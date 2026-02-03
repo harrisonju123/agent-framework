@@ -38,3 +38,8 @@ safeguards:
   max_task_age_days: 7       # Archive tasks older than N days
   heartbeat_timeout: 90      # Agent considered dead after N seconds
   watchdog_interval: 60      # Watchdog check interval (seconds)
+
+# Multi-Repository Configuration
+# Used by the 'agent apply-pattern' command
+multi_repo:
+  workspace_root: "~/.agent-workspaces"  # Where to clone repos for multi-repo operations

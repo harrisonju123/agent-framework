@@ -34,8 +34,55 @@ class GitHubClient:
         draft: bool = False,
         labels: Optional[List[str]] = None,
     ) -> PullRequest:
-        """Create a pull request."""
+        """Create a pull request in the configured repository."""
         pr = self.repo.create_pull(
+            title=title,
+            body=body,
+            head=head_branch,
+            base=base_branch,
+            draft=draft,
+        )
+
+        if labels:
+            pr.add_to_labels(*labels)
+
+        return pr
+
+    def create_pr_in_repo(
+        self,
+        owner_repo: str,
+        title: str,
+        body: str,
+        head_branch: str,
+        base_branch: str = "main",
+        draft: bool = False,
+        labels: Optional[List[str]] = None,
+    ) -> PullRequest:
+        """
+        Create a pull request in any repository.
+
+        Args:
+            owner_repo: Repository in format "owner/repo"
+            title: PR title
+            body: PR description
+            head_branch: Source branch
+            base_branch: Target branch (default: main)
+            draft: Create as draft PR
+            labels: Labels to add to PR
+
+        Returns:
+            Created PullRequest object
+
+        Example:
+            >>> client.create_pr_in_repo(
+            ...     "harrisonju123/service-b",
+            ...     "Implement S2S auth",
+            ...     "...",
+            ...     "feature/s2s-auth"
+            ... )
+        """
+        repo = self.gh.get_repo(owner_repo)
+        pr = repo.create_pull(
             title=title,
             body=body,
             head=head_branch,

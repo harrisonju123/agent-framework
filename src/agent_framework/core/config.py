@@ -46,6 +46,11 @@ class SafeguardsConfig(BaseModel):
     watchdog_interval: int = 60
 
 
+class MultiRepoConfig(BaseModel):
+    """Multi-repository configuration."""
+    workspace_root: Path = Field(default=Path("~/.agent-workspaces"))
+
+
 class AgentDefinition(BaseModel):
     """Agent definition from agents.yaml."""
     id: str
@@ -94,6 +99,7 @@ class FrameworkConfig(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
     safeguards: SafeguardsConfig = Field(default_factory=SafeguardsConfig)
+    multi_repo: MultiRepoConfig = Field(default_factory=MultiRepoConfig)
 
     class Config:
         env_prefix = "AGENT_"
