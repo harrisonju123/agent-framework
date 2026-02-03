@@ -36,18 +36,24 @@ class Orchestrator:
         self.comm_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-    def spawn_agent(self, agent_id: str) -> subprocess.Popen:
+    def spawn_agent(self, agent_id: str, env_vars: dict = None) -> subprocess.Popen:
         """
         Spawn a single agent as a subprocess.
 
         Args:
             agent_id: Agent identifier (e.g., "engineer", "qa")
+            env_vars: Optional environment variables to pass to agent
 
         Returns:
             subprocess.Popen object
         """
         log_file_path = self.logs_dir / f"{agent_id}.log"
         log_file = open(log_file_path, "w")
+
+        # Merge environment variables
+        env = os.environ.copy()
+        if env_vars:
+            env.update(env_vars)
 
         try:
             # Spawn agent process
@@ -56,6 +62,7 @@ class Orchestrator:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 cwd=self.workspace,
+                env=env,
             )
         except Exception:
             log_file.close()
@@ -68,12 +75,19 @@ class Orchestrator:
         self.processes[agent_id] = proc
         return proc
 
-    def spawn_all_agents(self, config_path: Optional[Path] = None) -> Dict[str, subprocess.Popen]:
+    def spawn_all_agents(
+        self,
+        config_path: Optional[Path] = None,
+        replicas: int = 1,
+        log_level: str = "INFO"
+    ) -> Dict[str, subprocess.Popen]:
         """
         Spawn all enabled agents from config.
 
         Args:
             config_path: Path to agents.yaml (default: config/agents.yaml)
+            replicas: Number of replicas per agent (default: 1)
+            log_level: Logging level for agents (DEBUG, INFO, WARNING, ERROR)
 
         Returns:
             Dict mapping agent_id to Popen object
@@ -85,15 +99,25 @@ class Orchestrator:
         agents = load_agents(config_path)
         enabled_agents = [a for a in agents if a.enabled]
 
-        logger.info(f"Starting {len(enabled_agents)} agents")
+        total_to_spawn = len(enabled_agents) * replicas
+        logger.info(f"Starting {total_to_spawn} agents ({len(enabled_agents)} types × {replicas} replicas)")
 
         # Clean up stale PIDs
         self._clean_stale_pids()
 
-        # Spawn each agent with staggered startup
+        # Environment variables to pass to agents
+        env_vars = {"AGENT_LOG_LEVEL": log_level}
+
+        # Spawn each agent with replicas
         for agent_def in enabled_agents:
-            self.spawn_agent(agent_def.id)
-            time.sleep(0.5)  # 0.5s delay between spawns
+            for replica_num in range(1, replicas + 1):
+                if replicas == 1:
+                    agent_id = agent_def.id
+                else:
+                    agent_id = f"{agent_def.id}-{replica_num}"
+
+                self.spawn_agent(agent_id, env_vars=env_vars)
+                time.sleep(0.5)  # 0.5s delay between spawns
 
         # Verify agents started
         time.sleep(2)

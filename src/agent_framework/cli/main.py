@@ -586,12 +586,30 @@ def retry(ctx, identifier):
 
 @cli.command()
 @click.option("--watchdog/--no-watchdog", default=True, help="Start watchdog")
+@click.option(
+    "--replicas", "-r",
+    default=1,
+    type=click.IntRange(min=1, max=50),
+    help="Number of replicas per agent (1-50, for parallel processing)"
+)
+@click.option(
+    "--log-level", "-l",
+    default="INFO",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    help="Logging level"
+)
 @click.pass_context
-def start(ctx, watchdog):
+def start(ctx, watchdog, replicas, log_level):
     """Start the agent system."""
     workspace = ctx.obj["workspace"]
 
-    console.print("[bold green]Starting Agent Framework[/]")
+    if replicas > 1:
+        console.print(f"[bold green]Starting Agent Framework with {replicas} replicas per agent[/]")
+    else:
+        console.print("[bold green]Starting Agent Framework[/]")
+
+    if log_level != "INFO":
+        console.print(f"[dim]Log level: {log_level}[/]")
 
     try:
         # Create orchestrator
@@ -600,8 +618,8 @@ def start(ctx, watchdog):
         # Setup signal handlers for graceful shutdown
         orchestrator.setup_signal_handlers()
 
-        # Spawn all agents
-        processes = orchestrator.spawn_all_agents()
+        # Spawn all agents with replicas
+        processes = orchestrator.spawn_all_agents(replicas=replicas, log_level=log_level)
         console.print(f"[green]✓ Started {len(processes)} agents[/]")
 
         # Spawn watchdog if requested

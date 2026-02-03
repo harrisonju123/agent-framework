@@ -71,9 +71,19 @@ class FileLock:
             os.kill(pid, 0)
             logger.debug(f"Lock for {self.task_id} is held by active PID {pid}")
             return False
-        except (ValueError, ProcessLookupError, PermissionError):
-            logger.warning(f"Lock for {self.task_id} held by dead PID {pid if 'pid' in locals() else 'unknown'} (stale)")
+        except ValueError:
+            # Invalid PID in file - treat as stale
+            logger.warning(f"Lock for {self.task_id} has invalid PID (stale)")
             return True
+        except ProcessLookupError:
+            # Process doesn't exist - definitely stale
+            logger.warning(f"Lock for {self.task_id} held by dead PID {pid} (stale)")
+            return True
+        except PermissionError:
+            # Can't signal the process (different user/permissions) but it may still be alive
+            # Conservatively assume the lock is held to avoid data corruption
+            logger.debug(f"Lock for {self.task_id} held by PID {pid} (cannot signal, assuming live)")
+            return False
 
     def _remove_lock(self) -> None:
         """Remove the lock directory."""

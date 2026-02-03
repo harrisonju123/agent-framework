@@ -7,6 +7,7 @@ import logging
 import re
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
 from ..safeguards.escalation import EscalationHandler
 from ..workspace.worktree_manager import WorktreeManager, WorktreeConfig
+from ..utils.rich_logging import ContextLogger, setup_rich_logging
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -32,7 +34,7 @@ except ImportError:
     TestResult = None
 
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)  # Removed: using self.logger instead
 
 # Pause/resume signal file
 PAUSE_SIGNAL_FILE = ".agent-communication/pause"
@@ -112,12 +114,23 @@ class Agent:
         self.worktree_manager = worktree_manager
         self._active_worktree: Optional[Path] = None  # Track active worktree for cleanup
 
+        # Setup rich logging (log_level passed from CLI via environment)
+        import os
+        log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO")
+        self.logger = setup_rich_logging(
+            agent_id=config.id,
+            workspace=workspace,
+            log_level=log_level,
+            use_file=True,
+            use_json=False,
+        )
+
         # Optimization configuration (sanitize then make immutable for thread safety)
         sanitized_config = self._sanitize_optimization_config(optimization_config or {})
         self._optimization_config = MappingProxyType(sanitized_config)
 
         # Log active optimizations on startup
-        logger.info(f"Agent {self.config.id} optimization config: {self._get_active_optimizations()}")
+        self.logger.info(f"🔧 Optimization config: {self._get_active_optimizations()}")
 
         # Initialize safeguards
         self.retry_handler = RetryHandler(max_retries=config.max_retries)
@@ -140,11 +153,11 @@ class Agent:
                 executor = DockerExecutor(image=config.sandbox_image)
                 if executor.health_check():
                     self._test_runner = GoTestRunner(executor=executor)
-                    logger.info(f"Agent {config.id} sandbox enabled with image {config.sandbox_image}")
+                    self.logger.info(f"Agent {config.id} sandbox enabled with image {config.sandbox_image}")
                 else:
-                    logger.warning(f"Docker not available, sandbox disabled for {config.id}")
+                    self.logger.warning(f"Docker not available, sandbox disabled for {config.id}")
             except Exception as e:
-                logger.warning(f"Failed to initialize sandbox for {config.id}: {e}")
+                self.logger.warning(f"Failed to initialize sandbox for {config.id}: {e}")
 
     async def run(self) -> None:
         """
@@ -153,7 +166,7 @@ class Agent:
         Ported from scripts/async-agent-runner.sh lines 254-407.
         """
         self._running = True
-        logger.info(f"Starting {self.config.id} runner")
+        self.logger.info(f"🚀 Starting {self.config.id} runner")
 
         # Write initial IDLE state when agent starts
         from datetime import datetime
@@ -170,7 +183,7 @@ class Agent:
             # Check for pause signal before processing tasks
             if self._check_pause_signal():
                 if not self._paused:
-                    logger.info(f"Agent {self.config.id} paused")
+                    self.logger.info(f"Agent {self.config.id} paused")
                     self._paused = True
                     # Update activity to show paused state
                     self.activity_manager.update_activity(AgentActivity(
@@ -182,7 +195,7 @@ class Agent:
                 continue
 
             if self._paused:
-                logger.info(f"Agent {self.config.id} resumed")
+                self.logger.info(f"Agent {self.config.id} resumed")
                 self._paused = False
 
             # Poll for next task
@@ -191,7 +204,7 @@ class Agent:
             if task:
                 await self._handle_task(task)
             else:
-                logger.debug(
+                self.logger.debug(
                     f"No tasks available for {self.config.id}, "
                     f"sleeping for {self.config.poll_interval}s"
                 )
@@ -200,12 +213,12 @@ class Agent:
 
     async def stop(self) -> None:
         """Stop the polling loop gracefully."""
-        logger.info(f"Stopping {self.config.id}")
+        self.logger.info(f"Stopping {self.config.id}")
         self._running = False
 
         # Release current task lock if any
         if self._current_task_id:
-            logger.warning(
+            self.logger.warning(
                 f"Releasing lock for current task: {self._current_task_id}"
             )
             # Lock will be automatically released by FileLock context manager
@@ -217,12 +230,14 @@ class Agent:
         """Handle task execution with retry/escalation logic."""
         from datetime import datetime
 
-        logger.info(f"Found task: {task.id} - {task.title}")
+        # Set task context for logging
+        jira_key = task.context.get("jira_key")
+        self.logger.task_started(task.id, task.title, jira_key=jira_key)
 
         # Try to acquire lock
         lock = self.queue.acquire_lock(task.id, self.config.id)
         if not lock:
-            logger.warning(f"Could not acquire lock for {task.id}, will retry later")
+            self.logger.warning(f"⏸️  Could not acquire lock, will retry later")
             return
 
         self._current_task_id = task.id
@@ -257,15 +272,14 @@ class Agent:
             ))
 
             # Build prompt
+            self.logger.phase_change("analyzing")
             prompt = self._build_prompt(task)
 
             # Update phase: Executing LLM (this is where most time is spent)
             self._update_phase(TaskPhase.EXECUTING_LLM)
-
-            # Execute with LLM
-            logger.info(
-                f"Processing task {task.id} with model "
-                f"(type: {task.type}, retries: {task.retry_count})"
+            self.logger.phase_change("executing_llm")
+            self.logger.info(
+                f"🤖 Calling LLM (model: {task.type}, attempt: {task.retry_count + 1})"
             )
 
             response = await self.llm.complete(
@@ -282,7 +296,7 @@ class Agent:
                 if self._optimization_config.get("enable_result_summarization", False):
                     summary = await self._extract_summary(response.content, task)
                     task.result_summary = summary
-                    logger.debug(f"Task {task.id} summary: {summary}")
+                    self.logger.debug(f"Task {task.id} summary: {summary}")
 
                 # Run tests in sandbox if enabled and applicable
                 test_result = await self._run_sandbox_tests(task)
@@ -290,14 +304,14 @@ class Agent:
                     # Tests failed - give agent a chance to fix
                     test_retry = task.context.get("_test_retry_count", 0)
                     if test_retry < self.config.max_test_retries:
-                        logger.warning(
+                        self.logger.warning(
                             f"Tests failed for {task.id} (attempt {test_retry + 1}/{self.config.max_test_retries})"
                         )
                         # Feed test failures back to agent
                         await self._handle_test_failure(task, response, test_result)
                         return  # Will retry with test failure context
                     else:
-                        logger.error(f"Tests still failing after {test_retry} retries for {task.id}")
+                        self.logger.error(f"Tests still failing after {test_retry} retries for {task.id}")
                         task.last_error = f"Tests failed: {test_result.error_message}"
                         await self._handle_failure(task)
                         return
@@ -309,22 +323,20 @@ class Agent:
                 task.mark_completed(self.config.id)
                 self.queue.mark_completed(task)
 
-                # Log token usage (Strategy 6: Token Tracking)
+                # Log token usage and completion
                 total_tokens = response.input_tokens + response.output_tokens
                 budget = self._get_token_budget(task.type)
                 cost = self._estimate_cost(response)
 
-                logger.info(
-                    f"Completed task: {task.id} - "
-                    f"tokens: {response.input_tokens} in, {response.output_tokens} out, "
-                    f"total: {total_tokens}, budget: {budget}, estimated cost: ${cost:.2f}"
-                )
+                duration = (datetime.utcnow() - task_start_time).total_seconds()
+                self.logger.token_usage(response.input_tokens, response.output_tokens, cost)
+                self.logger.task_completed(duration, tokens_used=total_tokens)
 
                 # Soft limit warning (don't fail, just alert)
                 if self._optimization_config.get("enable_token_budget_warnings", False):
                     threshold = self._optimization_config.get("budget_warning_threshold", BUDGET_WARNING_THRESHOLD)
                     if total_tokens > budget * threshold:
-                        logger.warning(
+                        self.logger.warning(
                             f"Task {task.id} EXCEEDED TOKEN BUDGET: "
                             f"{total_tokens} tokens (budget: {budget}, "
                             f"{int(threshold * 100)}% threshold: {budget * threshold:.0f})"
@@ -353,9 +365,7 @@ class Agent:
             else:
                 # Task failed - store error for escalation
                 task.last_error = response.error or "Unknown error"
-                logger.error(
-                    f"LLM failed for task {task.id}: {task.last_error}"
-                )
+                self.logger.task_failed(task.last_error, task.retry_count)
 
                 # Append fail event with error details
                 self.activity_manager.append_event(ActivityEvent(
@@ -373,7 +383,7 @@ class Agent:
         except Exception as e:
             # Store exception for escalation
             task.last_error = str(e)
-            logger.exception(f"Error processing task {task.id}: {e}")
+            self.logger.exception(f"Error processing task {task.id}: {e}")
 
             # Append fail event for exceptions with error details
             self.activity_manager.append_event(ActivityEvent(
@@ -412,7 +422,7 @@ class Agent:
         """
         if task.retry_count >= self.retry_handler.max_retries:
             # Max retries exceeded - mark as failed
-            logger.error(
+            self.logger.error(
                 f"Task {task.id} has failed {task.retry_count} times "
                 f"(max: {self.retry_handler.max_retries})"
             )
@@ -425,18 +435,18 @@ class Agent:
                     task, self.config.id
                 )
                 self.queue.push(escalation, escalation.assigned_to)
-                logger.warning(
+                self.logger.warning(
                     f"Created escalation task {escalation.id} for failed task {task.id}"
                 )
             else:
-                logger.error(
+                self.logger.error(
                     f"Escalation task {task.id} failed after {task.retry_count} retries - "
                     "NOT creating another escalation (would cause infinite loop). "
                     "This escalation requires immediate human intervention."
                 )
         else:
             # Reset task to pending so it can be retried
-            logger.warning(
+            self.logger.warning(
                 f"Resetting task {task.id} to pending status "
                 f"(retry {task.retry_count + 1}/{self.retry_handler.max_retries})"
             )
@@ -454,12 +464,12 @@ class Agent:
         # Clamp canary percentage to valid range
         canary = config.get("canary_percentage", 0)
         if not 0 <= canary <= 100:
-            logger.warning(f"Invalid canary_percentage: {canary}, clamping to [0, 100]")
+            self.logger.warning(f"Invalid canary_percentage: {canary}, clamping to [0, 100]")
             config["canary_percentage"] = max(0, min(100, canary))
 
         # Warn about incompatible flag combinations
         if config.get("shadow_mode") and config.get("canary_percentage", 0) > 0:
-            logger.warning(
+            self.logger.warning(
                 "shadow_mode and canary_percentage both enabled. "
                 "Shadow mode will use legacy prompts regardless of canary setting."
             )
@@ -490,7 +500,7 @@ class Agent:
         # Check for task-level override first
         if hasattr(task, 'optimization_override') and task.optimization_override is not None:
             reason = getattr(task, 'optimization_override_reason', 'no reason given')
-            logger.info(
+            self.logger.info(
                 f"Task {task.id} optimization override: {task.optimization_override} ({reason})"
             )
             return task.optimization_override
@@ -522,7 +532,7 @@ class Agent:
         """
         # Validate essential fields
         if not task.title or not task.description:
-            logger.warning(
+            self.logger.warning(
                 f"Task {task.id} missing essential fields: "
                 f"title={bool(task.title)}, description={bool(task.description)}. "
                 f"Falling back to full task dict."
@@ -611,7 +621,7 @@ class Agent:
 
         # Defensive guard - prevents recursion even though we don't recurse currently
         if _recursion_depth > 0:
-            logger.debug("Recursion depth exceeded in summary extraction, using fallback")
+            self.logger.debug("Recursion depth exceeded in summary extraction, using fallback")
             return f"Task {_get_type_str(task.type)} completed"
 
         # Try regex extraction first (fast, no cost)
@@ -657,9 +667,9 @@ class Agent:
                 if summary_response.success and summary_response.content:
                     return summary_response.content[:SUMMARY_MAX_LENGTH]
                 else:
-                    logger.warning(f"Haiku summary failed: {summary_response.error}")
+                    self.logger.warning(f"Haiku summary failed: {summary_response.error}")
             except Exception as e:
-                logger.warning(f"Failed to extract summary with Haiku: {e}")
+                self.logger.warning(f"Failed to extract summary with Haiku: {e}")
 
         # Guaranteed fallback
         return extracted[0] if extracted else f"Task {_get_type_str(task.type)} completed"
@@ -695,7 +705,7 @@ class Agent:
             # Truncate task ID for security
             task_id_short = task.id[:8] + "..." if len(task.id) > 8 else task.id
 
-            logger.debug(
+            self.logger.debug(
                 f"[SHADOW MODE] Task {task_id_short} prompt comparison: "
                 f"legacy={legacy_len} chars, optimized={optimized_len} chars, "
                 f"savings={savings} chars ({savings_pct:.1f}%)"
@@ -714,11 +724,11 @@ class Agent:
             prompt = self._build_prompt_legacy(task)
 
         # Log prompt preview for debugging (sanitized)
-        if logger.isEnabledFor(logging.DEBUG):
+        if self.logger.isEnabledFor(logging.DEBUG):
             prompt_preview = prompt[:500].replace(task.id, "TASK_ID")
             if hasattr(task, 'context') and task.context.get('jira_key'):
                 prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
-            logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
+            self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
 
         # Append test failure context if retrying after test failure
         test_failure_report = task.context.get("_test_failure_report")
@@ -773,12 +783,12 @@ Fix the failing tests and ensure all tests pass.
             with open(metrics_file, "a") as f:
                 f.write(json.dumps(metrics) + "\n")
         except PermissionError as e:
-            logger.warning(f"Permission denied recording optimization metrics: {e}")
+            self.logger.warning(f"Permission denied recording optimization metrics: {e}")
         except OSError as e:
-            logger.warning(f"Failed to record optimization metrics (disk full?): {e}")
+            self.logger.warning(f"Failed to record optimization metrics (disk full?): {e}")
         except Exception as e:
             # Don't fail task if metrics recording fails
-            logger.debug(f"Unexpected error recording optimization metrics: {e}")
+            self.logger.debug(f"Unexpected error recording optimization metrics: {e}")
 
     def _estimate_cost(self, response: LLMResponse) -> float:
         """
@@ -803,7 +813,7 @@ Fix the failing tests and ensure all tests pass.
             model_type = "sonnet"
         else:
             # Unknown model, assume sonnet pricing as conservative estimate
-            logger.warning(
+            self.logger.warning(
                 f"Unknown model '{response.model_used}', assuming Sonnet pricing for cost estimate"
             )
             model_type = "sonnet"
@@ -1010,16 +1020,16 @@ IMPORTANT:
                         owner_repo=github_repo,
                     )
                     self._active_worktree = worktree_path
-                    logger.info(f"Using worktree: {github_repo} at {worktree_path}")
+                    self.logger.info(f"Using worktree: {github_repo} at {worktree_path}")
                     return worktree_path
                 except Exception as e:
-                    logger.warning(f"Failed to create worktree, falling back to shared clone: {e}")
+                    self.logger.warning(f"Failed to create worktree, falling back to shared clone: {e}")
                     # Fall through to shared clone
 
         if github_repo and self.multi_repo_manager:
             # Ensure repo is cloned/updated
             repo_path = self.multi_repo_manager.ensure_repo(github_repo)
-            logger.info(f"Using repository: {github_repo} at {repo_path}")
+            self.logger.info(f"Using repository: {github_repo} at {repo_path}")
             return repo_path
         else:
             # No repo context, use framework workspace
@@ -1054,17 +1064,17 @@ IMPORTANT:
         if explicit_base:
             base_path = Path(explicit_base).expanduser().resolve()
             if base_path.exists() and (base_path / ".git").exists():
-                logger.debug(f"Using explicit base repo: {base_path}")
+                self.logger.debug(f"Using explicit base repo: {base_path}")
                 return base_path
             else:
-                logger.warning(f"Explicit worktree_base_repo not valid: {explicit_base}")
+                self.logger.warning(f"Explicit worktree_base_repo not valid: {explicit_base}")
 
         # Use shared clone from multi_repo_manager
         if self.multi_repo_manager:
             try:
                 return self.multi_repo_manager.ensure_repo(github_repo)
             except Exception as e:
-                logger.error(f"Failed to get base repo from multi_repo_manager: {e}")
+                self.logger.error(f"Failed to get base repo from multi_repo_manager: {e}")
 
         return None
 
@@ -1091,21 +1101,21 @@ IMPORTANT:
             has_uncommitted = self.worktree_manager.has_uncommitted_changes(self._active_worktree)
 
             if has_unpushed:
-                logger.warning(
+                self.logger.warning(
                     f"Skipping worktree cleanup - unpushed commits detected: {self._active_worktree}. "
                     f"Manual cleanup required after pushing changes."
                 )
             elif has_uncommitted:
-                logger.warning(
+                self.logger.warning(
                     f"Skipping worktree cleanup - uncommitted changes detected: {self._active_worktree}. "
                     f"Manual cleanup required after committing/discarding changes."
                 )
             else:
                 try:
                     self.worktree_manager.remove_worktree(self._active_worktree, force=not success)
-                    logger.info(f"Cleaned up worktree: {self._active_worktree}")
+                    self.logger.info(f"Cleaned up worktree: {self._active_worktree}")
                 except Exception as e:
-                    logger.warning(f"Failed to cleanup worktree: {e}")
+                    self.logger.warning(f"Failed to cleanup worktree: {e}")
 
         self._active_worktree = None
 
@@ -1138,24 +1148,24 @@ IMPORTANT:
         """
         # Skip if MCPs are enabled - agents do this during execution now
         if self._mcp_enabled:
-            logger.debug("MCPs enabled - skipping post-LLM workflow")
+            self.logger.debug("MCPs enabled - skipping post-LLM workflow")
             return
 
         jira_key = task.context.get("jira_key")
         if not jira_key or not self.github_client or not self.jira_client:
-            logger.debug("Skipping post-LLM workflow (no JIRA key or clients not configured)")
+            self.logger.debug("Skipping post-LLM workflow (no JIRA key or clients not configured)")
             return
 
         try:
             # Get working directory (target repo or framework workspace)
             workspace = self._get_working_directory(task)
-            logger.info(f"Running post-LLM workflow for {jira_key} in {workspace}")
+            self.logger.info(f"Running post-LLM workflow for {jira_key} in {workspace}")
 
             # Create branch
             slug = task.title.lower().replace(" ", "-")[:30]
             branch = self.github_client.format_branch_name(jira_key, slug)
 
-            logger.info(f"Creating branch: {branch}")
+            self.logger.info(f"Creating branch: {branch}")
             subprocess.run(
                 ["git", "checkout", "-b", branch],
                 cwd=workspace,
@@ -1165,7 +1175,7 @@ IMPORTANT:
 
             # Stage and commit changes
             self._update_phase(TaskPhase.COMMITTING)
-            logger.info("Committing changes")
+            self.logger.info("Committing changes")
             subprocess.run(
                 ["git", "add", "-A"],
                 cwd=workspace,
@@ -1182,7 +1192,7 @@ IMPORTANT:
             )
 
             # Push to remote
-            logger.info(f"Pushing branch to origin")
+            self.logger.info(f"Pushing branch to origin")
             subprocess.run(
                 ["git", "push", "-u", "origin", branch],
                 cwd=workspace,
@@ -1192,7 +1202,7 @@ IMPORTANT:
 
             # Create PR
             self._update_phase(TaskPhase.CREATING_PR)
-            logger.info("Creating pull request")
+            self.logger.info("Creating pull request")
             pr_title = self.github_client.format_pr_title(jira_key, task.title)
             pr_body = f"Implements {jira_key}\n\n{task.description}"
 
@@ -1202,26 +1212,26 @@ IMPORTANT:
                 head_branch=branch,
             )
 
-            logger.info(f"Created PR: {pr.html_url}")
+            self.logger.info(f"Created PR: {pr.html_url}")
 
             # Store PR URL in task context for activity events
             task.context["pr_url"] = pr.html_url
 
             # Update JIRA
             self._update_phase(TaskPhase.UPDATING_JIRA)
-            logger.info("Updating JIRA ticket")
+            self.logger.info("Updating JIRA ticket")
             self.jira_client.transition_ticket(jira_key, "code_review")
             self.jira_client.add_comment(
                 jira_key,
                 f"Pull request created: {pr.html_url}"
             )
 
-            logger.info(f"Post-LLM workflow complete for {jira_key}")
+            self.logger.info(f"Post-LLM workflow complete for {jira_key}")
 
         except subprocess.CalledProcessError as e:
-            logger.error(f"Git operation failed: {e.stderr.decode() if e.stderr else str(e)}")
+            self.logger.error(f"Git operation failed: {e.stderr.decode() if e.stderr else str(e)}")
         except Exception as e:
-            logger.exception(f"Error in post-LLM workflow: {e}")
+            self.logger.exception(f"Error in post-LLM workflow: {e}")
 
     def _write_heartbeat(self) -> None:
         """Write current Unix timestamp to heartbeat file."""
@@ -1255,12 +1265,12 @@ IMPORTANT:
         # Get repository path
         github_repo = task.context.get("github_repo")
         if not github_repo:
-            logger.debug(f"Skipping sandbox tests for {task.id}: no github_repo in context")
+            self.logger.debug(f"Skipping sandbox tests for {task.id}: no github_repo in context")
             return None
 
         repo_path = self._get_working_directory(task)
         if not repo_path.exists():
-            logger.warning(f"Repository path does not exist: {repo_path}")
+            self.logger.warning(f"Repository path does not exist: {repo_path}")
             return None
 
         # Update task status
@@ -1268,7 +1278,7 @@ IMPORTANT:
         self.queue.update(task)
         self._update_phase(TaskPhase.COMMITTING)  # Reuse committing phase for testing
 
-        logger.info(f"Running tests in sandbox for {task.id} at {repo_path}")
+        self.logger.info(f"Running tests in sandbox for {task.id} at {repo_path}")
 
         try:
             # Run tests
@@ -1278,7 +1288,7 @@ IMPORTANT:
                 verbose=True,
             )
 
-            logger.info(f"Test result for {task.id}: {test_result.summary}")
+            self.logger.info(f"Test result for {task.id}: {test_result.summary}")
 
             # Log test event
             self.activity_manager.append_event(ActivityEvent(
@@ -1292,7 +1302,7 @@ IMPORTANT:
             return test_result
 
         except Exception as e:
-            logger.exception(f"Error running sandbox tests for {task.id}: {e}")
+            self.logger.exception(f"Error running sandbox tests for {task.id}: {e}")
             # Return a failed result
             if TestResult:
                 return TestResult(
@@ -1329,4 +1339,4 @@ IMPORTANT:
         task.reset_to_pending()
         self.queue.update(task)
 
-        logger.info(f"Task {task.id} reset for test fix retry (attempt {test_retry + 1})")
+        self.logger.info(f"Task {task.id} reset for test fix retry (attempt {test_retry + 1})")

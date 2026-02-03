@@ -132,24 +132,30 @@ class ActivityManager:
         return activities
 
     def append_event(self, event: ActivityEvent) -> None:
-        """Append event to activity stream with file locking to prevent race conditions."""
-        # Use file locking for atomic read-modify-write
-        with open(self.stream_file, 'a+') as f:
+        """Append event to activity stream with atomic write to prevent race conditions."""
+        # Use file locking to serialize access, then atomic write (temp + rename)
+        lock_file = self.stream_file.with_suffix(".lock")
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(lock_file, 'w') as lock_fd:
             if HAS_FCNTL:
-                fcntl.flock(f, fcntl.LOCK_EX)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
-                f.seek(0)
-                content = f.read()
-                events = self._parse_events(content)
+                # Read existing events
+                events = self._read_stream()
                 events.append(event)
+
+                # Trim to max size
                 if len(events) > self.max_stream_events:
                     events = events[-self.max_stream_events:]
-                f.seek(0)
-                f.truncate()
-                f.write('\n'.join(e.model_dump_json() for e in events) + '\n')
+
+                # Atomic write: write to temp file, then rename
+                tmp_file = self.stream_file.with_suffix(".tmp")
+                tmp_file.write_text('\n'.join(e.model_dump_json() for e in events) + '\n')
+                tmp_file.rename(self.stream_file)
             finally:
                 if HAS_FCNTL:
-                    fcntl.flock(f, fcntl.LOCK_UN)
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
 
     def _parse_events(self, content: str) -> List[ActivityEvent]:
         """Parse events from stream file content."""

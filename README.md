@@ -21,6 +21,8 @@ Multi-agent system for autonomous software development with JIRA and GitHub inte
 
 - **Interactive Mode**: Describe what you want to build, select a repo, agents handle the rest
 - **Workflow Modes**: Simple (direct), Standard (with QA), or Full (architect-led) workflows
+- **Agent Scaling**: Run 1-50 replicas per agent type for parallel processing
+- **Rich Logging**: Context-aware logs with JIRA keys, phases, and emojis
 - **Live Dashboard**: Real-time TUI showing agent status, tasks, and progress
 - **Multi-Repository**: Work across multiple repos from a central orchestrator
 - **Git Worktrees**: Isolated workspaces so agents don't interfere with your work
@@ -88,8 +90,13 @@ agent pull --project PROJ
 # Work on specific ticket
 agent run PROJ-123
 
-# Start/stop agents
+# Start agents (basic)
 agent start
+
+# Start with scaling and debug logging
+agent start --replicas 4 --log-level DEBUG
+
+# Stop agents
 agent stop
 
 # Monitor
@@ -189,7 +196,9 @@ Load before running: `source scripts/setup-env.sh`
 | `agent status` | One-time status snapshot |
 | `agent pull --project PROJ` | Pull JIRA backlog tickets |
 | `agent run PROJ-123` | Work on specific ticket |
-| `agent start` | Start all agents + watchdog |
+| `agent start` | Start all agents (1 of each type) |
+| `agent start --replicas N` | Start N replicas per agent (1-50) |
+| `agent start --log-level LEVEL` | Set log level (DEBUG/INFO/WARNING/ERROR) |
 | `agent stop` | Stop agents gracefully |
 | `agent check` | Run safety checks |
 | `agent check --fix` | Auto-fix issues |
@@ -207,12 +216,39 @@ agent-framework/
 │   ├── integrations/       # JIRA and GitHub clients
 │   ├── safeguards/         # Circuit breaker, watchdog, retry logic
 │   ├── sandbox/            # Docker test execution
+│   ├── utils/              # Rich logging with context
 │   └── workspace/          # Git operations, multi-repo manager
 ├── mcp-servers/
 │   ├── jira/               # JIRA MCP server
 │   └── github/             # GitHub MCP server
 └── config/                 # YAML configuration files
 ```
+
+### Agent Scaling
+
+Run multiple replicas of each agent type for parallel processing:
+
+```bash
+# Single instance of each agent (default)
+agent start
+
+# 4 replicas per agent type (20 total agents)
+agent start --replicas 4
+
+# Maximum parallelism (250 total agents)
+agent start --replicas 50
+```
+
+**How it works:**
+- All replicas share the same queue (e.g., `engineer-1`, `engineer-2` both poll `engineer` queue)
+- File-based locking prevents race conditions
+- Git worktrees provide isolated workspaces
+- Each replica has unique logger (process-safe)
+
+**Cost efficiency:**
+- Idle agents cost $0 (no token usage)
+- Only active agents consume tokens
+- Scale up during high load, scale down when idle
 
 ### Multi-Repository Support
 
@@ -257,6 +293,42 @@ agent cleanup-worktrees              # Remove stale worktrees
 agent cleanup-worktrees --dry-run    # Preview what would be removed
 agent cleanup-worktrees --force      # Remove all worktrees
 ```
+
+### Enhanced Logging
+
+Context-aware logs with JIRA keys, phases, and emojis:
+
+```log
+16:17:23 INFO     [engineer-1] [ME-422] 📋 Starting task: Implement rollback feature
+16:17:23 INFO     [engineer-1] [analyzing] [ME-422] 🔍 Phase: analyzing
+16:17:23 INFO     [engineer-1] [executing_llm] [ME-422] 🤖 Calling LLM (attempt 1)
+16:18:45 INFO     [engineer-1] [ME-422] 💰 Tokens: 15,234 in + 3,456 out = 18,690 total (~$0.0328)
+16:18:45 INFO     [engineer-1] [ME-422] ✅ Task completed in 82.3s (18,690 tokens)
+```
+
+**Features:**
+- **Context preserved**: JIRA keys and task IDs in every log line
+- **Phase tracking**: See what the agent is doing (analyzing, implementing, testing, etc.)
+- **Visual emojis**: Quick status at a glance
+- **Token costs**: Track API usage per task
+- **Clean files**: No ANSI codes in log files (parseable)
+- **Configurable levels**: DEBUG, INFO, WARNING, ERROR
+
+**Usage:**
+```bash
+# Default INFO level
+agent start
+
+# Debug mode for troubleshooting
+agent start --log-level DEBUG
+
+# Production mode (less verbose)
+agent start --log-level WARNING
+```
+
+**Log locations:**
+- Console: Color output with ANSI codes (when interactive)
+- Files: `logs/engineer-1.log` (plain text, no colors)
 
 ## MCP Integration
 

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,14 +20,18 @@ from .llm.claude_cli_backend import ClaudeCLIBackend
 from .queue.file_queue import FileQueue
 from .workspace.multi_repo_manager import MultiRepoManager
 from .workspace.worktree_manager import WorktreeManager
+from .utils.rich_logging import setup_rich_logging
 
 
 def setup_logging(agent_id: str, workspace: Path):
     """Setup logging for the agent."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format=f"%(asctime)s - {agent_id} - %(levelname)s - %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+    # Use rich logging with better formatting
+    return setup_rich_logging(
+        agent_id=agent_id,
+        workspace=workspace,
+        log_level="INFO",
+        use_file=True,
+        use_json=False,
     )
 
 
@@ -51,17 +56,33 @@ def main():
         agents_config_path = workspace / "config" / "agents.yaml"
         agents = load_agents(agents_config_path)
 
-        # Find this agent's config
-        agent_def = next((a for a in agents if a.id == agent_id), None)
+        # Support replica IDs like "engineer-2", "engineer-3"
+        # Extract base agent ID by removing trailing -N suffix
+        if '-' in agent_id:
+            parts = agent_id.split('-')
+            # Check if last part is a number (replica ID)
+            if parts[-1].isdigit():
+                base_agent_id = '-'.join(parts[:-1])
+                replica_num = parts[-1]
+            else:
+                base_agent_id = agent_id
+                replica_num = None
+        else:
+            base_agent_id = agent_id
+            replica_num = None
+
+        # Find this agent's config using base ID
+        agent_def = next((a for a in agents if a.id == base_agent_id), None)
         if not agent_def:
-            logger.error(f"Agent {agent_id} not found in config")
+            logger.error(f"Agent {base_agent_id} not found in config (requested: {agent_id})")
             sys.exit(1)
 
-        # Create agent config
+        # Create agent config (use actual agent_id for replicas)
+        agent_name = f"{agent_def.name} #{replica_num}" if replica_num else agent_def.name
         agent_config = AgentConfig(
-            id=agent_def.id,
-            name=agent_def.name,
-            queue=agent_def.queue,
+            id=agent_id,  # Use full replica ID (e.g., engineer-2)
+            name=agent_name,
+            queue=agent_def.queue,  # All replicas share same queue
             prompt=agent_def.prompt,
             poll_interval=framework_config.task.poll_interval,
             max_retries=framework_config.task.max_retries,

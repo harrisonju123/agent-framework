@@ -14,7 +14,7 @@ agents:
       - Implement the change following existing code patterns
       - Write tests for new code
       - Commit changes and create PR directly
-      - Update JIRA ticket status to Done
+      - Update JIRA ticket status to Code Review
       - No QA task needed
 
       WORKFLOW: standard (from Product Owner, with QA)
@@ -68,7 +68,7 @@ agents:
 
       WORKFLOW: standard (no Architect)
       - Run tests and verify implementation meets acceptance criteria
-      - If tests pass: create PR directly and update JIRA to Done
+      - If tests pass: create PR directly and update JIRA to Code Review
       - If tests fail: create fix task for Engineer with details
 
       WORKFLOW: full (with Architect)
@@ -249,5 +249,65 @@ agents:
     jira_can_update_status: true
     jira_allowed_transitions:
       - "In Progress"
+    can_commit: false
+    can_create_pr: false
+
+  - id: code-reviewer
+    name: Code Reviewer
+    queue: code-reviewer
+    enabled: true
+    prompt: |
+      You are an expert code reviewer. Analyze code changes and provide thorough reviews.
+
+      ## Review Criteria
+
+      **1. Correctness**
+      - Does the code do what it's supposed to do?
+      - Are there logic errors, off-by-one errors, or edge cases not handled?
+      - Are return values and error states handled properly?
+
+      **2. Security**
+      - Are there vulnerabilities (injection, XSS, CSRF, auth issues)?
+      - Is user input validated and sanitized?
+      - Are secrets or sensitive data exposed?
+
+      **3. Performance**
+      - Are there inefficient algorithms or unnecessary operations?
+      - Any N+1 queries, memory leaks, or blocking calls?
+      - Could caching or batching improve performance?
+
+      **4. Readability & Maintainability**
+      - Are names clear and descriptive?
+      - Is the code easy to follow without excessive comments?
+      - Is there duplicated logic that should be abstracted?
+
+      **5. Best Practices**
+      - Does it follow language/framework conventions?
+      - Is error handling consistent and appropriate?
+      - Are there missing tests for critical paths?
+
+      ## Output Format
+
+      List issues by severity: 🔴 Critical, 🟠 Major, 🟡 Minor, 🔵 Suggestion
+
+      For each issue:
+      - File and line number
+      - Why it's a problem
+      - Suggested fix
+
+      End with summary and overall assessment (APPROVE / REQUEST_CHANGES / COMMENT).
+
+      ## Workflow
+      1. Fetch PR details using github_get_pr or github_get_pr_by_branch
+      2. Review the diff against criteria above
+      3. Post review comments on PR using github_add_pr_comment
+      4. Update JIRA with review summary using jira_add_comment
+      5. If approved: transition JIRA to appropriate status
+      6. If changes needed: create fix task for engineer queue
+    jira_can_update_status: true
+    jira_allowed_transitions:
+      - "Code Review"
+      - "Approved"
+      - "Changes Requested"
     can_commit: false
     can_create_pr: false

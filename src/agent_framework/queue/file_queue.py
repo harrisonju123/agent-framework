@@ -41,6 +41,7 @@ class FileQueue:
         self.backoff_initial = backoff_initial
         self.backoff_max = backoff_max
         self.backoff_multiplier = backoff_multiplier
+        self.malformed_dir = self.comm_dir / "malformed"
 
         self._ensure_dirs()
 
@@ -50,6 +51,7 @@ class FileQueue:
         self.lock_dir.mkdir(parents=True, exist_ok=True)
         self.completed_dir.mkdir(parents=True, exist_ok=True)
         self.heartbeat_dir.mkdir(parents=True, exist_ok=True)
+        self.malformed_dir.mkdir(parents=True, exist_ok=True)
 
     def push(self, task: Task, queue_id: str) -> None:
         """
@@ -107,10 +109,35 @@ class FileQueue:
 
                 return task
 
-            except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+            except FileNotFoundError:
+                # File was removed between glob and read - just skip
+                continue
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                # Malformed task file - move to malformed directory for investigation
+                self._quarantine_malformed_task(task_file, e)
                 continue
 
         return None
+
+    def _quarantine_malformed_task(self, task_file: Path, error: Exception) -> None:
+        """Move malformed task file to malformed directory for investigation."""
+        try:
+            # Preserve original path info in filename
+            queue_name = task_file.parent.name
+            dest_file = self.malformed_dir / f"{queue_name}_{task_file.name}"
+
+            # Avoid overwriting - append timestamp if exists
+            if dest_file.exists():
+                timestamp = int(time.time())
+                dest_file = self.malformed_dir / f"{queue_name}_{task_file.stem}_{timestamp}{task_file.suffix}"
+
+            task_file.rename(dest_file)
+            logger.warning(
+                f"Quarantined malformed task file: {task_file} -> {dest_file} "
+                f"(error: {error})"
+            )
+        except Exception as move_error:
+            logger.error(f"Failed to quarantine malformed task {task_file}: {move_error}")
 
     def update(self, task: Task) -> None:
         """Update a task's state."""
