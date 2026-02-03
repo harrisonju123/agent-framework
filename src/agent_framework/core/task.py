@@ -30,6 +30,7 @@ class TaskType(str, Enum):
     # Cheap model (haiku)
     TESTING = "testing"
     VERIFICATION = "verification"
+    QA_VERIFICATION = "qa_verification"
     FIX = "fix"
     BUGFIX = "bugfix"
     BUG_FIX = "bug-fix"
@@ -43,6 +44,7 @@ class TaskType(str, Enum):
     PLANNING = "planning"
     REVIEW = "review"
     ENHANCEMENT = "enhancement"
+    PR_REQUEST = "pr_request"
 
     # Premium model (opus)
     ESCALATION = "escalation"

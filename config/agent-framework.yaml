@@ -25,8 +25,8 @@ llm:
   # MCP (Model Context Protocol) settings
   # Enables real-time JIRA/GitHub access during agent execution
   # Requires mode: claude_cli
-  use_mcp: false
-  # mcp_config_path: ${PWD}/config/mcp-config.json
+  use_mcp: true
+  mcp_config_path: ${PWD}/config/mcp-config.json
 
 # Task Processing Configuration
 task:

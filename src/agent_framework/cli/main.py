@@ -6,6 +6,13 @@ import re
 import subprocess
 from pathlib import Path
 
+# Load .env file into environment before anything else
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, rely on shell environment
+
 import click
 from rich.console import Console
 from rich.table import Table

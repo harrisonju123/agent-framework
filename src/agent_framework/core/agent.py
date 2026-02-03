@@ -38,6 +38,11 @@ MODEL_PRICING = {
 }
 
 
+def _get_type_str(task_type) -> str:
+    """Get string value from task type (handles both enum and string)."""
+    return task_type.value if hasattr(task_type, 'value') else str(task_type)
+
+
 @dataclass
 class AgentConfig:
     """Agent configuration."""
@@ -179,7 +184,7 @@ class Agent:
                 current_task=CurrentTask(
                     id=task.id,
                     title=task.title,
-                    type=task.type.value,
+                    type=_get_type_str(task.type),
                     started_at=task_start_time
                 ),
                 current_phase=TaskPhase.ANALYZING,
@@ -444,7 +449,7 @@ class Agent:
         minimal = {
             "title": task.title.strip(),
             "description": task.description.strip(),
-            "type": task.type.value,
+            "type": _get_type_str(task.type),
         }
 
         # Include acceptance criteria and deliverables if present
@@ -519,12 +524,12 @@ class Agent:
         """
         # Guard against empty response
         if not response or not response.strip():
-            return f"Task {task.type.value} completed (no output)"
+            return f"Task {_get_type_str(task.type)} completed (no output)"
 
         # Defensive guard - prevents recursion even though we don't recurse currently
         if _recursion_depth > 0:
             logger.debug("Recursion depth exceeded in summary extraction, using fallback")
-            return f"Task {task.type.value} completed"
+            return f"Task {_get_type_str(task.type)} completed"
 
         # Try regex extraction first (fast, no cost)
         extracted = []
@@ -574,7 +579,7 @@ class Agent:
                 logger.warning(f"Failed to extract summary with Haiku: {e}")
 
         # Guaranteed fallback
-        return extracted[0] if extracted else f"Task {task.type.value} completed"
+        return extracted[0] if extracted else f"Task {_get_type_str(task.type)} completed"
 
     def _build_prompt(self, task: Task) -> str:
         """
@@ -649,7 +654,7 @@ class Agent:
         try:
             metrics = {
                 "task_id": task.id,
-                "task_type": task.type.value,
+                "task_type": _get_type_str(task.type),
                 "agent_id": self.config.id,
                 "legacy_prompt_chars": legacy_prompt_length,
                 "optimized_prompt_chars": optimized_prompt_length,

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "jira": {
+      "command": "node",
+      "args": ["mcp-servers/jira/build/index.js"],
+      "env": {
+        "JIRA_URL": "${JIRA_URL}",
+        "JIRA_EMAIL": "${JIRA_EMAIL}",
+        "JIRA_API_TOKEN": "${JIRA_API_TOKEN}",
+        "JIRA_SERVER": "${JIRA_SERVER}",
+        "LOG_PATH": "./logs/mcp-jira.log"
+      }
+    },
+    "github": {
+      "command": "node",
+      "args": ["mcp-servers/github/build/index.js"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+        "JIRA_SERVER": "${JIRA_SERVER}",
+        "LOG_PATH": "./logs/mcp-github.log"
+      }
+    }
+  }
+}

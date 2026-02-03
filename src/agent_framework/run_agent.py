@@ -6,6 +6,13 @@ import os
 import sys
 from pathlib import Path
 
+# Load .env file into environment before anything else
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not installed, rely on shell environment
+
 from .core.agent import Agent, AgentConfig
 from .core.config import load_agents, load_config, load_jira_config, load_github_config
 from .llm.claude_cli_backend import ClaudeCLIBackend

@@ -42,11 +42,19 @@ echo "✅ GitHub MCP server installed"
 echo ""
 
 # Copy MCP config if not exists
-if [ ! -f config/mcp-config.json ]; then
-    echo "📝 Creating MCP configuration..."
-    cp config/mcp-config.json.example config/mcp-config.json
-    echo "✅ Created config/mcp-config.json"
+if [ -f config/mcp-config.json ]; then
+    echo "✅ config/mcp-config.json already exists"
     echo ""
+else
+    if [ -f config/mcp-config.json.example ]; then
+        echo "📝 Creating MCP configuration..."
+        cp config/mcp-config.json.example config/mcp-config.json
+        echo "✅ Created config/mcp-config.json from example"
+        echo ""
+    else
+        echo "⚠️  config/mcp-config.json not found and no example available"
+        echo ""
+    fi
 fi
 
 # Create logs directory

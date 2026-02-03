@@ -6,6 +6,11 @@ from datetime import datetime
 from ..core.task import Task, TaskStatus, TaskType
 
 
+def _get_type_str(task_type) -> str:
+    """Get string value from task type (handles both enum and string)."""
+    return task_type.value if hasattr(task_type, 'value') else str(task_type)
+
+
 class EscalationHandler:
     """
     Handles task escalations for human review.
@@ -117,7 +122,7 @@ class EscalationHandler:
             needs_human_review=True,
             context={
                 "original_task_id": failed_task.id,
-                "original_task_type": failed_task.type.value,
+                "original_task_type": _get_type_str(failed_task.type),
                 "retry_count": failed_task.retry_count,
                 "error": error_msg,
             },
@@ -131,6 +136,6 @@ class EscalationHandler:
             f"Task {failed_task.id} failed after {failed_task.retry_count} retry attempts "
             f"and has been marked as failed. This requires human intervention or product decision.\n\n"
             f"Original task: {failed_task.title}\n"
-            f"Task type: {failed_task.type.value}\n\n"
+            f"Task type: {_get_type_str(failed_task.type)}\n\n"
             f"Please review the failed task and decide next steps."
         )
