@@ -41,6 +41,9 @@ queues/
 logs/
 *.log
 
+# Node.js (MCP servers)
+node_modules/
+
 # IDE files
 .idea/
 .vscode/

@@ -148,12 +148,15 @@ def pull(ctx, project, max):
     help="Workflow complexity: simple (Engineer only), standard (Engineer→QA), full (Architect→Engineer→QA)"
 )
 @click.option("--epic", "-e", help="JIRA epic key to process (e.g., PROJ-100)")
+@click.option("--parallel", "-p", is_flag=True, help="Process epic tickets in parallel (requires worktrees)")
 @click.pass_context
-def work(ctx, no_dashboard, workflow, epic):
+def work(ctx, no_dashboard, workflow, epic, parallel):
     """Interactive mode: describe what to build, delegate to Product Owner agent.
 
-    With --epic: Process all tickets in an existing JIRA epic sequentially.
+    With --epic: Process all tickets in an existing JIRA epic.
     Without --epic: Describe a new feature to implement.
+
+    Use --parallel with --epic to process multiple tickets concurrently.
     """
     workspace = ctx.obj["workspace"]
 
@@ -165,7 +168,7 @@ def work(ctx, no_dashboard, workflow, epic):
 
     # Handle epic processing mode
     if epic:
-        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, workflow)
+        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, workflow, parallel)
         return
 
     # Check if repos are registered
@@ -1125,8 +1128,8 @@ This PR implements the same pattern/functionality as the reference implementatio
         traceback.print_exc()
 
 
-def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, workflow: str):
-    """Handle --epic mode: process all tickets in a JIRA epic sequentially.
+def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, workflow: str, parallel: bool = False):
+    """Handle --epic mode: process tickets in a JIRA epic.
 
     Args:
         ctx: Click context
@@ -1135,6 +1138,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         epic_key: JIRA epic key (e.g., PROJ-100)
         no_dashboard: Skip dashboard if True
         workflow: Workflow complexity
+        parallel: If True, process tickets in parallel (no dependencies)
     """
     from datetime import datetime
     import time
@@ -1225,13 +1229,26 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
                 console.print("[red]No repositories configured. Add them to config/agent-framework.yaml[/]")
                 return
 
-        # Queue all issues as tasks with dependencies (sequential execution)
+        # Queue all issues as tasks
         queue = FileQueue(workspace)
 
         previous_task_id = None
         queued_tasks = []
 
-        for i, issue in enumerate(issues):
+        # Filter out completed tickets
+        pending_issues = [
+            issue for issue in issues
+            if issue.fields.status.name.lower() not in ("done", "closed", "resolved")
+        ]
+
+        if len(pending_issues) < len(issues):
+            console.print(f"[dim]Skipping {len(issues) - len(pending_issues)} completed tickets[/]")
+
+        if not pending_issues:
+            console.print("[green]All tickets in this epic are already completed![/]")
+            return
+
+        for i, issue in enumerate(pending_issues):
             # Determine agent based on issue type and workflow
             if workflow == "simple":
                 assigned_to = "engineer"
@@ -1257,18 +1274,25 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             task.context["jira_project"] = jira_project
             task.context["workflow"] = workflow
             task.context["epic_position"] = i + 1
-            task.context["epic_total"] = len(issues)
+            task.context["epic_total"] = len(pending_issues)
 
-            # Make sequential: each task depends on previous
-            if previous_task_id:
-                task.depends_on = [previous_task_id]
+            # Parallel mode: use worktrees, no dependencies
+            if parallel:
+                task.context["use_worktree"] = True
+            else:
+                # Sequential: each task depends on previous
+                if previous_task_id:
+                    task.depends_on = [previous_task_id]
 
             queue.push(task, assigned_to)
             queued_tasks.append((task.id, issue.key, assigned_to))
             previous_task_id = task.id
 
         console.print(f"\n[green]✓ Queued {len(queued_tasks)} tasks from epic {epic_key}[/]")
-        console.print(f"[dim]Tasks will process sequentially: ticket 1 → ticket 2 → ...[/]")
+        if parallel:
+            console.print(f"[dim]Tasks will process in PARALLEL using worktrees[/]")
+        else:
+            console.print(f"[dim]Tasks will process sequentially: ticket 1 → ticket 2 → ...[/]")
 
         # Ensure agents are running
         orchestrator = Orchestrator(workspace)

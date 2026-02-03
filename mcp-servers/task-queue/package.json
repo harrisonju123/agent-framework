@@ -1,0 +1,27 @@
+{
+  "name": "@agent-framework/mcp-task-queue",
+  "version": "1.0.0",
+  "description": "MCP server for task queue operations - enables agents to queue tasks for other agents",
+  "main": "build/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node build/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "task-queue",
+    "agent-framework"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

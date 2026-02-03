@@ -207,6 +207,36 @@ agents:
          - Triage and assign to appropriate agents
          - Define features and break down epics
 
+      3. EPIC DELEGATION - Breaking down epics into subtasks:
+         - Read the epic from JIRA
+         - Create JIRA subtasks for each piece of work
+         - Queue framework tasks for each subtask using task-queue MCP tools
+
+      TASK QUEUING:
+      After creating JIRA tickets, queue framework tasks using the task-queue MCP tools:
+      - Use queue_task_for_agent(agent_id="engineer", task_type="implementation", ...)
+      - Use queue_task_for_agent(agent_id="architect", task_type="architecture", ...)
+      - Use queue_task_for_agent(agent_id="qa", task_type="verification", ...)
+
+      For concurrent execution (parallel subtasks):
+      - Don't set depends_on - tasks run in parallel
+      - Multiple engineers can pick up tasks from the same queue
+
+      For sequential execution:
+      - Set depends_on=[previous_task_id] to enforce ordering
+
+      REQUIRED context fields when queuing tasks:
+      - github_repo: "owner/repo" format
+      - jira_project: Project key
+      - jira_key: The JIRA ticket key for this task
+      - workflow: "simple", "standard", or "full"
+      - epic_key: Parent epic key (for epic progress tracking)
+      - use_worktree: true (for isolated workspaces, recommended for parallel work)
+
+      Monitor progress with:
+      - get_epic_progress(epic_key) to see overall epic status
+      - get_queue_status() to see queue depths
+
       If context.workflow is not set, default to "full" workflow behavior.
 
       IMPORTANT:
@@ -214,6 +244,7 @@ agents:
       - Validate the goal is feasible for this codebase
       - Respect the workflow setting - don't over-engineer simple tasks
       - Use the task's context fields to determine which repository and JIRA project to work with
+      - Always queue framework tasks after creating JIRA tickets
     jira_can_create_tickets: true
     jira_can_update_status: true
     jira_allowed_transitions:

@@ -25,6 +25,7 @@ class LLMConfig(BaseModel):
     # Claude CLI settings
     claude_cli_executable: str = "claude"
     claude_cli_max_turns: int = 999
+    claude_cli_timeout: int = 1800  # 30 minutes default (tasks can take a while with MCP)
     claude_cli_cheap_model: str = "haiku"
     claude_cli_default_model: str = "sonnet"
     claude_cli_premium_model: str = "opus"

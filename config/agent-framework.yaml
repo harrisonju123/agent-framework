@@ -12,6 +12,7 @@ llm:
   # Claude CLI settings (used when mode=claude_cli)
   claude_cli_executable: claude
   claude_cli_max_turns: 999
+  claude_cli_timeout: 3600  # 1 hour - tasks with MCP can take a while
   claude_cli_cheap_model: haiku
   claude_cli_default_model: sonnet
   claude_cli_premium_model: opus
@@ -81,6 +82,16 @@ optimization:
 # Used by the 'agent apply-pattern' command
 multi_repo:
   workspace_root: "~/.agent-workspaces"  # Where to clone repos for multi-repo operations
+
+  # Git worktree configuration for isolated agent workspaces
+  # Each parallel task gets its own worktree (separate branch, separate directory)
+  worktree:
+    enabled: true
+    root: "~/.agent-workspaces/worktrees"
+    cleanup_on_complete: true      # Remove worktree after successful task
+    cleanup_on_failure: false      # Keep failed worktrees for debugging
+    max_age_hours: 24              # Auto-cleanup worktrees older than this
+    max_worktrees: 50              # Max concurrent worktrees (increase for parallel work)
 
 # Repository Registry
 # Repos are cloned to multi_repo.workspace_root (~/.agent-workspaces by default)

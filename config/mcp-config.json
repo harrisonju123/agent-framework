@@ -19,6 +19,14 @@
         "JIRA_SERVER": "${JIRA_SERVER}",
         "LOG_PATH": "./logs/mcp-github.log"
       }
+    },
+    "task-queue": {
+      "command": "node",
+      "args": ["mcp-servers/task-queue/build/index.js"],
+      "env": {
+        "WORKSPACE": ".",
+        "LOG_PATH": "./logs/mcp-task-queue.log"
+      }
     }
   }
 }

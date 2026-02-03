@@ -81,6 +81,7 @@ def main():
         llm = ClaudeCLIBackend(
             executable=framework_config.llm.claude_cli_executable,
             max_turns=framework_config.llm.claude_cli_max_turns,
+            timeout=framework_config.llm.claude_cli_timeout,
             cheap_model=framework_config.llm.claude_cli_cheap_model,
             default_model=framework_config.llm.claude_cli_default_model,
             premium_model=framework_config.llm.claude_cli_premium_model,
