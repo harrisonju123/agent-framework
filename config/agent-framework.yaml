@@ -86,7 +86,7 @@ multi_repo:
 # Repos are cloned to multi_repo.workspace_root (~/.agent-workspaces by default)
 repositories:
   - github_repo: justworkshr/pto
-    jira_project: PTO
+    jira_project: PLUTO
     display_name: PTO Service
 
   - github_repo: justworkshr/international
@@ -98,5 +98,9 @@ repositories:
     display_name: Sui Service
 
   - github_repo: justworkshr/punch-out
-    jira_project: PUNCH
+    jira_project: PLUTO
     display_name: Punch Out Service
+
+  - github_repo: justworkshr/mauvelous-hippo
+    jira_project: ME
+    display_name: Lifecycle Service
