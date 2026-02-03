@@ -107,7 +107,7 @@ export function getQueueStatus(workspace: string): QueueStatus[] {
   const queuePath = getQueuePath(workspace);
   const results: QueueStatus[] = [];
 
-  const agentQueues: AgentId[] = ["engineer", "qa", "architect", "product-owner"];
+  const agentQueues: AgentId[] = ["engineer", "qa", "architect", "product-owner", "code-reviewer", "testing", "static-analysis"];
 
   for (const agentId of agentQueues) {
     const agentQueuePath = join(queuePath, agentId);
@@ -152,7 +152,7 @@ export function getTaskDetails(workspace: string, taskId: string): Task | null {
   const completedPath = getCompletedPath(workspace);
 
   // Search in all agent queues
-  const agentQueues: AgentId[] = ["engineer", "qa", "architect", "product-owner"];
+  const agentQueues: AgentId[] = ["engineer", "qa", "architect", "product-owner", "code-reviewer", "testing", "static-analysis"];
   for (const agentId of agentQueues) {
     const taskFile = join(queuePath, agentId, `${taskId}.json`);
     if (existsSync(taskFile)) {
@@ -175,7 +175,7 @@ export function getEpicProgress(workspace: string, epicKey: string): EpicProgres
   const allTasks: Task[] = [];
 
   // Collect tasks from all queues
-  const agentQueues: AgentId[] = ["engineer", "qa", "architect", "product-owner"];
+  const agentQueues: AgentId[] = ["engineer", "qa", "architect", "product-owner", "code-reviewer", "testing", "static-analysis"];
   for (const agentId of agentQueues) {
     const agentQueuePath = join(queuePath, agentId);
     const tasks = loadAllTasksFromDir(agentQueuePath);

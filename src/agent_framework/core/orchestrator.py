@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import load_agents, AgentDefinition
+from ..safeguards.circuit_breaker import CircuitBreaker
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,12 @@ class Orchestrator:
     Ported from scripts/start-async-agents.sh and scripts/stop-async-agents.sh
     """
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        enable_circuit_breaker: bool = True,
+        check_health_interval: int = 300,  # Check every 5 minutes
+    ):
         self.workspace = Path(workspace)
         self.comm_dir = self.workspace / ".agent-communication"
         self.pid_file = self.comm_dir / "pids.txt"
@@ -31,6 +37,14 @@ class Orchestrator:
 
         self.processes: Dict[str, subprocess.Popen] = {}
         self._running = False
+
+        # Circuit breaker integration
+        self.enable_circuit_breaker = enable_circuit_breaker
+        self.check_health_interval = check_health_interval
+        self.last_health_check = 0.0
+        self.circuit_breaker = CircuitBreaker(workspace) if enable_circuit_breaker else None
+        self.health_degraded = False
+        self.original_replica_count = 1
 
         # Ensure directories exist
         self.comm_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +108,19 @@ class Orchestrator:
         """
         if config_path is None:
             config_path = self.workspace / "config" / "agents.yaml"
+
+        # Store original replica count for health management
+        self.original_replica_count = replicas
+
+        # Check system health before spawning agents
+        if self.enable_circuit_breaker:
+            health_report = self.check_system_health()
+            if not health_report.passed:
+                logger.warning("System health checks failed, spawning with reduced capacity")
+                logger.warning(str(health_report))
+                # Reduce replicas if health is degraded
+                replicas = max(1, replicas // 2)
+                self.health_degraded = True
 
         # Load agent configs
         agents = load_agents(config_path)
@@ -379,3 +406,127 @@ class Orchestrator:
 
         if reset_count > 0:
             logger.info(f"Reset {reset_count} in_progress tasks to pending")
+
+    def check_system_health(self):
+        """Check system health using circuit breaker.
+
+        Returns:
+            CircuitBreakerReport with health status
+        """
+        if not self.circuit_breaker:
+            # Circuit breaker disabled, return passing report
+            from ..safeguards.circuit_breaker import CircuitBreakerReport
+            report = CircuitBreakerReport()
+            report.add_check("circuit_breaker", True, "Circuit breaker disabled")
+            return report
+
+        # Run all circuit breaker checks
+        report = self.circuit_breaker.run_all_checks()
+
+        # Update last health check time
+        self.last_health_check = time.time()
+
+        # Log health status
+        if not report.passed:
+            logger.warning("System health degraded:")
+            logger.warning(str(report))
+        else:
+            logger.info("System health check passed")
+
+        return report
+
+    def should_check_health(self) -> bool:
+        """Check if it's time to run health checks.
+
+        Returns:
+            True if health check interval has elapsed
+        """
+        if not self.enable_circuit_breaker:
+            return False
+
+        elapsed = time.time() - self.last_health_check
+        return elapsed >= self.check_health_interval
+
+    def handle_health_degradation(self, config_path: Optional[Path] = None):
+        """Handle system health degradation by reducing agent replicas.
+
+        Args:
+            config_path: Path to agents.yaml
+        """
+        if self.health_degraded:
+            # Already in degraded mode
+            return
+
+        logger.warning("System health degraded, reducing agent replicas")
+
+        # Stop half of the agents to reduce load
+        agents_to_stop = []
+        for agent_id in list(self.processes.keys()):
+            # Keep at least one replica of each agent type
+            if "-" in agent_id:  # Replica (e.g., "engineer-2")
+                base_id, replica_num = agent_id.rsplit("-", 1)
+                if int(replica_num) > 1:
+                    agents_to_stop.append(agent_id)
+
+        for agent_id in agents_to_stop[:len(agents_to_stop) // 2]:
+            logger.info(f"Stopping {agent_id} due to health degradation")
+            self.stop_agent(agent_id, graceful=True)
+
+        self.health_degraded = True
+
+    def handle_critical_health(self):
+        """Handle critical health issues by pausing task intake.
+
+        This creates a marker file that agents can check to pause polling.
+        """
+        logger.error("System health CRITICAL - pausing task intake")
+
+        # Create pause marker file
+        pause_marker = self.comm_dir / "PAUSE_INTAKE"
+        pause_marker.write_text(f"System paused due to critical health issues at {time.time()}")
+
+        self.health_degraded = True
+
+    def resume_from_health_degradation(self, config_path: Optional[Path] = None, replicas: int = None):
+        """Resume normal operations after health recovers.
+
+        Args:
+            config_path: Path to agents.yaml
+            replicas: Number of replicas to restore (default: original count)
+        """
+        if not self.health_degraded:
+            return
+
+        logger.info("System health recovered, resuming normal operations")
+
+        # Remove pause marker if present
+        pause_marker = self.comm_dir / "PAUSE_INTAKE"
+        if pause_marker.exists():
+            pause_marker.unlink()
+
+        # Restore original replica count if we reduced it
+        if replicas is None:
+            replicas = self.original_replica_count
+
+        current_count = len(self.processes)
+        if config_path is None:
+            config_path = self.workspace / "config" / "agents.yaml"
+
+        agents = load_agents(config_path)
+        enabled_agents = [a for a in agents if a.enabled]
+        target_count = len(enabled_agents) * replicas
+
+        if current_count < target_count:
+            logger.info(f"Spawning additional agents to reach target: {current_count} -> {target_count}")
+            # Spawn additional replicas
+            for agent_def in enabled_agents:
+                current_replicas = len([p for p in self.processes.keys() if p.startswith(agent_def.id)])
+                needed_replicas = replicas - current_replicas
+
+                for i in range(needed_replicas):
+                    replica_num = current_replicas + i + 1
+                    agent_id = f"{agent_def.id}-{replica_num}"
+                    self.spawn_agent(agent_id)
+                    time.sleep(0.5)
+
+        self.health_degraded = False

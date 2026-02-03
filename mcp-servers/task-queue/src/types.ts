@@ -23,7 +23,7 @@ export type TaskType =
   | "pr_request"
   | "escalation";
 
-export type AgentId = "engineer" | "qa" | "architect" | "product-owner";
+export type AgentId = "engineer" | "qa" | "architect" | "product-owner" | "code-reviewer" | "testing" | "static-analysis";
 
 export interface PlanDocument {
   objectives: string[];

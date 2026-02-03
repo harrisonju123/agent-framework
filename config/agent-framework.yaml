@@ -115,3 +115,64 @@ repositories:
   - github_repo: justworkshr/mauvelous-hippo
     jira_project: ME
     display_name: Lifecycle Service
+
+# Workflow Configuration
+# Defines agent chains and quality gates for different workflow modes
+workflows:
+  simple:
+    description: "Fast workflow for small changes"
+    agents: [engineer, testing]
+    pr_creator: engineer
+    auto_review: true
+    require_tests: true
+
+  standard:
+    description: "Standard workflow with QA verification"
+    agents: [engineer, qa]
+    pr_creator: qa
+    auto_review: true
+    require_tests: true
+
+  full:
+    description: "Full workflow with architecture planning"
+    agents: [architect, engineer, qa, architect]
+    pr_creator: architect
+    auto_review: true
+    require_tests: true
+
+  quality-focused:
+    description: "Enhanced workflow with static analysis"
+    agents: [architect, engineer, testing, qa, static-analysis, code-reviewer]
+    pr_creator: code-reviewer
+    auto_review: true
+    require_tests: true
+    require_static_analysis: true
+    block_on_critical: true
+
+# Static Analysis Configuration
+static_analysis:
+  enabled: true
+  severity_thresholds:
+    critical: block    # Block workflow on critical issues
+    high: warn         # Warn but allow to proceed
+    medium: warn       # Warn but allow to proceed
+    low: ignore        # Ignore low severity issues
+  tools:
+    go: golangci-lint
+    python: [pylint, mypy, bandit]
+    javascript: eslint
+    typescript: eslint
+    ruby: rubocop
+
+# Circuit Breaker Configuration
+# Orchestrator-level health checks to prevent cascading failures
+circuit_breaker:
+  enabled: true
+  check_interval_seconds: 300  # Check health every 5 minutes
+  thresholds:
+    max_failure_rate: 0.30     # >30% task failures triggers degradation
+    max_stuck_tasks: 10         # >10 stuck tasks triggers action
+    max_escalations: 50         # >50 escalations indicates systemic issues
+  actions:
+    on_degraded: reduce_replicas   # Scale down agents on degradation
+    on_critical: pause_intake      # Stop accepting new tasks on critical health

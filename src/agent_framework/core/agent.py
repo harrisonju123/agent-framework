@@ -1239,9 +1239,15 @@ IMPORTANT:
         self.heartbeat_file.write_text(str(int(time.time())))
 
     def _check_pause_signal(self) -> bool:
-        """Check if pause signal file exists."""
+        """Check if pause signal file exists.
+
+        Checks for two pause signals:
+        1. PAUSE_SIGNAL_FILE - manual pause by user
+        2. PAUSE_INTAKE - automatic pause by orchestrator due to health issues
+        """
         pause_file = self.workspace / PAUSE_SIGNAL_FILE
-        return pause_file.exists()
+        health_pause_file = self.workspace / ".agent-communication" / "PAUSE_INTAKE"
+        return pause_file.exists() or health_pause_file.exists()
 
     @property
     def is_paused(self) -> bool:

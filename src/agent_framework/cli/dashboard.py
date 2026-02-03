@@ -13,6 +13,7 @@ from rich.text import Text
 from ..core.activity import ActivityManager, AgentStatus
 from ..core.config import load_agents
 from ..queue.file_queue import FileQueue
+from ..safeguards.circuit_breaker import CircuitBreaker
 
 
 class AgentDashboard:
@@ -23,6 +24,7 @@ class AgentDashboard:
         self.activity_manager = ActivityManager(workspace)
         self.console = Console()
         self.start_time = datetime.utcnow()
+        self.circuit_breaker = CircuitBreaker(workspace)
 
     def make_layout(self) -> Layout:
         """Create dashboard layout."""
@@ -30,6 +32,7 @@ class AgentDashboard:
 
         layout.split_column(
             Layout(name="header", size=3),
+            Layout(name="health", size=6),  # Add health status section
             Layout(name="main"),
             Layout(name="footer", size=8)
         )
@@ -165,11 +168,48 @@ class AgentDashboard:
 
         return Panel(text, title="Queue Status", border_style="blue")
 
+    def render_health_status(self) -> Panel:
+        """Render system health status."""
+        report = self.circuit_breaker.run_all_checks()
+
+        text = Text()
+
+        # Overall status
+        if report.passed:
+            text.append("✓ System Health: ", style="green bold")
+            text.append("HEALTHY\n\n", style="green")
+        else:
+            text.append("⚠ System Health: ", style="red bold")
+            text.append("DEGRADED\n\n", style="red")
+
+        # Individual checks
+        for check_name, passed in report.checks.items():
+            status_icon = "✓" if passed else "✗"
+            status_style = "green" if passed else "red"
+            check_label = check_name.replace("_", " ").title()
+
+            text.append(f"{status_icon} {check_label}", style=status_style)
+
+            if not passed and check_name in report.issues:
+                for issue in report.issues[check_name][:1]:  # Show first issue only
+                    text.append(f" - {issue[:60]}...", style="dim red")
+            text.append("\n")
+
+        # Check for pause marker
+        pause_marker = self.workspace / ".agent-communication" / "PAUSE_INTAKE"
+        if pause_marker.exists():
+            text.append("\n⏸  ", style="yellow bold")
+            text.append("Task intake PAUSED due to critical health\n", style="yellow")
+
+        border_style = "green" if report.passed else "red"
+        return Panel(text, title="System Health", border_style=border_style)
+
     def render(self) -> Layout:
         """Render complete dashboard."""
         layout = self.make_layout()
 
         layout["header"].update(self.render_header())
+        layout["health"].update(self.render_health_status())
         layout["agents"].update(self.render_agents_table())
         layout["queues"].update(self.render_queue_stats())
         layout["footer"].update(self.render_recent_activity())
