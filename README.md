@@ -14,6 +14,7 @@ Multi-agent system for autonomous software development with JIRA and GitHub inte
 - [Architecture](#architecture)
 - [MCP Integration](#mcp-integration)
 - [Safeguards](#safeguards)
+- [Documentation](#documentation)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -398,6 +399,14 @@ MCP (Model Context Protocol) enables real-time JIRA/GitHub access during agent e
 10. **Task Age Limits**: Archive tasks >7 days old
 
 Run checks: `agent check` or `agent check --fix`
+
+## Documentation
+
+Detailed technical documentation is available in the `docs/` directory:
+
+- **[MCP Architecture](docs/MCP_ARCHITECTURE.md)** - Model Context Protocol integration details
+- **[MCP Setup](docs/MCP_SETUP.md)** - Setting up JIRA and GitHub MCP servers
+- **[Code Review Workflow](docs/CODE_REVIEW_WORKFLOW.md)** - How PRs are queued and picked up by reviewers
 
 ## Troubleshooting
 
