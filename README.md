@@ -23,6 +23,7 @@ Multi-agent system for autonomous software development with JIRA and GitHub inte
 - **Workflow Modes**: Simple (direct), Standard (with QA), or Full (architect-led) workflows
 - **Live Dashboard**: Real-time TUI showing agent status, tasks, and progress
 - **Multi-Repository**: Work across multiple repos from a central orchestrator
+- **Git Worktrees**: Isolated workspaces so agents don't interfere with your work
 - **Docker Sandbox**: Isolated test execution in containers
 - **MCP Integration**: Real-time JIRA/GitHub access during agent execution
 - **Smart Model Selection**: Automatic Haiku/Sonnet/Opus routing based on task complexity
@@ -192,6 +193,7 @@ Load before running: `source scripts/setup-env.sh`
 | `agent stop` | Stop agents gracefully |
 | `agent check` | Run safety checks |
 | `agent check --fix` | Auto-fix issues |
+| `agent cleanup-worktrees` | Remove stale git worktrees |
 
 ## Architecture
 
@@ -218,6 +220,43 @@ Agents run from one location but work across multiple repositories:
 - Tasks contain repository context (`github_repo`, `jira_project`)
 - Repos cloned to `~/.agent-workspaces/owner/repo`
 - Single set of logs and queues for easy monitoring
+
+### Git Worktree Support
+
+Worktrees provide isolated workspaces so agents don't interfere with your work or each other:
+
+```
+~/.agent-workspaces/
+├── owner/repo/                    # Shared clone (base repo)
+└── worktrees/owner/repo/
+    ├── engineer-task-abc1/        # Agent 1's isolated workspace
+    └── qa-task-def2/              # Agent 2's isolated workspace
+```
+
+Enable in `config/agent-framework.yaml`:
+
+```yaml
+multi_repo:
+  workspace_root: ~/.agent-workspaces
+  worktree:
+    enabled: true
+    root: ~/.agent-workspaces/worktrees
+    cleanup_on_complete: true      # Auto-remove after success
+    cleanup_on_failure: false      # Keep for debugging
+    max_age_hours: 24              # Auto-cleanup stale worktrees
+    max_worktrees: 20              # LRU eviction when over limit
+```
+
+Task-level overrides:
+- `task.context["use_worktree"] = False` - Disable for specific task
+- `task.context["worktree_base_repo"] = "/path/to/local/repo"` - Use your local clone as base
+
+Cleanup orphaned worktrees:
+```bash
+agent cleanup-worktrees              # Remove stale worktrees
+agent cleanup-worktrees --dry-run    # Preview what would be removed
+agent cleanup-worktrees --force      # Remove all worktrees
+```
 
 ## MCP Integration
 
