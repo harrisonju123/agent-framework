@@ -21,6 +21,8 @@ class TaskStatus(str, Enum):
     """Task status values."""
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
+    TESTING = "testing"  # Running tests in sandbox
+    AWAITING_REVIEW = "awaiting_review"  # Tests passed, awaiting optional review
     COMPLETED = "completed"
     FAILED = "failed"
 
