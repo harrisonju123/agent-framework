@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/rest";
+import { execSync } from "child_process";
 
 interface CreateBranchArgs {
   owner: string;
@@ -36,6 +37,31 @@ interface LinkPRToJiraArgs {
   repo: string;
   prNumber: number;
   jiraKey: string;
+}
+
+interface CloneRepoArgs {
+  owner: string;
+  repo: string;
+  localPath: string;
+}
+
+interface CommitChangesArgs {
+  localPath: string;
+  message: string;
+}
+
+interface PushBranchArgs {
+  localPath: string;
+  branchName: string;
+}
+
+interface UpdatePRArgs {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  title?: string;
+  body?: string;
+  state?: "open" | "closed";
 }
 
 export async function createBranch(octokit: Octokit, args: CreateBranchArgs) {
@@ -174,6 +200,74 @@ export async function linkPRToJira(octokit: Octokit, args: LinkPRToJiraArgs) {
       prNumber,
       jiraKey,
       jiraLink,
+    },
+  };
+}
+
+export async function cloneRepo(args: CloneRepoArgs) {
+  const { owner, repo, localPath } = args;
+  const token = process.env.GITHUB_TOKEN;
+  const cloneUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
+
+  execSync(`git clone ${cloneUrl} ${localPath}`, { timeout: 300000 });
+  return { success: true, data: { path: localPath, owner, repo } };
+}
+
+export async function commitChanges(args: CommitChangesArgs) {
+  const { localPath, message } = args;
+  execSync("git add -A", { cwd: localPath, timeout: 30000 });
+
+  // Check if there are changes to commit
+  const status = execSync("git status --porcelain", {
+    cwd: localPath,
+    encoding: "utf-8",
+  });
+  if (!status.trim()) {
+    return { success: true, data: { message: "No changes to commit" } };
+  }
+
+  execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
+    cwd: localPath,
+    timeout: 30000,
+  });
+  return { success: true, data: { message } };
+}
+
+export async function pushBranch(args: PushBranchArgs) {
+  const { localPath, branchName } = args;
+  execSync(`git push -u origin ${branchName}`, {
+    cwd: localPath,
+    timeout: 120000,
+  });
+  return { success: true, data: { branch: branchName } };
+}
+
+export async function updatePR(octokit: Octokit, args: UpdatePRArgs) {
+  const { owner, repo, prNumber, title, body, state } = args;
+
+  const updateFields: {
+    title?: string;
+    body?: string;
+    state?: "open" | "closed";
+  } = {};
+  if (title !== undefined) updateFields.title = title;
+  if (body !== undefined) updateFields.body = body;
+  if (state !== undefined) updateFields.state = state;
+
+  const { data: pr } = await octokit.pulls.update({
+    owner,
+    repo,
+    pull_number: prNumber,
+    ...updateFields,
+  });
+
+  return {
+    success: true,
+    data: {
+      number: pr.number,
+      title: pr.title,
+      state: pr.state,
+      url: pr.html_url,
     },
   };
 }

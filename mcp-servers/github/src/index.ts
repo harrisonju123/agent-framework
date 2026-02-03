@@ -15,6 +15,10 @@ import {
   addPRComment,
   getPRByBranch,
   linkPRToJira,
+  cloneRepo,
+  commitChanges,
+  pushBranch,
+  updatePR,
 } from "./github-tools.js";
 
 const logger = createLogger();
@@ -170,6 +174,99 @@ const TOOLS: Tool[] = [
       required: ["owner", "repo", "prNumber", "jiraKey"],
     },
   },
+  {
+    name: "github_clone_repo",
+    description: "Clone a GitHub repository to a local path",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: {
+          type: "string",
+          description: "Repository owner",
+        },
+        repo: {
+          type: "string",
+          description: "Repository name",
+        },
+        localPath: {
+          type: "string",
+          description: "Local filesystem path to clone to",
+        },
+      },
+      required: ["owner", "repo", "localPath"],
+    },
+  },
+  {
+    name: "github_commit_changes",
+    description: "Stage and commit all changes in a local repository",
+    inputSchema: {
+      type: "object",
+      properties: {
+        localPath: {
+          type: "string",
+          description: "Path to local repository",
+        },
+        message: {
+          type: "string",
+          description: "Commit message",
+        },
+      },
+      required: ["localPath", "message"],
+    },
+  },
+  {
+    name: "github_push_branch",
+    description: "Push a branch to the remote origin",
+    inputSchema: {
+      type: "object",
+      properties: {
+        localPath: {
+          type: "string",
+          description: "Path to local repository",
+        },
+        branchName: {
+          type: "string",
+          description: "Branch name to push",
+        },
+      },
+      required: ["localPath", "branchName"],
+    },
+  },
+  {
+    name: "github_update_pr",
+    description: "Update a pull request's title, description, or state",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: {
+          type: "string",
+          description: "Repository owner",
+        },
+        repo: {
+          type: "string",
+          description: "Repository name",
+        },
+        prNumber: {
+          type: "number",
+          description: "Pull request number",
+        },
+        title: {
+          type: "string",
+          description: "New PR title (optional)",
+        },
+        body: {
+          type: "string",
+          description: "New PR description (optional)",
+        },
+        state: {
+          type: "string",
+          enum: ["open", "closed"],
+          description: "PR state (optional)",
+        },
+      },
+      required: ["owner", "repo", "prNumber"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -211,6 +308,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "github_link_pr_to_jira":
         result = await linkPRToJira(octokit, args as any);
+        break;
+      case "github_clone_repo":
+        result = await cloneRepo(args as any);
+        break;
+      case "github_commit_changes":
+        result = await commitChanges(args as any);
+        break;
+      case "github_push_branch":
+        result = await pushBranch(args as any);
+        break;
+      case "github_update_pr":
+        result = await updatePR(octokit, args as any);
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
