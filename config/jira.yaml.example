@@ -1,0 +1,12 @@
+jira:
+  server: https://your-org.atlassian.net
+  email: ${JIRA_EMAIL}
+  api_token: ${JIRA_API_TOKEN}
+  project: PROJ
+  backlog_filter: "project = PROJ AND status = 'To Do' AND assignee is EMPTY"
+  transitions:
+    in_progress: "21"
+    code_review: "31"
+    done: "41"
+  poll_interval: 300  # 5 minutes
+  batch_size: 10

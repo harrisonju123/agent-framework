@@ -1,0 +1,106 @@
+"""JIRA client for ticket management."""
+
+import time
+from typing import List, Optional
+
+from jira import JIRA
+from jira.resources import Issue
+
+from ...core.task import Task, TaskStatus, TaskType
+from ...core.config import JIRAConfig
+
+
+class JIRAClient:
+    """JIRA API client for ticket operations."""
+
+    def __init__(self, config: JIRAConfig):
+        self.config = config
+        self.jira = JIRA(
+            server=config.server,
+            basic_auth=(config.email, config.api_token),
+        )
+
+    def pull_unassigned_tickets(self, max_results: int = 10) -> List[Issue]:
+        """Pull unassigned tickets from backlog using JQL filter."""
+        issues = self.jira.search_issues(
+            jql_str=self.config.backlog_filter,
+            maxResults=max_results,
+        )
+        return list(issues)
+
+    def create_ticket(
+        self,
+        summary: str,
+        description: str,
+        issue_type: str = "Story",
+        labels: Optional[List[str]] = None,
+    ) -> Issue:
+        """Create a new JIRA ticket."""
+        issue_dict = {
+            "project": {"key": self.config.project},
+            "summary": summary,
+            "description": description,
+            "issuetype": {"name": issue_type},
+        }
+
+        if labels:
+            issue_dict["labels"] = labels
+
+        issue = self.jira.create_issue(fields=issue_dict)
+        return issue
+
+    def transition_ticket(self, ticket_id: str, status: str) -> None:
+        """Transition ticket to new status."""
+        # Get transition ID from config
+        transition_id = self.config.transitions.get(status.lower().replace(" ", "_"))
+        if not transition_id:
+            raise ValueError(f"Unknown transition: {status}")
+
+        issue = self.jira.issue(ticket_id)
+        self.jira.transition_issue(issue, transition_id)
+
+    def add_comment(self, ticket_id: str, comment: str) -> None:
+        """Add a comment to a ticket."""
+        issue = self.jira.issue(ticket_id)
+        self.jira.add_comment(issue, comment)
+
+    def update_custom_field(self, ticket_id: str, field_id: str, value: str) -> None:
+        """Update a custom field (e.g., PR link)."""
+        issue = self.jira.issue(ticket_id)
+        issue.update(fields={field_id: value})
+
+    def issue_to_task(self, issue: Issue, assigned_to: str) -> Task:
+        """Convert JIRA issue to internal Task."""
+        task_id = f"jira-{issue.key}-{int(time.time())}"
+
+        # Determine task type from issue type
+        task_type = TaskType.IMPLEMENTATION
+        if hasattr(issue.fields, 'issuetype'):
+            issue_type = issue.fields.issuetype.name.lower()
+            if "bug" in issue_type:
+                task_type = TaskType.FIX
+            elif "test" in issue_type:
+                task_type = TaskType.TESTING
+
+        # Extract acceptance criteria if available
+        acceptance_criteria = []
+        description = issue.fields.description or ""
+
+        task = Task(
+            id=task_id,
+            type=task_type,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="jira",
+            assigned_to=assigned_to,
+            created_at=issue.fields.created,
+            title=issue.fields.summary,
+            description=description,
+            acceptance_criteria=acceptance_criteria,
+            context={
+                "jira_key": issue.key,
+                "jira_url": f"{self.config.server}/browse/{issue.key}",
+            },
+        )
+
+        return task

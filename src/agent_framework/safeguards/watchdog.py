@@ -1,0 +1,242 @@
+"""Watchdog for monitoring agent heartbeats and restarting dead agents."""
+
+import asyncio
+import json
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from ..core.task import Task, TaskStatus
+
+
+logger = logging.getLogger(__name__)
+
+
+class Watchdog:
+    """
+    Monitors agent heartbeats and restarts dead agents.
+
+    Ported from scripts/watchdog.sh
+    """
+
+    def __init__(
+        self,
+        workspace: Path,
+        heartbeat_timeout: int = 90,
+        check_interval: int = 60,
+    ):
+        self.workspace = Path(workspace)
+        self.comm_dir = self.workspace / ".agent-communication"
+        self.heartbeat_dir = self.comm_dir / "heartbeats"
+        self.pid_file = self.comm_dir / "pids.txt"
+        self.queue_dir = self.comm_dir / "queues"
+        self.lock_dir = self.comm_dir / "locks"
+
+        self.heartbeat_timeout = heartbeat_timeout
+        self.check_interval = check_interval
+        self._running = False
+
+    async def run(self) -> None:
+        """Main watchdog monitoring loop."""
+        logger.info("Watchdog starting")
+        self._running = True
+
+        while self._running:
+            try:
+                # Check all agents
+                agent_status = await self.check_all_agents()
+
+                for agent_id, is_healthy in agent_status.items():
+                    if not is_healthy:
+                        logger.warning(f"Agent {agent_id} is dead or unresponsive")
+                        await self.handle_dead_agent(agent_id)
+
+                # Sleep until next check
+                await asyncio.sleep(self.check_interval)
+
+            except Exception as e:
+                logger.exception(f"Error in watchdog loop: {e}")
+                await asyncio.sleep(self.check_interval)
+
+    async def stop(self) -> None:
+        """Stop the watchdog loop."""
+        logger.info("Watchdog stopping")
+        self._running = False
+
+    async def check_heartbeat(self, agent_id: str) -> bool:
+        """
+        Check if an agent's heartbeat is fresh.
+
+        Args:
+            agent_id: Agent identifier
+
+        Returns:
+            True if agent is healthy, False if dead
+        """
+        heartbeat_file = self.heartbeat_dir / agent_id
+
+        if not heartbeat_file.exists():
+            logger.warning(f"No heartbeat file for {agent_id}")
+            return False
+
+        try:
+            # Read heartbeat timestamp
+            last_heartbeat = int(heartbeat_file.read_text().strip())
+            current_time = int(time.time())
+            age = current_time - last_heartbeat
+
+            if age > self.heartbeat_timeout:
+                logger.warning(
+                    f"Agent {agent_id} heartbeat is stale: {age}s old "
+                    f"(timeout: {self.heartbeat_timeout}s)"
+                )
+                return False
+
+            return True
+
+        except (ValueError, OSError) as e:
+            logger.error(f"Error reading heartbeat for {agent_id}: {e}")
+            return False
+
+    async def check_all_agents(self) -> Dict[str, bool]:
+        """
+        Check heartbeats for all agents.
+
+        Returns:
+            Dict mapping agent_id to health status (True=healthy, False=dead)
+        """
+        pids = self._load_pids()
+        agent_status = {}
+
+        for agent_id in pids.keys():
+            if agent_id == "watchdog":
+                continue  # Don't monitor watchdog itself
+            agent_status[agent_id] = await self.check_heartbeat(agent_id)
+
+        return agent_status
+
+    async def restart_agent(self, agent_id: str) -> None:
+        """
+        Restart a dead agent.
+
+        Args:
+            agent_id: Agent identifier
+        """
+        logger.info(f"Restarting agent {agent_id}")
+
+        # Kill zombie process if it exists
+        pids = self._load_pids()
+        if agent_id in pids:
+            pid = pids[agent_id]
+            if self._is_running(pid):
+                logger.warning(f"Killing zombie process for {agent_id} (PID {pid})")
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    time.sleep(1)
+                except ProcessLookupError:
+                    pass
+
+        # Reset in-progress tasks for this agent
+        await self.reset_in_progress_tasks(agent_id)
+
+        # Spawn new agent process
+        log_file_path = self.workspace / "logs" / f"{agent_id}.log"
+        log_file = open(log_file_path, "a")  # Append to existing log
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agent_framework.run_agent", agent_id],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            cwd=self.workspace,
+        )
+
+        logger.info(f"Restarted agent {agent_id} with new PID {proc.pid}")
+
+        # Update PID file
+        self._update_pid(agent_id, proc.pid)
+
+    async def reset_in_progress_tasks(self, agent_id: str) -> None:
+        """
+        Reset in_progress tasks for a dead agent to pending.
+
+        Args:
+            agent_id: Agent identifier
+        """
+        agent_queue = self.queue_dir / agent_id
+        if not agent_queue.exists():
+            return
+
+        reset_count = 0
+        for task_file in agent_queue.glob("*.json"):
+            try:
+                task_data = json.loads(task_file.read_text())
+
+                if task_data.get("status") == "in_progress":
+                    # Reset to pending
+                    task = Task(**task_data)
+                    task.reset_to_pending()
+
+                    # Write back
+                    tmp_file = task_file.with_suffix(".tmp")
+                    tmp_file.write_text(task.model_dump_json(indent=2))
+                    tmp_file.rename(task_file)
+
+                    reset_count += 1
+                    logger.info(f"Reset task {task.id} to pending")
+
+            except Exception as e:
+                logger.error(f"Error resetting task {task_file}: {e}")
+
+        if reset_count > 0:
+            logger.info(f"Reset {reset_count} tasks for {agent_id}")
+
+    async def handle_dead_agent(self, agent_id: str) -> None:
+        """
+        Handle a dead or unresponsive agent.
+
+        Args:
+            agent_id: Agent identifier
+        """
+        logger.warning(f"Handling dead agent: {agent_id}")
+
+        # Reset tasks and restart
+        await self.restart_agent(agent_id)
+
+    def _load_pids(self) -> Dict[str, int]:
+        """Load PIDs from file."""
+        if not self.pid_file.exists():
+            return {}
+
+        pids = {}
+        for line in self.pid_file.read_text().strip().split("\n"):
+            if not line:
+                continue
+            try:
+                agent_id, pid_str = line.split(":", 1)
+                pids[agent_id] = int(pid_str)
+            except ValueError:
+                continue
+
+        return pids
+
+    def _update_pid(self, agent_id: str, new_pid: int) -> None:
+        """Update PID for an agent in the PID file."""
+        pids = self._load_pids()
+        pids[agent_id] = new_pid
+
+        # Write back
+        lines = [f"{aid}:{pid}\n" for aid, pid in pids.items()]
+        self.pid_file.write_text("".join(lines))
+
+    def _is_running(self, pid: int) -> bool:
+        """Check if process is running."""
+        try:
+            os.kill(pid, 0)  # Signal 0 = check existence
+            return True
+        except ProcessLookupError:
+            return False

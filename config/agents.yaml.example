@@ -1,0 +1,59 @@
+agents:
+  - id: engineer
+    name: Software Engineer
+    queue: engineer
+    enabled: true
+    prompt: |
+      Implement features and fix bugs. Follow existing code patterns.
+      Write tests for new code. Create QA verification tasks when done.
+    jira_can_update_status: true
+    jira_allowed_transitions:
+      - "In Progress"
+      - "Code Review"
+    can_commit: true
+    can_create_pr: false
+
+  - id: qa
+    name: QA Engineer
+    queue: qa
+    enabled: true
+    prompt: |
+      Run tests and verify implementations meet acceptance criteria.
+      If tests pass, create PR request for architect.
+      If tests fail, create fix task for engineer.
+    jira_can_update_status: true
+    jira_allowed_transitions:
+      - "Code Review"
+      - "Done"
+    can_commit: false
+    can_create_pr: false
+
+  - id: architect
+    name: Technical Architect
+    queue: architect
+    enabled: true
+    prompt: |
+      Review code and approve PRs. Make architectural decisions.
+      Create implementation tasks for engineers.
+    jira_can_create_tickets: true
+    jira_can_update_status: true
+    jira_allowed_transitions:
+      - "In Progress"
+      - "Code Review"
+      - "Done"
+    can_commit: true
+    can_create_pr: true
+
+  - id: product-owner
+    name: Product Owner
+    queue: product-owner
+    enabled: true
+    prompt: |
+      Pull unassigned tickets from JIRA backlog. Define features and
+      break down epics into stories. Assign work to appropriate agents.
+    jira_can_create_tickets: true
+    jira_can_update_status: true
+    jira_allowed_transitions:
+      - "In Progress"
+    can_commit: false
+    can_create_pr: false

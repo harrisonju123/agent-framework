@@ -1,0 +1,40 @@
+# Agent Framework Configuration
+# Copy this file to agent-framework.yaml and customize as needed
+
+workspace: "."
+communication_dir: ".agent-communication"
+
+# LLM Configuration
+llm:
+  # Mode: "claude_cli" (Claude Code subprocess) or "litellm" (API calls)
+  mode: claude_cli
+
+  # Claude CLI settings (used when mode=claude_cli)
+  claude_cli_executable: claude
+  claude_cli_max_turns: 999
+  claude_cli_cheap_model: haiku
+  claude_cli_default_model: sonnet
+  claude_cli_premium_model: opus
+
+  # LiteLLM settings (used when mode=litellm)
+  # litellm_api_key: ${ANTHROPIC_API_KEY}
+  # litellm_cheap_model: claude-3-5-haiku-20241022
+  # litellm_default_model: claude-sonnet-4-20250514
+  # litellm_premium_model: claude-opus-4-20250514
+
+# Task Processing Configuration
+task:
+  poll_interval: 30          # Queue polling interval (seconds)
+  timeout: 1800              # Task timeout (seconds, default: 30 min)
+  max_retries: 5             # Max retry attempts before escalation
+  backoff_initial: 30        # Initial backoff delay (seconds)
+  backoff_max: 240           # Max backoff delay (seconds)
+  backoff_multiplier: 2      # Backoff multiplier (exponential)
+
+# Safeguards Configuration
+safeguards:
+  max_queue_size: 100        # Max tasks per agent queue
+  max_escalations: 50        # Max total escalations
+  max_task_age_days: 7       # Archive tasks older than N days
+  heartbeat_timeout: 90      # Agent considered dead after N seconds
+  watchdog_interval: 60      # Watchdog check interval (seconds)

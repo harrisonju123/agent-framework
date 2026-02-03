@@ -1,0 +1,47 @@
+{
+  "id": "task-example-001",
+  "type": "implementation",
+  "status": "pending",
+  "priority": 1,
+  "created_by": "agent-d",
+  "assigned_to": "agent-b",
+  "created_at": "2026-02-02T00:00:00Z",
+  "depends_on": [],
+  "blocks": [],
+  "title": "Example Task - Implement User Authentication",
+  "description": "Create POST /api/auth/login endpoint with JWT token generation.\n\nRequirements:\n- Accept email and password\n- Validate credentials against database\n- Return JWT token on success\n- Return 401 on invalid credentials\n- Rate limit to 5 attempts per minute\n\nImplementation files:\n- src/api/auth.ts (new file)\n- src/middleware/rate-limit.ts (update)\n- src/utils/jwt.ts (new file)\n\nFollow existing patterns in src/api/users.ts for API structure.",
+  "acceptance_criteria": [
+    "Endpoint responds to POST /api/auth/login",
+    "Returns JWT token on valid credentials",
+    "Returns 401 on invalid credentials",
+    "Rate limiting enforced (5 attempts/minute)",
+    "Tests written and passing",
+    "Type-safe interfaces defined"
+  ],
+  "context": {
+    "product_requirement": "task-pr-001",
+    "files_to_create": [
+      "src/api/auth.ts",
+      "src/utils/jwt.ts",
+      "src/api/auth.test.ts"
+    ],
+    "files_to_modify": [
+      "src/middleware/rate-limit.ts"
+    ],
+    "patterns_to_follow": "See src/api/users.ts for API endpoint structure"
+  },
+  "deliverables": [
+    "Working /api/auth/login endpoint",
+    "JWT token generation utility",
+    "Rate limiting middleware",
+    "Unit tests with ≥80% coverage",
+    "API documentation"
+  ],
+  "notes": [
+    "Use bcrypt for password comparison",
+    "JWT secret should come from environment variable",
+    "Token expiry: 24 hours for access token",
+    "Create verification task for agent-c after implementation"
+  ],
+  "estimated_effort": "2-3 hours"
+}

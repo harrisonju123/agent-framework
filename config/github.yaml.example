@@ -1,0 +1,8 @@
+github:
+  token: ${GITHUB_TOKEN}
+  owner: your-org
+  repo: your-repo
+  branch_pattern: "feature/{ticket_id}-{slug}"
+  pr_title_pattern: "[{ticket_id}] {title}"
+  labels:
+    - agent-pr
