@@ -66,3 +66,6 @@ docs/_build/
 # Claude Code local settings (may contain API keys)
 .claude/*.local.*
 .claude/settings.local.json
+
+# agent stuff
+task_results/*
