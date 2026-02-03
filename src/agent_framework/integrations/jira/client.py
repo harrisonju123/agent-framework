@@ -1,6 +1,7 @@
 """JIRA client for ticket management."""
 
 import time
+from datetime import datetime
 from typing import List, Optional
 
 from jira import JIRA
@@ -144,6 +145,57 @@ class JIRAClient:
 
         return issues
 
+    def get_epic_issues(self, epic_key: str) -> List[Issue]:
+        """Get all issues belonging to an epic.
+
+        Args:
+            epic_key: JIRA key of the epic (e.g., PROJ-123)
+
+        Returns:
+            List of issues linked to the epic
+        """
+        # Try different JQL queries since epic link field varies by JIRA setup
+        jql_queries = [
+            # Standard epic link (JIRA Software)
+            f'"Epic Link" = {epic_key}',
+            # Parent link (JIRA next-gen / Team-managed)
+            f'parent = {epic_key}',
+            # Issues in epic (some JIRA configurations)
+            f'"Parent Link" = {epic_key}',
+        ]
+
+        for jql in jql_queries:
+            try:
+                issues = self.jira.search_issues(
+                    jql_str=jql,
+                    maxResults=100,
+                    fields="summary,description,issuetype,status,created,priority",
+                )
+                if issues:
+                    return list(issues)
+            except Exception:
+                continue
+
+        # If no linked issues found, return empty list
+        return []
+
+    def get_epic_with_subtasks(self, epic_key: str) -> dict:
+        """Get epic and all its linked issues.
+
+        Args:
+            epic_key: JIRA key of the epic
+
+        Returns:
+            Dict with 'epic' (Issue) and 'issues' (List[Issue])
+        """
+        epic = self.jira.issue(epic_key)
+        issues = self.get_epic_issues(epic_key)
+
+        return {
+            "epic": epic,
+            "issues": issues,
+        }
+
     def issue_to_task(self, issue: Issue, assigned_to: str) -> Task:
         """Convert JIRA issue to internal Task."""
         task_id = f"jira-{issue.key}-{int(time.time())}"
@@ -161,6 +213,14 @@ class JIRAClient:
         acceptance_criteria = []
         description = issue.fields.description or ""
 
+        # Parse JIRA ISO datetime string to datetime object
+        created_str = str(issue.fields.created)
+        try:
+            # Handle JIRA datetime format (ISO 8601 with timezone)
+            created_at = datetime.fromisoformat(created_str.replace('Z', '+00:00'))
+        except ValueError:
+            created_at = datetime.utcnow()
+
         task = Task(
             id=task_id,
             type=task_type,
@@ -168,7 +228,7 @@ class JIRAClient:
             priority=1,
             created_by="jira",
             assigned_to=assigned_to,
-            created_at=issue.fields.created,
+            created_at=created_at,
             title=issue.fields.summary,
             description=description,
             acceptance_criteria=acceptance_criteria,

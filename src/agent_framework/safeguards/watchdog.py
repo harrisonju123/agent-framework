@@ -134,31 +134,48 @@ class Watchdog:
         """
         logger.info(f"Restarting agent {agent_id}")
 
-        # Kill zombie process if it exists
+        # Kill process if it exists, using graceful shutdown first
         pids = self._load_pids()
         if agent_id in pids:
             pid = pids[agent_id]
             if self._is_running(pid):
-                logger.warning(f"Killing zombie process for {agent_id} (PID {pid})")
+                logger.warning(f"Stopping process for {agent_id} (PID {pid})")
                 try:
-                    os.kill(pid, signal.SIGKILL)
-                    time.sleep(1)
+                    # Send SIGTERM first for graceful shutdown
+                    os.kill(pid, signal.SIGTERM)
+                    # Wait up to 5 seconds for graceful exit
+                    for _ in range(10):
+                        await asyncio.sleep(0.5)
+                        if not self._is_running(pid):
+                            break
+                    else:
+                        # Force kill if still running after grace period
+                        logger.warning(f"Force killing process for {agent_id} (PID {pid})")
+                        os.kill(pid, signal.SIGKILL)
+                        await asyncio.sleep(0.5)
                 except ProcessLookupError:
                     pass
 
-        # Reset in-progress tasks for this agent
+        # Reset in-progress tasks AFTER process is dead to prevent corruption
         await self.reset_in_progress_tasks(agent_id)
 
         # Spawn new agent process
         log_file_path = self.workspace / "logs" / f"{agent_id}.log"
         log_file = open(log_file_path, "a")  # Append to existing log
 
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "agent_framework.run_agent", agent_id],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            cwd=self.workspace,
-        )
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "agent_framework.run_agent", agent_id],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=self.workspace,
+            )
+        except Exception:
+            log_file.close()
+            raise
+
+        # Close file handle after subprocess inherits it (prevents FD exhaustion)
+        log_file.close()
 
         logger.info(f"Restarted agent {agent_id} with new PID {proc.pid}")
 

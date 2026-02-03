@@ -49,7 +49,7 @@ class SafeguardsConfig(BaseModel):
     max_queue_size: int = 100
     max_escalations: int = 50
     max_task_age_days: int = 7
-    heartbeat_timeout: int = 90
+    heartbeat_timeout: int = 600  # 10 min to accommodate long MCP tasks
     watchdog_interval: int = 60
 
 
@@ -227,7 +227,10 @@ class FrameworkConfig(BaseSettings):
 def load_config(config_path: Path = Path("agent-framework.yaml")) -> FrameworkConfig:
     """Load framework configuration from YAML file."""
     if not config_path.exists():
-        # Return default config
+        logger.warning(
+            f"Config file not found: {config_path}. Using default configuration. "
+            "To customize settings, create a config file at this path."
+        )
         return FrameworkConfig()
 
     with open(config_path) as f:
@@ -290,13 +293,25 @@ def load_github_config(github_path: Path = Path("config/github.yaml")) -> Option
     return GitHubConfig(**github_data)
 
 
-def _expand_env_vars(data: Any) -> Any:
-    """Recursively expand environment variables in config data."""
+def _expand_env_vars(data: Any, _path: str = "") -> Any:
+    """Recursively expand environment variables in config data.
+
+    Args:
+        data: Config data to process
+        _path: Internal tracking for error messages (e.g., "llm.api_token")
+    """
     if isinstance(data, dict):
-        return {k: _expand_env_vars(v) for k, v in data.items()}
+        return {k: _expand_env_vars(v, f"{_path}.{k}" if _path else k) for k, v in data.items()}
     elif isinstance(data, list):
-        return [_expand_env_vars(item) for item in data]
+        return [_expand_env_vars(item, f"{_path}[{i}]") for i, item in enumerate(data)]
     elif isinstance(data, str) and data.startswith("${") and data.endswith("}"):
         env_var = data[2:-1]
-        return os.environ.get(env_var, data)
+        value = os.environ.get(env_var)
+        if value is None:
+            logger.warning(
+                f"Environment variable '{env_var}' not set (referenced at config path: {_path or 'root'}). "
+                f"The literal string '{data}' will be used, which may cause errors."
+            )
+            return data
+        return value
     return data

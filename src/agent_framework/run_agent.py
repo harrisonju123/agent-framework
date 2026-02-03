@@ -44,7 +44,7 @@ def main():
 
     try:
         # Load framework config
-        framework_config = load_config(workspace / "agent-framework.yaml")
+        framework_config = load_config(workspace / "config" / "agent-framework.yaml")
 
         # Load agent definitions
         agents_config_path = workspace / "config" / "agents.yaml"
@@ -70,7 +70,11 @@ def main():
         # Create LLM backend (Claude CLI mode only for now)
         mcp_config_path = None
         if framework_config.llm.use_mcp and framework_config.llm.mcp_config_path:
-            mcp_config_path = framework_config.llm.mcp_config_path
+            mcp_path = Path(framework_config.llm.mcp_config_path)
+            if not mcp_path.exists():
+                logger.error(f"MCP config file not found: {mcp_path}")
+                raise FileNotFoundError(f"MCP config file not found: {mcp_path}")
+            mcp_config_path = str(mcp_path)
             logger.info(f"MCP enabled, config path: {mcp_config_path}")
 
         llm = ClaudeCLIBackend(

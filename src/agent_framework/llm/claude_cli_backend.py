@@ -21,6 +21,9 @@ class ClaudeCLIBackend(LLMBackend):
     Ported from scripts/async-agent-runner.sh lines 355-358.
     """
 
+    # Default timeout for LLM calls (5 minutes)
+    DEFAULT_TIMEOUT = 300
+
     def __init__(
         self,
         executable: str = "claude",
@@ -29,9 +32,11 @@ class ClaudeCLIBackend(LLMBackend):
         default_model: str = "sonnet",
         premium_model: str = "opus",
         mcp_config_path: Optional[str] = None,
+        timeout: int = DEFAULT_TIMEOUT,
     ):
         self.executable = executable
         self.max_turns = max_turns
+        self.timeout = timeout
         self.model_selector = ModelSelector(cheap_model, default_model, premium_model)
 
         # Expand environment variables in MCP config if provided
@@ -84,7 +89,28 @@ class ClaudeCLIBackend(LLMBackend):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await process.communicate(input=full_prompt.encode())
+            # Apply timeout to prevent indefinite hangs
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(input=full_prompt.encode()),
+                    timeout=self.timeout
+                )
+            except asyncio.TimeoutError:
+                # Kill the process if it times out
+                process.kill()
+                await process.wait()
+                latency_ms = (time.time() - start_time) * 1000
+                return LLMResponse(
+                    content="",
+                    model_used=model,
+                    input_tokens=0,
+                    output_tokens=0,
+                    finish_reason="error",
+                    latency_ms=latency_ms,
+                    success=False,
+                    error=f"Claude CLI timed out after {self.timeout} seconds",
+                )
+
             latency_ms = (time.time() - start_time) * 1000
 
             if process.returncode == 0:

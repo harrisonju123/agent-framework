@@ -49,13 +49,20 @@ class Orchestrator:
         log_file_path = self.logs_dir / f"{agent_id}.log"
         log_file = open(log_file_path, "w")
 
-        # Spawn agent process
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "agent_framework.run_agent", agent_id],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            cwd=self.workspace,
-        )
+        try:
+            # Spawn agent process
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "agent_framework.run_agent", agent_id],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=self.workspace,
+            )
+        except Exception:
+            log_file.close()
+            raise
+
+        # Close file handle after subprocess inherits it (prevents FD exhaustion)
+        log_file.close()
 
         logger.info(f"Spawned agent {agent_id} with PID {proc.pid}")
         self.processes[agent_id] = proc
@@ -107,12 +114,19 @@ class Orchestrator:
         log_file_path = self.logs_dir / "watchdog.log"
         log_file = open(log_file_path, "w")
 
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "agent_framework.run_watchdog"],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            cwd=self.workspace,
-        )
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "agent_framework.run_watchdog"],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=self.workspace,
+            )
+        except Exception:
+            log_file.close()
+            raise
+
+        # Close file handle after subprocess inherits it (prevents FD exhaustion)
+        log_file.close()
 
         logger.info(f"Spawned watchdog with PID {proc.pid}")
         self.processes["watchdog"] = proc

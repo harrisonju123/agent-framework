@@ -148,7 +148,7 @@ class CircuitBreaker:
                 for task_file in agent_dir.glob("*.json"):
                     try:
                         task_data = json.loads(task_file.read_text())
-                        if task_data.get("type") == "escalation":
+                        if task_data.get("type") in ("escalation", TaskType.ESCALATION.value):
                             escalation_count += 1
                     except Exception:
                         continue
@@ -373,9 +373,12 @@ class CircuitBreaker:
                 try:
                     task_data = json.loads(task_file.read_text())
 
-                    if task_data.get("type") == "escalation" and task_data.get("retry_count", 0) > 0:
+                    if task_data.get("type") in ("escalation", TaskType.ESCALATION.value) and task_data.get("retry_count", 0) > 0:
                         task_data["retry_count"] = 0
-                        task_file.write_text(json.dumps(task_data, indent=2))
+                        # Use atomic write pattern to prevent race conditions
+                        tmp_file = task_file.with_suffix('.tmp')
+                        tmp_file.write_text(json.dumps(task_data, indent=2))
+                        tmp_file.rename(task_file)
                         logger.info(f"Reset retry count for escalation {task_data['id']}")
                 except Exception as e:
                     logger.error(f"Error fixing {task_file}: {e}")

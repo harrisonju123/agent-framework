@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import signal
 from pathlib import Path
 from typing import Optional
@@ -77,9 +78,10 @@ class FileLock:
     def _remove_lock(self) -> None:
         """Remove the lock directory."""
         if self.lock_path.exists():
-            if self.pid_file.exists():
-                self.pid_file.unlink()
-            self.lock_path.rmdir()
+            try:
+                shutil.rmtree(self.lock_path)
+            except OSError as e:
+                logger.warning(f"Failed to remove lock directory {self.lock_path}: {e}")
 
     def __enter__(self):
         """Context manager entry."""
