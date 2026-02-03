@@ -1,12 +1,22 @@
 """Activity tracking for agent runtime state and events."""
 
+import json
+import logging
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List
-import json
 
 from pydantic import BaseModel
+
+# fcntl is Unix-only, use fallback for Windows
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+
+logger = logging.getLogger(__name__)
 
 
 class AgentStatus(str, Enum):
@@ -75,6 +85,8 @@ class ActivityEvent(BaseModel):
     duration_ms: Optional[int] = None
     retry_count: Optional[int] = None
     phase: Optional[TaskPhase] = None
+    error_message: Optional[str] = None  # Error details for failed tasks
+    pr_url: Optional[str] = None  # PR URL for completed tasks
 
 
 class ActivityManager:
@@ -120,19 +132,36 @@ class ActivityManager:
         return activities
 
     def append_event(self, event: ActivityEvent) -> None:
-        """Append event to activity stream."""
-        # Read existing events
-        events = self._read_stream()
+        """Append event to activity stream with file locking to prevent race conditions."""
+        # Use file locking for atomic read-modify-write
+        with open(self.stream_file, 'a+') as f:
+            if HAS_FCNTL:
+                fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.seek(0)
+                content = f.read()
+                events = self._parse_events(content)
+                events.append(event)
+                if len(events) > self.max_stream_events:
+                    events = events[-self.max_stream_events:]
+                f.seek(0)
+                f.truncate()
+                f.write('\n'.join(e.model_dump_json() for e in events) + '\n')
+            finally:
+                if HAS_FCNTL:
+                    fcntl.flock(f, fcntl.LOCK_UN)
 
-        # Append new event
-        events.append(event)
-
-        # Keep only last N events
-        if len(events) > self.max_stream_events:
-            events = events[-self.max_stream_events:]
-
-        # Write back
-        self._write_stream(events)
+    def _parse_events(self, content: str) -> List[ActivityEvent]:
+        """Parse events from stream file content."""
+        events = []
+        for line in content.strip().split('\n'):
+            if line:
+                try:
+                    data = json.loads(line)
+                    events.append(ActivityEvent(**data))
+                except (json.JSONDecodeError, ValueError, KeyError) as e:
+                    logger.debug(f"Failed to parse activity event: {e}")
+        return events
 
     def get_recent_events(self, limit: int = 10) -> List[ActivityEvent]:
         """Get recent activity events."""

@@ -140,9 +140,20 @@ def pull(ctx, project, max):
 
 @cli.command()
 @click.option("--no-dashboard", is_flag=True, help="Skip live dashboard")
+@click.option(
+    "--workflow", "-w",
+    type=click.Choice(["simple", "standard", "full"]),
+    default=None,
+    help="Workflow complexity: simple (Engineer only), standard (Engineer→QA), full (Architect→Engineer→QA)"
+)
+@click.option("--epic", "-e", help="JIRA epic key to process (e.g., PROJ-100)")
 @click.pass_context
-def work(ctx, no_dashboard):
-    """Interactive mode: describe what to build, delegate to Product Owner agent."""
+def work(ctx, no_dashboard, workflow, epic):
+    """Interactive mode: describe what to build, delegate to Product Owner agent.
+
+    With --epic: Process all tickets in an existing JIRA epic sequentially.
+    Without --epic: Describe a new feature to implement.
+    """
     workspace = ctx.obj["workspace"]
 
     console.print("[bold cyan]🤖 Agent Framework - Interactive Mode[/]")
@@ -150,6 +161,11 @@ def work(ctx, no_dashboard):
 
     # Load config
     framework_config = load_config(workspace / "config" / "agent-framework.yaml")
+
+    # Handle epic processing mode
+    if epic:
+        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, workflow)
+        return
 
     # Check if repos are registered
     if not framework_config.repositories:
@@ -178,7 +194,24 @@ def work(ctx, no_dashboard):
 
     console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/] (JIRA: {selected_repo.jira_project})")
 
-    # Step 3: Create planning task for Product Owner
+    # Step 3: Select workflow complexity
+    if workflow is None:
+        console.print("\n[bold]Workflow complexity?[/]")
+        console.print("  1. [cyan]simple[/]   - Engineer only (bug fixes, small changes)")
+        console.print("  2. [cyan]standard[/] - Engineer → QA (features needing verification)")
+        console.print("  3. [cyan]full[/]     - Architect → Engineer → QA (complex work)")
+
+        workflow_idx = click.prompt(
+            "Select workflow",
+            type=click.IntRange(1, 3),
+            default=1
+        )
+        workflow_modes = ["simple", "standard", "full"]
+        workflow = workflow_modes[workflow_idx - 1]
+
+    console.print(f"\n[green]✓[/] Workflow: [bold]{workflow}[/]")
+
+    # Step 4: Create planning task for Product Owner
     import time
     from datetime import datetime
     task_id = f"planning-{selected_repo.jira_project}-{int(time.time())}"
@@ -192,19 +225,18 @@ def work(ctx, no_dashboard):
         created_by="cli",
         assigned_to="product-owner",
         created_at=datetime.utcnow(),
-        title=f"Create epic and breakdown for: {goal}",
+        title=f"Plan and delegate: {goal}",
         description=f"""User Goal: {goal}
 
 Instructions for Product Owner Agent:
 1. Clone/update repository (use MultiRepoManager)
 2. Explore the codebase to understand structure
 3. Validate the goal is feasible
-4. Create JIRA epic
-5. Break down into subtasks (architect → engineer → qa)
-6. Create JIRA subtasks with parent-child relationships
-7. Queue internal tasks for other agents with repository context""",
+4. Check context.workflow ('{workflow}') and route accordingly
+5. Create appropriate JIRA ticket and queue tasks per workflow mode""",
         context={
             "mode": "planning",
+            "workflow": workflow,
             "github_repo": selected_repo.github_repo,
             "jira_project": selected_repo.jira_project,
             "repository_name": selected_repo.name,
@@ -359,6 +391,196 @@ def status(ctx, watch):
 
 
 @cli.command()
+@click.option("--epic", "-e", required=True, help="JIRA epic key (e.g., PROJ-100)")
+@click.pass_context
+def summary(ctx, epic):
+    """Show progress summary for an epic's tickets.
+
+    Displays a table with all tickets in the epic, their current status,
+    associated PRs, and error details for failed tasks.
+    """
+    workspace = ctx.obj["workspace"]
+
+    # Validate epic key format
+    if "-" not in epic:
+        console.print(f"[red]Invalid epic key format: {epic}[/]")
+        console.print("[dim]Expected format: PROJ-123[/]")
+        return
+
+    console.print(f"[bold]Epic Summary: {epic}[/]")
+    console.print()
+
+    # Load JIRA config
+    jira_config = load_jira_config(workspace / "config" / "jira.yaml")
+    if not jira_config:
+        console.print("[red]Error: JIRA config not found[/]")
+        return
+
+    # Create JIRA client and get epic info
+    jira_client = JIRAClient(jira_config)
+
+    try:
+        epic_data = jira_client.get_epic_with_subtasks(epic)
+        epic_issue = epic_data["epic"]
+        issues = epic_data["issues"]
+
+        console.print(f"[bold cyan]Epic: {epic} - {epic_issue.fields.summary}[/]")
+        console.print()
+
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not fetch epic from JIRA: {e}[/]")
+        console.print("[dim]Showing local task data only...[/]")
+        console.print()
+        epic_issue = None
+        issues = []
+
+    # Get tasks from local queue
+    queue = FileQueue(workspace)
+    tasks_by_status = queue.get_tasks_by_epic(epic)
+
+    # Calculate totals
+    total_pending = len(tasks_by_status["pending"])
+    total_in_progress = len(tasks_by_status["in_progress"])
+    total_completed = len(tasks_by_status["completed"])
+    total_failed = len(tasks_by_status["failed"])
+    total_tasks = total_pending + total_in_progress + total_completed + total_failed
+
+    if total_tasks == 0:
+        console.print("[yellow]No tasks found for this epic.[/]")
+        console.print("[dim]Make sure tasks have epic_key in their context.[/]")
+        return
+
+    # Status summary
+    status_text = f"Status: "
+    if total_in_progress > 0:
+        status_text += f"[yellow]IN_PROGRESS[/yellow]"
+    elif total_failed > 0 and total_pending == 0:
+        status_text += f"[red]FAILED[/red]"
+    elif total_completed == total_tasks:
+        status_text += f"[green]COMPLETED[/green]"
+    else:
+        status_text += f"[cyan]PENDING[/cyan]"
+
+    status_text += f" ({total_completed}/{total_tasks} tickets)"
+    console.print(status_text)
+    console.print()
+
+    # Build task table
+    table = Table(expand=True)
+    table.add_column("Ticket", style="cyan", width=12)
+    table.add_column("Title", width=35)
+    table.add_column("Status", width=12)
+    table.add_column("PR", width=15)
+
+    # Combine all tasks and sort by epic_position if available
+    all_tasks = (
+        tasks_by_status["completed"] +
+        tasks_by_status["in_progress"] +
+        tasks_by_status["pending"] +
+        tasks_by_status["failed"]
+    )
+    all_tasks.sort(key=lambda t: t.context.get("epic_position", 999))
+
+    prs_ready = []
+    failed_tasks = []
+
+    for task in all_tasks:
+        jira_key = task.context.get("jira_key", task.id[:12])
+        title = task.title[:32] + "..." if len(task.title) > 32 else task.title
+        pr_url = task.context.get("pr_url", "")
+
+        # Format status
+        if task.status == TaskStatus.COMPLETED:
+            status_str = "✓ Done"
+            status_style = "green"
+            if pr_url:
+                # Extract PR number from URL
+                pr_num = pr_url.split("/")[-1] if "/" in pr_url else pr_url
+                pr_display = f"PR #{pr_num}"
+                prs_ready.append(pr_url)
+            else:
+                pr_display = "-"
+        elif task.status == TaskStatus.IN_PROGRESS:
+            status_str = "⏳ Running"
+            status_style = "yellow"
+            pr_display = "-"
+        elif task.status == TaskStatus.FAILED:
+            status_str = "✗ Failed"
+            status_style = "red"
+            pr_display = "-"
+            failed_tasks.append(task)
+        else:  # PENDING
+            status_str = "⏸ Queued"
+            status_style = "dim"
+            pr_display = "-"
+
+        table.add_row(
+            jira_key,
+            title,
+            f"[{status_style}]{status_str}[/{status_style}]",
+            pr_display
+        )
+
+    console.print(table)
+    console.print()
+
+    # Show failed tasks with error details
+    if failed_tasks:
+        console.print(f"[bold red]Failed Tasks ({len(failed_tasks)}):[/]")
+        for task in failed_tasks:
+            jira_key = task.context.get("jira_key", task.id[:12])
+            console.print(f"  [red]{jira_key}[/]: {task.title}")
+            if task.last_error:
+                error_preview = task.last_error[:100] + "..." if len(task.last_error) > 100 else task.last_error
+                console.print(f"  └─ Error: {error_preview}", style="dim")
+            console.print(f"  └─ Retry: [cyan]agent retry {jira_key}[/]")
+        console.print()
+
+    # Show PRs ready for review
+    if prs_ready:
+        console.print(f"[bold green]PRs Ready for Review: {len(prs_ready)}[/]")
+        for pr_url in prs_ready:
+            console.print(f"  - {pr_url}")
+        console.print()
+
+
+@cli.command()
+@click.argument("identifier")
+@click.pass_context
+def retry(ctx, identifier):
+    """Retry a failed task.
+
+    IDENTIFIER can be either a task ID or a JIRA key (e.g., PROJ-104).
+    The task will be reset to PENDING status and re-queued for processing.
+    """
+    workspace = ctx.obj["workspace"]
+
+    queue = FileQueue(workspace)
+
+    # Find the failed task
+    task = queue.get_failed_task(identifier)
+
+    if not task:
+        console.print(f"[red]Error: No failed task found with identifier '{identifier}'[/]")
+        console.print("[dim]Make sure the task exists and has FAILED status.[/]")
+        return
+
+    jira_key = task.context.get("jira_key", task.id)
+    console.print(f"[bold]Retrying: {jira_key} - {task.title}[/]")
+
+    # Show current error if available
+    if task.last_error:
+        error_preview = task.last_error[:100] + "..." if len(task.last_error) > 100 else task.last_error
+        console.print(f"[dim]Previous error: {error_preview}[/]")
+
+    # Re-queue the task
+    queue.requeue_task(task)
+
+    console.print(f"[green]✓ Task queued for {task.assigned_to}[/]")
+    console.print(f"[dim]Monitor with: agent status --watch[/]")
+
+
+@cli.command()
 @click.option("--watchdog/--no-watchdog", default=True, help="Start watchdog")
 @click.pass_context
 def start(ctx, watchdog):
@@ -418,6 +640,175 @@ def stop(ctx, graceful):
 
 
 @cli.command()
+@click.option("--watchdog/--no-watchdog", default=True, help="Start watchdog")
+@click.option("--dashboard/--no-dashboard", default=True, help="Show live dashboard")
+@click.pass_context
+def restart(ctx, watchdog, dashboard):
+    """Restart the agent system (stop then start)."""
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold yellow]Restarting Agent Framework[/]")
+
+    try:
+        orchestrator = Orchestrator(workspace)
+
+        # Stop existing agents
+        orchestrator.stop_all_agents(graceful=True)
+        console.print("[green]✓ Agents stopped[/]")
+
+        import time
+        time.sleep(1)
+
+        # Start agents
+        orchestrator.setup_signal_handlers()
+        processes = orchestrator.spawn_all_agents()
+        console.print(f"[green]✓ Started {len(processes)} agents[/]")
+
+        if watchdog:
+            orchestrator.spawn_watchdog()
+            console.print("[green]✓ Started watchdog[/]")
+
+        if dashboard:
+            console.print("\n[bold cyan]Starting live dashboard...[/]")
+            console.print("[dim]Press Ctrl+C to exit dashboard (agents continue running)[/]\n")
+
+            from .dashboard import AgentDashboard
+            dash = AgentDashboard(workspace)
+            try:
+                asyncio.run(dash.run())
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Dashboard closed[/]")
+                console.print("[dim]Agents continue running. Use 'agent status --watch' to monitor.[/]")
+        else:
+            console.print("\n[bold]Agents are running. Use 'agent status --watch' to monitor.[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command()
+@click.option("--agent", "-a", help="Clear only specific agent queue (e.g., 'engineer', 'qa')")
+@click.option("--completed", is_flag=True, help="Also clear completed tasks")
+@click.option("--locks", is_flag=True, help="Also clear stale lock files")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.pass_context
+def clear(ctx, agent, completed, locks, yes):
+    """Clear agent task queues."""
+    workspace = ctx.obj["workspace"]
+    comm_dir = workspace / ".agent-communication"
+    queues_dir = comm_dir / "queues"
+    completed_dir = comm_dir / "completed"
+    locks_dir = comm_dir / "locks"
+
+    if not queues_dir.exists():
+        console.print("[yellow]No queues directory found[/]")
+        return
+
+    # Count tasks to clear
+    pending_count = 0
+    completed_count = 0
+
+    if agent:
+        # Clear specific agent queue
+        agent_dir = queues_dir / agent
+        if agent_dir.exists():
+            pending_count = len(list(agent_dir.glob("*.json")))
+    else:
+        # Count all pending tasks
+        for agent_dir in queues_dir.iterdir():
+            if agent_dir.is_dir():
+                pending_count += len(list(agent_dir.glob("*.json")))
+
+    if completed and completed_dir.exists():
+        completed_count = len(list(completed_dir.glob("*.json")))
+
+    locks_count = 0
+    if locks and locks_dir.exists():
+        locks_count = len(list(locks_dir.glob("*.lock")))
+
+    if pending_count == 0 and completed_count == 0 and locks_count == 0:
+        console.print("[green]Queues are already empty[/]")
+        return
+
+    # Show what will be cleared
+    console.print(f"[bold]Tasks to clear:[/]")
+    console.print(f"  Pending: {pending_count}")
+    if completed:
+        console.print(f"  Completed: {completed_count}")
+    if locks:
+        console.print(f"  Locks: {locks_count}")
+
+    if not yes:
+        if not click.confirm("Continue?"):
+            console.print("[yellow]Cancelled[/]")
+            return
+
+    # Clear tasks
+    cleared = 0
+    if agent:
+        agent_dir = queues_dir / agent
+        if agent_dir.exists():
+            for f in agent_dir.glob("*.json"):
+                f.unlink()
+                cleared += 1
+    else:
+        for agent_dir in queues_dir.iterdir():
+            if agent_dir.is_dir():
+                for f in agent_dir.glob("*.json"):
+                    f.unlink()
+                    cleared += 1
+
+    if completed and completed_dir.exists():
+        for f in completed_dir.glob("*.json"):
+            f.unlink()
+            cleared += 1
+
+    if locks and locks_dir.exists():
+        import shutil
+        for lock_dir in locks_dir.glob("*.lock"):
+            if lock_dir.is_dir():
+                shutil.rmtree(lock_dir)
+                cleared += 1
+
+    console.print(f"[green]✓ Cleared {cleared} items[/]")
+
+
+@cli.command()
+@click.pass_context
+def pause(ctx):
+    """Pause agent processing after current task completes."""
+    workspace = ctx.obj["workspace"]
+    comm_dir = workspace / ".agent-communication"
+    pause_file = comm_dir / "pause"
+
+    comm_dir.mkdir(parents=True, exist_ok=True)
+
+    if pause_file.exists():
+        console.print("[yellow]Agents are already paused[/]")
+    else:
+        pause_file.write_text(str(int(__import__("time").time())))
+        console.print("[yellow]⏸ Pause signal sent[/]")
+        console.print("[dim]Agents will pause after completing their current task.[/]")
+        console.print("[dim]Use 'agent status --watch' to monitor, 'agent resume' to continue.[/]")
+
+
+@cli.command()
+@click.pass_context
+def resume(ctx):
+    """Resume paused agent processing."""
+    workspace = ctx.obj["workspace"]
+    comm_dir = workspace / ".agent-communication"
+    pause_file = comm_dir / "pause"
+
+    if not pause_file.exists():
+        console.print("[yellow]Agents are not paused[/]")
+    else:
+        pause_file.unlink()
+        console.print("[green]▶ Resume signal sent[/]")
+        console.print("[dim]Agents will resume processing on next poll cycle.[/]")
+
+
+@cli.command()
 @click.option("--fix", is_flag=True, help="Auto-fix detected issues")
 @click.pass_context
 def check(ctx, fix):
@@ -427,8 +818,8 @@ def check(ctx, fix):
     console.print("[bold]Running Circuit Breaker Checks[/]")
 
     try:
-        # Load config
-        framework_config = load_config(workspace / "agent-framework.yaml")
+        # Load config (use config/ subdirectory for consistency)
+        framework_config = load_config(workspace / "config" / "agent-framework.yaml")
 
         # Create circuit breaker
         breaker = CircuitBreaker(
@@ -467,8 +858,8 @@ def apply_pattern(ctx, reference, files, targets, description, branch_prefix, dr
     workspace = ctx.obj["workspace"]
 
     try:
-        # Load config
-        framework_config = load_config(workspace / "agent-framework.yaml")
+        # Load config (use config/ subdirectory for consistency)
+        framework_config = load_config(workspace / "config" / "agent-framework.yaml")
 
         # Check for GitHub token
         github_token = os.environ.get("GITHUB_TOKEN")
@@ -606,6 +997,186 @@ This PR implements the same pattern/functionality as the reference implementatio
                 continue
 
         console.print(f"\n[bold green]✓ Pattern application complete![/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        import traceback
+        traceback.print_exc()
+
+
+def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, workflow: str):
+    """Handle --epic mode: process all tickets in a JIRA epic sequentially.
+
+    Args:
+        ctx: Click context
+        workspace: Workspace path
+        framework_config: Framework configuration
+        epic_key: JIRA epic key (e.g., PROJ-100)
+        no_dashboard: Skip dashboard if True
+        workflow: Workflow complexity
+    """
+    from datetime import datetime
+    import time
+
+    # Validate epic key format
+    if "-" not in epic_key:
+        console.print(f"[red]Invalid epic key format: {epic_key}[/]")
+        console.print("[dim]Expected format: PROJ-123[/]")
+        return
+
+    # Load JIRA config
+    jira_config = load_jira_config(workspace / "config" / "jira.yaml")
+    if not jira_config:
+        console.print("[red]Error: JIRA config not found. Create config/jira.yaml[/]")
+        return
+
+    # Create JIRA client
+    jira_client = JIRAClient(jira_config)
+
+    console.print(f"[bold]Fetching epic: {epic_key}[/]")
+
+    try:
+        epic_data = jira_client.get_epic_with_subtasks(epic_key)
+        epic = epic_data["epic"]
+        issues = epic_data["issues"]
+
+        if not issues:
+            console.print(f"[yellow]No issues found in epic {epic_key}[/]")
+            console.print("[dim]Make sure the epic has linked issues or subtasks.[/]")
+            return
+
+        console.print(f"[green]✓ Found {len(issues)} issues in epic:[/]")
+        console.print(f"  [bold]{epic.fields.summary}[/]")
+        console.print()
+
+        # Show issues
+        table = Table()
+        table.add_column("#", style="dim")
+        table.add_column("Key")
+        table.add_column("Summary")
+        table.add_column("Type")
+        table.add_column("Status")
+
+        for i, issue in enumerate(issues, 1):
+            table.add_row(
+                str(i),
+                issue.key,
+                issue.fields.summary[:50] + "..." if len(issue.fields.summary) > 50 else issue.fields.summary,
+                issue.fields.issuetype.name,
+                issue.fields.status.name,
+            )
+
+        console.print(table)
+        console.print()
+
+        if not click.confirm(f"Queue {len(issues)} tickets for processing?"):
+            console.print("[yellow]Cancelled[/]")
+            return
+
+        # Determine workflow (default to standard for epics)
+        if workflow is None:
+            workflow = "standard"
+
+        # Determine target repository from epic or config
+        github_repo = None
+        jira_project = epic_key.split("-")[0]
+
+        # Try to find matching repo in config
+        for repo in framework_config.repositories:
+            if repo.jira_project == jira_project:
+                github_repo = repo.github_repo
+                break
+
+        if not github_repo:
+            console.print(f"[yellow]No repository configured for JIRA project {jira_project}[/]")
+            if framework_config.repositories:
+                console.print("Available repositories:")
+                for i, repo in enumerate(framework_config.repositories, 1):
+                    console.print(f"  {i}. {repo.github_repo} ({repo.jira_project})")
+
+                repo_idx = click.prompt(
+                    "Select repository",
+                    type=click.IntRange(1, len(framework_config.repositories))
+                )
+                selected_repo = framework_config.repositories[repo_idx - 1]
+                github_repo = selected_repo.github_repo
+            else:
+                console.print("[red]No repositories configured. Add them to config/agent-framework.yaml[/]")
+                return
+
+        # Queue all issues as tasks with dependencies (sequential execution)
+        queue = FileQueue(workspace)
+
+        previous_task_id = None
+        queued_tasks = []
+
+        for i, issue in enumerate(issues):
+            # Determine agent based on issue type and workflow
+            if workflow == "simple":
+                assigned_to = "engineer"
+            elif workflow == "standard":
+                assigned_to = "engineer"
+            else:  # full
+                assigned_to = "architect"
+
+            # Override based on issue type
+            issue_type = issue.fields.issuetype.name.lower()
+            if "test" in issue_type or "qa" in issue_type:
+                assigned_to = "qa"
+            elif "bug" in issue_type:
+                assigned_to = "engineer"
+
+            # Create task
+            task = jira_client.issue_to_task(issue, assigned_to)
+
+            # Add epic context
+            task.context["epic_key"] = epic_key
+            task.context["epic_summary"] = epic.fields.summary
+            task.context["github_repo"] = github_repo
+            task.context["jira_project"] = jira_project
+            task.context["workflow"] = workflow
+            task.context["epic_position"] = i + 1
+            task.context["epic_total"] = len(issues)
+
+            # Make sequential: each task depends on previous
+            if previous_task_id:
+                task.depends_on = [previous_task_id]
+
+            queue.push(task, assigned_to)
+            queued_tasks.append((task.id, issue.key, assigned_to))
+            previous_task_id = task.id
+
+        console.print(f"\n[green]✓ Queued {len(queued_tasks)} tasks from epic {epic_key}[/]")
+        console.print(f"[dim]Tasks will process sequentially: ticket 1 → ticket 2 → ...[/]")
+
+        # Ensure agents are running
+        orchestrator = Orchestrator(workspace)
+        running = orchestrator.get_running_agents()
+
+        if running:
+            console.print(f"\n[green]✓ Agents already running: {', '.join(running)}[/]")
+        else:
+            console.print("\n[bold]Starting agents...[/]")
+            orchestrator.setup_signal_handlers()
+            orchestrator.spawn_all_agents()
+            console.print("[green]✓ Agents started[/]")
+
+        if no_dashboard:
+            console.print(f"\n[bold cyan]🎯 Processing epic: {epic_key}[/]")
+            console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
+            console.print(f"[dim]⏸ Pause anytime: agent pause[/]")
+            console.print(f"[dim]▶ Resume: agent resume[/]")
+        else:
+            console.print("\n[bold cyan]✓ Tasks queued, starting live dashboard...[/]")
+            console.print("[dim]Press Ctrl+C to exit dashboard[/]\n")
+
+            from .dashboard import AgentDashboard
+            dashboard = AgentDashboard(workspace)
+            try:
+                asyncio.run(dashboard.run())
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Dashboard closed[/]")
+                console.print("[dim]Agents continue running. Use 'agent status --watch' to monitor.[/]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")

@@ -20,8 +20,21 @@ from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
 from ..safeguards.escalation import EscalationHandler
 
+# Optional sandbox imports (only used if Docker is available)
+try:
+    from ..sandbox import DockerExecutor, GoTestRunner, TestResult
+    SANDBOX_AVAILABLE = True
+except ImportError:
+    SANDBOX_AVAILABLE = False
+    DockerExecutor = None
+    GoTestRunner = None
+    TestResult = None
+
 
 logger = logging.getLogger(__name__)
+
+# Pause/resume signal file
+PAUSE_SIGNAL_FILE = ".agent-communication/pause"
 
 # Constants for optimization strategies
 SUMMARY_CONTEXT_MAX_CHARS = 2000
@@ -53,6 +66,11 @@ class AgentConfig:
     poll_interval: int = 30
     max_retries: int = 5
     timeout: int = 1800
+    # Sandbox configuration
+    enable_sandbox: bool = False
+    sandbox_image: str = "golang:1.22"
+    sandbox_test_cmd: str = "go test ./..."
+    max_test_retries: int = 2
 
 
 class Agent:
@@ -108,6 +126,22 @@ class Agent:
         # Activity tracking
         self.activity_manager = ActivityManager(workspace)
 
+        # Pause state tracking
+        self._paused = False
+
+        # Sandbox for isolated test execution
+        self._test_runner = None
+        if config.enable_sandbox and SANDBOX_AVAILABLE:
+            try:
+                executor = DockerExecutor(image=config.sandbox_image)
+                if executor.health_check():
+                    self._test_runner = GoTestRunner(executor=executor)
+                    logger.info(f"Agent {config.id} sandbox enabled with image {config.sandbox_image}")
+                else:
+                    logger.warning(f"Docker not available, sandbox disabled for {config.id}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize sandbox for {config.id}: {e}")
+
     async def run(self) -> None:
         """
         Main polling loop.
@@ -128,6 +162,24 @@ class Agent:
         while self._running:
             # Write heartbeat every iteration
             self._write_heartbeat()
+
+            # Check for pause signal before processing tasks
+            if self._check_pause_signal():
+                if not self._paused:
+                    logger.info(f"Agent {self.config.id} paused")
+                    self._paused = True
+                    # Update activity to show paused state
+                    self.activity_manager.update_activity(AgentActivity(
+                        agent_id=self.config.id,
+                        status=AgentStatus.IDLE,
+                        last_updated=datetime.utcnow()
+                    ))
+                await asyncio.sleep(self.config.poll_interval)
+                continue
+
+            if self._paused:
+                logger.info(f"Agent {self.config.id} resumed")
+                self._paused = False
 
             # Poll for next task
             task = self.queue.pop(self.config.queue)
@@ -228,6 +280,24 @@ class Agent:
                     task.result_summary = summary
                     logger.debug(f"Task {task.id} summary: {summary}")
 
+                # Run tests in sandbox if enabled and applicable
+                test_result = await self._run_sandbox_tests(task)
+                if test_result and not test_result.success:
+                    # Tests failed - give agent a chance to fix
+                    test_retry = task.context.get("_test_retry_count", 0)
+                    if test_retry < self.config.max_test_retries:
+                        logger.warning(
+                            f"Tests failed for {task.id} (attempt {test_retry + 1}/{self.config.max_test_retries})"
+                        )
+                        # Feed test failures back to agent
+                        await self._handle_test_failure(task, response, test_result)
+                        return  # Will retry with test failure context
+                    else:
+                        logger.error(f"Tests still failing after {test_retry} retries for {task.id}")
+                        task.last_error = f"Tests failed: {test_result.error_message}"
+                        await self._handle_failure(task)
+                        return
+
                 # Handle post-LLM workflow (git/PR/JIRA)
                 await self._handle_success(task, response)
 
@@ -264,15 +334,17 @@ class Agent:
                             timestamp=datetime.utcnow()
                         ))
 
-                # Append complete event with duration
+                # Append complete event with duration and PR URL if available
                 duration_ms = int((datetime.utcnow() - task_start_time).total_seconds() * 1000)
+                pr_url = task.context.get("pr_url")
                 self.activity_manager.append_event(ActivityEvent(
                     type="complete",
                     agent=self.config.id,
                     task_id=task.id,
                     title=task.title,
                     timestamp=datetime.utcnow(),
-                    duration_ms=duration_ms
+                    duration_ms=duration_ms,
+                    pr_url=pr_url
                 ))
             else:
                 # Task failed - store error for escalation
@@ -281,14 +353,15 @@ class Agent:
                     f"LLM failed for task {task.id}: {task.last_error}"
                 )
 
-                # Append fail event
+                # Append fail event with error details
                 self.activity_manager.append_event(ActivityEvent(
                     type="fail",
                     agent=self.config.id,
                     task_id=task.id,
                     title=task.title,
                     timestamp=datetime.utcnow(),
-                    retry_count=task.retry_count
+                    retry_count=task.retry_count,
+                    error_message=task.last_error
                 ))
 
                 await self._handle_failure(task)
@@ -298,14 +371,15 @@ class Agent:
             task.last_error = str(e)
             logger.exception(f"Error processing task {task.id}: {e}")
 
-            # Append fail event for exceptions
+            # Append fail event for exceptions with error details
             self.activity_manager.append_event(ActivityEvent(
                 type="fail",
                 agent=self.config.id,
                 task_id=task.id,
                 title=task.title,
                 timestamp=datetime.utcnow(),
-                retry_count=task.retry_count
+                retry_count=task.retry_count,
+                error_message=task.last_error
             ))
 
             await self._handle_failure(task)
@@ -318,7 +392,8 @@ class Agent:
                 last_updated=datetime.utcnow()
             ))
 
-            self.queue.release_lock(lock)
+            if lock:
+                self.queue.release_lock(lock)
             self._current_task_id = None
 
     async def _handle_failure(self, task: Task) -> None:
@@ -501,7 +576,7 @@ class Agent:
         }
 
         # Get budget from config or use default
-        budget_key = task_type.value.lower().replace("-", "_")
+        budget_key = _get_type_str(task_type).lower().replace("-", "_")
         configured_budgets = self._optimization_config.get("token_budgets", {})
 
         return configured_budgets.get(budget_key, default_budgets.get(budget_key, 40000))
@@ -636,6 +711,20 @@ class Agent:
             if hasattr(task, 'context') and task.context.get('jira_key'):
                 prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
             logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
+
+        # Append test failure context if retrying after test failure
+        test_failure_report = task.context.get("_test_failure_report")
+        if test_failure_report:
+            prompt += f"""
+
+## IMPORTANT: Previous Tests Failed
+
+Your previous implementation had test failures. Please fix the issues below:
+
+{test_failure_report}
+
+Fix the failing tests and ensure all tests pass.
+"""
 
         return prompt
 
@@ -988,6 +1077,9 @@ IMPORTANT:
 
             logger.info(f"Created PR: {pr.html_url}")
 
+            # Store PR URL in task context for activity events
+            task.context["pr_url"] = pr.html_url
+
             # Update JIRA
             self._update_phase(TaskPhase.UPDATING_JIRA)
             logger.info("Updating JIRA ticket")
@@ -1008,3 +1100,106 @@ IMPORTANT:
         """Write current Unix timestamp to heartbeat file."""
         self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
         self.heartbeat_file.write_text(str(int(time.time())))
+
+    def _check_pause_signal(self) -> bool:
+        """Check if pause signal file exists."""
+        pause_file = self.workspace / PAUSE_SIGNAL_FILE
+        return pause_file.exists()
+
+    @property
+    def is_paused(self) -> bool:
+        """Check if agent is currently paused."""
+        return self._paused
+
+    async def _run_sandbox_tests(self, task: Task) -> Optional[Any]:
+        """Run tests in Docker sandbox if enabled and applicable.
+
+        Returns:
+            TestResult if tests were run, None if sandbox not enabled/applicable
+        """
+        # Skip if sandbox not initialized
+        if not self._test_runner:
+            return None
+
+        # Only run tests for implementation tasks
+        if task.type not in (TaskType.IMPLEMENTATION, TaskType.FIX, TaskType.BUGFIX, TaskType.ENHANCEMENT):
+            return None
+
+        # Get repository path
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            logger.debug(f"Skipping sandbox tests for {task.id}: no github_repo in context")
+            return None
+
+        repo_path = self._get_working_directory(task)
+        if not repo_path.exists():
+            logger.warning(f"Repository path does not exist: {repo_path}")
+            return None
+
+        # Update task status
+        task.status = TaskStatus.TESTING
+        self.queue.update(task)
+        self._update_phase(TaskPhase.COMMITTING)  # Reuse committing phase for testing
+
+        logger.info(f"Running tests in sandbox for {task.id} at {repo_path}")
+
+        try:
+            # Run tests
+            test_result = self._test_runner.run_sync(
+                repo_path=repo_path,
+                packages="./...",
+                verbose=True,
+            )
+
+            logger.info(f"Test result for {task.id}: {test_result.summary}")
+
+            # Log test event
+            self.activity_manager.append_event(ActivityEvent(
+                type="test_complete" if test_result.success else "test_fail",
+                agent=self.config.id,
+                task_id=task.id,
+                title=test_result.summary,
+                timestamp=datetime.utcnow()
+            ))
+
+            return test_result
+
+        except Exception as e:
+            logger.exception(f"Error running sandbox tests for {task.id}: {e}")
+            # Return a failed result
+            if TestResult:
+                return TestResult(
+                    success=False,
+                    total=0,
+                    passed=0,
+                    failed=0,
+                    skipped=0,
+                    duration_seconds=0,
+                    error_message=str(e),
+                )
+            return None
+
+    async def _handle_test_failure(self, task: Task, llm_response, test_result) -> None:
+        """Handle test failure by feeding results back to agent for fixing.
+
+        Args:
+            task: The task being processed
+            llm_response: Original LLM response
+            test_result: TestResult with failure details
+        """
+        # Increment test retry count
+        test_retry = task.context.get("_test_retry_count", 0)
+        task.context["_test_retry_count"] = test_retry + 1
+
+        # Build prompt with test failure context
+        failure_report = self._test_runner.format_failure_report(test_result)
+
+        # Store failure context for next attempt
+        task.context["_test_failure_report"] = failure_report
+        task.notes.append(f"Test failure (attempt {test_retry + 1}): {test_result.error_message}")
+
+        # Reset task to pending for retry
+        task.reset_to_pending()
+        self.queue.update(task)
+
+        logger.info(f"Task {task.id} reset for test fix retry (attempt {test_retry + 1})")

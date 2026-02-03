@@ -1,13 +1,16 @@
 """File-based task queue using JSON files (ported from Bash system)."""
 
 import json
+import logging
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from ..core.task import Task, TaskStatus
 from .locks import FileLock
+
+logger = logging.getLogger(__name__)
 
 
 class FileQueue:
@@ -104,7 +107,7 @@ class FileQueue:
 
                 return task
 
-            except (json.JSONDecodeError, Exception):
+            except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
                 continue
 
         return None
@@ -115,6 +118,7 @@ class FileQueue:
         task_file = queue_path / f"{task.id}.json"
 
         if not task_file.exists():
+            logger.warning(f"Task file not found for update: {task.id}")
             return
 
         tmp_file = queue_path / f"{task.id}.json.tmp"
@@ -194,13 +198,21 @@ class FileQueue:
         return time_since_failure >= backoff
 
     def _dependencies_met(self, task: Task) -> bool:
-        """Check if all dependencies are completed."""
+        """Check if all dependencies are completed successfully."""
         for dep_id in task.depends_on:
             if not dep_id:
                 continue
 
             dep_file = self.completed_dir / f"{dep_id}.json"
             if not dep_file.exists():
+                return False
+
+            # Verify task actually completed successfully (not just exists)
+            try:
+                dep_task = self._load_task(dep_file)
+                if dep_task.status != TaskStatus.COMPLETED:
+                    return False
+            except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
                 return False
 
         return True
@@ -213,5 +225,126 @@ class FileQueue:
 
         try:
             return self._load_task(completed_file)
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
             return None
+
+    def get_tasks_by_epic(self, epic_key: str) -> dict[str, List[Task]]:
+        """Get all tasks (pending, in-progress, completed, failed) for an epic.
+
+        Args:
+            epic_key: JIRA epic key (e.g., PROJ-100)
+
+        Returns:
+            dict with keys: pending, in_progress, completed, failed
+            Each containing a list of Task objects
+        """
+        result = {
+            "pending": [],
+            "in_progress": [],
+            "completed": [],
+            "failed": [],
+        }
+
+        # Search all queue directories for pending/in-progress tasks
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if not queue_dir.is_dir():
+                    continue
+                for task_file in queue_dir.glob("*.json"):
+                    try:
+                        task = self._load_task(task_file)
+                        if task.context.get("epic_key") == epic_key:
+                            if task.status == TaskStatus.PENDING:
+                                result["pending"].append(task)
+                            elif task.status == TaskStatus.IN_PROGRESS:
+                                result["in_progress"].append(task)
+                            elif task.status == TaskStatus.FAILED:
+                                result["failed"].append(task)
+                    except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                        continue
+
+        # Search completed directory
+        if self.completed_dir.exists():
+            for task_file in self.completed_dir.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.context.get("epic_key") == epic_key:
+                        if task.status == TaskStatus.COMPLETED:
+                            result["completed"].append(task)
+                        elif task.status == TaskStatus.FAILED:
+                            result["failed"].append(task)
+                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                    continue
+
+        return result
+
+    def get_failed_task(self, identifier: str) -> Optional[Task]:
+        """Find a failed task by task ID or JIRA key.
+
+        Args:
+            identifier: Task ID or JIRA key (e.g., PROJ-104)
+
+        Returns:
+            Task if found and failed, None otherwise
+        """
+        # Check completed directory for failed tasks
+        if self.completed_dir.exists():
+            for task_file in self.completed_dir.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.status != TaskStatus.FAILED:
+                        continue
+                    # Match by task ID or JIRA key
+                    if task.id == identifier or task.context.get("jira_key") == identifier:
+                        return task
+                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                    continue
+
+        # Also check queue directories for failed tasks
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if not queue_dir.is_dir():
+                    continue
+                for task_file in queue_dir.glob("*.json"):
+                    try:
+                        task = self._load_task(task_file)
+                        if task.status != TaskStatus.FAILED:
+                            continue
+                        if task.id == identifier or task.context.get("jira_key") == identifier:
+                            return task
+                    except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                        continue
+
+        return None
+
+    def requeue_task(self, task: Task) -> None:
+        """Reset a failed task and re-queue it for processing.
+
+        Args:
+            task: Failed task to retry
+        """
+        # Remove from completed directory if present
+        completed_file = self.completed_dir / f"{task.id}.json"
+        if completed_file.exists():
+            completed_file.unlink()
+
+        # Also remove from queue directories if present (prevent duplicates)
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if queue_dir.is_dir():
+                    task_file = queue_dir / f"{task.id}.json"
+                    if task_file.exists():
+                        task_file.unlink()
+                        break
+
+        # Reset task state
+        task.status = TaskStatus.PENDING
+        task.last_error = None
+        task.failed_at = None
+        task.failed_by = None
+        task.started_at = None
+        task.started_by = None
+        # Keep retry_count to track total attempts
+
+        # Push to appropriate queue
+        self.push(task, task.assigned_to)

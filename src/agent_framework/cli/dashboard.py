@@ -84,8 +84,12 @@ class AgentDashboard:
                 task_title = activity.current_task.title[:40] + "..." if len(activity.current_task.title) > 40 else activity.current_task.title
                 task_id_short = activity.current_task.id[:20] + "..."
 
-                # Format phase
-                phase_text = activity.current_phase.value.replace("_", " ").title() if activity.current_phase else "Processing"
+                # Format phase (handle both enum and string)
+                if activity.current_phase:
+                    phase_val = activity.current_phase.value if hasattr(activity.current_phase, 'value') else str(activity.current_phase)
+                    phase_text = phase_val.replace("_", " ").title()
+                else:
+                    phase_text = "Processing"
 
                 # Calculate elapsed time
                 elapsed = activity.get_elapsed_seconds()
@@ -123,10 +127,18 @@ class AgentDashboard:
                     duration_sec = event.duration_ms // 1000 if event.duration_ms else 0
                     duration_str = f"{duration_sec // 60}m {duration_sec % 60}s"
                     text.append(f"✓ {timestamp_str}", style="green bold")
-                    text.append(f" - {event.agent} completed: {event.title} ({duration_str})\n")
+                    text.append(f" - {event.agent} completed: {event.title} ({duration_str})")
+                    if event.pr_url:
+                        text.append(f" → ", style="dim")
+                        text.append(f"{event.pr_url}", style="cyan underline")
+                    text.append("\n")
                 elif event.type == "fail":
                     text.append(f"✗ {timestamp_str}", style="red bold")
-                    text.append(f" - {event.agent} failed: {event.title} (retry {event.retry_count}/5)\n")
+                    retry_info = f" (attempt {event.retry_count})" if event.retry_count else ""
+                    text.append(f" - {event.agent} failed: {event.title}{retry_info}\n")
+                    if event.error_message:
+                        error_preview = event.error_message[:80] + "..." if len(event.error_message) > 80 else event.error_message
+                        text.append(f"  └─ Error: {error_preview}\n", style="dim red")
                 elif event.type == "start":
                     text.append(f"▶ {timestamp_str}", style="blue bold")
                     text.append(f" - {event.agent} started: {event.title}\n")
