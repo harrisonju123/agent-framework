@@ -1,12 +1,15 @@
 """Configuration loading and validation."""
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class LLMConfig(BaseModel):
@@ -25,6 +28,10 @@ class LLMConfig(BaseModel):
     claude_cli_cheap_model: str = "haiku"
     claude_cli_default_model: str = "sonnet"
     claude_cli_premium_model: str = "opus"
+
+    # MCP settings
+    mcp_config_path: Optional[str] = None
+    use_mcp: bool = False
 
 
 class TaskConfig(BaseModel):
@@ -46,9 +53,112 @@ class SafeguardsConfig(BaseModel):
     watchdog_interval: int = 60
 
 
+class OptimizationConfig(BaseModel):
+    """Optimization configuration for token usage reduction."""
+    # Quick wins (Phase 1)
+    enable_minimal_prompts: bool = False
+    enable_compact_json: bool = False
+    enable_context_deduplication: bool = False
+
+    # Structural changes (Phase 2)
+    enable_token_tracking: bool = False
+    enable_token_budget_warnings: bool = False
+
+    # Advanced features (Phase 3)
+    enable_result_summarization: bool = False
+    enable_error_truncation: bool = False
+
+    # Rollout settings
+    canary_percentage: int = 0  # 0-100
+    shadow_mode: bool = False
+
+    # Budget warning threshold (e.g., 1.3 = warn at 130% of budget)
+    budget_warning_threshold: float = 1.3
+
+    # Token budgets by task type (configurable)
+    token_budgets: Dict[str, int] = Field(default_factory=lambda: {
+        "planning": 30000,
+        "implementation": 50000,
+        "testing": 20000,
+        "escalation": 80000,
+        "review": 25000,
+        "architecture": 40000,
+        "coordination": 15000,
+        "documentation": 15000,
+        "fix": 30000,
+        "bugfix": 30000,
+        "bug_fix": 30000,
+        "verification": 20000,
+        "status_report": 10000,
+        "enhancement": 40000,
+    })
+
+    @field_validator('token_budgets')
+    @classmethod
+    def validate_budgets(cls, v: Dict[str, int]) -> Dict[str, int]:
+        """Validate token budgets are reasonable."""
+        for task_type, budget in v.items():
+            if budget < 1000:
+                raise ValueError(
+                    f"Token budget for '{task_type}' must be at least 1000, got {budget}"
+                )
+            if budget > 1_000_000:
+                logger.warning(
+                    f"Token budget for '{task_type}' is very high: {budget}. "
+                    "This may indicate a configuration error."
+                )
+        return v
+
+    @field_validator('canary_percentage')
+    @classmethod
+    def validate_canary(cls, v: int) -> int:
+        """Validate canary percentage is in valid range."""
+        if not 0 <= v <= 100:
+            raise ValueError(f"canary_percentage must be 0-100, got {v}")
+        return v
+
+    @field_validator('budget_warning_threshold')
+    @classmethod
+    def validate_threshold(cls, v: float) -> float:
+        """Validate budget warning threshold is reasonable."""
+        if v < 1.0:
+            raise ValueError(
+                f"budget_warning_threshold must be >= 1.0 (100%), got {v}"
+            )
+        if v > 5.0:
+            logger.warning(
+                f"budget_warning_threshold is very high ({v}). "
+                "You may not get warnings for over-budget tasks."
+            )
+        return v
+
+    @model_validator(mode='after')
+    def validate_config(self) -> 'OptimizationConfig':
+        """Validate optimization config after loading."""
+        if self.shadow_mode and self.canary_percentage > 0:
+            logger.warning(
+                "shadow_mode=true will override canary_percentage setting. "
+                "Shadow mode always uses legacy prompts."
+            )
+
+        return self
+
+
 class MultiRepoConfig(BaseModel):
     """Multi-repository configuration."""
     workspace_root: Path = Field(default=Path("~/.agent-workspaces"))
+
+
+class RepositoryConfig(BaseModel):
+    """Configuration for a registered repository."""
+    github_repo: str  # owner/repo format (e.g., "justworkshr/pto")
+    jira_project: str  # JIRA project key (e.g., "PTO")
+    display_name: Optional[str] = None  # Display name (defaults to repo name)
+
+    @property
+    def name(self) -> str:
+        """Display name for UI."""
+        return self.display_name or self.github_repo.split("/")[1]
 
 
 class AgentDefinition(BaseModel):
@@ -99,7 +209,9 @@ class FrameworkConfig(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)
     safeguards: SafeguardsConfig = Field(default_factory=SafeguardsConfig)
+    optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
     multi_repo: MultiRepoConfig = Field(default_factory=MultiRepoConfig)
+    repositories: List[RepositoryConfig] = Field(default_factory=list)
 
     class Config:
         env_prefix = "AGENT_"
@@ -119,7 +231,16 @@ def load_config(config_path: Path = Path("agent-framework.yaml")) -> FrameworkCo
     # Expand environment variables
     data = _expand_env_vars(data)
 
-    return FrameworkConfig(**data)
+    config = FrameworkConfig(**data)
+
+    # Validate MCP requirements
+    if config.llm.use_mcp and config.llm.mode != "claude_cli":
+        raise ValueError(
+            "MCP integration requires Claude CLI mode. "
+            "Set llm.mode to 'claude_cli' or disable MCPs with use_mcp: false"
+        )
+
+    return config
 
 
 def load_agents(agents_path: Path = Path("config/agents.yaml")) -> List[AgentDefinition]:

@@ -1,0 +1,102 @@
+# Agent Framework Configuration
+# Copy this file to agent-framework.yaml and customize as needed
+
+workspace: "."
+communication_dir: ".agent-communication"
+
+# LLM Configuration
+llm:
+  # Mode: "claude_cli" (Claude Code subprocess) or "litellm" (API calls)
+  mode: claude_cli
+
+  # Claude CLI settings (used when mode=claude_cli)
+  claude_cli_executable: claude
+  claude_cli_max_turns: 999
+  claude_cli_cheap_model: haiku
+  claude_cli_default_model: sonnet
+  claude_cli_premium_model: opus
+
+  # LiteLLM settings (used when mode=litellm)
+  # litellm_api_key: ${ANTHROPIC_API_KEY}
+  # litellm_cheap_model: claude-3-5-haiku-20241022
+  # litellm_default_model: claude-sonnet-4-20250514
+  # litellm_premium_model: claude-opus-4-20250514
+
+  # MCP (Model Context Protocol) settings
+  # Enables real-time JIRA/GitHub access during agent execution
+  # Requires mode: claude_cli
+  use_mcp: false
+  # mcp_config_path: ${PWD}/config/mcp-config.json
+
+# Task Processing Configuration
+task:
+  poll_interval: 30          # Queue polling interval (seconds)
+  timeout: 1800              # Task timeout (seconds, default: 30 min)
+  max_retries: 5             # Max retry attempts before escalation
+  backoff_initial: 30        # Initial backoff delay (seconds)
+  backoff_max: 240           # Max backoff delay (seconds)
+  backoff_multiplier: 2      # Backoff multiplier (exponential)
+
+# Safeguards Configuration
+safeguards:
+  max_queue_size: 100        # Max tasks per agent queue
+  max_escalations: 50        # Max total escalations
+  max_task_age_days: 7       # Archive tasks older than N days
+  heartbeat_timeout: 90      # Agent considered dead after N seconds
+  watchdog_interval: 60      # Watchdog check interval (seconds)
+
+# Optimization Configuration
+# Token usage optimizations for reducing prompt size and costs
+optimization:
+  # Quick wins (Phase 1)
+  enable_minimal_prompts: false           # Strategy 1: Reduce task JSON to essential fields only
+  enable_compact_json: false              # Strategy 4: Remove whitespace from JSON in prompts
+  enable_context_deduplication: false     # Strategy 3: Eliminate description/context duplication
+
+  # Structural changes (Phase 2)
+  enable_token_tracking: false            # Strategy 6: Track token usage per task
+  enable_token_budget_warnings: false     # Strategy 6: Warn when tasks exceed budget
+
+  # Advanced features (Phase 3)
+  enable_result_summarization: false      # Strategy 5: Extract and reuse task outcomes
+  enable_error_truncation: false          # Strategy 8: Truncate large error messages
+
+  # Rollout settings
+  canary_percentage: 0  # 0-100, percentage of tasks to use optimizations (0=disabled, 100=all)
+  shadow_mode: false    # If true, generate both prompts but use legacy (for validation)
+
+  # Budget warning threshold (e.g., 1.3 = warn at 130% of budget)
+  budget_warning_threshold: 1.3  # Default: warn at 30% over budget
+
+  # Token budgets by task type (optional, uses sensible defaults if not specified)
+  # Customize these if your tasks consistently need more/less tokens
+  # token_budgets:
+  #   planning: 30000
+  #   implementation: 50000
+  #   testing: 20000
+  #   escalation: 80000
+  #   review: 25000
+
+# Multi-Repository Configuration
+# Used by the 'agent apply-pattern' command
+multi_repo:
+  workspace_root: "~/.agent-workspaces"  # Where to clone repos for multi-repo operations
+
+# Repository Registry
+# Repos are cloned to multi_repo.workspace_root (~/.agent-workspaces by default)
+repositories:
+  - github_repo: justworkshr/pto
+    jira_project: PTO
+    display_name: PTO Service
+
+  - github_repo: justworkshr/international
+    jira_project: INTL
+    display_name: International Service
+
+  - github_repo: justworkshr/sui
+    jira_project: SUI
+    display_name: Sui Service
+
+  - github_repo: justworkshr/punch-out
+    jira_project: PUNCH
+    display_name: Punch Out Service

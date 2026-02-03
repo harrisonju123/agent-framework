@@ -17,6 +17,7 @@ from ..core.config import (
     load_github_config,
 )
 from ..core.orchestrator import Orchestrator
+from ..core.task import Task, TaskStatus, TaskType
 from ..integrations.jira.client import JIRAClient
 from ..integrations.github.client import GitHubClient
 from ..queue.file_queue import FileQueue
@@ -113,10 +114,13 @@ def pull(ctx, project, max):
             queue = FileQueue(workspace)
 
             for issue in issues:
-                # Simple assignment: give to first enabled agent
+                # Assign to architect for planning first
                 assigned_to = next(
-                    (a.queue for a in agents_config if a.enabled),
-                    "engineer"
+                    (a.queue for a in agents_config if a.enabled and a.id == "architect"),
+                    next(
+                        (a.queue for a in agents_config if a.enabled),
+                        "engineer"
+                    )
                 )
                 task = jira_client.issue_to_task(issue, assigned_to)
                 queue.push(task, assigned_to)
@@ -125,6 +129,129 @@ def pull(ctx, project, max):
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command()
+@click.option("--no-dashboard", is_flag=True, help="Skip live dashboard")
+@click.pass_context
+def work(ctx, no_dashboard):
+    """Interactive mode: describe what to build, delegate to Product Owner agent."""
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold cyan]🤖 Agent Framework - Interactive Mode[/]")
+    console.print()
+
+    # Load config
+    framework_config = load_config(workspace / "config" / "agent-framework.yaml")
+
+    # Check if repos are registered
+    if not framework_config.repositories:
+        console.print("[red]No repositories registered in config/agent-framework.yaml[/]")
+        console.print("[yellow]Add a 'repositories' section with your repos[/]")
+        return
+
+    # Step 1: Ask what to work on
+    console.print("[bold]What would you like to work on?[/]")
+    goal = click.prompt("", type=str)
+
+    if not goal or len(goal.strip()) < 10:
+        console.print("[red]Please provide a more detailed description (at least 10 chars)[/]")
+        return
+
+    # Step 2: Select repository
+    console.print("\n[bold]Which repository?[/]")
+    for i, repo in enumerate(framework_config.repositories, 1):
+        console.print(f"  {i}. [cyan]{repo.github_repo}[/] ({repo.jira_project} project)")
+
+    repo_idx = click.prompt(
+        "Select repository",
+        type=click.IntRange(1, len(framework_config.repositories))
+    )
+    selected_repo = framework_config.repositories[repo_idx - 1]
+
+    console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/] (JIRA: {selected_repo.jira_project})")
+
+    # Step 3: Create planning task for Product Owner
+    import time
+    from datetime import datetime
+    task_id = f"planning-{selected_repo.jira_project}-{int(time.time())}"
+
+    # Strategy 3: Context Deduplication - store metadata in context only
+    task = Task(
+        id=task_id,
+        type=TaskType.PLANNING,
+        status=TaskStatus.PENDING,
+        priority=1,
+        created_by="cli",
+        assigned_to="product-owner",
+        created_at=datetime.utcnow(),
+        title=f"Create epic and breakdown for: {goal}",
+        description=f"""User Goal: {goal}
+
+Instructions for Product Owner Agent:
+1. Clone/update repository (use MultiRepoManager)
+2. Explore the codebase to understand structure
+3. Validate the goal is feasible
+4. Create JIRA epic
+5. Break down into subtasks (architect → engineer → qa)
+6. Create JIRA subtasks with parent-child relationships
+7. Queue internal tasks for other agents with repository context""",
+        context={
+            "mode": "planning",
+            "github_repo": selected_repo.github_repo,
+            "jira_project": selected_repo.jira_project,
+            "repository_name": selected_repo.name,
+            "user_goal": goal,
+        },
+    )
+
+    # Queue the planning task
+    queue = FileQueue(workspace)
+    queue.push(task, "product-owner")
+
+    console.print(f"\n[green]✓[/] Task queued: Analyze goal and create JIRA epic with breakdown")
+
+    # Step 4: Ensure agents are running (don't block)
+    orchestrator = Orchestrator(workspace)
+
+    # Check if agents already running
+    running = orchestrator.get_running_agents()
+
+    if running:
+        console.print(f"\n[green]✓[/] Agents already running: {', '.join(running)}")
+    else:
+        console.print("\n[bold]Starting agents...[/]")
+        orchestrator.setup_signal_handlers()
+        orchestrator.spawn_all_agents()
+        console.print("[green]✓[/] Agents started")
+
+    if no_dashboard:
+        # Print status without launching dashboard
+        console.print(f"\n[bold cyan]🎯 Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
+        console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
+        console.print(f"[dim]📝 View logs: tail -f logs/product-owner.log[/]")
+        console.print()
+        console.print("[yellow]The Product Owner agent will:[/]")
+        console.print(f"  1. Clone/update {selected_repo.github_repo} to ~/.agent-workspaces/")
+        console.print(f"  2. Analyze the codebase")
+        console.print(f"  3. Create JIRA epic in project {selected_repo.jira_project}")
+        console.print(f"  4. Break down into architect → engineer → qa subtasks")
+        console.print(f"  5. Queue tasks for other agents")
+        console.print()
+        console.print("[dim]Dashboard disabled. Use 'agent status --watch' to monitor.[/]")
+    else:
+        # Start live dashboard
+        console.print("\n[bold cyan]✓ Task queued, starting live dashboard...[/]")
+        console.print("[dim]Press Ctrl+C to exit dashboard[/]\n")
+
+        from .dashboard import AgentDashboard
+
+        dashboard = AgentDashboard(workspace)
+        try:
+            asyncio.run(dashboard.run())
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Dashboard closed[/]")
+            console.print("[dim]Agents continue running in background. Use 'agent status --watch' to monitor.[/]")
 
 
 @cli.command()
@@ -153,10 +280,13 @@ def run(ctx, ticket_id, agent):
         # Load agent config
         agents_config = load_agents(workspace / "config" / "agents.yaml")
 
-        # Assign to agent
+        # Assign to agent (default to architect for planning first)
         assigned_to = agent or next(
-            (a.queue for a in agents_config if a.enabled),
-            "engineer"
+            (a.queue for a in agents_config if a.enabled and a.id == "architect"),
+            next(
+                (a.queue for a in agents_config if a.enabled),
+                "engineer"
+            )
         )
 
         # Create task
@@ -173,37 +303,52 @@ def run(ctx, ticket_id, agent):
 
 
 @cli.command()
+@click.option("--watch", "-w", is_flag=True, help="Watch mode: auto-refresh every 2s")
 @click.pass_context
-def status(ctx):
-    """Show system status."""
+def status(ctx, watch):
+    """Show agent status and activity."""
     workspace = ctx.obj["workspace"]
 
-    console.print("[bold]Agent Framework Status[/]")
+    if watch:
+        # Launch dashboard in watch mode
+        from .dashboard import AgentDashboard
 
-    try:
-        # Load agent configs
-        agents_config = load_agents(workspace / "config" / "agents.yaml")
-        queue = FileQueue(workspace)
+        console.print("[bold cyan]Agent Status - Watch Mode[/]")
+        console.print("[dim]Press Ctrl+C to exit[/]\n")
 
-        table = Table()
-        table.add_column("Agent")
-        table.add_column("Status")
-        table.add_column("Queue Count")
+        dashboard = AgentDashboard(workspace)
+        try:
+            asyncio.run(dashboard.run())
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Exited watch mode[/]")
+    else:
+        # One-time status display (legacy table view)
+        console.print("[bold]Agent Framework Status[/]")
 
-        for agent_def in agents_config:
-            stats = queue.get_queue_stats(agent_def.queue)
-            status = "enabled" if agent_def.enabled else "disabled"
+        try:
+            # Load agent configs
+            agents_config = load_agents(workspace / "config" / "agents.yaml")
+            queue = FileQueue(workspace)
 
-            table.add_row(
-                agent_def.name,
-                f"[green]{status}[/]" if agent_def.enabled else f"[dim]{status}[/]",
-                str(stats["count"]),
-            )
+            table = Table()
+            table.add_column("Agent")
+            table.add_column("Status")
+            table.add_column("Queue Count")
 
-        console.print(table)
+            for agent_def in agents_config:
+                stats = queue.get_queue_stats(agent_def.queue)
+                status = "enabled" if agent_def.enabled else "disabled"
 
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/]")
+                table.add_row(
+                    agent_def.name,
+                    f"[green]{status}[/]" if agent_def.enabled else f"[dim]{status}[/]",
+                    str(stats["count"]),
+                )
+
+            console.print(table)
+
+        except Exception as e:
+            console.print(f"[red]Error: {e}[/]")
 
 
 @cli.command()
@@ -589,10 +734,12 @@ def _run_claude_cli(prompt: str, cwd: Path, framework_config, timeout: int = 360
         raise RuntimeError(f"Claude CLI executable not found: {claude_cmd}")
 
     # Run Claude CLI with timeout
+    # Send prompt via stdin and use dangerously-skip-permissions for automation
     try:
         result = subprocess.run(
-            [claude_cmd, "-m", prompt],
+            [claude_cmd, "--dangerously-skip-permissions"],
             cwd=cwd,
+            input=prompt,
             capture_output=False,  # Let Claude output directly to console
             text=True,
             timeout=timeout,

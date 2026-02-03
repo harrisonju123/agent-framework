@@ -78,6 +78,14 @@ class Task(BaseModel):
     # Estimation
     estimated_effort: Optional[str] = None
 
+    # Result tracking (for dependency context reuse)
+    result_summary: Optional[str] = None
+    last_error: Optional[str] = None
+
+    # Optimization control (None=use config, True/False=force override)
+    optimization_override: Optional[bool] = None
+    optimization_override_reason: Optional[str] = None
+
     class Config:
         """Pydantic config."""
         use_enum_values = True

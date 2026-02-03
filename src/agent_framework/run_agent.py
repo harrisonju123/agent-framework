@@ -2,13 +2,15 @@
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
 from .core.agent import Agent, AgentConfig
-from .core.config import load_agents, load_config
+from .core.config import load_agents, load_config, load_jira_config, load_github_config
 from .llm.claude_cli_backend import ClaudeCLIBackend
 from .queue.file_queue import FileQueue
+from .workspace.multi_repo_manager import MultiRepoManager
 
 
 def setup_logging(agent_id: str, workspace: Path):
@@ -59,12 +61,18 @@ def main():
         )
 
         # Create LLM backend (Claude CLI mode only for now)
+        mcp_config_path = None
+        if framework_config.llm.use_mcp and framework_config.llm.mcp_config_path:
+            mcp_config_path = framework_config.llm.mcp_config_path
+            logger.info(f"MCP enabled, config path: {mcp_config_path}")
+
         llm = ClaudeCLIBackend(
             executable=framework_config.llm.claude_cli_executable,
             max_turns=framework_config.llm.claude_cli_max_turns,
             cheap_model=framework_config.llm.claude_cli_cheap_model,
             default_model=framework_config.llm.claude_cli_default_model,
             premium_model=framework_config.llm.claude_cli_premium_model,
+            mcp_config_path=mcp_config_path,
         )
 
         # Create queue
@@ -75,8 +83,37 @@ def main():
             backoff_multiplier=framework_config.task.backoff_multiplier,
         )
 
+        # Create MultiRepoManager if GITHUB_TOKEN is available
+        github_token = os.environ.get("GITHUB_TOKEN")
+        multi_repo_manager = None
+        if github_token:
+            multi_repo_manager = MultiRepoManager(
+                workspace_root=framework_config.multi_repo.workspace_root,
+                github_token=github_token
+            )
+            logger.info("MultiRepoManager initialized")
+        else:
+            logger.warning("No GITHUB_TOKEN, multi-repo features disabled")
+
+        # Load JIRA and GitHub configs for MCP prompt guidance
+        jira_config = load_jira_config(workspace / "config" / "jira.yaml")
+        github_config = load_github_config(workspace / "config" / "github.yaml")
+
+        # Extract optimization config from framework config
+        optimization_config = framework_config.optimization.model_dump() if framework_config.optimization else {}
+
         # Create and run agent
-        agent = Agent(agent_config, llm, queue, framework_config.workspace)
+        agent = Agent(
+            agent_config,
+            llm,
+            queue,
+            framework_config.workspace,
+            multi_repo_manager=multi_repo_manager,
+            jira_config=jira_config,
+            github_config=github_config,
+            mcp_enabled=framework_config.llm.use_mcp,
+            optimization_config=optimization_config,
+        )
 
         logger.info(f"Starting agent {agent_id}")
         asyncio.run(agent.run())

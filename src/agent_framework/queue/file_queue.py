@@ -204,3 +204,14 @@ class FileQueue:
                 return False
 
         return True
+
+    def get_completed(self, task_id: str) -> Optional[Task]:
+        """Get a completed task by ID."""
+        completed_file = self.completed_dir / f"{task_id}.json"
+        if not completed_file.exists():
+            return None
+
+        try:
+            return self._load_task(completed_file)
+        except (json.JSONDecodeError, Exception):
+            return None
