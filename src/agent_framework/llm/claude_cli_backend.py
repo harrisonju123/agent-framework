@@ -1,7 +1,12 @@
 """Claude CLI subprocess backend implementation."""
 
 import asyncio
+import json
+import os
+import re
+import tempfile
 import time
+from pathlib import Path
 from typing import Optional
 
 from .base import LLMBackend, LLMRequest, LLMResponse
@@ -23,10 +28,17 @@ class ClaudeCLIBackend(LLMBackend):
         cheap_model: str = "haiku",
         default_model: str = "sonnet",
         premium_model: str = "opus",
+        mcp_config_path: Optional[str] = None,
     ):
         self.executable = executable
         self.max_turns = max_turns
         self.model_selector = ModelSelector(cheap_model, default_model, premium_model)
+
+        # Expand environment variables in MCP config if provided
+        if mcp_config_path:
+            self.mcp_config_path = self._expand_mcp_config(Path(mcp_config_path))
+        else:
+            self.mcp_config_path = None
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """
@@ -51,6 +63,10 @@ class ClaudeCLIBackend(LLMBackend):
             "--dangerously-skip-permissions",
             "--max-turns", str(self.max_turns),
         ]
+
+        # Add MCP config if specified
+        if self.mcp_config_path:
+            cmd.extend(["--mcp-config", str(self.mcp_config_path)])
 
         # Build prompt (combine system + user)
         full_prompt = ""
@@ -110,3 +126,36 @@ class ClaudeCLIBackend(LLMBackend):
     def select_model(self, task_type: TaskType, retry_count: int) -> str:
         """Select appropriate model based on task type and retry count."""
         return self.model_selector.select(task_type, retry_count)
+
+    def _expand_mcp_config(self, config_path: Path) -> Path:
+        """Expand environment variables in MCP config and write to temp file."""
+        with open(config_path) as f:
+            config = json.load(f)
+
+        # Recursively expand ${VAR} in all string values
+        expanded = self._expand_env_vars_recursive(config)
+
+        # Write to temporary file
+        temp_dir = Path.home() / ".cache" / "agent-framework"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = temp_dir / "mcp-config-expanded.json"
+
+        with open(temp_path, 'w') as f:
+            json.dump(expanded, f, indent=2)
+
+        return temp_path
+
+    def _expand_env_vars_recursive(self, obj):
+        """Recursively expand ${VAR} in dict/list/str."""
+        if isinstance(obj, dict):
+            return {k: self._expand_env_vars_recursive(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._expand_env_vars_recursive(item) for item in obj]
+        elif isinstance(obj, str):
+            # Expand ${VAR} patterns
+            def replace_var(match):
+                var_name = match.group(1)
+                return os.environ.get(var_name, match.group(0))
+            return re.sub(r'\$\{(\w+)\}', replace_var, obj)
+        else:
+            return obj

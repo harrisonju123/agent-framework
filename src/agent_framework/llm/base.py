@@ -17,6 +17,7 @@ class LLMRequest:
     temperature: float = 0.7
     task_type: Optional[TaskType] = None  # For automatic model selection
     retry_count: int = 0  # For escalation to stronger model
+    context: dict = None  # Task context (github_repo, jira_project, etc.)
 
 
 @dataclass

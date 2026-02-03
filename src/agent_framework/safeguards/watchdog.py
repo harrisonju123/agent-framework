@@ -8,10 +8,12 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..core.task import Task, TaskStatus
+from ..core.activity import ActivityManager, AgentActivity, AgentStatus
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,9 @@ class Watchdog:
         self.heartbeat_timeout = heartbeat_timeout
         self.check_interval = check_interval
         self._running = False
+
+        # Activity tracking
+        self.activity_manager = ActivityManager(workspace)
 
     async def run(self) -> None:
         """Main watchdog monitoring loop."""
@@ -203,6 +208,13 @@ class Watchdog:
             agent_id: Agent identifier
         """
         logger.warning(f"Handling dead agent: {agent_id}")
+
+        # Mark agent as dead in activity
+        self.activity_manager.update_activity(AgentActivity(
+            agent_id=agent_id,
+            status=AgentStatus.DEAD,
+            last_updated=datetime.utcnow()
+        ))
 
         # Reset tasks and restart
         await self.restart_agent(agent_id)

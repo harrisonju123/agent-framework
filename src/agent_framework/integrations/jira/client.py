@@ -69,6 +69,81 @@ class JIRAClient:
         issue = self.jira.issue(ticket_id)
         issue.update(fields={field_id: value})
 
+    def create_epic(
+        self,
+        summary: str,
+        description: str,
+        project: str,
+        labels: Optional[List[str]] = None,
+    ) -> Issue:
+        """Create a JIRA epic."""
+        issue_dict = {
+            "project": {"key": project},
+            "summary": summary,
+            "description": description,
+            "issuetype": {"name": "Epic"},
+        }
+        if labels:
+            issue_dict["labels"] = labels
+
+        return self.jira.create_issue(fields=issue_dict)
+
+    def create_subtask(
+        self,
+        parent_key: str,
+        summary: str,
+        description: str,
+        project: str,
+        labels: Optional[List[str]] = None,
+    ) -> Issue:
+        """Create a subtask under a parent issue."""
+        issue_dict = {
+            "project": {"key": project},
+            "summary": summary,
+            "description": description,
+            "issuetype": {"name": "Sub-task"},
+            "parent": {"key": parent_key},
+        }
+        if labels:
+            issue_dict["labels"] = labels
+
+        return self.jira.create_issue(fields=issue_dict)
+
+    def create_epic_with_subtasks(
+        self,
+        epic_summary: str,
+        epic_description: str,
+        subtasks: List[dict],
+        project: str,
+    ) -> dict:
+        """Create epic with subtasks in one operation.
+
+        Args:
+            epic_summary: Epic title
+            epic_description: Epic description
+            subtasks: List of dicts with 'summary', 'description', 'agent', 'depends_on'
+            project: JIRA project key
+
+        Returns:
+            Dict mapping task IDs to JIRA issues
+        """
+        # Create epic
+        epic = self.create_epic(epic_summary, epic_description, project)
+
+        # Create subtasks
+        issues = {"epic": epic}
+        for i, subtask in enumerate(subtasks):
+            issue = self.create_subtask(
+                parent_key=epic.key,
+                summary=subtask["summary"],
+                description=subtask["description"],
+                project=project,
+                labels=[f"agent:{subtask['agent']}"],
+            )
+            issues[f"subtask_{i}"] = issue
+
+        return issues
+
     def issue_to_task(self, issue: Issue, assigned_to: str) -> Task:
         """Convert JIRA issue to internal Task."""
         task_id = f"jira-{issue.key}-{int(time.time())}"
