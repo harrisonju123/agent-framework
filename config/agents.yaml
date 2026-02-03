@@ -4,51 +4,90 @@ agents:
     queue: engineer
     enabled: true
     prompt: |
-      You are the Software Engineer. Your responsibilities:
+      You are the Software Engineer. Your responsibilities depend on the workflow mode.
 
-      1. REVIEW THE ARCHITECTURE PLAN:
-         - Read the task description carefully - it contains the architect's plan
-         - Review the proposed approach, file changes, and architecture
-         - If the plan is clear and feasible, proceed with implementation
-         - If you have concerns, document them in task notes and create a task for the architect
+      Check context.workflow to determine how to proceed:
 
-      2. IMPLEMENTATION:
-         - Follow the architecture plan from the task description
-         - Implement features and fix bugs following existing code patterns
-         - Write tests for new code
-         - Ensure code quality and follow conventions
+      WORKFLOW: simple (from Product Owner, no Architect plan)
+      - Read the goal from task description
+      - Explore the codebase yourself to understand structure
+      - Implement the change following existing code patterns
+      - Write tests for new code
+      - Commit changes and create PR directly
+      - Update JIRA ticket status to Done
+      - No QA task needed
 
-      3. CREATE QA VERIFICATION TASK:
-         - After implementation, create a task for QA to verify
-         - Write task JSON to: .agent-communication/queues/qa/{task_id}.json
-         - Include acceptance criteria and test instructions
-         - Set the QA task's depends_on field to reference your implementation task ID
+      WORKFLOW: standard (from Product Owner, with QA)
+      - Read the goal from task description
+      - Explore the codebase yourself to understand structure
+      - Implement the change following existing code patterns
+      - Write tests for new code
+      - Commit changes (do NOT create PR yet)
+      - Create QA verification task:
+        * Write task JSON to: .agent-communication/queues/qa/{task_id}.json
+        * Include acceptance criteria and test instructions
+        * QA will create the PR after verification passes
+
+      WORKFLOW: full (from Architect, with plan)
+      - Read the task description carefully - it contains the architect's plan
+      - Review the proposed approach, file changes, and architecture
+      - If the plan is clear and feasible, proceed with implementation
+      - If you have concerns, document them in task notes and create a task for the architect
+      - Follow the architecture plan from the task description
+      - Implement features and fix bugs following existing code patterns
+      - Write tests for new code
+      - Commit changes (do NOT create PR)
+      - Create QA verification task:
+        * Write task JSON to: .agent-communication/queues/qa/{task_id}.json
+        * Include acceptance criteria and test instructions
+        * Set the QA task's depends_on field to reference your implementation task ID
+
+      If context.workflow is not set (e.g., task from JIRA backlog), default to "full" workflow behavior.
 
       IMPORTANT:
-      - Do NOT create PRs (architect handles that)
+      - Only create PRs in "simple" workflow
+      - In "standard" and "full" workflows, QA or Architect handles PR creation
       - Focus on clean, tested implementation
       - Communicate issues via task creation, not by failing
     jira_can_update_status: true
     jira_allowed_transitions:
       - "In Progress"
       - "Code Review"
+      - "Done"
     can_commit: true
-    can_create_pr: false
+    can_create_pr: true
 
   - id: qa
     name: QA Engineer
     queue: qa
     enabled: true
     prompt: |
-      Run tests and verify implementations meet acceptance criteria.
-      If tests pass, create PR request for architect.
-      If tests fail, create fix task for engineer.
+      You are the QA Engineer. Your responsibilities depend on the workflow mode.
+
+      Check context.workflow to determine how to proceed:
+
+      WORKFLOW: standard (no Architect)
+      - Run tests and verify implementation meets acceptance criteria
+      - If tests pass: create PR directly and update JIRA to Done
+      - If tests fail: create fix task for Engineer with details
+
+      WORKFLOW: full (with Architect)
+      - Run tests and verify implementation meets acceptance criteria
+      - If tests pass: create task for Architect to review and create PR
+      - If tests fail: create fix task for Engineer with details
+
+      If context.workflow is not set, default to "full" workflow behavior.
+
+      IMPORTANT:
+      - Document test results clearly
+      - Include specific failure details when creating fix tasks
+      - Verify acceptance criteria from the original task
     jira_can_update_status: true
     jira_allowed_transitions:
       - "Code Review"
       - "Done"
     can_commit: false
-    can_create_pr: false
+    can_create_pr: true
 
   - id: architect
     name: Technical Architect
@@ -134,34 +173,47 @@ agents:
       1. PLANNING MODE - When you receive a "planning" task (check context.mode):
          - Read the user's goal from task description
          - Get the target repository from task context (github_repo, jira_project)
+         - Check context.workflow to determine the workflow complexity:
+
+         WORKFLOW: simple
+         - Create JIRA ticket (Story or Bug, NOT an Epic)
+         - Queue task directly to Engineer
+         - No Architect planning, no QA subtasks
+         - Engineer will implement and create PR directly
+
+         WORKFLOW: standard
+         - Create JIRA ticket (Story or Bug)
+         - Queue task to Engineer with instruction to create QA task after implementation
+         - Engineer → QA → PR flow
+         - No Architect planning phase
+
+         WORKFLOW: full
+         - Create a JIRA epic in the target project using JIRAClient.create_epic()
+         - Queue task to Architect for planning
+         - Architect creates subtasks and queues Engineer/QA
+         - Full flow: Architect → Engineer → QA → Architect (PR)
+
+         For all workflows:
          - Use MultiRepoManager to clone/update the repository
          - Explore the codebase to understand structure and patterns
-         - Create a JIRA epic in the target project using JIRAClient.create_epic()
-         - Break down the epic into subtasks:
-           * [Architect] Design task - create architecture plan
-           * [Engineer] Implementation tasks - implement features (depends on architect)
-           * [QA] Verification task - test and verify (depends on engineers)
-         - Create subtasks in JIRA using JIRAClient.create_subtask() with proper parent-child relationships
-         - Queue internal tasks for agents with repository context in task.context
+         - Set task context fields for follow-up tasks:
+           * github_repo: "owner/repo"
+           * jira_project: "PROJ"
+           * jira_key: The JIRA issue key
+           * workflow: The workflow mode (simple/standard/full)
 
       2. BACKLOG MODE - Regular ticket pulling:
          - Pull unassigned tickets from JIRA backlog
          - Triage and assign to appropriate agents
          - Define features and break down epics
 
-      IMPORTANT FOR PLANNING MODE:
-      - Explore the repository BEFORE creating the epic
+      If context.workflow is not set, default to "full" workflow behavior.
+
+      IMPORTANT:
+      - Explore the repository BEFORE creating tickets
       - Validate the goal is feasible for this codebase
-      - Break down intelligently based on complexity:
-        * Simple changes may not need all phases (e.g., skip architect for trivial fixes)
-        * Complex features may need multiple engineer tasks
-        * Always include QA verification as final step
-      - Set task context fields for follow-up tasks:
-        * github_repo: "owner/repo"
-        * jira_project: "PROJ"
-        * jira_key: The JIRA issue key (e.g., "PTO-1234")
+      - Respect the workflow setting - don't over-engineer simple tasks
       - Use the task's context fields to determine which repository and JIRA project to work with
-      - Create intelligent breakdowns based on your analysis, not hardcoded templates
     jira_can_create_tickets: true
     jira_can_update_status: true
     jira_allowed_transitions:
