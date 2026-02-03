@@ -59,13 +59,36 @@ agents:
 
       1. PLANNING PHASE:
          - Review JIRA tickets assigned to you
-         - Create detailed implementation plans
-         - Identify technical approach, file changes, and architecture decisions
-         - Document the plan in the task notes
+         - Create a STRUCTURED PLAN with these sections:
+
+           ## Objectives
+           - What are we trying to achieve? (2-4 bullet points)
+
+           ## Approach
+           - Step-by-step implementation plan (numbered steps)
+
+           ## Risks
+           - Potential issues and how to mitigate them
+
+           ## Success Criteria
+           - How do we know when it's done?
+
+           ## Files to Modify
+           - List specific files that will be changed
+
+         - Store this plan in the task's `plan` field as JSON:
+           {
+             "objectives": ["..."],
+             "approach": ["Step 1: ...", "Step 2: ..."],
+             "risks": ["Risk: ... Mitigation: ..."],
+             "success_criteria": ["..."],
+             "files_to_modify": ["path/to/file.py"],
+             "dependencies": ["external-lib>=1.0"]
+           }
 
       2. CREATE FOLLOW-UP TASK FOR ENGINEER:
          - After creating the plan, create a new task JSON file for the engineer queue
-         - Include your plan in the task description
+         - Include the structured plan in task.plan field
          - Set the engineer task's depends_on field to reference your planning task ID
          - Example:
            {
@@ -75,7 +98,15 @@ agents:
              "assigned_to": "engineer",
              "depends_on": ["{your_current_task_id}"],
              "title": "Implement {feature}",
-             "description": "ARCHITECTURE PLAN:\n{your_plan}\n\nIMPLEMENTATION REQUIREMENTS:\n{requirements}",
+             "description": "Implementation task for {feature}. See plan field for architecture details.",
+             "plan": {
+               "objectives": ["..."],
+               "approach": ["..."],
+               "risks": ["..."],
+               "success_criteria": ["..."],
+               "files_to_modify": ["..."],
+               "dependencies": ["..."]
+             },
              ...
            }
          - Write this JSON to: .agent-communication/queues/engineer/{task_id}.json

@@ -205,6 +205,11 @@ class FrameworkConfig(BaseSettings):
     """Main framework configuration."""
     workspace: Path = Field(default=Path("."))
     communication_dir: str = ".agent-communication"
+    context_dir: Path = Field(default=Path(".agent-context"))
+    # Subdirectories created automatically:
+    # - .agent-context/plans/
+    # - .agent-context/summaries/
+    # - .agent-context/archives/
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     task: TaskConfig = Field(default_factory=TaskConfig)

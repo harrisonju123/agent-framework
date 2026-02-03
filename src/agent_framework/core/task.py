@@ -6,6 +6,17 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 
+class PlanDocument(BaseModel):
+    """Structured architecture plan (inspired by PARA methodology)."""
+
+    objectives: list[str]  # What we're trying to achieve
+    approach: list[str]  # Step-by-step implementation approach
+    risks: list[str] = Field(default_factory=list)  # Potential issues and mitigations
+    success_criteria: list[str]  # How to verify the work is complete
+    files_to_modify: list[str] = Field(default_factory=list)  # Affected files
+    dependencies: list[str] = Field(default_factory=list)  # External dependencies
+
+
 class TaskStatus(str, Enum):
     """Task status values."""
     PENDING = "pending"
@@ -85,6 +96,9 @@ class Task(BaseModel):
     # Optimization control (None=use config, True/False=force override)
     optimization_override: Optional[bool] = None
     optimization_override_reason: Optional[str] = None
+
+    # Structured planning (PARA-inspired)
+    plan: Optional[PlanDocument] = None
 
     class Config:
         """Pydantic config."""
