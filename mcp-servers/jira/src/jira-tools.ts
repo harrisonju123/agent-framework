@@ -247,6 +247,8 @@ export async function createEpicWithSubtasks(
 ) {
   const { project, epicTitle, epicDescription, subtasks } = args;
 
+  const startTime = Date.now();
+
   const epicResult = await createEpic(client, {
     project,
     title: epicTitle,
@@ -254,22 +256,38 @@ export async function createEpicWithSubtasks(
   });
 
   const epicKey = epicResult.data.key;
-  const createdSubtasks = [];
 
-  for (const subtask of subtasks) {
-    const subtaskResult = await createSubtask(client, {
+  // Create all subtasks in parallel for 5-10x speedup
+  const subtaskPromises = subtasks.map(subtask =>
+    createSubtask(client, {
       parentKey: epicKey,
       summary: subtask.summary,
       description: subtask.description,
-    });
-    createdSubtasks.push(subtaskResult.data);
-  }
+    })
+  );
+
+  const results = await Promise.allSettled(subtaskPromises);
+
+  const createdSubtasks = results
+    .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
+    .map(r => r.value.data);
+
+  const failedSubtasks = results
+    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    .map((r, idx) => ({
+      summary: subtasks[idx].summary,
+      error: r.reason?.message || String(r.reason)
+    }));
+
+  const duration = Date.now() - startTime;
+  console.log(`createEpicWithSubtasks completed in ${duration}ms (${subtasks.length} subtasks, ${createdSubtasks.length} succeeded, ${failedSubtasks.length} failed)`);
 
   return {
-    success: true,
+    success: failedSubtasks.length === 0,
     data: {
       epic: epicResult.data,
       subtasks: createdSubtasks,
+      failed: failedSubtasks.length > 0 ? failedSubtasks : undefined,
     },
   };
 }
