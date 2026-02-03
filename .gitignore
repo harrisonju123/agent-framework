@@ -37,12 +37,14 @@ ENV/
 
 # Agent runtime data
 .agent-communication/
+queues/
 logs/
 *.log
 
 # IDE files
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 *~
