@@ -18,6 +18,7 @@ from .core.config import load_agents, load_config, load_jira_config, load_github
 from .llm.claude_cli_backend import ClaudeCLIBackend
 from .queue.file_queue import FileQueue
 from .workspace.multi_repo_manager import MultiRepoManager
+from .workspace.worktree_manager import WorktreeManager
 
 
 def setup_logging(agent_id: str, workspace: Path):
@@ -97,12 +98,32 @@ def main():
         # Create MultiRepoManager if GITHUB_TOKEN is available
         github_token = os.environ.get("GITHUB_TOKEN")
         multi_repo_manager = None
+        worktree_manager = None
+
         if github_token:
             multi_repo_manager = MultiRepoManager(
                 workspace_root=framework_config.multi_repo.workspace_root,
                 github_token=github_token
             )
             logger.info("MultiRepoManager initialized")
+
+            # Create WorktreeManager if worktree mode is enabled
+            worktree_config = framework_config.multi_repo.worktree
+            if worktree_config.enabled:
+                wt_config = worktree_config.to_manager_config()
+                worktree_manager = WorktreeManager(
+                    config=wt_config,
+                    github_token=github_token,
+                )
+                logger.info(f"WorktreeManager initialized (root: {wt_config.root})")
+
+                # Run startup cleanup of orphaned worktrees
+                cleanup_result = worktree_manager.cleanup_orphaned_worktrees()
+                if cleanup_result["total"]:
+                    logger.info(
+                        f"Cleaned up {cleanup_result['total']} worktrees on startup "
+                        f"(registered: {cleanup_result['registered']}, unregistered: {cleanup_result['unregistered']})"
+                    )
         else:
             logger.warning("No GITHUB_TOKEN, multi-repo features disabled")
 
@@ -124,6 +145,7 @@ def main():
             github_config=github_config,
             mcp_enabled=framework_config.llm.use_mcp,
             optimization_config=optimization_config,
+            worktree_manager=worktree_manager,
         )
 
         logger.info(f"Starting agent {agent_id}")

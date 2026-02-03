@@ -19,6 +19,7 @@ from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
 from ..safeguards.escalation import EscalationHandler
+from ..workspace.worktree_manager import WorktreeManager, WorktreeConfig
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -94,6 +95,7 @@ class Agent:
         github_config=None,
         mcp_enabled: bool = False,
         optimization_config: Optional[dict] = None,
+        worktree_manager: Optional[WorktreeManager] = None,
     ):
         self.config = config
         self.llm = llm
@@ -107,6 +109,8 @@ class Agent:
         self._mcp_enabled = mcp_enabled
         self._running = False
         self._current_task_id: Optional[str] = None
+        self.worktree_manager = worktree_manager
+        self._active_worktree: Optional[Path] = None  # Track active worktree for cleanup
 
         # Optimization configuration (sanitize then make immutable for thread safety)
         sanitized_config = self._sanitize_optimization_config(optimization_config or {})
@@ -391,6 +395,10 @@ class Agent:
                 status=AgentStatus.IDLE,
                 last_updated=datetime.utcnow()
             ))
+
+            # Cleanup worktree based on task outcome
+            task_succeeded = task.status == TaskStatus.COMPLETED
+            self._cleanup_worktree(task, success=task_succeeded)
 
             if lock:
                 self.queue.release_lock(lock)
@@ -970,8 +978,43 @@ IMPORTANT:
 """
 
     def _get_working_directory(self, task: Task) -> Path:
-        """Get working directory for task (target repo or framework workspace)."""
+        """Get working directory for task (worktree, target repo, or framework workspace).
+
+        Priority:
+        1. If worktree mode enabled (config or task override), create isolated worktree
+        2. If multi_repo_manager available, use shared clone
+        3. Fall back to framework workspace
+        """
         github_repo = task.context.get("github_repo")
+
+        # Check if worktree mode should be used
+        use_worktree = self._should_use_worktree(task)
+
+        if use_worktree and github_repo and self.worktree_manager:
+            # Get base repo path (shared clone or explicit override)
+            base_repo = self._get_base_repo_for_worktree(task, github_repo)
+
+            if base_repo:
+                # Create worktree for isolated work
+                # Include task_id[:8] for uniqueness to avoid branch collisions on retries
+                jira_key = task.context.get("jira_key", "task")
+                task_short = task.id[:8]
+                branch_name = f"agent/{self.config.id}/{jira_key}-{task_short}"
+
+                try:
+                    worktree_path = self.worktree_manager.create_worktree(
+                        base_repo=base_repo,
+                        branch_name=branch_name,
+                        agent_id=self.config.id,
+                        task_id=task.id,
+                        owner_repo=github_repo,
+                    )
+                    self._active_worktree = worktree_path
+                    logger.info(f"Using worktree: {github_repo} at {worktree_path}")
+                    return worktree_path
+                except Exception as e:
+                    logger.warning(f"Failed to create worktree, falling back to shared clone: {e}")
+                    # Fall through to shared clone
 
         if github_repo and self.multi_repo_manager:
             # Ensure repo is cloned/updated
@@ -981,6 +1024,90 @@ IMPORTANT:
         else:
             # No repo context, use framework workspace
             return self.workspace
+
+    def _should_use_worktree(self, task: Task) -> bool:
+        """Determine if worktree mode should be used for this task.
+
+        Task context can override config:
+        - task.context["use_worktree"] = True/False
+        """
+        # Check task-level override first
+        task_override = task.context.get("use_worktree")
+        if task_override is not None:
+            return bool(task_override)
+
+        # Check if worktree manager is available and enabled
+        if not self.worktree_manager:
+            return False
+
+        return True  # Worktree manager exists, so worktree mode is enabled
+
+    def _get_base_repo_for_worktree(self, task: Task, github_repo: str) -> Optional[Path]:
+        """Get base repository path for worktree creation.
+
+        Priority:
+        1. Explicit path in task.context["worktree_base_repo"]
+        2. Shared clone from multi_repo_manager
+        """
+        # Check for explicit base repo override
+        explicit_base = task.context.get("worktree_base_repo")
+        if explicit_base:
+            base_path = Path(explicit_base).expanduser().resolve()
+            if base_path.exists() and (base_path / ".git").exists():
+                logger.debug(f"Using explicit base repo: {base_path}")
+                return base_path
+            else:
+                logger.warning(f"Explicit worktree_base_repo not valid: {explicit_base}")
+
+        # Use shared clone from multi_repo_manager
+        if self.multi_repo_manager:
+            try:
+                return self.multi_repo_manager.ensure_repo(github_repo)
+            except Exception as e:
+                logger.error(f"Failed to get base repo from multi_repo_manager: {e}")
+
+        return None
+
+    def _cleanup_worktree(self, task: Task, success: bool) -> None:
+        """Cleanup worktree after task completion based on config.
+
+        Safety checks:
+        - Skip cleanup if there are unpushed commits (data loss prevention)
+        - Skip cleanup if there are uncommitted changes
+        - Log warnings when skipping to help with debugging
+        """
+        if not self._active_worktree or not self.worktree_manager:
+            return
+
+        worktree_config = self.worktree_manager.config
+        should_cleanup = (
+            (success and worktree_config.cleanup_on_complete) or
+            (not success and worktree_config.cleanup_on_failure)
+        )
+
+        if should_cleanup:
+            # Safety check: don't delete worktrees with unpushed work
+            has_unpushed = self.worktree_manager.has_unpushed_commits(self._active_worktree)
+            has_uncommitted = self.worktree_manager.has_uncommitted_changes(self._active_worktree)
+
+            if has_unpushed:
+                logger.warning(
+                    f"Skipping worktree cleanup - unpushed commits detected: {self._active_worktree}. "
+                    f"Manual cleanup required after pushing changes."
+                )
+            elif has_uncommitted:
+                logger.warning(
+                    f"Skipping worktree cleanup - uncommitted changes detected: {self._active_worktree}. "
+                    f"Manual cleanup required after committing/discarding changes."
+                )
+            else:
+                try:
+                    self.worktree_manager.remove_worktree(self._active_worktree, force=not success)
+                    logger.info(f"Cleaned up worktree: {self._active_worktree}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup worktree: {e}")
+
+        self._active_worktree = None
 
     def _update_phase(self, phase: TaskPhase):
         """Update current execution phase."""

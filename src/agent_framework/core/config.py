@@ -144,9 +144,35 @@ class OptimizationConfig(BaseModel):
         return self
 
 
+class WorktreeConfig(BaseModel):
+    """Git worktree configuration for isolated agent workspaces."""
+    enabled: bool = False
+    root: Path = Field(default=Path("~/.agent-workspaces/worktrees"))
+    cleanup_on_complete: bool = True
+    cleanup_on_failure: bool = False  # Keep failed worktrees for debugging
+    max_age_hours: int = 24
+    max_worktrees: int = 20
+
+    def to_manager_config(self):
+        """Convert to WorktreeManager's WorktreeConfig dataclass.
+
+        This bridges the Pydantic config model with the manager's dataclass.
+        """
+        from ..workspace.worktree_manager import WorktreeConfig as ManagerWorktreeConfig
+        return ManagerWorktreeConfig(
+            enabled=self.enabled,
+            root=self.root,
+            cleanup_on_complete=self.cleanup_on_complete,
+            cleanup_on_failure=self.cleanup_on_failure,
+            max_age_hours=self.max_age_hours,
+            max_worktrees=self.max_worktrees,
+        )
+
+
 class MultiRepoConfig(BaseModel):
     """Multi-repository configuration."""
     workspace_root: Path = Field(default=Path("~/.agent-workspaces"))
+    worktree: WorktreeConfig = Field(default_factory=WorktreeConfig)
 
 
 class RepositoryConfig(BaseModel):

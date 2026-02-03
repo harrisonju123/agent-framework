@@ -30,6 +30,7 @@ from ..integrations.github.client import GitHubClient
 from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
 from ..workspace.multi_repo_manager import MultiRepoManager
+from ..workspace.worktree_manager import WorktreeManager
 
 
 console = Console()
@@ -843,6 +844,126 @@ def check(ctx, fix):
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command("cleanup-worktrees")
+@click.option("--max-age", "-a", type=int, help="Max age in hours (overrides config)")
+@click.option("--force", is_flag=True, help="Force remove all worktrees")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed")
+@click.pass_context
+def cleanup_worktrees(ctx, max_age, force, dry_run):
+    """Clean up orphaned or stale git worktrees.
+
+    By default, removes worktrees older than max_age_hours (from config).
+    Use --force to remove all worktrees regardless of age.
+    """
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold]Git Worktree Cleanup[/]")
+    console.print()
+
+    try:
+        # Load config
+        framework_config = load_config(workspace / "config" / "agent-framework.yaml")
+        worktree_config = framework_config.multi_repo.worktree
+
+        if not worktree_config.enabled:
+            console.print("[yellow]Worktree mode is not enabled in config[/]")
+            console.print("[dim]Enable with: multi_repo.worktree.enabled: true[/]")
+            return
+
+        # Create worktree manager
+        github_token = os.environ.get("GITHUB_TOKEN")
+        wt_config = worktree_config.to_manager_config()
+        # Override max_age if specified via CLI
+        if max_age is not None:
+            wt_config.max_age_hours = max_age
+        manager = WorktreeManager(config=wt_config, github_token=github_token)
+
+        # Get current stats
+        stats = manager.get_stats()
+        worktrees = manager.list_worktrees()
+
+        console.print(f"Worktree root: [cyan]{wt_config.root}[/]")
+        console.print(f"Registered: {stats['total_registered']}, Active: {stats['active']}, Orphaned: {stats['orphaned']}")
+        console.print(f"Max age: {wt_config.max_age_hours}h, Max worktrees: {wt_config.max_worktrees}")
+        console.print()
+
+        if not worktrees:
+            console.print("[green]No worktrees to clean up[/]")
+            return
+
+        # Show worktrees
+        from rich.table import Table
+        from datetime import datetime
+
+        table = Table()
+        table.add_column("Agent")
+        table.add_column("Task")
+        table.add_column("Branch")
+        table.add_column("Age")
+        table.add_column("Status")
+
+        now = datetime.utcnow()
+        to_remove = []
+
+        for wt in worktrees:
+            try:
+                last_accessed = datetime.fromisoformat(wt.last_accessed)
+                age_hours = (now - last_accessed).total_seconds() / 3600
+                age_str = f"{age_hours:.1f}h"
+
+                is_stale = age_hours > wt_config.max_age_hours
+                exists = Path(wt.path).exists()
+
+                if force or is_stale or not exists:
+                    to_remove.append(wt)
+                    status = "[red]REMOVE[/]"
+                else:
+                    status = "[green]KEEP[/]"
+
+                table.add_row(
+                    wt.agent_id,
+                    wt.task_id[:8],
+                    wt.branch[:30] + "..." if len(wt.branch) > 30 else wt.branch,
+                    age_str,
+                    status,
+                )
+            except ValueError:
+                to_remove.append(wt)
+                table.add_row(wt.agent_id, wt.task_id[:8], wt.branch[:30], "?", "[red]REMOVE[/]")
+
+        console.print(table)
+        console.print()
+
+        if not to_remove:
+            console.print("[green]No worktrees need removal[/]")
+            return
+
+        console.print(f"[yellow]{len(to_remove)} worktrees will be removed[/]")
+
+        if dry_run:
+            console.print("[dim]Dry run - no changes made[/]")
+            return
+
+        if not click.confirm("Continue?"):
+            console.print("[yellow]Cancelled[/]")
+            return
+
+        # Perform cleanup
+        removed = 0
+        for wt in to_remove:
+            path = Path(wt.path)
+            if manager.remove_worktree(path, force=True):
+                removed += 1
+                console.print(f"  Removed: {path.name}")
+
+        console.print(f"\n[green]✓ Removed {removed} worktrees[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        import traceback
+        traceback.print_exc()
 
 
 @cli.command("apply-pattern")
