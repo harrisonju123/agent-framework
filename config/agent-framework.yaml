@@ -134,6 +134,8 @@ repositories:
     jira_project: ME
     display_name: Clockwork Web
 
+  - github_repo: harrisonju123/agent-framework
+    display_name: Agent Framework
 # Workflow Configuration
 # Defines agent chains and quality gates for diffeent workflow modes
 workflows:

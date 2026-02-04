@@ -34,6 +34,8 @@ dependencies = [
     "aiofiles>=23.0.0",
     "python-dotenv>=1.0.0",
     "docker>=7.0.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
 ]
 
 [project.optional-dependencies]

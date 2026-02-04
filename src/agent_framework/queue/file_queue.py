@@ -344,6 +344,45 @@ class FileQueue:
 
         return None
 
+    def get_all_failed(self) -> List[Task]:
+        """Get all failed tasks from completed and queue directories.
+
+        Returns:
+            List of failed tasks sorted by failed_at time (most recent first)
+        """
+        failed_tasks = []
+
+        # Check completed directory for failed tasks
+        if self.completed_dir.exists():
+            for task_file in self.completed_dir.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.status == TaskStatus.FAILED:
+                        failed_tasks.append(task)
+                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                    continue
+
+        # Also check queue directories for failed tasks
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if not queue_dir.is_dir():
+                    continue
+                for task_file in queue_dir.glob("*.json"):
+                    try:
+                        task = self._load_task(task_file)
+                        if task.status == TaskStatus.FAILED:
+                            failed_tasks.append(task)
+                    except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                        continue
+
+        # Sort by failed_at time (most recent first)
+        failed_tasks.sort(
+            key=lambda t: t.failed_at or datetime.min,
+            reverse=True
+        )
+
+        return failed_tasks
+
     def requeue_task(self, task: Task) -> None:
         """Reset a failed task and re-queue it for processing.
 

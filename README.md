@@ -2,12 +2,15 @@
 
 Multi-agent system for autonomous software development with JIRA and GitHub integration.
 
+![Agent Dashboard](img.png)
+
 ## Table of Contents
 
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Web Dashboard](#web-dashboard)
 - [Workflow Modes](#workflow-modes)
 - [Configuration](#configuration)
 - [CLI Commands](#cli-commands)
@@ -20,11 +23,11 @@ Multi-agent system for autonomous software development with JIRA and GitHub inte
 
 ## Features
 
+- **Web Dashboard**: Real-time browser UI with agent cards, activity feed, and one-click controls
 - **Interactive Mode**: Describe what you want to build, select a repo, agents handle the rest
 - **Workflow Modes**: Simple (direct), Standard (with QA), or Full (architect-led) workflows
 - **Agent Scaling**: Run 1-50 replicas per agent type for parallel processing
-- **Rich Logging**: Context-aware logs with JIRA keys, phases, and emojis
-- **Live Dashboard**: Real-time TUI showing agent status, tasks, and progress
+- **Rich Logging**: Context-aware logs with JIRA keys, phases, and visual indicators
 - **Multi-Repository**: Work across multiple repos from a central orchestrator
 - **Git Worktrees**: Isolated workspaces so agents don't interfere with your work
 - **Docker Sandbox**: Isolated test execution in containers
@@ -35,7 +38,7 @@ Multi-agent system for autonomous software development with JIRA and GitHub inte
 ## Requirements
 
 - Python 3.10+
-- Node.js 18+ (for MCP servers)
+- Node.js 18+ (for MCP servers and dashboard)
 - Docker (for sandbox test execution)
 - Claude CLI or Anthropic API key
 - Git, JIRA API token, GitHub token
@@ -51,6 +54,9 @@ pip install -e .
 # Build MCP servers
 cd mcp-servers/jira && npm install && npm run build && cd ../..
 cd mcp-servers/github && npm install && npm run build && cd ../..
+
+# Build web dashboard (optional)
+cd src/agent_framework/web/frontend && npm install && npm run build && cd ../../../..
 
 # Configure
 cp config/agents.yaml.example config/agents.yaml
@@ -82,14 +88,21 @@ You'll be prompted for:
 
 The system creates JIRA tickets and queues tasks for agents automatically.
 
+### Run a Specific Ticket
+
+```bash
+# Work on a single JIRA ticket
+agent run PROJ-123
+
+# Assign to a specific agent type
+agent run PROJ-123 --agent engineer
+```
+
 ### Traditional Mode
 
 ```bash
 # Pull from JIRA backlog
 agent pull --project PROJ
-
-# Work on specific ticket
-agent run PROJ-123
 
 # Start agents (basic)
 agent start
@@ -100,9 +113,58 @@ agent start --replicas 4 --log-level DEBUG
 # Stop agents
 agent stop
 
-# Monitor
+# Monitor via CLI
 agent status --watch
 ```
+
+## Web Dashboard
+
+The web dashboard provides real-time visibility into agent operations through your browser.
+
+### Starting the Dashboard
+
+```bash
+# Start the dashboard server
+agent dashboard
+
+# Custom port
+agent dashboard --port 8080
+
+# Allow external access
+agent dashboard --host 0.0.0.0
+```
+
+Open `http://localhost:3000` in your browser.
+
+### Dashboard Features
+
+**Agent Cards**
+- Visual status for each agent (idle, working, dead)
+- Current task and progress phases
+- Elapsed time on active tasks
+- Hover for task details
+
+**Controls**
+- **Pause/Resume**: Temporarily halt task processing
+- **Start All / Stop All**: Bulk agent management with confirmation
+- **New Work**: Create tasks via goal description (opens modal)
+- **Analyze Repo**: Run repository analysis (opens modal)
+
+**Monitoring**
+- **Queue Status**: Pending task counts per agent type
+- **Health Checks**: System health with pass/fail indicators
+- **Uptime**: Server uptime and WebSocket connection status
+- **Recent Activity**: Live feed of task starts, completions, and failures
+- **Failed Tasks**: List of failed tasks with retry option
+
+**Live Logs** (collapsible)
+- Real-time log streaming per agent
+- Filter by agent type
+- Auto-scroll with manual pause
+
+### WebSocket Connection
+
+The dashboard maintains a WebSocket connection for real-time updates. If disconnected, it automatically reconnects with exponential backoff (up to 10 attempts).
 
 ## Workflow Modes
 
@@ -110,9 +172,9 @@ Choose the right workflow based on task complexity:
 
 | Mode | Flow | Best For |
 |------|------|----------|
-| **simple** | Engineer → Done | Bug fixes, small changes |
-| **standard** | Engineer → QA → Done | Medium features with testing |
-| **full** | Architect → Engineer → QA → Review | Complex features, architectural changes |
+| **simple** | Engineer -> Done | Bug fixes, small changes |
+| **standard** | Engineer -> QA -> Done | Medium features with testing |
+| **full** | Architect -> Engineer -> QA -> Review | Complex features, architectural changes |
 
 ### Simple Workflow
 - Engineer implements and creates PR directly
@@ -191,12 +253,12 @@ Load before running: `source scripts/setup-env.sh`
 
 | Command | Description |
 |---------|-------------|
-| `agent work` | Interactive mode with live dashboard |
-| `agent work --no-dashboard` | Interactive mode, logs only |
-| `agent status --watch` | Live dashboard |
+| `agent work` | Interactive mode - describe goal, select repo, choose workflow |
+| `agent run PROJ-123` | Work on a specific JIRA ticket |
+| `agent dashboard` | Start web dashboard server |
+| `agent status --watch` | Live CLI dashboard |
 | `agent status` | One-time status snapshot |
 | `agent pull --project PROJ` | Pull JIRA backlog tickets |
-| `agent run PROJ-123` | Work on specific ticket |
 | `agent start` | Start all agents (1 of each type) |
 | `agent start --replicas N` | Start N replicas per agent (1-50) |
 | `agent start --log-level LEVEL` | Set log level (DEBUG/INFO/WARNING/ERROR) |
@@ -212,7 +274,7 @@ Load before running: `source scripts/setup-env.sh`
 ```
 agent-framework/
 ├── src/agent_framework/
-│   ├── cli/                # CLI commands
+│   ├── cli/                # CLI commands and TUI dashboard
 │   ├── core/               # Task model, orchestrator, agent loop
 │   ├── queue/              # File-based queues with locking
 │   ├── llm/                # Claude CLI and LiteLLM backends
@@ -220,12 +282,29 @@ agent-framework/
 │   ├── safeguards/         # Circuit breaker, watchdog, retry logic
 │   ├── sandbox/            # Docker test execution
 │   ├── utils/              # Rich logging with context
+│   ├── web/                # Web dashboard (FastAPI + Vue.js)
+│   │   ├── server.py       # API endpoints and WebSocket
+│   │   ├── data_provider.py # Real-time data aggregation
+│   │   └── frontend/       # Vue.js SPA
 │   └── workspace/          # Git operations, multi-repo manager
 ├── mcp-servers/
 │   ├── jira/               # JIRA MCP server
 │   └── github/             # GitHub MCP server
 └── config/                 # YAML configuration files
 ```
+
+### Agent Types
+
+| Agent | Role |
+|-------|------|
+| **Software Engineer** | Implements features and bug fixes |
+| **QA Engineer** | Verifies implementations and creates PRs |
+| **Technical Architect** | Plans complex features, reviews PRs |
+| **Product Owner** | Manages backlog and priorities |
+| **Testing Agent** | Runs test suites in sandbox |
+| **Static Analysis Agent** | Code quality and security scanning |
+| **Code Reviewer** | Reviews pull requests |
+| **Repository Analyzer** | Scans repos for issues and tech debt |
 
 ### Agent Scaling
 
@@ -235,10 +314,10 @@ Run multiple replicas of each agent type for parallel processing:
 # Single instance of each agent (default)
 agent start
 
-# 4 replicas per agent type (20 total agents)
+# 4 replicas per agent type (32 total agents)
 agent start --replicas 4
 
-# Maximum parallelism (250 total agents)
+# Maximum parallelism (up to 50 per type)
 agent start --replicas 50
 ```
 
@@ -269,23 +348,17 @@ The `analyze` command scans repositories for issues (security, performance, code
 agent analyze --repo justworkshr/pto
 
 # Focused analysis - target specific code flows or issue types
-agent analyze --repo justworkshr/pto --focus "review PTO accrual flow for tech debt and code cleanup opportunities"
+agent analyze --repo justworkshr/pto --focus "review PTO accrual flow for tech debt"
 
 # Focus on security in specific areas
-agent analyze --repo justworkshr/pto --focus "focus on authentication and authorization code, look for security vulnerabilities"
+agent analyze --repo justworkshr/pto --focus "authentication and authorization code, security vulnerabilities"
 
 # Preview without creating JIRA tickets
-agent analyze --repo justworkshr/pto --focus "analyze database queries for N+1 issues" --dry-run
+agent analyze --repo justworkshr/pto --dry-run
 
 # Combine with severity filtering
-agent analyze --repo justworkshr/pto --focus "review payroll calculation logic" --severity medium --max-issues 30
+agent analyze --repo justworkshr/pto --severity medium --max-issues 30
 ```
-
-**How `--focus` works:**
-- The agent explores the specified areas BEFORE running static analyzers
-- Findings in focus areas are prioritized over generic issues
-- A "Focus Area Analysis" section is added to the JIRA epic
-- Useful for targeted code reviews, tech debt identification, or flow-specific analysis
 
 ### Git Worktree Support
 
@@ -313,10 +386,6 @@ multi_repo:
     max_worktrees: 20              # LRU eviction when over limit
 ```
 
-Task-level overrides:
-- `task.context["use_worktree"] = False` - Disable for specific task
-- `task.context["worktree_base_repo"] = "/path/to/local/repo"` - Use your local clone as base
-
 Cleanup orphaned worktrees:
 ```bash
 agent cleanup-worktrees              # Remove stale worktrees
@@ -326,34 +395,14 @@ agent cleanup-worktrees --force      # Remove all worktrees
 
 ### Enhanced Logging
 
-Context-aware logs with JIRA keys, phases, and emojis:
+Context-aware logs with JIRA keys, phases, and visual indicators:
 
 ```log
-16:17:23 INFO     [engineer-1] [ME-422] 📋 Starting task: Implement rollback feature
-16:17:23 INFO     [engineer-1] [analyzing] [ME-422] 🔍 Phase: analyzing
-16:17:23 INFO     [engineer-1] [executing_llm] [ME-422] 🤖 Calling LLM (attempt 1)
-16:18:45 INFO     [engineer-1] [ME-422] 💰 Tokens: 15,234 in + 3,456 out = 18,690 total (~$0.0328)
-16:18:45 INFO     [engineer-1] [ME-422] ✅ Task completed in 82.3s (18,690 tokens)
-```
-
-**Features:**
-- **Context preserved**: JIRA keys and task IDs in every log line
-- **Phase tracking**: See what the agent is doing (analyzing, implementing, testing, etc.)
-- **Visual emojis**: Quick status at a glance
-- **Token costs**: Track API usage per task
-- **Clean files**: No ANSI codes in log files (parseable)
-- **Configurable levels**: DEBUG, INFO, WARNING, ERROR
-
-**Usage:**
-```bash
-# Default INFO level
-agent start
-
-# Debug mode for troubleshooting
-agent start --log-level DEBUG
-
-# Production mode (less verbose)
-agent start --log-level WARNING
+16:17:23 INFO     [engineer-1] [ME-422] Starting task: Implement rollback feature
+16:17:23 INFO     [engineer-1] [analyzing] [ME-422] Phase: analyzing
+16:17:23 INFO     [engineer-1] [executing_llm] [ME-422] Calling LLM (attempt 1)
+16:18:45 INFO     [engineer-1] [ME-422] Tokens: 15,234 in + 3,456 out = 18,690 total (~$0.0328)
+16:18:45 INFO     [engineer-1] [ME-422] Task completed in 82.3s (18,690 tokens)
 ```
 
 **Log locations:**
@@ -472,6 +521,16 @@ agent stop && agent start
 ### MCP config not found
 Ensure `mcp_config_path` in `agent-framework.yaml` is an absolute path and the file exists.
 
+### Dashboard not loading
+```bash
+# Rebuild frontend
+cd src/agent_framework/web/frontend
+npm install && npm run build
+
+# Check if port is in use
+lsof -i :3000
+```
+
 ## Development
 
 ```bash
@@ -488,6 +547,10 @@ mypy src/
 # Linting
 ruff check src/
 ruff format src/
+
+# Frontend development
+cd src/agent_framework/web/frontend
+npm run dev  # Hot-reload dev server
 ```
 
 ## License

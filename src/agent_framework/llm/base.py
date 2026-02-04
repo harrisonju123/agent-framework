@@ -37,8 +37,18 @@ class LLMBackend(ABC):
     """Abstract base class for LLM backends."""
 
     @abstractmethod
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """Send a completion request to the LLM."""
+    async def complete(
+        self,
+        request: LLMRequest,
+        task_id: Optional[str] = None,
+    ) -> LLMResponse:
+        """
+        Send a completion request to the LLM.
+
+        Args:
+            request: The LLM request with prompt and configuration.
+            task_id: Optional task identifier for logging/streaming output.
+        """
         pass
 
     @abstractmethod
