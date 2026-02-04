@@ -353,7 +353,8 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
     # Step 2: Select repository
     console.print("\n[bold]Which repository?[/]")
     for i, repo in enumerate(framework_config.repositories, 1):
-        console.print(f"  {i}. [cyan]{repo.github_repo}[/] ({repo.jira_project} project)")
+        jira_info = f"(JIRA: {repo.jira_project})" if repo.jira_project else "(local tasks)"
+        console.print(f"  {i}. [cyan]{repo.github_repo}[/] {jira_info}")
 
     repo_idx = click.prompt(
         "Select repository",
@@ -361,7 +362,11 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
     )
     selected_repo = framework_config.repositories[repo_idx - 1]
 
-    console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/] (JIRA: {selected_repo.jira_project})")
+    if selected_repo.jira_project:
+        console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/] (JIRA: {selected_repo.jira_project})")
+    else:
+        console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/]")
+        console.print("[dim]No JIRA project configured - using local task tracking[/]")
 
     # Step 3: Select workflow complexity
     if workflow is None:
@@ -381,36 +386,15 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
     console.print(f"\n[green]✓[/] Workflow: [bold]{workflow}[/]")
 
     # Step 4: Create planning task for Product Owner
-    import time
-    from datetime import datetime
-    task_id = f"planning-{selected_repo.jira_project}-{int(time.time())}"
+    from ..core.task_builder import build_planning_task
 
-    # Strategy 3: Context Deduplication - store metadata in context only
-    task = Task(
-        id=task_id,
-        type=TaskType.PLANNING,
-        status=TaskStatus.PENDING,
-        priority=1,
+    task = build_planning_task(
+        goal=goal,
+        workflow=workflow,
+        github_repo=selected_repo.github_repo,
+        repository_name=selected_repo.name,
+        jira_project=selected_repo.jira_project,
         created_by="cli",
-        assigned_to="product-owner",
-        created_at=datetime.utcnow(),
-        title=f"Plan and delegate: {goal}",
-        description=f"""User Goal: {goal}
-
-Instructions for Product Owner Agent:
-1. Clone/update repository (use MultiRepoManager)
-2. Explore the codebase to understand structure
-3. Validate the goal is feasible
-4. Check context.workflow ('{workflow}') and route accordingly
-5. Create appropriate JIRA ticket and queue tasks per workflow mode""",
-        context={
-            "mode": "planning",
-            "workflow": workflow,
-            "github_repo": selected_repo.github_repo,
-            "jira_project": selected_repo.jira_project,
-            "repository_name": selected_repo.name,
-            "user_goal": goal,
-        },
     )
 
     # Queue the planning task
@@ -435,15 +419,22 @@ Instructions for Product Owner Agent:
 
     if no_dashboard:
         # Print status without launching dashboard
-        console.print(f"\n[bold cyan]🎯 Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
+        if selected_repo.jira_project:
+            console.print(f"\n[bold cyan]🎯 Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
+        else:
+            console.print(f"\n[bold cyan]🎯 Tasks will be created in local queues[/]")
         console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
         console.print(f"[dim]📝 View logs: tail -f logs/product-owner.log[/]")
         console.print()
         console.print("[yellow]The Product Owner agent will:[/]")
         console.print(f"  1. Clone/update {selected_repo.github_repo} to ~/.agent-workspaces/")
         console.print(f"  2. Analyze the codebase")
-        console.print(f"  3. Create JIRA epic in project {selected_repo.jira_project}")
-        console.print(f"  4. Break down into architect → engineer → qa subtasks")
+        if selected_repo.jira_project:
+            console.print(f"  3. Create JIRA epic in project {selected_repo.jira_project}")
+            console.print(f"  4. Break down into architect → engineer → qa subtasks")
+        else:
+            console.print(f"  3. Create tasks in local queues (.agent-communication/queues/)")
+            console.print(f"  4. Route to appropriate agents based on workflow")
         console.print(f"  5. Queue tasks for other agents")
         console.print()
         console.print("[dim]Dashboard disabled. Use 'agent status --watch' to monitor.[/]")
@@ -508,6 +499,45 @@ def run(ctx, ticket_id, agent):
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command()
+@click.option("--port", "-p", default=8080, help="Server port (default: 8080)")
+@click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
+@click.option("--dev", is_flag=True, help="Run in dev mode (Vite hot reload)")
+@click.pass_context
+def dashboard(ctx, port, no_browser, dev):
+    """Start the web dashboard.
+
+    Opens a browser-based dashboard for monitoring and controlling agents.
+    Uses WebSocket for real-time updates.
+
+    Examples:
+        agent dashboard              # Start on port 8080, open browser
+        agent dashboard --port 9000  # Use custom port
+        agent dashboard --dev        # Dev mode with Vite hot reload
+        agent dashboard --no-browser # Don't auto-open browser
+    """
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold cyan]Starting Web Dashboard[/]")
+    console.print(f"[dim]Server: http://localhost:{port}[/]")
+
+    if dev:
+        console.print("[yellow]Running in development mode[/]")
+        console.print("[dim]Make sure to run 'npm run dev' in frontend directory[/]")
+
+    from ..web.server import run_dashboard_server
+
+    try:
+        run_dashboard_server(
+            workspace=workspace,
+            port=port,
+            open_browser=not no_browser,
+            dev_mode=dev,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dashboard stopped[/]")
 
 
 @cli.command()
@@ -732,19 +762,70 @@ def summary(ctx, epic):
 
 
 @cli.command()
-@click.argument("identifier")
+@click.argument("identifier", required=False)
+@click.option("--reset-retries", is_flag=True, help="Reset retry count to 0")
+@click.option("--all", "retry_all", is_flag=True, help="Retry all failed tasks")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation for bulk operations")
 @click.pass_context
-def retry(ctx, identifier):
+def retry(ctx, identifier, reset_retries, retry_all, yes):
     """Retry a failed task.
 
     IDENTIFIER can be either a task ID or a JIRA key (e.g., PROJ-104).
     The task will be reset to PENDING status and re-queued for processing.
+
+    Examples:
+        agent retry PROJ-104              # Retry a specific task
+        agent retry PROJ-104 --reset-retries  # Retry and reset retry count
+        agent retry --all                 # Retry all failed tasks
+        agent retry --all --yes           # Retry all without confirmation
     """
     workspace = ctx.obj["workspace"]
-
     queue = FileQueue(workspace)
 
-    # Find the failed task
+    if retry_all:
+        # Retry all failed tasks
+        failed_tasks = queue.get_all_failed()
+
+        if not failed_tasks:
+            console.print("[green]No failed tasks to retry[/]")
+            return
+
+        # Show tasks to be retried
+        console.print(f"[bold]Found {len(failed_tasks)} failed tasks:[/]")
+        for task in failed_tasks[:10]:  # Show first 10
+            jira_key = task.context.get("jira_key", task.id[:12])
+            console.print(f"  • {jira_key} - {task.title[:40]}...")
+        if len(failed_tasks) > 10:
+            console.print(f"  ... and {len(failed_tasks) - 10} more")
+        console.print()
+
+        # Confirm unless --yes flag is provided
+        if not yes:
+            if not click.confirm(f"Retry all {len(failed_tasks)} tasks?"):
+                console.print("[yellow]Cancelled[/]")
+                return
+
+        console.print(f"[bold]Retrying {len(failed_tasks)} failed tasks...[/]")
+
+        for task in failed_tasks:
+            jira_key = task.context.get("jira_key", task.id)
+
+            if reset_retries:
+                task.retry_count = 0
+
+            queue.requeue_task(task)
+            console.print(f"  [green]✓[/] {jira_key} - {task.title[:40]}...")
+
+        console.print(f"\n[green]✓ Queued {len(failed_tasks)} tasks for retry[/]")
+        console.print(f"[dim]Monitor with: agent status --watch[/]")
+        return
+
+    # Single task retry
+    if not identifier:
+        console.print("[red]Error: Provide a task identifier or use --all[/]")
+        console.print("[dim]Usage: agent retry TASK-ID or agent retry --all[/]")
+        return
+
     task = queue.get_failed_task(identifier)
 
     if not task:
@@ -759,6 +840,11 @@ def retry(ctx, identifier):
     if task.last_error:
         error_preview = task.last_error[:100] + "..." if len(task.last_error) > 100 else task.last_error
         console.print(f"[dim]Previous error: {error_preview}[/]")
+
+    # Reset retry count if requested
+    if reset_retries:
+        task.retry_count = 0
+        console.print(f"[dim]Retry count reset to 0[/]")
 
     # Re-queue the task
     queue.requeue_task(task)

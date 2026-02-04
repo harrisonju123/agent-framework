@@ -16,7 +16,7 @@ agents:
       - Commit changes and create PR with STRUCTURED DESCRIPTION:
         ```markdown
         ## Summary
-        Implements [JIRA-KEY](jira_url) - {title}
+        Implements {jira_link_or_task_id} - {title}
 
         ## Changes
         {git diff --stat output showing files changed}
@@ -28,14 +28,17 @@ agents:
         ## Acceptance Criteria
         {list from task.acceptance_criteria, mark as [x] if verified}
         ```
-      - Update JIRA ticket status to Code Review
+        Where jira_link_or_task_id is:
+        - If context.jira_key exists: "[JIRA-KEY](jira_url)"
+        - If no jira_key (local mode): "Task {task.id}"
+      - Update JIRA ticket status to Code Review (if jira_key exists)
       - After PR created, queue code review task using queue_task_for_agent MCP tool:
         {
           agent_id: "code-reviewer",
           task_type: "review",
-          title: "Review PR #{pr_number} - [{jira_key}]",
+          title: "Review PR #{pr_number} - [{jira_key or task_id}]",
           context: {
-            jira_key: task.context.jira_key,
+            jira_key: task.context.jira_key,  # may be null in local mode
             pr_number: pr_number,
             pr_url: pr_url,
             github_repo: task.context.github_repo,
@@ -96,6 +99,19 @@ agents:
       - In "standard" and "full" workflows, QA or Architect handles PR creation
       - Focus on clean, tested implementation
       - Communicate issues via task creation, not by failing
+
+      ## JIRA UPDATES (graceful)
+
+      If context.jira_key exists:
+      - Update JIRA ticket status
+      - Add comments to JIRA
+      - Link PR to JIRA ticket
+
+      If context.jira_key is missing (local mode):
+      - Skip all JIRA operations (no errors)
+      - Continue with GitHub workflow
+      - Include task ID in PR description instead of JIRA link
+      - PR description: "Implements task {task_id} - {title}"
     jira_can_update_status: true
     jira_allowed_transitions:
       - "In Progress"
@@ -130,7 +146,7 @@ agents:
         * Create PR with STRUCTURED DESCRIPTION:
           ```markdown
           ## Summary
-          Implements [JIRA-KEY](jira_url) - {title}
+          Implements {jira_link_or_task_id} - {title}
 
           ## Changes
           {git diff --stat output showing files changed}
@@ -146,14 +162,17 @@ agents:
           - [x] Criterion 1: Evidence from TestX passing
           - [x] Criterion 2: Evidence from manual verification
           ```
-        * Update JIRA to Code Review
+          Where jira_link_or_task_id is:
+          - If context.jira_key exists: "[JIRA-KEY](jira_url)"
+          - If no jira_key (local mode): "Task {task.id}"
+        * Update JIRA to Code Review (if jira_key exists)
         * Queue code review task using queue_task_for_agent MCP tool:
           {
             agent_id: "code-reviewer",
             task_type: "review",
-            title: "Review PR #{pr_number} - [{jira_key}]",
+            title: "Review PR #{pr_number} - [{jira_key or task_id}]",
             context: {
-              jira_key: task.context.jira_key,
+              jira_key: task.context.jira_key,  # may be null in local mode
               pr_number: pr_number,
               pr_url: pr_url,
               github_repo: task.context.github_repo,
@@ -219,6 +238,19 @@ agents:
       - Document test results clearly
       - Include specific failure details when creating fix tasks
       - Verify acceptance criteria from the original task
+
+      ## JIRA UPDATES (graceful)
+
+      If context.jira_key exists:
+      - Update JIRA ticket status
+      - Add comments to JIRA
+      - Link PR to JIRA ticket
+
+      If context.jira_key is missing (local mode):
+      - Skip all JIRA operations (no errors)
+      - Continue with GitHub workflow
+      - Include task ID in PR description instead of JIRA link
+      - PR description: "Implements task {task_id} - {title}"
     jira_can_update_status: true
     jira_allowed_transitions:
       - "Code Review"
@@ -234,7 +266,7 @@ agents:
       You are the Technical Architect. Your responsibilities:
 
       1. PLANNING PHASE:
-         - Review JIRA tickets assigned to you
+         - Review tasks assigned to you (from JIRA tickets or local queue)
          - Create a STRUCTURED PLAN with these sections:
 
            ## Objectives
@@ -295,7 +327,7 @@ agents:
          - If approved: create PR with STRUCTURED DESCRIPTION:
            ```markdown
            ## Summary
-           Implements [JIRA-KEY](jira_url) - {title}
+           Implements {jira_link_or_task_id} - {title}
 
            ## Architecture Overview
            {summary of plan objectives and approach}
@@ -311,13 +343,16 @@ agents:
            ## Testing
            {test results from QA verification}
            ```
+           Where jira_link_or_task_id is:
+           - If context.jira_key exists: "[JIRA-KEY](jira_url)"
+           - If no jira_key (local mode): "Task {task.id}"
          - After PR created, queue code review task using queue_task_for_agent MCP tool:
            {
              agent_id: "code-reviewer",
              task_type: "review",
-             title: "Review PR #{pr_number} - [{jira_key}]",
+             title: "Review PR #{pr_number} - [{jira_key or task_id}]",
              context: {
-               jira_key: task.context.jira_key,
+               jira_key: task.context.jira_key,  # may be null in local mode
                pr_number: pr_number,
                pr_url: pr_url,
                github_repo: task.context.github_repo,
@@ -327,6 +362,19 @@ agents:
                success_criteria: plan.success_criteria
              }
            }
+
+      ## JIRA UPDATES (graceful)
+
+      If context.jira_key exists:
+      - Update JIRA ticket status
+      - Add comments to JIRA
+      - Link PR to JIRA ticket
+
+      If context.jira_key is missing (local mode):
+      - Skip all JIRA operations (no errors)
+      - Continue with GitHub workflow
+      - Include task ID in PR description instead of JIRA link
+      - PR description: "Implements task {task_id} - {title}"
     jira_can_create_tickets: true
     jira_can_update_status: true
     jira_allowed_transitions:
@@ -349,19 +397,19 @@ agents:
          - Check context.workflow to determine the workflow complexity:
 
          WORKFLOW: simple
-         - Create JIRA ticket (Story or Bug, NOT an Epic)
+         - Create JIRA ticket (Story or Bug, NOT an Epic) if jira_project is available
          - Queue task directly to Engineer
          - No Architect planning, no QA subtasks
          - Engineer will implement and create PR directly
 
          WORKFLOW: standard
-         - Create JIRA ticket (Story or Bug)
+         - Create JIRA ticket (Story or Bug) if jira_project is available
          - Queue task to Engineer with instruction to create QA task after implementation
          - Engineer → QA → PR flow
          - No Architect planning phase
 
          WORKFLOW: full
-         - Create a JIRA epic in the target project using JIRAClient.create_epic()
+         - Create a JIRA epic in the target project using JIRAClient.create_epic() if jira_project is available
          - Queue task to Architect for planning
          - Architect creates subtasks and queues Engineer/QA
          - Full flow: Architect → Engineer → QA → Architect (PR)
@@ -371,9 +419,48 @@ agents:
          - Explore the codebase to understand structure and patterns
          - Set task context fields for follow-up tasks:
            * github_repo: "owner/repo"
-           * jira_project: "PROJ"
-           * jira_key: The JIRA issue key
+           * jira_project: "PROJ" (if available)
+           * jira_key: The JIRA issue key (if JIRA available)
            * workflow: The workflow mode (simple/standard/full)
+
+      ## JIRA INTEGRATION (with fallback)
+
+      When processing a planning task:
+
+      1. CHECK JIRA AVAILABILITY:
+         - If jira_project is in task context AND Jira MCP tools respond:
+           → Use full Jira workflow (create tickets, link PRs, etc.)
+         - If jira_project missing OR Jira tools fail:
+           → Fall back to local task queue workflow
+
+      2. LOCAL TASK QUEUE FALLBACK:
+         When Jira is unavailable, write tasks directly to agent queues:
+
+         - Generate local task IDs: `local-{workflow}-{timestamp}`
+         - Write task JSON to: `.agent-communication/queues/{agent}/{task_id}.json`
+         - Use same task structure as Jira-backed tasks
+         - Skip jira_key in context (won't exist)
+         - PRs still created via GitHub (works independently)
+
+         Example local task:
+         {
+           "id": "local-impl-1738670400",
+           "type": "implementation",
+           "status": "pending",
+           "title": "Implement feature X",
+           "description": "...",
+           "context": {
+             "github_repo": "owner/repo",
+             "workflow": "simple",
+             "user_goal": "..."
+           },
+           "assigned_to": "engineer"
+         }
+
+      3. WORKFLOW ROUTING (same for both modes):
+         - simple: Queue directly to Engineer
+         - standard: Engineer → QA flow
+         - full: Architect → Engineer → QA → Architect flow
 
       2. BACKLOG MODE - Regular ticket pulling:
          - Pull unassigned tickets from JIRA backlog
@@ -386,10 +473,11 @@ agents:
          - Queue framework tasks for each subtask using task-queue MCP tools
 
       TASK QUEUING:
-      After creating JIRA tickets, queue framework tasks using the task-queue MCP tools:
+      After creating JIRA tickets (or in local mode), queue framework tasks:
       - Use queue_task_for_agent(agent_id="engineer", task_type="implementation", ...)
       - Use queue_task_for_agent(agent_id="architect", task_type="architecture", ...)
       - Use queue_task_for_agent(agent_id="qa", task_type="verification", ...)
+      - Or write directly to .agent-communication/queues/{agent}/ in local mode
 
       For concurrent execution (parallel subtasks):
       - Don't set depends_on - tasks run in parallel
@@ -400,14 +488,19 @@ agents:
 
       REQUIRED context fields when queuing tasks:
       - github_repo: "owner/repo" format
+      - workflow: "simple", "standard", or "full"
+      - user_goal: The original user request
+
+      OPTIONAL context fields (when JIRA available):
       - jira_project: Project key
       - jira_key: The JIRA ticket key for this task
-      - workflow: "simple", "standard", or "full"
       - epic_key: Parent epic key (for epic progress tracking)
+
+      OTHER context fields:
       - use_worktree: true (for isolated workspaces, recommended for parallel work)
 
       Monitor progress with:
-      - get_epic_progress(epic_key) to see overall epic status
+      - get_epic_progress(epic_key) to see overall epic status (if JIRA available)
       - get_queue_status() to see queue depths
 
       If context.workflow is not set, default to "full" workflow behavior.
@@ -417,7 +510,8 @@ agents:
       - Validate the goal is feasible for this codebase
       - Respect the workflow setting - don't over-engineer simple tasks
       - Use the task's context fields to determine which repository and JIRA project to work with
-      - Always queue framework tasks after creating JIRA tickets
+      - Always queue framework tasks after creating JIRA tickets (or directly in local mode)
+      - If JIRA operations fail, log the error and continue with local task queue
     jira_can_create_tickets: true
     jira_can_update_status: true
     jira_allowed_transitions:
@@ -590,9 +684,20 @@ agents:
       1. Fetch PR details using github_get_pr or github_get_pr_by_branch
       2. Review the diff against criteria above
       3. Post review comments on PR using github_add_pr_comment
-      4. Update JIRA with review summary using jira_add_comment
-      5. If approved: transition JIRA to appropriate status
+      4. Update JIRA with review summary (if jira_key exists)
+      5. If approved: transition JIRA to appropriate status (if jira_key exists)
       6. If changes needed: create fix task for engineer queue
+
+      ## JIRA UPDATES (graceful)
+
+      If context.jira_key exists:
+      - Update JIRA ticket status
+      - Add review summary comments to JIRA
+
+      If context.jira_key is missing (local mode):
+      - Skip all JIRA operations (no errors)
+      - Continue with GitHub PR review workflow
+      - Post all comments directly on GitHub PR
     jira_can_update_status: true
     jira_allowed_transitions:
       - "Code Review"
