@@ -226,6 +226,208 @@ class Agent:
         # Write final heartbeat
         self._write_heartbeat()
 
+    def _validate_task_or_reject(self, task: Task) -> bool:
+        """
+        Validate task and reject if invalid.
+
+        Returns:
+            True if task is valid and should be processed, False if rejected
+        """
+        if not self.config.validate_tasks:
+            return True
+
+        validation = validate_task(task, mode=self.config.validation_mode)
+        if validation.skipped:
+            return True
+
+        if validation.warnings:
+            for warning in validation.warnings:
+                self.logger.warning(f"Task validation warning: {warning}")
+
+        if validation.errors:
+            for error in validation.errors:
+                self.logger.error(f"Task validation error: {error}")
+
+        if not validation.is_valid:
+            self.logger.error(f"Task {task.id} rejected due to validation errors")
+            task.last_error = f"Task validation failed: {'; '.join(validation.errors)}"
+            task.mark_failed(self.config.id)
+            self.queue.mark_failed(task)
+            return False
+
+        return True
+
+    def _initialize_task_execution(self, task: Task, task_start_time) -> None:
+        """Initialize task execution with activity tracking and events."""
+        from datetime import datetime
+
+        task.mark_in_progress(self.config.id)
+        self.queue.update(task)
+
+        # Update activity: Started
+        self.activity_manager.update_activity(AgentActivity(
+            agent_id=self.config.id,
+            status=AgentStatus.WORKING,
+            current_task=CurrentTask(
+                id=task.id,
+                title=task.title,
+                type=get_type_str(task.type),
+                started_at=task_start_time
+            ),
+            current_phase=TaskPhase.ANALYZING,
+            last_updated=datetime.utcnow()
+        ))
+
+        # Append start event
+        self.activity_manager.append_event(ActivityEvent(
+            type="start",
+            agent=self.config.id,
+            task_id=task.id,
+            title=task.title,
+            timestamp=datetime.utcnow()
+        ))
+
+    async def _handle_successful_response(self, task: Task, response, task_start_time) -> None:
+        """Handle successful LLM response including tests, workflow, and completion."""
+        from datetime import datetime, timezone
+
+        # Extract summary from response
+        if self._optimization_config.get("enable_result_summarization", False):
+            summary = await self._extract_summary(response.content, task)
+            task.result_summary = summary
+            self.logger.debug(f"Task {task.id} summary: {summary}")
+
+        # Run tests in sandbox if enabled
+        test_result = await self._run_sandbox_tests(task)
+        if test_result and not test_result.success:
+            test_retry = task.context.get("_test_retry_count", 0)
+            if test_retry < self.config.max_test_retries:
+                self.logger.warning(
+                    f"Tests failed for {task.id} (attempt {test_retry + 1}/{self.config.max_test_retries})"
+                )
+                await self._handle_test_failure(task, response, test_result)
+                return
+            else:
+                self.logger.error(f"Tests still failing after {test_retry} retries for {task.id}")
+                task.last_error = f"Tests failed: {test_result.error_message}"
+                await self._handle_failure(task)
+                return
+
+        # Handle post-LLM workflow
+        self.logger.debug(f"Running post-LLM workflow for {task.id}")
+        await self._handle_success(task, response)
+
+        # Mark completed
+        self.logger.debug(f"Marking task {task.id} as completed")
+        task.mark_completed(self.config.id)
+        self.queue.mark_completed(task)
+        self.logger.info(f"✅ Task {task.id} moved to completed")
+
+        # Transition to COMPLETING status
+        try:
+            self.activity_manager.update_activity(AgentActivity(
+                agent_id=self.config.id,
+                status=AgentStatus.COMPLETING,
+                current_task=CurrentTask(
+                    id=task.id,
+                    title=task.title,
+                    type=get_type_str(task.type),
+                    started_at=task_start_time
+                ),
+                last_updated=datetime.now(timezone.utc)
+            ))
+            await asyncio.sleep(1.5)
+        except asyncio.CancelledError:
+            pass
+
+        # Queue code review if needed
+        self.logger.debug(f"Checking if code review needed for {task.id}")
+        self._queue_code_review_if_needed(task, response)
+
+        # Log metrics and events
+        self._log_task_completion_metrics(task, response, task_start_time)
+
+    def _log_task_completion_metrics(self, task: Task, response, task_start_time) -> None:
+        """Log token usage, cost, and completion events."""
+        from datetime import datetime
+
+        total_tokens = response.input_tokens + response.output_tokens
+        budget = self._get_token_budget(task.type)
+        cost = self._estimate_cost(response)
+
+        duration = (datetime.utcnow() - task_start_time).total_seconds()
+        self.logger.token_usage(response.input_tokens, response.output_tokens, cost)
+        self.logger.task_completed(duration, tokens_used=total_tokens)
+
+        # Budget warning
+        if self._optimization_config.get("enable_token_budget_warnings", False):
+            threshold = self._optimization_config.get("budget_warning_threshold", BUDGET_WARNING_THRESHOLD)
+            if total_tokens > budget * threshold:
+                self.logger.warning(
+                    f"Task {task.id} EXCEEDED TOKEN BUDGET: "
+                    f"{total_tokens} tokens (budget: {budget}, "
+                    f"{int(threshold * 100)}% threshold: {budget * threshold:.0f})"
+                )
+                self.activity_manager.append_event(ActivityEvent(
+                    type="token_budget_exceeded",
+                    agent=self.config.id,
+                    task_id=task.id,
+                    title=f"Token budget exceeded: {total_tokens} > {budget}",
+                    timestamp=datetime.utcnow()
+                ))
+
+        # Append complete event
+        duration_ms = int((datetime.utcnow() - task_start_time).total_seconds() * 1000)
+        pr_url = task.context.get("pr_url")
+        self.activity_manager.append_event(ActivityEvent(
+            type="complete",
+            agent=self.config.id,
+            task_id=task.id,
+            title=task.title,
+            timestamp=datetime.utcnow(),
+            duration_ms=duration_ms,
+            pr_url=pr_url,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost=cost
+        ))
+
+    async def _handle_failed_response(self, task: Task, response) -> None:
+        """Handle failed LLM response."""
+        from datetime import datetime
+
+        task.last_error = response.error or "Unknown error"
+        self.logger.task_failed(task.last_error, task.retry_count)
+
+        self.activity_manager.append_event(ActivityEvent(
+            type="fail",
+            agent=self.config.id,
+            task_id=task.id,
+            title=task.title,
+            timestamp=datetime.utcnow(),
+            retry_count=task.retry_count,
+            error_message=task.last_error
+        ))
+
+        await self._handle_failure(task)
+
+    def _cleanup_task_execution(self, task: Task, lock) -> None:
+        """Cleanup after task execution."""
+        from datetime import datetime
+
+        self.activity_manager.update_activity(AgentActivity(
+            agent_id=self.config.id,
+            status=AgentStatus.IDLE,
+            last_updated=datetime.utcnow()
+        ))
+
+        task_succeeded = task.status == TaskStatus.COMPLETED
+        self._cleanup_worktree(task, success=task_succeeded)
+
+        if lock:
+            self.queue.release_lock(lock)
+        self._current_task_id = None
+
     async def _handle_task(self, task: Task) -> None:
         """Handle task execution with retry/escalation logic."""
         from datetime import datetime
@@ -234,25 +436,11 @@ class Agent:
         jira_key = task.context.get("jira_key")
         self.logger.task_started(task.id, task.title, jira_key=jira_key)
 
-        # Validate task if enabled
-        if self.config.validate_tasks:
-            validation = validate_task(task, mode=self.config.validation_mode)
-            if not validation.skipped:
-                if validation.warnings:
-                    for warning in validation.warnings:
-                        self.logger.warning(f"Task validation warning: {warning}")
-                if validation.errors:
-                    for error in validation.errors:
-                        self.logger.error(f"Task validation error: {error}")
-                if not validation.is_valid:
-                    # Reject mode and task failed validation
-                    self.logger.error(f"Task {task.id} rejected due to validation errors")
-                    task.last_error = f"Task validation failed: {'; '.join(validation.errors)}"
-                    task.mark_failed(self.config.id)
-                    self.queue.mark_failed(task)
-                    return
+        # Validate task
+        if not self._validate_task_or_reject(task):
+            return
 
-        # Try to acquire lock
+        # Acquire lock
         lock = self.queue.acquire_lock(task.id, self.config.id)
         if not lock:
             self.logger.warning(f"⏸️  Could not acquire lock, will retry later")
@@ -262,38 +450,13 @@ class Agent:
         task_start_time = datetime.utcnow()
 
         try:
-            # Mark in progress
-            task.mark_in_progress(self.config.id)
-            self.queue.update(task)
+            # Initialize task execution
+            self._initialize_task_execution(task, task_start_time)
 
-            # Update activity: Started
-            self.activity_manager.update_activity(AgentActivity(
-                agent_id=self.config.id,
-                status=AgentStatus.WORKING,
-                current_task=CurrentTask(
-                    id=task.id,
-                    title=task.title,
-                    type=get_type_str(task.type),
-                    started_at=task_start_time
-                ),
-                current_phase=TaskPhase.ANALYZING,
-                last_updated=datetime.utcnow()
-            ))
-
-            # Append start event
-            self.activity_manager.append_event(ActivityEvent(
-                type="start",
-                agent=self.config.id,
-                task_id=task.id,
-                title=task.title,
-                timestamp=datetime.utcnow()
-            ))
-
-            # Build prompt
+            # Build prompt and execute LLM
             self.logger.phase_change("analyzing")
             prompt = self._build_prompt(task)
 
-            # Update phase: Executing LLM (this is where most time is spent)
             self._update_phase(TaskPhase.EXECUTING_LLM)
             self.logger.phase_change("executing_llm")
             self.logger.info(
@@ -310,130 +473,16 @@ class Agent:
                 task_id=task.id,
             )
 
+            # Handle response
             if response.success:
-                # Extract summary from response (Strategy 5: Result Summarization)
-                if self._optimization_config.get("enable_result_summarization", False):
-                    summary = await self._extract_summary(response.content, task)
-                    task.result_summary = summary
-                    self.logger.debug(f"Task {task.id} summary: {summary}")
-
-                # Run tests in sandbox if enabled and applicable
-                test_result = await self._run_sandbox_tests(task)
-                if test_result and not test_result.success:
-                    # Tests failed - give agent a chance to fix
-                    test_retry = task.context.get("_test_retry_count", 0)
-                    if test_retry < self.config.max_test_retries:
-                        self.logger.warning(
-                            f"Tests failed for {task.id} (attempt {test_retry + 1}/{self.config.max_test_retries})"
-                        )
-                        # Feed test failures back to agent
-                        await self._handle_test_failure(task, response, test_result)
-                        return  # Will retry with test failure context
-                    else:
-                        self.logger.error(f"Tests still failing after {test_retry} retries for {task.id}")
-                        task.last_error = f"Tests failed: {test_result.error_message}"
-                        await self._handle_failure(task)
-                        return
-
-                # Handle post-LLM workflow (git/PR/JIRA)
-                self.logger.debug(f"Running post-LLM workflow for {task.id}")
-                await self._handle_success(task, response)
-
-                # Task completed successfully
-                self.logger.debug(f"Marking task {task.id} as completed")
-                task.mark_completed(self.config.id)
-                self.queue.mark_completed(task)
-                self.logger.info(f"✅ Task {task.id} moved to completed")
-
-                # Transition to COMPLETING status briefly so UI can show completion
-                try:
-                    self.activity_manager.update_activity(AgentActivity(
-                        agent_id=self.config.id,
-                        status=AgentStatus.COMPLETING,
-                        current_task=CurrentTask(
-                            id=task.id,
-                            title=task.title,
-                            type=get_type_str(task.type),
-                            started_at=task_start_time
-                        ),
-                        last_updated=datetime.now(timezone.utc)
-                    ))
-                    # Brief delay so dashboard can display the completing state
-                    await asyncio.sleep(1.5)
-                except asyncio.CancelledError:
-                    # If interrupted during sleep, ensure we still go to IDLE
-                    pass
-
-                # Queue code review if PR was created
-                self.logger.debug(f"Checking if code review needed for {task.id}")
-                self._queue_code_review_if_needed(task, response)
-
-                # Log token usage and completion
-                total_tokens = response.input_tokens + response.output_tokens
-                budget = self._get_token_budget(task.type)
-                cost = self._estimate_cost(response)
-
-                duration = (datetime.utcnow() - task_start_time).total_seconds()
-                self.logger.token_usage(response.input_tokens, response.output_tokens, cost)
-                self.logger.task_completed(duration, tokens_used=total_tokens)
-
-                # Soft limit warning (don't fail, just alert)
-                if self._optimization_config.get("enable_token_budget_warnings", False):
-                    threshold = self._optimization_config.get("budget_warning_threshold", BUDGET_WARNING_THRESHOLD)
-                    if total_tokens > budget * threshold:
-                        self.logger.warning(
-                            f"Task {task.id} EXCEEDED TOKEN BUDGET: "
-                            f"{total_tokens} tokens (budget: {budget}, "
-                            f"{int(threshold * 100)}% threshold: {budget * threshold:.0f})"
-                        )
-                        # Append to activity metrics for dashboard
-                        self.activity_manager.append_event(ActivityEvent(
-                            type="token_budget_exceeded",
-                            agent=self.config.id,
-                            task_id=task.id,
-                            title=f"Token budget exceeded: {total_tokens} > {budget}",
-                            timestamp=datetime.utcnow()
-                        ))
-
-                # Append complete event with duration, token usage, and PR URL
-                duration_ms = int((datetime.utcnow() - task_start_time).total_seconds() * 1000)
-                pr_url = task.context.get("pr_url")
-                self.activity_manager.append_event(ActivityEvent(
-                    type="complete",
-                    agent=self.config.id,
-                    task_id=task.id,
-                    title=task.title,
-                    timestamp=datetime.utcnow(),
-                    duration_ms=duration_ms,
-                    pr_url=pr_url,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    cost=cost
-                ))
+                await self._handle_successful_response(task, response, task_start_time)
             else:
-                # Task failed - store error for escalation
-                task.last_error = response.error or "Unknown error"
-                self.logger.task_failed(task.last_error, task.retry_count)
-
-                # Append fail event with error details
-                self.activity_manager.append_event(ActivityEvent(
-                    type="fail",
-                    agent=self.config.id,
-                    task_id=task.id,
-                    title=task.title,
-                    timestamp=datetime.utcnow(),
-                    retry_count=task.retry_count,
-                    error_message=task.last_error
-                ))
-
-                await self._handle_failure(task)
+                await self._handle_failed_response(task, response)
 
         except Exception as e:
-            # Store exception for escalation
             task.last_error = str(e)
             self.logger.exception(f"Error processing task {task.id}: {e}")
 
-            # Append fail event for exceptions with error details
             self.activity_manager.append_event(ActivityEvent(
                 type="fail",
                 agent=self.config.id,
@@ -447,20 +496,7 @@ class Agent:
             await self._handle_failure(task)
 
         finally:
-            # Clear activity - back to IDLE
-            self.activity_manager.update_activity(AgentActivity(
-                agent_id=self.config.id,
-                status=AgentStatus.IDLE,
-                last_updated=datetime.utcnow()
-            ))
-
-            # Cleanup worktree based on task outcome
-            task_succeeded = task.status == TaskStatus.COMPLETED
-            self._cleanup_worktree(task, success=task_succeeded)
-
-            if lock:
-                self.queue.release_lock(lock)
-            self._current_task_id = None
+            self._cleanup_task_execution(task, lock)
 
     async def _handle_failure(self, task: Task) -> None:
         """
@@ -755,6 +791,49 @@ class Agent:
         # Guaranteed fallback
         return extracted[0] if extracted else f"Task {get_type_str(task.type)} completed"
 
+    def _handle_shadow_mode_comparison(self, task: Task) -> str:
+        """Generate and compare both prompts in shadow mode, return legacy prompt."""
+        legacy_prompt = self._build_prompt_legacy(task)
+        optimized_prompt = self._build_prompt_optimized(task)
+
+        # Log comparison
+        legacy_len = len(legacy_prompt)
+        optimized_len = len(optimized_prompt)
+        savings = legacy_len - optimized_len
+        savings_pct = (savings / legacy_len * 100) if legacy_len > 0 else 0
+
+        # Truncate task ID for security
+        task_id_short = task.id[:8] + "..." if len(task.id) > 8 else task.id
+
+        self.logger.debug(
+            f"[SHADOW MODE] Task {task_id_short} prompt comparison: "
+            f"legacy={legacy_len} chars, optimized={optimized_len} chars, "
+            f"savings={savings} chars ({savings_pct:.1f}%)"
+        )
+
+        # Record metrics for analysis
+        self._record_optimization_metrics(task, legacy_len, optimized_len)
+
+        # Return legacy prompt (no behavioral change in shadow mode)
+        return legacy_prompt
+
+    def _append_test_failure_context(self, prompt: str, task: Task) -> str:
+        """Append test failure report to prompt if present."""
+        test_failure_report = task.context.get("_test_failure_report")
+        if not test_failure_report:
+            return prompt
+
+        return prompt + f"""
+
+## IMPORTANT: Previous Tests Failed
+
+Your previous implementation had test failures. Please fix the issues below:
+
+{test_failure_report}
+
+Fix the failing tests and ensure all tests pass.
+"""
+
     def _build_prompt(self, task: Task) -> str:
         """
         Build prompt from task.
@@ -771,37 +850,12 @@ class Agent:
         shadow_mode = self._optimization_config.get("shadow_mode", False)
         use_optimizations = self._should_use_optimization(task)
 
-        # Determine which prompt to use (or generate both for shadow mode)
+        # Determine which prompt to use
         if shadow_mode:
-            # Generate both prompts for comparison
-            legacy_prompt = self._build_prompt_legacy(task)
-            optimized_prompt = self._build_prompt_optimized(task)
-
-            # Log comparison (DEBUG level to avoid sensitive data exposure)
-            legacy_len = len(legacy_prompt)
-            optimized_len = len(optimized_prompt)
-            savings = legacy_len - optimized_len
-            savings_pct = (savings / legacy_len * 100) if legacy_len > 0 else 0
-
-            # Truncate task ID for security
-            task_id_short = task.id[:8] + "..." if len(task.id) > 8 else task.id
-
-            self.logger.debug(
-                f"[SHADOW MODE] Task {task_id_short} prompt comparison: "
-                f"legacy={legacy_len} chars, optimized={optimized_len} chars, "
-                f"savings={savings} chars ({savings_pct:.1f}%)"
-            )
-
-            # Record metrics for analysis
-            self._record_optimization_metrics(task, legacy_len, optimized_len)
-
-            # Use legacy prompt (no behavioral change in shadow mode)
-            return legacy_prompt
+            prompt = self._handle_shadow_mode_comparison(task)
         elif use_optimizations:
-            # Use optimized prompt
-            return self._build_prompt_optimized(task)
+            prompt = self._build_prompt_optimized(task)
         else:
-            # Use legacy prompt (default)
             prompt = self._build_prompt_legacy(task)
 
         # Log prompt preview for debugging (sanitized)
@@ -811,19 +865,8 @@ class Agent:
                 prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
             self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
 
-        # Append test failure context if retrying after test failure
-        test_failure_report = task.context.get("_test_failure_report")
-        if test_failure_report:
-            prompt += f"""
-
-## IMPORTANT: Previous Tests Failed
-
-Your previous implementation had test failures. Please fix the issues below:
-
-{test_failure_report}
-
-Fix the failing tests and ensure all tests pass.
-"""
+        # Append test failure context if present
+        prompt = self._append_test_failure_context(prompt, task)
 
         return prompt
 
@@ -906,22 +949,11 @@ Fix the failing tests and ensure all tests pass.
         )
         return cost
 
-    def _build_prompt_legacy(self, task: Task) -> str:
-        """Build prompt using legacy format (original implementation)."""
-        task_json = task.model_dump_json(indent=2)
+    def _build_jira_guidance(self, jira_key: str, jira_project: str) -> str:
+        """Build JIRA integration guidance for MCP."""
+        jira_server = self.jira_config.server if self.jira_config else "jira.example.com"
 
-        # Extract integration context
-        jira_key = task.context.get("jira_key")
-        github_repo = task.context.get("github_repo")
-        jira_project = task.context.get("jira_project")
-
-        mcp_guidance = ""
-
-        # Add JIRA guidance if MCP enabled and JIRA context exists
-        if self._mcp_enabled and (jira_key or jira_project):
-            jira_server = self.jira_config.server if self.jira_config else "jira.example.com"
-
-            mcp_guidance += f"""
+        return f"""
 JIRA INTEGRATION (via MCP):
 You have access to JIRA via MCP tools:
 - Search issues: jira_search_issues(jql="project = {jira_project or 'PROJ'}")
@@ -939,18 +971,18 @@ Current context:
 
 """
 
-        # Add GitHub guidance if MCP enabled and GitHub context exists
-        if self._mcp_enabled and github_repo:
-            owner, repo = github_repo.split("/")
+    def _build_github_guidance(self, github_repo: str, jira_key: str) -> str:
+        """Build GitHub integration guidance for MCP."""
+        owner, repo = github_repo.split("/")
 
-            # Get formatting patterns from config
-            branch_pattern = "{type}/{ticket_id}-{slug}"
-            pr_title_pattern = "[{ticket_id}] {title}"
-            if self.github_config:
-                branch_pattern = self.github_config.branch_pattern
-                pr_title_pattern = self.github_config.pr_title_pattern
+        # Get formatting patterns from config
+        branch_pattern = "{type}/{ticket_id}-{slug}"
+        pr_title_pattern = "[{ticket_id}] {title}"
+        if self.github_config:
+            branch_pattern = self.github_config.branch_pattern
+            pr_title_pattern = self.github_config.pr_title_pattern
 
-            mcp_guidance += f"""
+        return f"""
 GITHUB INTEGRATION (via MCP):
 Repository: {github_repo}
 Branch naming: Use pattern "{branch_pattern}"
@@ -977,9 +1009,9 @@ Workflow coordination:
 
 """
 
-        # Add error handling guidance if MCP enabled
-        if self._mcp_enabled:
-            mcp_guidance += """
+    def _build_error_handling_guidance(self) -> str:
+        """Build error handling guidance for MCP tools."""
+        return """
 ERROR HANDLING:
 If a tool call fails:
 1. Read the error message carefully
@@ -992,6 +1024,25 @@ If a tool call fails:
    - Do NOT try to undo successful operations
 
 """
+
+    def _build_prompt_legacy(self, task: Task) -> str:
+        """Build prompt using legacy format (original implementation)."""
+        task_json = task.model_dump_json(indent=2)
+
+        # Extract integration context
+        jira_key = task.context.get("jira_key")
+        github_repo = task.context.get("github_repo")
+        jira_project = task.context.get("jira_project")
+
+        mcp_guidance = ""
+
+        # Build MCP guidance sections
+        if self._mcp_enabled:
+            if jira_key or jira_project:
+                mcp_guidance += self._build_jira_guidance(jira_key, jira_project)
+            if github_repo:
+                mcp_guidance += self._build_github_guidance(github_repo, jira_key)
+            mcp_guidance += self._build_error_handling_guidance()
 
         return f"""You are {self.config.id} working on an asynchronous task.
 
@@ -1450,47 +1501,39 @@ IMPORTANT:
             }
         return None
 
-    def _queue_code_review_if_needed(self, task: Task, response) -> None:
-        """
-        Automatically queue a code review task if a PR was created.
-
-        This ensures every PR gets reviewed by the code-reviewer agent,
-        regardless of whether the creating agent remembered to queue the review.
-        """
-        # Skip if this agent IS the code-reviewer (avoid infinite loop)
-        if self.config.id == "code-reviewer":
-            return
-
-        # Skip if task type is already a review
-        if task.type == TaskType.REVIEW:
-            return
-
-        # Extract PR info from response
+    def _get_pr_info(self, task: Task, response) -> Optional[dict]:
+        """Extract PR information from response or task context."""
+        # Try extracting from response content
         pr_info = self._extract_pr_info_from_response(response.content)
+        if pr_info:
+            return pr_info
 
-        # Also check task context (in case it was set by MCP)
-        if not pr_info and task.context.get("pr_url"):
-            pr_url = task.context.get("pr_url")
-            match = re.search(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)', pr_url)
-            if match:
-                owner, repo, pr_number = match.groups()
-                pr_info = {
-                    "pr_url": pr_url,
-                    "pr_number": int(pr_number),
-                    "owner": owner,
-                    "repo": repo,
-                    "github_repo": f"{owner}/{repo}",
-                }
+        # Check task context
+        pr_url = task.context.get("pr_url")
+        if not pr_url:
+            return None
 
-        if not pr_info:
-            self.logger.debug(f"No PR found in task {task.id} - skipping code review queue")
-            return
+        match = re.search(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)', pr_url)
+        if not match:
+            return None
 
-        # Create code review task
+        owner, repo, pr_number = match.groups()
+        return {
+            "pr_url": pr_url,
+            "pr_number": int(pr_number),
+            "owner": owner,
+            "repo": repo,
+            "github_repo": f"{owner}/{repo}",
+        }
+
+    def _build_review_task(self, task: Task, pr_info: dict) -> Task:
+        """Build code review task for a PR."""
+        from datetime import datetime
+
         jira_key = task.context.get("jira_key", "UNKNOWN")
         pr_number = pr_info["pr_number"]
 
-        review_task = Task(
+        return Task(
             id=f"review-{task.id}-{pr_number}",
             type=TaskType.REVIEW,
             status=TaskStatus.PENDING,
@@ -1532,7 +1575,31 @@ IMPORTANT:
             },
         )
 
-        # Queue the review task
+    def _queue_code_review_if_needed(self, task: Task, response) -> None:
+        """
+        Automatically queue a code review task if a PR was created.
+
+        This ensures every PR gets reviewed by the code-reviewer agent,
+        regardless of whether the creating agent remembered to queue the review.
+        """
+        # Skip if this agent IS the code-reviewer (avoid infinite loop)
+        if self.config.id == "code-reviewer":
+            return
+
+        # Skip if task type is already a review
+        if task.type == TaskType.REVIEW:
+            return
+
+        # Get PR information
+        pr_info = self._get_pr_info(task, response)
+        if not pr_info:
+            self.logger.debug(f"No PR found in task {task.id} - skipping code review queue")
+            return
+
+        # Build and queue review task
+        review_task = self._build_review_task(task, pr_info)
+        pr_number = pr_info["pr_number"]
+
         try:
             self.queue.push(review_task, "code-reviewer")
             self.logger.info(
