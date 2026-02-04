@@ -23,6 +23,7 @@ from ..safeguards.retry_handler import RetryHandler
 from ..safeguards.escalation import EscalationHandler
 from ..workspace.worktree_manager import WorktreeManager, WorktreeConfig
 from ..utils.rich_logging import ContextLogger, setup_rich_logging
+from ..utils.type_helpers import get_type_str
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -53,11 +54,6 @@ MODEL_PRICING = {
     "sonnet": {"input": 3.0, "output": 15.0},
     "opus": {"input": 15.0, "output": 75.0},
 }
-
-
-def _get_type_str(task_type) -> str:
-    """Get string value from task type (handles both enum and string)."""
-    return task_type.value if hasattr(task_type, 'value') else str(task_type)
 
 
 @dataclass
@@ -277,7 +273,7 @@ class Agent:
                 current_task=CurrentTask(
                     id=task.id,
                     title=task.title,
-                    type=_get_type_str(task.type),
+                    type=get_type_str(task.type),
                     started_at=task_start_time
                 ),
                 current_phase=TaskPhase.ANALYZING,
@@ -357,7 +353,7 @@ class Agent:
                         current_task=CurrentTask(
                             id=task.id,
                             title=task.title,
-                            type=_get_type_str(task.type),
+                            type=get_type_str(task.type),
                             started_at=task_start_time
                         ),
                         last_updated=datetime.now(timezone.utc)
@@ -627,7 +623,7 @@ class Agent:
         minimal = {
             "title": task.title.strip(),
             "description": task.description.strip(),
-            "type": _get_type_str(task.type),
+            "type": get_type_str(task.type),
         }
 
         # Include acceptance criteria and deliverables if present
@@ -679,7 +675,7 @@ class Agent:
         }
 
         # Get budget from config or use default
-        budget_key = _get_type_str(task_type).lower().replace("-", "_")
+        budget_key = get_type_str(task_type).lower().replace("-", "_")
         configured_budgets = self._optimization_config.get("token_budgets", {})
 
         return configured_budgets.get(budget_key, default_budgets.get(budget_key, 40000))
@@ -702,12 +698,12 @@ class Agent:
         """
         # Guard against empty response
         if not response or not response.strip():
-            return f"Task {_get_type_str(task.type)} completed (no output)"
+            return f"Task {get_type_str(task.type)} completed (no output)"
 
         # Defensive guard - prevents recursion even though we don't recurse currently
         if _recursion_depth > 0:
             self.logger.debug("Recursion depth exceeded in summary extraction, using fallback")
-            return f"Task {_get_type_str(task.type)} completed"
+            return f"Task {get_type_str(task.type)} completed"
 
         # Try regex extraction first (fast, no cost)
         extracted = []
@@ -757,7 +753,7 @@ class Agent:
                 self.logger.warning(f"Failed to extract summary with Haiku: {e}")
 
         # Guaranteed fallback
-        return extracted[0] if extracted else f"Task {_get_type_str(task.type)} completed"
+        return extracted[0] if extracted else f"Task {get_type_str(task.type)} completed"
 
     def _build_prompt(self, task: Task) -> str:
         """
@@ -846,7 +842,7 @@ Fix the failing tests and ensure all tests pass.
         try:
             metrics = {
                 "task_id": task.id,
-                "task_type": _get_type_str(task.type),
+                "task_type": get_type_str(task.type),
                 "agent_id": self.config.id,
                 "legacy_prompt_chars": legacy_prompt_length,
                 "optimized_prompt_chars": optimized_prompt_length,

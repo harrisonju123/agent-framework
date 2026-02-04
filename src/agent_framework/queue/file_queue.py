@@ -9,6 +9,7 @@ from typing import Optional, List
 
 from ..core.task import Task, TaskStatus
 from .locks import FileLock
+from ..utils.atomic_io import atomic_write_model
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +64,9 @@ class FileQueue:
         queue_path.mkdir(parents=True, exist_ok=True)
 
         task_file = queue_path / f"{task.id}.json"
-        tmp_file = queue_path / f"{task.id}.json.tmp"
 
-        # Write to temp file
-        tmp_file.write_text(task.model_dump_json(indent=2))
-
-        # Atomic rename
-        tmp_file.rename(task_file)
+        # Atomic write
+        atomic_write_model(task_file, task)
 
     def pop(self, queue_id: str) -> Optional[Task]:
         """
@@ -148,9 +145,7 @@ class FileQueue:
             logger.warning(f"Task file not found for update: {task.id}")
             return
 
-        tmp_file = queue_path / f"{task.id}.json.tmp"
-        tmp_file.write_text(task.model_dump_json(indent=2))
-        tmp_file.rename(task_file)
+        atomic_write_model(task_file, task)
 
     def mark_completed(self, task: Task) -> None:
         """Move task to completed storage."""
@@ -158,11 +153,9 @@ class FileQueue:
         task_file = queue_path / f"{task.id}.json"
 
         completed_file = self.completed_dir / f"{task.id}.json"
-        tmp_file = self.completed_dir / f"{task.id}.json.tmp"
 
         # Write to completed directory
-        tmp_file.write_text(task.model_dump_json(indent=2))
-        tmp_file.rename(completed_file)
+        atomic_write_model(completed_file, task)
 
         # Remove from queue
         if task_file.exists():

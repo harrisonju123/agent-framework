@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ..utils.validators import validate_branch_name, validate_owner_repo
+
 logger = logging.getLogger(__name__)
 
 # Constants
@@ -65,23 +67,7 @@ class MultiRepoManager:
         Raises:
             ValueError: If format is invalid
         """
-        # Must be in format "owner/repo"
-        if not re.match(r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$', owner_repo):
-            raise ValueError(
-                f"Invalid repository format: {owner_repo}. Must be 'owner/repo'"
-            )
-
-        # Prevent path traversal
-        if '..' in owner_repo or owner_repo.startswith('/'):
-            raise ValueError(f"Invalid repository name: {owner_repo}")
-
-        # Must contain exactly one slash
-        if owner_repo.count('/') != 1:
-            raise ValueError(
-                f"Repository must be in format 'owner/repo': {owner_repo}"
-            )
-
-        return owner_repo
+        return validate_owner_repo(owner_repo)
 
     def _validate_branch_name(self, branch_name: str) -> str:
         """
@@ -96,26 +82,13 @@ class MultiRepoManager:
         Raises:
             ValueError: If branch name is invalid
         """
-        if not branch_name:
-            raise ValueError("Branch name cannot be empty")
+        result = validate_branch_name(branch_name)
 
-        # Strict whitelist: only allow alphanumeric, dash, underscore, forward slash
-        if not re.match(r'^[a-zA-Z0-9/_-]+$', branch_name):
-            raise ValueError(f"Invalid branch name: {branch_name}")
-
-        if branch_name.startswith('/') or branch_name.endswith('/'):
-            raise ValueError("Branch name cannot start or end with /")
-
-        if '..' in branch_name or '@{' in branch_name:
-            raise ValueError("Branch name contains invalid sequence")
-
+        # Additional check specific to multi-repo manager
         if branch_name.endswith('.lock'):
             raise ValueError("Branch name cannot end with .lock")
 
-        if len(branch_name) > 255:
-            raise ValueError("Branch name too long")
-
-        return branch_name
+        return result
 
     def _validate_file_path(self, file_path: str) -> str:
         """

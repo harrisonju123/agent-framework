@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ..utils.validators import validate_branch_name, validate_identifier, validate_owner_repo
+
 logger = logging.getLogger(__name__)
 
 # Registry file for tracking worktrees
@@ -150,63 +152,15 @@ class WorktreeManager:
 
     def _validate_branch_name(self, branch_name: str) -> str:
         """Validate and sanitize git branch name."""
-        if not branch_name:
-            raise ValueError("Branch name cannot be empty")
-
-        # Strict whitelist
-        if not re.match(r'^[a-zA-Z0-9/_-]+$', branch_name):
-            raise ValueError(f"Invalid branch name: {branch_name}")
-
-        if branch_name.startswith('/') or branch_name.endswith('/'):
-            raise ValueError("Branch name cannot start or end with /")
-
-        if '..' in branch_name or '@{' in branch_name:
-            raise ValueError("Branch name contains invalid sequence")
-
-        if len(branch_name) > 255:
-            raise ValueError("Branch name too long")
-
-        return branch_name
+        return validate_branch_name(branch_name)
 
     def _validate_identifier(self, value: str, name: str) -> str:
         """Validate agent_id or task_id to prevent path traversal."""
-        if not value:
-            raise ValueError(f"{name} cannot be empty")
-
-        # Only allow alphanumeric, dash, underscore
-        if not re.match(r'^[a-zA-Z0-9_-]+$', value):
-            raise ValueError(f"Invalid {name}: {value}")
-
-        if '..' in value or '/' in value or '\\' in value:
-            raise ValueError(f"{name} contains invalid characters: {value}")
-
-        if len(value) > 128:
-            raise ValueError(f"{name} too long")
-
-        return value
+        return validate_identifier(value, name)
 
     def _validate_owner_repo(self, owner_repo: str) -> str:
         """Validate repository name format (owner/repo)."""
-        if not owner_repo:
-            raise ValueError("Repository name cannot be empty")
-
-        # Must be in format "owner/repo"
-        if not re.match(r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$', owner_repo):
-            raise ValueError(
-                f"Invalid repository format: {owner_repo}. Must be 'owner/repo'"
-            )
-
-        # Prevent path traversal
-        if '..' in owner_repo or owner_repo.startswith('/'):
-            raise ValueError(f"Invalid repository name: {owner_repo}")
-
-        # Must contain exactly one slash
-        if owner_repo.count('/') != 1:
-            raise ValueError(
-                f"Repository must be in format 'owner/repo': {owner_repo}"
-            )
-
-        return owner_repo
+        return validate_owner_repo(owner_repo)
 
     def _get_worktree_key(self, agent_id: str, task_id: str) -> str:
         """Generate registry key for a worktree."""

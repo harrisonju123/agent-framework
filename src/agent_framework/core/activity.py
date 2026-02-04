@@ -9,6 +9,8 @@ from typing import Optional, List
 
 from pydantic import BaseModel
 
+from ..utils.stream_parser import parse_jsonl_to_models
+
 # fcntl is Unix-only, use fallback for Windows
 try:
     import fcntl
@@ -168,15 +170,7 @@ class ActivityManager:
 
     def _parse_events(self, content: str) -> List[ActivityEvent]:
         """Parse events from stream file content."""
-        events = []
-        for line in content.strip().split('\n'):
-            if line:
-                try:
-                    data = json.loads(line)
-                    events.append(ActivityEvent(**data))
-                except (json.JSONDecodeError, ValueError, KeyError) as e:
-                    logger.debug(f"Failed to parse activity event: {e}")
-        return events
+        return parse_jsonl_to_models(content, ActivityEvent, strict=False)
 
     def get_recent_events(self, limit: int = 10) -> List[ActivityEvent]:
         """Get recent activity events."""
@@ -188,15 +182,14 @@ class ActivityManager:
         if not self.stream_file.exists():
             return []
 
-        events = []
-        for line in self.stream_file.read_text().strip().split('\n'):
-            if line:
-                try:
-                    data = json.loads(line)
-                    events.append(ActivityEvent(**data))
-                except Exception:
-                    pass
-        return events
+        content = self.stream_file.read_text()
+        return parse_jsonl_to_models(content, ActivityEvent, strict=False)
+
+    def get_recent_events(self, limit: int = 10) -> List[ActivityEvent]:
+        """Get recent activity events (most recent first)."""
+        events = self._read_stream()
+        # Return last N events in reverse order (most recent first)
+        return list(reversed(events[-limit:])) if events else []
 
     def _write_stream(self, events: List[ActivityEvent]) -> None:
         """Write events to stream file atomically."""
