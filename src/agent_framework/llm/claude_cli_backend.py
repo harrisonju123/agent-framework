@@ -111,19 +111,21 @@ class ClaudeCLIBackend(LLMBackend):
         if task_id:
             self.logs_dir.mkdir(parents=True, exist_ok=True)
             log_file_path = self.logs_dir / f"claude-cli-{task_id}.log"
-            log_file = open(log_file_path, "w")
-            log_file.write(f"=== Claude CLI Task: {task_id} ===\n")
-            log_file.write(f"Model: {model}\n")
-            log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            log_file.write(f"Timeout: {timeout}s\n")
-            log_file.write("=" * 50 + "\n\n")
-            log_file.flush()
-            logger.info(f"Streaming Claude CLI output to {log_file_path}")
 
         try:
-            # Prepare clean environment (exclude problematic beta flag)
+            # Open file inside try block to prevent handle leak
+            if log_file_path:
+                log_file = open(log_file_path, "w")
+                log_file.write(f"=== Claude CLI Task: {task_id} ===\n")
+                log_file.write(f"Model: {model}\n")
+                log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log_file.write(f"Timeout: {timeout}s\n")
+                log_file.write("=" * 50 + "\n\n")
+                log_file.flush()
+                logger.info(f"Streaming Claude CLI output to {log_file_path}")
+            # Prepare clean environment (disable experimental betas for AWS Bedrock compatibility)
             env = os.environ.copy()
-            env.pop('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', None)
+            env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1'
 
             # Run subprocess with streaming output
             process = await asyncio.create_subprocess_exec(
