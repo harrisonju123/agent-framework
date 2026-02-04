@@ -116,8 +116,12 @@ repositories:
     jira_project: ME
     display_name: Lifecycle Service
 
+  - github_repo: justworkshr/clockwork_web
+    jira_project: ME
+    display_name: Clockwork Web
+
 # Workflow Configuration
-# Defines agent chains and quality gates for different workflow modes
+# Defines agent chains and quality gates for diffeent workflow modes
 workflows:
   simple:
     description: "Fast workflow for small changes"
