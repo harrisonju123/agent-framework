@@ -25,10 +25,15 @@ class LLMConfig(BaseModel):
     # Claude CLI settings
     claude_cli_executable: str = "claude"
     claude_cli_max_turns: int = 999
-    claude_cli_timeout: int = 1800  # 30 minutes default (tasks can take a while with MCP)
+    claude_cli_timeout: int = 3600  # Default fallback timeout (1 hour)
     claude_cli_cheap_model: str = "haiku"
     claude_cli_default_model: str = "sonnet"
     claude_cli_premium_model: str = "opus"
+
+    # Task-type-specific timeouts (used by ModelSelector.select_timeout)
+    claude_cli_timeout_large: int = 3600   # 1 hour - IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING
+    claude_cli_timeout_bounded: int = 1800  # 30 min - TESTING, VERIFICATION, FIX, BUGFIX, REVIEW
+    claude_cli_timeout_simple: int = 900    # 15 min - DOCUMENTATION, COORDINATION, STATUS_REPORT
 
     # MCP settings
     mcp_config_path: Optional[str] = None
@@ -43,6 +48,10 @@ class TaskConfig(BaseModel):
     backoff_initial: int = 30
     backoff_max: int = 240
     backoff_multiplier: int = 2
+
+    # Task validation settings
+    validate_tasks: bool = True
+    validation_mode: str = "warn"  # "warn" logs warning, "reject" fails the task
 
 
 class SafeguardsConfig(BaseModel):

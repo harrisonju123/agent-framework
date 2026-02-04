@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import tempfile
@@ -12,6 +13,8 @@ from typing import Optional
 from .base import LLMBackend, LLMRequest, LLMResponse
 from .model_selector import ModelSelector
 from ..core.task import TaskType
+
+logger = logging.getLogger(__name__)
 
 
 class ClaudeCLIBackend(LLMBackend):
@@ -33,11 +36,21 @@ class ClaudeCLIBackend(LLMBackend):
         premium_model: str = "opus",
         mcp_config_path: Optional[str] = None,
         timeout: int = DEFAULT_TIMEOUT,
+        timeout_large: int = 3600,
+        timeout_bounded: int = 1800,
+        timeout_simple: int = 900,
+        logs_dir: Optional[Path] = None,
     ):
         self.executable = executable
         self.max_turns = max_turns
-        self.timeout = timeout
-        self.model_selector = ModelSelector(cheap_model, default_model, premium_model)
+        self.timeout = timeout  # Fallback timeout when task_type not specified
+        self.model_selector = ModelSelector(
+            cheap_model, default_model, premium_model,
+            timeout_large=timeout_large,
+            timeout_bounded=timeout_bounded,
+            timeout_simple=timeout_simple,
+        )
+        self.logs_dir = logs_dir or Path("logs")
 
         # Expand environment variables in MCP config if provided
         if mcp_config_path:
@@ -45,11 +58,17 @@ class ClaudeCLIBackend(LLMBackend):
         else:
             self.mcp_config_path = None
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
+    async def complete(
+        self,
+        request: LLMRequest,
+        task_id: Optional[str] = None,
+    ) -> LLMResponse:
         """
         Send a completion request via Claude CLI subprocess.
 
         Spawns: echo "$PROMPT" | claude --model "$MODEL" --dangerously-skip-permissions --max-turns 999
+
+        Output is streamed to a log file in real-time for visibility into long-running tasks.
         """
         start_time = time.time()
 
@@ -60,6 +79,12 @@ class ClaudeCLIBackend(LLMBackend):
             model = self.select_model(request.task_type, request.retry_count)
         else:
             model = self.model_selector.default_model
+
+        # Select timeout based on task type (dynamic timeout per task scope)
+        if request.task_type:
+            timeout = self.model_selector.select_timeout(request.task_type)
+        else:
+            timeout = self.timeout
 
         # Build command
         cmd = [
@@ -80,12 +105,27 @@ class ClaudeCLIBackend(LLMBackend):
         else:
             full_prompt = request.prompt
 
+        # Set up streaming log file
+        log_file_path = None
+        log_file = None
+        if task_id:
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            log_file_path = self.logs_dir / f"claude-cli-{task_id}.log"
+            log_file = open(log_file_path, "w")
+            log_file.write(f"=== Claude CLI Task: {task_id} ===\n")
+            log_file.write(f"Model: {model}\n")
+            log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log_file.write(f"Timeout: {timeout}s\n")
+            log_file.write("=" * 50 + "\n\n")
+            log_file.flush()
+            logger.info(f"Streaming Claude CLI output to {log_file_path}")
+
         try:
             # Prepare clean environment (exclude problematic beta flag)
             env = os.environ.copy()
             env.pop('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', None)
 
-            # Run subprocess
+            # Run subprocess with streaming output
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
@@ -94,33 +134,84 @@ class ClaudeCLIBackend(LLMBackend):
                 env=env,
             )
 
-            # Apply timeout to prevent indefinite hangs
+            # Send prompt to stdin
+            process.stdin.write(full_prompt.encode())
+            await process.stdin.drain()
+            process.stdin.close()
+
+            # Stream output with timeout
+            stdout_chunks = []
+            stderr_chunks = []
+            timed_out = False
+
+            async def read_stream(stream, chunks, name):
+                """Read from stream and write to log file in real-time."""
+                try:
+                    while True:
+                        chunk = await asyncio.wait_for(
+                            stream.read(4096),
+                            timeout=60  # Read timeout per chunk
+                        )
+                        if not chunk:
+                            break
+                        decoded = chunk.decode(errors='replace')
+                        chunks.append(decoded)
+                        if log_file:
+                            log_file.write(decoded)
+                            log_file.flush()
+                except asyncio.TimeoutError:
+                    pass  # Individual read timeout, continue
+                except Exception as e:
+                    logger.debug(f"Stream read error ({name}): {e}")
+
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(input=full_prompt.encode()),
-                    timeout=self.timeout
+                # Read stdout and stderr concurrently with overall timeout
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        read_stream(process.stdout, stdout_chunks, "stdout"),
+                        read_stream(process.stderr, stderr_chunks, "stderr"),
+                    ),
+                    timeout=timeout
                 )
+                await process.wait()
             except asyncio.TimeoutError:
-                # Kill the process if it times out
+                timed_out = True
+                if log_file:
+                    log_file.write(f"\n\n{'=' * 50}\n")
+                    log_file.write(f"⚠️  TIMEOUT after {timeout} seconds\n")
+                    log_file.write(f"Process killed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    log_file.flush()
+                logger.warning(f"Claude CLI timed out after {timeout}s, killing process")
                 process.kill()
                 await process.wait()
-                latency_ms = (time.time() - start_time) * 1000
+
+            latency_ms = (time.time() - start_time) * 1000
+            stdout_text = "".join(stdout_chunks)
+            stderr_text = "".join(stderr_chunks)
+
+            if log_file:
+                log_file.write(f"\n\n{'=' * 50}\n")
+                log_file.write(f"Completed: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log_file.write(f"Duration: {latency_ms/1000:.1f}s\n")
+                log_file.write(f"Exit code: {process.returncode}\n")
+                log_file.write(f"Timed out: {timed_out}\n")
+                log_file.close()
+
+            if timed_out:
                 return LLMResponse(
-                    content="",
+                    content=stdout_text,  # Include partial output
                     model_used=model,
                     input_tokens=0,
                     output_tokens=0,
                     finish_reason="error",
                     latency_ms=latency_ms,
                     success=False,
-                    error=f"Claude CLI timed out after {self.timeout} seconds",
+                    error=f"Claude CLI timed out after {timeout} seconds. Output logged to {log_file_path}",
                 )
-
-            latency_ms = (time.time() - start_time) * 1000
 
             if process.returncode == 0:
                 return LLMResponse(
-                    content=stdout.decode(),
+                    content=stdout_text,
                     model_used=model,
                     input_tokens=0,  # CLI doesn't report token usage
                     output_tokens=0,
@@ -129,13 +220,8 @@ class ClaudeCLIBackend(LLMBackend):
                     success=True,
                 )
             else:
-                # Capture both stdout and stderr for debugging
-                stdout_text = stdout.decode() if stdout else ""
-                stderr_text = stderr.decode() if stderr else ""
                 error_msg = stderr_text or stdout_text or f"Exit code {process.returncode}"
-                # Log the full error for debugging
-                import logging
-                logging.getLogger(__name__).error(
+                logger.error(
                     f"Claude CLI failed: returncode={process.returncode}, "
                     f"stderr={stderr_text[:500]}, stdout={stdout_text[:500]}"
                 )
@@ -152,6 +238,10 @@ class ClaudeCLIBackend(LLMBackend):
 
         except Exception as e:
             latency_ms = (time.time() - start_time) * 1000
+            if log_file:
+                log_file.write(f"\n\n{'=' * 50}\n")
+                log_file.write(f"ERROR: {e}\n")
+                log_file.close()
             return LLMResponse(
                 content="",
                 model_used=model,

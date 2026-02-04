@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import Any, Dict, Optional
 
 from .task import Task, TaskStatus, TaskType
+from .task_validator import validate_task, ValidationResult
 from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
@@ -74,6 +75,9 @@ class AgentConfig:
     sandbox_image: str = "golang:1.22"
     sandbox_test_cmd: str = "go test ./..."
     max_test_retries: int = 2
+    # Task validation
+    validate_tasks: bool = True
+    validation_mode: str = "warn"  # "warn" or "reject"
 
 
 class Agent:
@@ -234,6 +238,24 @@ class Agent:
         jira_key = task.context.get("jira_key")
         self.logger.task_started(task.id, task.title, jira_key=jira_key)
 
+        # Validate task if enabled
+        if self.config.validate_tasks:
+            validation = validate_task(task, mode=self.config.validation_mode)
+            if not validation.skipped:
+                if validation.warnings:
+                    for warning in validation.warnings:
+                        self.logger.warning(f"Task validation warning: {warning}")
+                if validation.errors:
+                    for error in validation.errors:
+                        self.logger.error(f"Task validation error: {error}")
+                if not validation.is_valid:
+                    # Reject mode and task failed validation
+                    self.logger.error(f"Task {task.id} rejected due to validation errors")
+                    task.last_error = f"Task validation failed: {'; '.join(validation.errors)}"
+                    task.mark_failed(self.config.id)
+                    self.queue.mark_failed(task)
+                    return
+
         # Try to acquire lock
         lock = self.queue.acquire_lock(task.id, self.config.id)
         if not lock:
@@ -288,7 +310,8 @@ class Agent:
                     task_type=task.type,
                     retry_count=task.retry_count,
                     context=task.context,
-                )
+                ),
+                task_id=task.id,
             )
 
             if response.success:

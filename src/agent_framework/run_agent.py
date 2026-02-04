@@ -87,6 +87,8 @@ def main():
             poll_interval=framework_config.task.poll_interval,
             max_retries=framework_config.task.max_retries,
             timeout=framework_config.task.timeout,
+            validate_tasks=framework_config.task.validate_tasks,
+            validation_mode=framework_config.task.validation_mode,
         )
 
         # Create LLM backend (Claude CLI mode only for now)
@@ -103,10 +105,14 @@ def main():
             executable=framework_config.llm.claude_cli_executable,
             max_turns=framework_config.llm.claude_cli_max_turns,
             timeout=framework_config.llm.claude_cli_timeout,
+            timeout_large=framework_config.llm.claude_cli_timeout_large,
+            timeout_bounded=framework_config.llm.claude_cli_timeout_bounded,
+            timeout_simple=framework_config.llm.claude_cli_timeout_simple,
             cheap_model=framework_config.llm.claude_cli_cheap_model,
             default_model=framework_config.llm.claude_cli_default_model,
             premium_model=framework_config.llm.claude_cli_premium_model,
             mcp_config_path=mcp_config_path,
+            logs_dir=Path(framework_config.workspace) / "logs",
         )
 
         # Create queue

@@ -12,7 +12,16 @@ llm:
   # Claude CLI settings (used when mode=claude_cli)
   claude_cli_executable: claude
   claude_cli_max_turns: 999
-  claude_cli_timeout: 3600  # 1 hour - tasks with MCP can take a while
+  claude_cli_timeout: 3600  # Default fallback timeout (1 hour)
+
+  # Task-type-specific timeouts (prevents vague tasks from running too long)
+  # Large: IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, ESCALATION, ENHANCEMENT
+  # Bounded: TESTING, VERIFICATION, FIX, BUGFIX, REVIEW, PR_REQUEST
+  # Simple: DOCUMENTATION, COORDINATION, STATUS_REPORT
+  claude_cli_timeout_large: 3600   # 1 hour
+  claude_cli_timeout_bounded: 1800 # 30 minutes
+  claude_cli_timeout_simple: 900   # 15 minutes
+
   claude_cli_cheap_model: claude-3-5-haiku-20241022
   claude_cli_default_model: claude-sonnet-4-20250514
   claude_cli_premium_model: claude-opus-4-5-20251101
@@ -32,11 +41,16 @@ llm:
 # Task Processing Configuration
 task:
   poll_interval: 30          # Queue polling interval (seconds)
-  timeout: 1800              # Task timeout (seconds, default: 30 min)
+  timeout: 3600              # Task timeout (seconds, default: 1 hour)
   max_retries: 5             # Max retry attempts before escalation
   backoff_initial: 30        # Initial backoff delay (seconds)
   backoff_max: 240           # Max backoff delay (seconds)
   backoff_multiplier: 2      # Backoff multiplier (exponential)
+
+  # Task validation (prevents vague/underspecified tasks from processing)
+  # Only validates agent-generated tasks; JIRA tickets are skipped
+  validate_tasks: true
+  validation_mode: warn      # "warn" logs warning, "reject" fails the task
 
 # Safeguards Configuration
 safeguards:
