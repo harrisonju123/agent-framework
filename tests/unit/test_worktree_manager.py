@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 import subprocess
 
-from src.agent_framework.workspace.worktree_manager import (
+from agent_framework.workspace.worktree_manager import (
     WorktreeManager,
     WorktreeConfig,
     WorktreeInfo,
