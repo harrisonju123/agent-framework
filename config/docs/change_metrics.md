@@ -1,5 +1,9 @@
 # Change Metrics and PR Size Guidelines
 
+**Version:** 1.0
+**Last Updated:** 2026-02-04
+**Status:** Active
+
 ## Overview
 
 Managing PR size is critical for effective code review and maintainability. This guide provides metrics, thresholds, and escalation procedures for keeping changes reviewable.

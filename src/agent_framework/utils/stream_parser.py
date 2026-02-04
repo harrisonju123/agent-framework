@@ -33,7 +33,8 @@ def parse_jsonl_to_models(
     """
     models = []
     for line in content.strip().split('\n'):
-        if not line.strip():
+        line = line.strip()
+        if not line:
             continue
 
         try:
@@ -67,7 +68,8 @@ def parse_jsonl_to_dicts(
     """
     dicts = []
     for line in content.strip().split('\n'):
-        if not line.strip():
+        line = line.strip()
+        if not line:
             continue
 
         try:

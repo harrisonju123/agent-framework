@@ -2,7 +2,7 @@
 
 import functools
 import logging
-from typing import TypeVar, Callable, Optional, Any
+from typing import TypeVar, Callable, Optional, Any, NoReturn
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +15,7 @@ def log_and_reraise(
     *,
     logger_instance: Optional[logging.Logger] = None,
     level: int = logging.ERROR,
-) -> None:
+) -> NoReturn:
     """
     Log an error with context and re-raise it.
 
@@ -213,6 +213,10 @@ class ErrorContext:
                 return False  # Re-raise exception
             else:
                 return True  # Suppress exception
+
+    def __bool__(self) -> bool:
+        """Return True if no error occurred, False otherwise."""
+        return self.error is None
 
     def get_result(self, result: Any = None) -> Any:
         """

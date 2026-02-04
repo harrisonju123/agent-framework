@@ -1,5 +1,9 @@
 # Workflow Modes
 
+**Version:** 1.0
+**Last Updated:** 2026-02-04
+**Status:** Active
+
 ## Overview
 
 The agent framework supports three workflow modes to balance speed, thoroughness, and team coordination. The workflow mode is set in `task.context.workflow`.

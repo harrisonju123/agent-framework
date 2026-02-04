@@ -1,5 +1,9 @@
 # JIRA Integration Guidelines
 
+**Version:** 1.0
+**Last Updated:** 2026-02-04
+**Status:** Active
+
 ## Overview
 
 Agents integrate with JIRA using MCP (Model Context Protocol) tools. JIRA integration is **optional** and agents must handle both JIRA-connected and local-only modes gracefully.

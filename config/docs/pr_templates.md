@@ -1,5 +1,9 @@
 # Pull Request Description Templates
 
+**Version:** 1.0
+**Last Updated:** 2026-02-04
+**Status:** Active
+
 ## Overview
 
 Standardized PR descriptions improve code review efficiency and provide clear documentation of changes.

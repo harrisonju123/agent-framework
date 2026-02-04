@@ -11,14 +11,30 @@ logger = logging.getLogger(__name__)
 class SubprocessError(Exception):
     """Exception raised when a subprocess command fails."""
 
-    def __init__(self, cmd: str, returncode: int, stderr: str, stdout: str = ""):
+    def __init__(
+        self,
+        cmd: str,
+        returncode: int,
+        stderr: str,
+        stdout: str = "",
+        cwd: Optional[Path] = None,
+        timed_out: bool = False,
+    ):
         self.cmd = cmd
         self.returncode = returncode
         self.stderr = stderr
         self.stdout = stdout
-        super().__init__(
-            f"Command failed with exit code {returncode}: {cmd}\nstderr: {stderr}"
-        )
+        self.cwd = cwd
+        self.timed_out = timed_out
+
+        error_msg = f"Command failed with exit code {returncode}: {cmd}"
+        if cwd:
+            error_msg += f"\n  cwd: {cwd}"
+        if timed_out:
+            error_msg += "\n  (command timed out)"
+        error_msg += f"\n  stderr: {stderr}"
+
+        super().__init__(error_msg)
 
 
 def run_command(
@@ -69,12 +85,25 @@ def run_command(
                 returncode=result.returncode,
                 stderr=result.stderr,
                 stdout=result.stdout,
+                cwd=cwd,
+                timed_out=False,
             )
 
         return result
 
     except subprocess.TimeoutExpired as e:
         logger.error(f"Command timed out after {timeout}s: {cmd}")
+        # Convert TimeoutExpired to SubprocessError for consistency
+        cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+        if check:
+            raise SubprocessError(
+                cmd=cmd_str,
+                returncode=-1,
+                stderr=str(e.stderr) if e.stderr else "Command timed out",
+                stdout=str(e.stdout) if e.stdout else "",
+                cwd=cwd,
+                timed_out=True,
+            )
         raise
 
 
@@ -83,7 +112,7 @@ def run_git_command(
     *,
     cwd: Optional[Path] = None,
     check: bool = True,
-    timeout: int = 30,
+    timeout: Optional[int] = 30,
 ) -> subprocess.CompletedProcess:
     """
     Run a git command with standardized error handling.
@@ -92,7 +121,7 @@ def run_git_command(
         args: Git command arguments (without 'git' prefix)
         cwd: Working directory (git repo)
         check: Raise exception on non-zero exit
-        timeout: Timeout in seconds (default: 30)
+        timeout: Timeout in seconds (default: 30, None for no timeout)
 
     Returns:
         CompletedProcess with stdout, stderr, returncode
