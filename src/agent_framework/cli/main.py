@@ -81,6 +81,171 @@ def init(ctx):
 
 
 @cli.command()
+@click.option("--repo", "-r", required=True, help="GitHub repo (owner/repo)")
+@click.option("--severity", type=click.Choice(["all", "critical", "high", "medium"]), default="high",
+              help="Minimum severity to include")
+@click.option("--max-issues", default=50, help="Max subtasks to create")
+@click.option("--dry-run", is_flag=True, help="Show findings without creating JIRA")
+@click.option("--focus", "-f", help="Custom focus instructions for the analysis (e.g., 'review PTO accrual flow for tech debt')")
+@click.pass_context
+def analyze(ctx, repo, severity, max_issues, dry_run, focus):
+    """Analyze repository and create JIRA epic with findings.
+
+    Scans the entire repository for issues (security, performance, code quality)
+    and creates a JIRA epic with subtasks grouped by file/module location.
+
+    Examples:
+        agent analyze --repo justworkshr/pto
+        agent analyze --repo justworkshr/pto --severity critical --dry-run
+        agent analyze --repo justworkshr/pto --max-issues 30
+    """
+    workspace = ctx.obj["workspace"]
+
+    # Validate repo format
+    if "/" not in repo:
+        console.print(f"[red]Invalid repo format: {repo}[/]")
+        console.print("[dim]Expected format: owner/repo (e.g., justworkshr/pto)[/]")
+        return
+
+    console.print(f"[bold cyan]Repository Analysis: {repo}[/]")
+    console.print()
+
+    # Load config
+    framework_config = load_config(workspace / "config" / "agent-framework.yaml")
+
+    # Find matching repository in config
+    matching_repo = None
+    for registered_repo in framework_config.repositories:
+        if registered_repo.github_repo == repo:
+            matching_repo = registered_repo
+            break
+
+    if not matching_repo:
+        console.print(f"[yellow]Warning: Repository {repo} not found in config[/]")
+        console.print("[dim]Available repositories:[/]")
+        for r in framework_config.repositories:
+            console.print(f"  - {r.github_repo} ({r.jira_project})")
+
+        # Prompt for JIRA project
+        jira_project = click.prompt("Enter JIRA project key for epic creation", type=str)
+    else:
+        jira_project = matching_repo.jira_project
+        console.print(f"[green]✓ Found in config: JIRA project {jira_project}[/]")
+
+    console.print()
+    console.print(f"[bold]Analysis Settings:[/]")
+    console.print(f"  Repository: {repo}")
+    console.print(f"  JIRA Project: {jira_project}")
+    console.print(f"  Severity Filter: {severity}")
+    console.print(f"  Max Issues: {max_issues}")
+    console.print(f"  Dry Run: {dry_run}")
+    if focus:
+        console.print(f"  Focus: {focus}")
+    console.print()
+
+    if dry_run:
+        console.print("[yellow]DRY RUN: Will show findings without creating JIRA tickets[/]")
+        console.print()
+
+    # Create analysis task for repo-analyzer agent
+    import time
+    from datetime import datetime
+
+    task_id = f"analysis-{repo.replace('/', '-')}-{int(time.time())}"
+
+    # Build task description
+    description = f"""Perform full repository analysis on {repo}.
+
+Scan for security vulnerabilities, performance issues, and code quality problems.
+Group findings by file/module location and create JIRA epic with subtasks.
+
+Settings:
+- Severity filter: {severity}
+- Max issues: {max_issues}
+- Dry run: {dry_run}
+"""
+
+    # Add focus instructions if provided
+    if focus:
+        description += f"""
+## Custom Focus Instructions
+{focus}
+
+When analyzing this repository:
+1. PRIORITIZE the areas and flows mentioned in the focus instructions
+2. Look specifically for the issue types mentioned (tech debt, code style, security, etc.)
+3. Explore and trace the specified code flows before running static analyzers
+4. Include a "Focus Area Analysis" section in the JIRA epic description
+"""
+
+    # Build task context
+    task_context = {
+        "mode": "analysis",
+        "workflow": "analysis",
+        "github_repo": repo,
+        "jira_project": jira_project,
+        "severity_filter": severity,
+        "max_issues": max_issues,
+        "dry_run": dry_run,
+    }
+
+    # Add focus instructions to context
+    if focus:
+        task_context["focus_instructions"] = focus
+
+    task = Task(
+        id=task_id,
+        type=TaskType.ANALYSIS,
+        status=TaskStatus.PENDING,
+        priority=1,
+        created_by="cli",
+        assigned_to="repo-analyzer",
+        created_at=datetime.utcnow(),
+        title=f"Analyze repository: {repo}",
+        description=description,
+        context=task_context,
+    )
+
+    # Queue the analysis task
+    queue = FileQueue(workspace)
+    queue.push(task, "repo-analyzer")
+
+    console.print(f"[green]✓ Analysis task queued: {task_id}[/]")
+
+    # Ensure agents are running
+    orchestrator = Orchestrator(workspace)
+    running = orchestrator.get_running_agents()
+
+    if running:
+        console.print(f"[green]✓ Agents already running: {', '.join(running)}[/]")
+    else:
+        console.print("[bold]Starting agents...[/]")
+        orchestrator.setup_signal_handlers()
+        orchestrator.spawn_all_agents()
+        console.print("[green]✓ Agents started[/]")
+
+    console.print()
+    console.print(f"[bold cyan]Analysis in progress...[/]")
+    console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
+    console.print(f"[dim]📝 View logs: tail -f logs/repo-analyzer.log[/]")
+    console.print()
+
+    if not dry_run:
+        console.print("[yellow]The repo-analyzer agent will:[/]")
+        console.print(f"  1. Clone/update {repo}")
+        console.print(f"  2. Detect languages and run static analyzers")
+        console.print(f"  3. Aggregate findings by file/module")
+        console.print(f"  4. Create JIRA epic in project {jira_project}")
+        console.print(f"  5. Create subtasks for each file group")
+    else:
+        console.print("[yellow]The repo-analyzer agent will:[/]")
+        console.print(f"  1. Clone/update {repo}")
+        console.print(f"  2. Detect languages and run static analyzers")
+        console.print(f"  3. Aggregate findings by file/module")
+        console.print(f"  4. Generate analysis report (no JIRA tickets)")
+
+
+@cli.command()
 @click.option("--project", "-p", help="JIRA project key")
 @click.option("--max", "-n", default=10, help="Max tickets to pull")
 @click.pass_context
@@ -364,6 +529,24 @@ def status(ctx, watch):
             asyncio.run(dashboard.run())
         except KeyboardInterrupt:
             console.print("\n[yellow]Exited watch mode[/]")
+
+
+@cli.command()
+@click.pass_context
+def analytics(ctx):
+    """Show analytics dashboard with performance metrics and failure analysis."""
+    workspace = ctx.obj["workspace"]
+
+    from .analytics_dashboard import AnalyticsDashboard
+
+    console.print("[bold cyan]Agent Analytics Dashboard[/]")
+    console.print("[dim]Press Ctrl+C to exit • Tab to switch views[/]\n")
+
+    dashboard = AnalyticsDashboard(workspace)
+    try:
+        asyncio.run(dashboard.run())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Analytics dashboard closed[/]")
     else:
         # One-time status display (legacy table view)
         console.print("[bold]Agent Framework Status[/]")

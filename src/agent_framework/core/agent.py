@@ -323,6 +323,9 @@ class Agent:
                 task.mark_completed(self.config.id)
                 self.queue.mark_completed(task)
 
+                # Queue code review if PR was created
+                self._queue_code_review_if_needed(task, response)
+
                 # Log token usage and completion
                 total_tokens = response.input_tokens + response.output_tokens
                 budget = self._get_token_budget(task.type)
@@ -350,7 +353,7 @@ class Agent:
                             timestamp=datetime.utcnow()
                         ))
 
-                # Append complete event with duration and PR URL if available
+                # Append complete event with duration, token usage, and PR URL
                 duration_ms = int((datetime.utcnow() - task_start_time).total_seconds() * 1000)
                 pr_url = task.context.get("pr_url")
                 self.activity_manager.append_event(ActivityEvent(
@@ -360,7 +363,10 @@ class Agent:
                     title=task.title,
                     timestamp=datetime.utcnow(),
                     duration_ms=duration_ms,
-                    pr_url=pr_url
+                    pr_url=pr_url,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    cost=cost
                 ))
             else:
                 # Task failed - store error for escalation
@@ -439,11 +445,13 @@ class Agent:
                     f"Created escalation task {escalation.id} for failed task {task.id}"
                 )
             else:
+                # Escalation failed - log to escalations directory for human review
                 self.logger.error(
                     f"Escalation task {task.id} failed after {task.retry_count} retries - "
                     "NOT creating another escalation (would cause infinite loop). "
-                    "This escalation requires immediate human intervention."
+                    "Logging to escalations directory for human intervention."
                 )
+                self._log_failed_escalation(task)
         else:
             # Reset task to pending so it can be retried
             self.logger.warning(
@@ -452,6 +460,37 @@ class Agent:
             )
             task.reset_to_pending()
             self.queue.update(task)
+
+    def _log_failed_escalation(self, task: Task) -> None:
+        """
+        Log a failed escalation to the escalations directory for human review.
+
+        When an escalation task itself fails, we cannot create another escalation
+        (infinite loop). Instead, write it to a dedicated directory where humans
+        can review and resolve it.
+        """
+        escalations_dir = self.workspace_root / ".agent-communication" / "escalations"
+        escalations_dir.mkdir(parents=True, exist_ok=True)
+
+        escalation_file = escalations_dir / f"{task.id}.json"
+
+        # Add metadata for human review
+        task_dict = task.model_dump()
+        task_dict["logged_at"] = datetime.utcnow().isoformat()
+        task_dict["logged_by"] = self.config.id
+        task_dict["requires_human_intervention"] = True
+        task_dict["escalation_failed"] = True
+
+        try:
+            escalation_file.write_text(json.dumps(task_dict, indent=2))
+            self.logger.info(
+                f"Logged failed escalation to {escalation_file}. "
+                f"Run 'bash scripts/review-escalations.sh' to review."
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to log escalation to file: {e}")
+            # Last resort: at least log the full task details to the log file
+            self.logger.error(f"Failed escalation details: {json.dumps(task_dict, indent=2)}")
 
     def _sanitize_optimization_config(self, config: dict) -> dict:
         """
@@ -1346,3 +1385,122 @@ IMPORTANT:
         self.queue.update(task)
 
         self.logger.info(f"Task {task.id} reset for test fix retry (attempt {test_retry + 1})")
+
+    def _extract_pr_info_from_response(self, response_content: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract PR information from LLM response content.
+
+        Parses the response for GitHub PR URLs created via MCP tools.
+        Returns dict with pr_url, pr_number, owner, repo if found.
+        """
+        # Pattern for GitHub PR URLs: https://github.com/{owner}/{repo}/pull/{number}
+        pr_pattern = r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)'
+
+        match = re.search(pr_pattern, response_content)
+        if match:
+            owner, repo, pr_number = match.groups()
+            return {
+                "pr_url": match.group(0),
+                "pr_number": int(pr_number),
+                "owner": owner,
+                "repo": repo,
+                "github_repo": f"{owner}/{repo}",
+            }
+        return None
+
+    def _queue_code_review_if_needed(self, task: Task, response) -> None:
+        """
+        Automatically queue a code review task if a PR was created.
+
+        This ensures every PR gets reviewed by the code-reviewer agent,
+        regardless of whether the creating agent remembered to queue the review.
+        """
+        # Skip if this agent IS the code-reviewer (avoid infinite loop)
+        if self.config.id == "code-reviewer":
+            return
+
+        # Skip if task type is already a review
+        if task.type == TaskType.REVIEW:
+            return
+
+        # Extract PR info from response
+        pr_info = self._extract_pr_info_from_response(response.content)
+
+        # Also check task context (in case it was set by MCP)
+        if not pr_info and task.context.get("pr_url"):
+            pr_url = task.context.get("pr_url")
+            match = re.search(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)', pr_url)
+            if match:
+                owner, repo, pr_number = match.groups()
+                pr_info = {
+                    "pr_url": pr_url,
+                    "pr_number": int(pr_number),
+                    "owner": owner,
+                    "repo": repo,
+                    "github_repo": f"{owner}/{repo}",
+                }
+
+        if not pr_info:
+            self.logger.debug(f"No PR found in task {task.id} - skipping code review queue")
+            return
+
+        # Create code review task
+        jira_key = task.context.get("jira_key", "UNKNOWN")
+        pr_number = pr_info["pr_number"]
+
+        review_task = Task(
+            id=f"review-{task.id}-{pr_number}",
+            type=TaskType.REVIEW,
+            status=TaskStatus.PENDING,
+            priority=task.priority,
+            created_by=self.config.id,
+            assigned_to="code-reviewer",
+            created_at=datetime.utcnow(),
+            title=f"Review PR #{pr_number} - [{jira_key}] {task.title[:50]}",
+            description=f"""Automated code review request for PR #{pr_number}.
+
+## PR Information
+- **PR URL**: {pr_info['pr_url']}
+- **Repository**: {pr_info['github_repo']}
+- **JIRA Ticket**: {jira_key}
+- **Created by**: {self.config.id} agent
+
+## Review Instructions
+1. Fetch PR details using `github_get_pr` MCP tool
+2. Review the diff against standard review criteria:
+   - Correctness: Logic errors, edge cases, error handling
+   - Security: Vulnerabilities, input validation, secrets
+   - Performance: Inefficient patterns, N+1 queries
+   - Readability: Code clarity, naming, documentation
+   - Best Practices: Language conventions, test coverage
+3. Post review comments on PR
+4. Update JIRA with review summary
+5. Transition JIRA status if appropriate (Approved/Changes Requested)
+""",
+            context={
+                "jira_key": jira_key,
+                "jira_url": task.context.get("jira_url"),
+                "pr_number": pr_number,
+                "pr_url": pr_info["pr_url"],
+                "github_repo": pr_info["github_repo"],
+                "branch_name": task.context.get("branch_name"),
+                "workflow": task.context.get("workflow", "standard"),
+                "source_task_id": task.id,
+                "source_agent": self.config.id,
+            },
+        )
+
+        # Queue the review task
+        try:
+            self.queue.push(review_task, "code-reviewer")
+            self.logger.info(
+                f"🔍 Queued code review for PR #{pr_number} ({pr_info['github_repo']}) -> code-reviewer"
+            )
+
+            # Store PR URL in original task context for tracking
+            task.context["pr_url"] = pr_info["pr_url"]
+            task.context["pr_number"] = pr_number
+            task.context["code_review_task_id"] = review_task.id
+
+        except Exception as e:
+            self.logger.error(f"Failed to queue code review for PR #{pr_number}: {e}")

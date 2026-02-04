@@ -51,6 +51,9 @@ class TaskType(str, Enum):
     # Premium model (opus)
     ESCALATION = "escalation"
 
+    # Analysis workflow (default model)
+    ANALYSIS = "analysis"
+
 
 class Task(BaseModel):
     """Task model matching the Bash system's JSON schema."""

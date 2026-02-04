@@ -31,7 +31,7 @@ const TOOLS: Tool[] = [
       properties: {
         agent_id: {
           type: "string",
-          enum: ["engineer", "qa", "architect", "product-owner"],
+          enum: ["engineer", "qa", "architect", "product-owner", "repo-analyzer"],
           description: "Target agent to receive the task",
         },
         task_type: {
@@ -48,6 +48,7 @@ const TOOLS: Tool[] = [
             "enhancement",
             "testing",
             "documentation",
+            "analysis",
           ],
           description: "Type of task determining model selection",
         },
@@ -162,7 +163,7 @@ const TOOLS: Tool[] = [
       properties: {
         agent_id: {
           type: "string",
-          enum: ["engineer", "qa", "architect", "product-owner"],
+          enum: ["engineer", "qa", "architect", "product-owner", "repo-analyzer"],
           description: "Agent queue to list tasks from",
         },
       },

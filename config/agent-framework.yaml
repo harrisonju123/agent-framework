@@ -13,9 +13,9 @@ llm:
   claude_cli_executable: claude
   claude_cli_max_turns: 999
   claude_cli_timeout: 3600  # 1 hour - tasks with MCP can take a while
-  claude_cli_cheap_model: haiku
-  claude_cli_default_model: sonnet
-  claude_cli_premium_model: opus
+  claude_cli_cheap_model: claude-3-5-haiku-20241022
+  claude_cli_default_model: claude-sonnet-4-20250514
+  claude_cli_premium_model: claude-opus-4-5-20251101
 
   # LiteLLM settings (used when mode=litellm)
   # litellm_api_key: ${ANTHROPIC_API_KEY}
@@ -149,6 +149,13 @@ workflows:
     require_static_analysis: true
     block_on_critical: true
 
+  analysis:
+    description: "Full repository analysis workflow"
+    agents: [repo-analyzer]
+    output: jira_epic  # Creates epic with file-grouped subtasks
+    auto_review: false
+    require_tests: false
+
 # Static Analysis Configuration
 static_analysis:
   enabled: true
@@ -176,3 +183,40 @@ circuit_breaker:
   actions:
     on_degraded: reduce_replicas   # Scale down agents on degradation
     on_critical: pause_intake      # Stop accepting new tasks on critical health
+
+# Analytics Configuration
+# Performance metrics, failure detection, and continuous improvement
+analytics:
+  enabled: true
+
+  # Performance metrics collection
+  performance_metrics:
+    enabled: true
+    report_interval_hours: 24      # Generate report every 24 hours
+    retention_days: 30             # Keep metrics for 30 days
+
+  # Failure pattern detection
+  failure_detection:
+    enabled: true
+    pattern_threshold: 3           # Minimum occurrences to report a pattern
+    analysis_interval_hours: 168   # Weekly analysis (168 hours)
+
+  # Shadow mode optimization analysis
+  shadow_mode_analysis:
+    enabled: true
+    min_samples: 10                # Minimum samples before recommendations
+    safety_threshold: 0.02         # Max acceptable success rate drop (2%)
+
+  # Dynamic token budget optimization
+  dynamic_budgets:
+    enabled: false                 # Start disabled, enable after baseline
+    adjustment_interval_days: 7    # Recalculate budgets weekly
+    percentile: 90                 # Use P90 for budget calculation
+    min_samples: 20                # Minimum tasks before adjusting
+
+  # Quality trend tracking
+  quality_trends:
+    enabled: true
+    track_test_coverage: true
+    track_static_analysis: true
+    track_pr_revisions: true

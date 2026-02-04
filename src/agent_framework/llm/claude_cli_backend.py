@@ -81,12 +81,17 @@ class ClaudeCLIBackend(LLMBackend):
             full_prompt = request.prompt
 
         try:
+            # Prepare clean environment (exclude problematic beta flag)
+            env = os.environ.copy()
+            env.pop('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', None)
+
             # Run subprocess
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
 
             # Apply timeout to prevent indefinite hangs
@@ -124,7 +129,16 @@ class ClaudeCLIBackend(LLMBackend):
                     success=True,
                 )
             else:
-                error_msg = stderr.decode() if stderr else f"Exit code {process.returncode}"
+                # Capture both stdout and stderr for debugging
+                stdout_text = stdout.decode() if stdout else ""
+                stderr_text = stderr.decode() if stderr else ""
+                error_msg = stderr_text or stdout_text or f"Exit code {process.returncode}"
+                # Log the full error for debugging
+                import logging
+                logging.getLogger(__name__).error(
+                    f"Claude CLI failed: returncode={process.returncode}, "
+                    f"stderr={stderr_text[:500]}, stdout={stdout_text[:500]}"
+                )
                 return LLMResponse(
                     content="",
                     model_used=model,

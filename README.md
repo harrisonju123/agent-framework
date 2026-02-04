@@ -200,6 +200,8 @@ Load before running: `source scripts/setup-env.sh`
 | `agent start` | Start all agents (1 of each type) |
 | `agent start --replicas N` | Start N replicas per agent (1-50) |
 | `agent start --log-level LEVEL` | Set log level (DEBUG/INFO/WARNING/ERROR) |
+| `agent analyze --repo owner/repo` | Analyze repo for issues, create JIRA epic |
+| `agent analyze --repo R --focus "..."` | Focused analysis on specific areas |
 | `agent stop` | Stop agents gracefully |
 | `agent check` | Run safety checks |
 | `agent check --fix` | Auto-fix issues |
@@ -257,6 +259,33 @@ Agents run from one location but work across multiple repositories:
 - Tasks contain repository context (`github_repo`, `jira_project`)
 - Repos cloned to `~/.agent-workspaces/owner/repo`
 - Single set of logs and queues for easy monitoring
+
+### Repository Analysis
+
+The `analyze` command scans repositories for issues (security, performance, code quality) and creates JIRA epics with file-grouped subtasks:
+
+```bash
+# Basic analysis - runs static analyzers and creates JIRA epic
+agent analyze --repo justworkshr/pto
+
+# Focused analysis - target specific code flows or issue types
+agent analyze --repo justworkshr/pto --focus "review PTO accrual flow for tech debt and code cleanup opportunities"
+
+# Focus on security in specific areas
+agent analyze --repo justworkshr/pto --focus "focus on authentication and authorization code, look for security vulnerabilities"
+
+# Preview without creating JIRA tickets
+agent analyze --repo justworkshr/pto --focus "analyze database queries for N+1 issues" --dry-run
+
+# Combine with severity filtering
+agent analyze --repo justworkshr/pto --focus "review payroll calculation logic" --severity medium --max-issues 30
+```
+
+**How `--focus` works:**
+- The agent explores the specified areas BEFORE running static analyzers
+- Findings in focus areas are prioritized over generic issues
+- A "Focus Area Analysis" section is added to the JIRA epic
+- Useful for targeted code reviews, tech debt identification, or flow-specific analysis
 
 ### Git Worktree Support
 

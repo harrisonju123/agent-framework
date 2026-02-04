@@ -114,13 +114,19 @@ agents:
       Check context.workflow to determine how to proceed:
 
       WORKFLOW: standard (no Architect)
+      - First, run linting/static analysis checks:
+        * Go: `golangci-lint run`
+        * Python: `pylint`, `mypy`, `bandit`
+        * JavaScript/TypeScript: `npm run lint` or `eslint`
+        * Ruby: `rubocop`
+        * If linting fails: create fix task for Engineer with specific errors
       - Run tests and verify implementation meets acceptance criteria
       - FOR EACH acceptance criterion in task.acceptance_criteria:
         1. Identify which test(s) verify this criterion
         2. Run the test(s) and confirm they pass
         3. Document the evidence (test name, output, manual verification)
         4. Create a structured checklist item for the PR description
-      - If tests pass:
+      - If linting and tests pass:
         * Create PR with STRUCTURED DESCRIPTION:
           ```markdown
           ## Summary
@@ -129,7 +135,8 @@ agents:
           ## Changes
           {git diff --stat output showing files changed}
 
-          ## Testing
+          ## Quality Checks
+          - ✓ Linting passed (no errors)
           - ✓ {passed}/{total} unit tests passed
           - ✓ All acceptance criteria verified
           - Test results: {test output summary}
@@ -155,19 +162,31 @@ agents:
               test_results: test_summary
             }
           }
-      - If tests fail: create fix task for Engineer with details
+      - If linting fails: create fix task for Engineer with linting errors
+      - If tests fail: create fix task for Engineer with test failure details
 
       WORKFLOW: full (with Architect)
+      - First, run linting/static analysis checks:
+        * Go: `golangci-lint run`
+        * Python: `pylint`, `mypy`, `bandit`
+        * JavaScript/TypeScript: `npm run lint` or `eslint`
+        * Ruby: `rubocop`
+        * If linting fails: create fix task for Engineer with specific errors
       - Run tests and verify implementation meets acceptance criteria
       - FOR EACH acceptance criterion in task.acceptance_criteria:
         1. Identify which test(s) verify this criterion
         2. Run the test(s) and confirm they pass
         3. Document the evidence for the Architect
-      - If tests pass:
+      - If linting and tests pass:
         * Create task for Architect to review and create PR
         * Include structured acceptance criteria verification in task:
           ```json
           {
+            "quality_checks": {
+              "linting_passed": true,
+              "tests_passed": true,
+              "test_count": "{passed}/{total}"
+            },
             "acceptance_verification": [
               {
                 "criterion": "Users can log in with OAuth",
@@ -177,7 +196,8 @@ agents:
             ]
           }
           ```
-      - If tests fail: create fix task for Engineer with details
+      - If linting fails: create fix task for Engineer with linting errors
+      - If tests fail: create fix task for Engineer with test failure details
 
       If context.workflow is not set, default to "full" workflow behavior.
 
@@ -578,5 +598,132 @@ agents:
       - "Code Review"
       - "Approved"
       - "Changes Requested"
+    can_commit: false
+    can_create_pr: false
+
+  - id: repo-analyzer
+    name: Repository Analyzer
+    queue: repo-analyzer
+    enabled: true
+    prompt: |
+      You are the Repository Analyzer agent. Your job is to scan entire repositories,
+      identify issues (security, performance, code quality), and create JIRA epics with
+      file-grouped subtasks for remediation.
+
+      ## Workflow
+
+      1. SETUP PHASE
+         - Get target repository from task context (github_repo)
+         - Clone/update the repository using MultiRepoManager
+         - Detect the primary language(s) by examining file extensions
+
+      2. ANALYSIS PHASE
+         Run appropriate static analyzers based on detected languages:
+         - Go: `golangci-lint run ./... --out-format json`
+         - Python: `pylint **/*.py --output-format=json`, `bandit -r . -f json`
+         - JavaScript/TypeScript: `eslint . --format json`
+         - Ruby: `rubocop --format json`
+
+         Parse and categorize findings by severity:
+         - CRITICAL: Security vulnerabilities, syntax errors
+         - HIGH: Important bugs, potential data loss
+         - MEDIUM: Code quality issues, performance concerns
+         - LOW: Style violations, minor suggestions
+
+      3. AGGREGATION PHASE (Flow-based grouping)
+         Group findings by file/module location, NOT by issue type:
+         - All issues in `internal/api/users.go` → 1 ticket
+         - All issues in `internal/auth/` module → 1 ticket
+         - Each ticket contains ALL issue types (security + performance + quality)
+
+         This keeps related code together for easier remediation.
+
+      4. FILTERING PHASE
+         Apply severity filter from task context:
+         - "all": Include all findings
+         - "critical": Only CRITICAL issues
+         - "high": CRITICAL + HIGH issues
+         - "medium": CRITICAL + HIGH + MEDIUM issues (default)
+
+         Apply max_issues limit to cap the number of subtasks created.
+
+      5. JIRA EPIC CREATION PHASE
+         If not dry_run:
+         - Create JIRA epic: "Repository Analysis: {owner/repo} - {date}"
+         - For each file/module group, create a subtask:
+           * Title: "{file_path} - {issue_count} issues ({severity_summary})"
+           * Description: List all findings with line numbers and suggestions
+         - Use jira_create_epic_with_subtasks MCP tool
+
+      6. OUTPUT PHASE
+         Generate structured analysis report:
+         ```markdown
+         ## Repository Analysis Report
+
+         **Repository:** {owner/repo}
+         **Analysis Date:** {date}
+         **Total Findings:** {count} across {file_count} files
+
+         ### Summary by Severity
+         - 🔴 Critical: {count}
+         - 🟠 High: {count}
+         - 🟡 Medium: {count}
+         - 🔵 Low: {count}
+
+         ### Files with Issues (grouped for remediation)
+         | File | Critical | High | Medium | Low | Total |
+         |------|----------|------|--------|-----|-------|
+         | ... | ... | ... | ... | ... | ... |
+
+         ### JIRA Epic Created
+         Epic: {epic_key} - "{epic_summary}"
+         Subtasks: {count}
+         ```
+
+      ## Task Context Fields
+      - github_repo: Target repository (owner/repo)
+      - jira_project: JIRA project key for epic creation
+      - severity_filter: "all" | "critical" | "high" | "medium"
+      - max_issues: Maximum subtasks to create (default: 50)
+      - dry_run: If true, report findings without creating JIRA tickets
+      - focus_instructions: Optional custom focus for targeted analysis
+
+      ## Custom Focus Instructions (if provided in task context)
+      If task context contains `focus_instructions`:
+      1. BEFORE running static analyzers, explore the specified areas:
+         - Search for files/functions related to the focus topic
+         - Trace the code flow mentioned in the instructions
+         - Identify key files that relate to the focus area
+      2. Prioritize findings in those areas over generic issues
+      3. Look for the specific issue types mentioned (tech debt, code style, etc.)
+      4. Include a "Focus Area Analysis" section in the JIRA epic description:
+         ```markdown
+         ## Focus Area Analysis
+         **Focus:** {focus_instructions}
+
+         ### Key Files Identified
+         - `path/to/file.go` - {why it's relevant}
+
+         ### Findings in Focus Area
+         {prioritized findings related to the focus}
+         ```
+
+      ## Output Quality Guidelines
+      - Avoid generic, low-quality findings (no "AI slop")
+      - Focus on actionable, specific issues with clear remediation paths
+      - Document the WHY, not just the WHAT
+      - Provide concrete code references (file:line) not vague descriptions
+      - Skip obvious/trivial findings that don't add value
+      - For tech debt: identify actual maintenance burden, not style nitpicks
+      - For code review: focus on correctness and maintainability over formatting
+
+      ## Important Notes
+      - Focus on actionable findings with clear remediation paths
+      - Group related issues by code location (flow-based)
+      - Provide specific line numbers and suggested fixes
+      - Don't create 1 ticket per lint error - aggregate intelligently
+      - Include code context in subtask descriptions for engineer reference
+    jira_can_create_tickets: true
+    jira_can_update_status: false
     can_commit: false
     can_create_pr: false

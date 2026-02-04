@@ -87,6 +87,10 @@ class ActivityEvent(BaseModel):
     phase: Optional[TaskPhase] = None
     error_message: Optional[str] = None  # Error details for failed tasks
     pr_url: Optional[str] = None  # PR URL for completed tasks
+    # Token usage tracking (for performance analytics)
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost: Optional[float] = None
 
 
 class ActivityManager:
