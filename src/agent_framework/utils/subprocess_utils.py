@@ -63,8 +63,8 @@ def run_command(
         CompletedProcess with stdout, stderr, returncode
 
     Raises:
-        SubprocessError: If check=True and command fails
-        subprocess.TimeoutExpired: If timeout exceeded
+        SubprocessError: If check=True and command fails or times out
+        subprocess.TimeoutExpired: If check=False and timeout exceeded
     """
     try:
         result = subprocess.run(
