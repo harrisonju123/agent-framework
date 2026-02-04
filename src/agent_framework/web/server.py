@@ -381,6 +381,27 @@ def register_routes(app: FastAPI):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    # ============== Claude CLI Log Streaming API ==============
+
+    @app.get("/api/logs/claude-cli")
+    async def list_claude_cli_logs():
+        """Get list of available Claude CLI log files (task IDs)."""
+        return app.state.data_provider.get_available_claude_cli_logs()
+
+    @app.get("/api/logs/claude-cli/{task_id}")
+    async def get_claude_cli_logs(task_id: str, lines: int = Query(default=100, ge=1, le=1000)):
+        """Get recent log lines for a Claude CLI subprocess by task_id."""
+        try:
+            log_lines = app.state.data_provider.get_claude_cli_logs(task_id, lines=lines)
+            return {"task_id": task_id, "lines": log_lines}
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/logs/claude-cli-active")
+    async def get_active_claude_cli_tasks():
+        """Get mapping of agent_id to current task_id for agents with active CLI processes."""
+        return app.state.data_provider.get_active_claude_cli_tasks()
+
     # ============== WebSocket ==============
 
     @app.websocket("/ws")
@@ -414,19 +435,24 @@ def register_routes(app: FastAPI):
 
     @app.websocket("/ws/logs")
     async def log_stream(websocket: WebSocket):
-        """WebSocket endpoint for real-time log streaming."""
+        """WebSocket endpoint for real-time log streaming.
+
+        Streams both agent logs and Claude CLI subprocess logs.
+        CLI logs include source='claude-cli' and task_id fields.
+        """
         await websocket.accept()
         logger.info("Log stream WebSocket client connected")
 
-        # Track file positions for each agent
+        # Track file positions for agent logs
         log_positions: Dict[str, int] = {}
+        # Track file positions for Claude CLI logs
+        cli_log_positions: Dict[str, int] = {}
 
         try:
             while True:
-                # Get current log file positions
+                # === Stream agent logs ===
                 current_positions = app.state.data_provider.get_all_log_positions()
 
-                # Check each log file for new content
                 for agent_id, current_size in current_positions.items():
                     last_position = log_positions.get(agent_id, 0)
 
@@ -448,10 +474,55 @@ def register_routes(app: FastAPI):
                             level = app.state.data_provider.parse_log_level(line)
                             await websocket.send_json({
                                 "agent": agent_id,
+                                "source": "agent",
                                 "line": line,
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                                 "level": level,
                             })
+
+                # === Stream Claude CLI subprocess logs ===
+                cli_positions = app.state.data_provider.get_all_claude_cli_log_positions()
+
+                # Map task_id to agent_id for active tasks
+                active_tasks = app.state.data_provider.get_active_claude_cli_tasks()
+                task_to_agent = {v: k for k, v in active_tasks.items()}
+
+                # Only stream logs for active tasks (skip historical logs with unknown agent)
+                for task_id, current_size in cli_positions.items():
+                    # Skip logs for tasks that are no longer active
+                    if task_id not in task_to_agent:
+                        continue
+
+                    last_position = cli_log_positions.get(task_id, 0)
+
+                    # If this is a new file, start from near the end
+                    if task_id not in cli_log_positions:
+                        cli_log_positions[task_id] = max(0, current_size - 4096)
+                        last_position = cli_log_positions[task_id]
+
+                    if current_size > last_position:
+                        new_lines, new_position = app.state.data_provider.read_claude_cli_log_from_position(
+                            task_id, last_position
+                        )
+                        cli_log_positions[task_id] = new_position
+
+                        agent_id = task_to_agent[task_id]
+
+                        for line in new_lines:
+                            level = app.state.data_provider.parse_log_level(line)
+                            await websocket.send_json({
+                                "agent": agent_id,
+                                "task_id": task_id,
+                                "source": "claude-cli",
+                                "line": line,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "level": level,
+                            })
+
+                # Cleanup: remove entries for task IDs no longer in active tasks
+                stale_task_ids = [tid for tid in cli_log_positions if tid not in task_to_agent]
+                for tid in stale_task_ids:
+                    del cli_log_positions[tid]
 
                 await asyncio.sleep(0.5)  # Poll every 500ms
 

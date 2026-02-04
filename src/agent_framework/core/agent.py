@@ -9,7 +9,7 @@ import subprocess
 import time
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, Optional
@@ -340,13 +340,36 @@ class Agent:
                         return
 
                 # Handle post-LLM workflow (git/PR/JIRA)
+                self.logger.debug(f"Running post-LLM workflow for {task.id}")
                 await self._handle_success(task, response)
 
                 # Task completed successfully
+                self.logger.debug(f"Marking task {task.id} as completed")
                 task.mark_completed(self.config.id)
                 self.queue.mark_completed(task)
+                self.logger.info(f"✅ Task {task.id} moved to completed")
+
+                # Transition to COMPLETING status briefly so UI can show completion
+                try:
+                    self.activity_manager.update_activity(AgentActivity(
+                        agent_id=self.config.id,
+                        status=AgentStatus.COMPLETING,
+                        current_task=CurrentTask(
+                            id=task.id,
+                            title=task.title,
+                            type=_get_type_str(task.type),
+                            started_at=task_start_time
+                        ),
+                        last_updated=datetime.now(timezone.utc)
+                    ))
+                    # Brief delay so dashboard can display the completing state
+                    await asyncio.sleep(1.5)
+                except asyncio.CancelledError:
+                    # If interrupted during sleep, ensure we still go to IDLE
+                    pass
 
                 # Queue code review if PR was created
+                self.logger.debug(f"Checking if code review needed for {task.id}")
                 self._queue_code_review_if_needed(task, response)
 
                 # Log token usage and completion

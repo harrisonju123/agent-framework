@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List
@@ -23,6 +23,7 @@ class AgentStatus(str, Enum):
     """Agent operational status."""
     IDLE = "idle"
     WORKING = "working"
+    COMPLETING = "completing"
     DEAD = "dead"
 
 
@@ -71,7 +72,11 @@ class AgentActivity(BaseModel):
         """Calculate elapsed time for current task."""
         if not self.current_task:
             return None
-        elapsed = datetime.utcnow() - self.current_task.started_at
+        started_at = self.current_task.started_at
+        # Handle naive datetimes by assuming UTC
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        elapsed = datetime.now(timezone.utc) - started_at
         return int(elapsed.total_seconds())
 
 
@@ -105,7 +110,7 @@ class ActivityManager:
 
     def update_activity(self, activity: AgentActivity) -> None:
         """Update agent's activity state atomically."""
-        activity.last_updated = datetime.utcnow()
+        activity.last_updated = datetime.now(timezone.utc)
         activity_file = self.activity_dir / f"{activity.agent_id}.json"
 
         # Atomic write: write to .tmp then mv (same pattern as queue system)
