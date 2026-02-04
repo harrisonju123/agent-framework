@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useWebSocket } from './composables/useWebSocket'
 import { useLogStream } from './composables/useLogStream'
 import { useApi } from './composables/useApi'
@@ -13,6 +13,7 @@ import LogViewer from './components/LogViewer.vue'
 import Modal from './components/Modal.vue'
 import Toast from './components/Toast.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import SetupWizard from './components/SetupWizard.vue'
 import type { ModalType } from './types'
 
 const { state, connected, error: wsError, reconnect, reconnecting, reconnectAttempt } = useWebSocket()
@@ -32,7 +33,11 @@ const {
 } = useApi()
 
 // Modal state
-const activeModal = ref<ModalType>(null)
+const activeModal = ref<ModalType | 'setup'>(null)
+
+// Setup status
+const setupComplete = ref(true)
+const showSetupPrompt = ref(false)
 
 // Confirm dialog state
 const confirmDialog = ref<{
@@ -314,10 +319,71 @@ async function handleConfirmAction() {
   confirmDialog.value.open = false
   await confirmDialog.value.action()
 }
+
+// Setup-related handlers
+async function checkSetupStatus() {
+  try {
+    const response = await fetch('/api/setup/status')
+    const status = await response.json()
+
+    setupComplete.value = status.ready_to_start
+
+    // Show setup prompt if not configured and not dismissed
+    if (!setupComplete.value && !localStorage.getItem('dismissed_setup')) {
+      showSetupPrompt.value = true
+    }
+  } catch (e) {
+    console.error('Failed to check setup status:', e)
+  }
+}
+
+function handleSetupComplete() {
+  activeModal.value = null
+  setupComplete.value = true
+  showSetupPrompt.value = false
+  showToast('Configuration saved. Click "Start All" to begin.', 'success')
+}
+
+function dismissSetupPrompt() {
+  showSetupPrompt.value = false
+  localStorage.setItem('dismissed_setup', 'true')
+}
+
+// Check setup status on mount
+onMounted(() => {
+  checkSetupStatus()
+})
 </script>
 
 <template>
   <div class="h-screen flex flex-col bg-black text-gray-300 overflow-hidden">
+    <!-- Setup prompt banner -->
+    <div v-if="showSetupPrompt" class="bg-yellow-500/20 border-b border-yellow-500 px-4 py-3 shrink-0">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center gap-3">
+          <span class="text-2xl">⚠️</span>
+          <div>
+            <p class="text-yellow-200 font-medium text-sm">System not configured</p>
+            <p class="text-yellow-300/70 text-xs">Complete setup to start using agent framework</p>
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <button
+            @click="activeModal = 'setup'; showSetupPrompt = false"
+            class="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white font-medium text-sm rounded"
+          >
+            Start Setup
+          </button>
+          <button
+            @click="dismissSetupPrompt"
+            class="px-3 py-2 text-yellow-300 hover:text-yellow-100 text-sm"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Header -->
     <header class="flex flex-wrap items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800 shrink-0 gap-2">
       <div class="flex items-center gap-3 font-mono text-sm">
@@ -374,6 +440,15 @@ async function handleConfirmAction() {
           aria-label="Run JIRA ticket"
         >
           Run Ticket
+        </button>
+        <div class="w-px h-6 bg-gray-700 mx-1 hidden sm:block"></div>
+        <button
+          v-if="!setupComplete"
+          @click="activeModal = 'setup'"
+          class="px-3 py-1.5 text-sm font-mono bg-green-600 hover:bg-green-500 text-white rounded transition-colors"
+          aria-label="Setup wizard"
+        >
+          ⚙️ Setup
         </button>
       </div>
     </header>
@@ -645,6 +720,11 @@ async function handleConfirmAction() {
           </button>
         </div>
       </form>
+    </Modal>
+
+    <!-- Setup Wizard Modal -->
+    <Modal :open="activeModal === 'setup'" title="Setup Wizard" @close="activeModal = null">
+      <SetupWizard @complete="handleSetupComplete" />
     </Modal>
 
     <!-- Run Ticket Modal -->

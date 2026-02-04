@@ -32,6 +32,12 @@ from .models import (
     RunTicketRequest,
     OperationResponse,
     LogEntry,
+    JIRAValidationRequest,
+    JIRAValidationResponse,
+    GitHubValidationRequest,
+    GitHubValidationResponse,
+    SetupConfiguration,
+    SetupStatusResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -226,6 +232,208 @@ def register_routes(app: FastAPI):
             "is_paused": app.state.data_provider.is_paused(),
             "uptime_seconds": int(uptime),
         }
+
+    # ============== Setup API ==============
+
+    @app.post("/api/setup/validate-jira", response_model=JIRAValidationResponse)
+    async def validate_jira_credentials(request: JIRAValidationRequest):
+        """Test JIRA connection with provided credentials."""
+        try:
+            from jira import JIRA
+            from jira.exceptions import JIRAError
+
+            # Test connection
+            jira = JIRA(
+                server=request.server,
+                basic_auth=(request.email, request.api_token),
+                timeout=10
+            )
+
+            # Get user info
+            user_info = jira.myself()
+
+            return JIRAValidationResponse(
+                valid=True,
+                message=f"Connected successfully as {user_info.get('displayName', request.email)}",
+                user_info={
+                    "display_name": user_info.get("displayName"),
+                    "email": user_info.get("emailAddress"),
+                }
+            )
+
+        except JIRAError as e:
+            return JIRAValidationResponse(
+                valid=False,
+                message="Authentication failed",
+                error=str(e)
+            )
+        except Exception as e:
+            return JIRAValidationResponse(
+                valid=False,
+                message="Connection failed",
+                error=str(e)
+            )
+
+    @app.post("/api/setup/validate-github", response_model=GitHubValidationResponse)
+    async def validate_github_token(request: GitHubValidationRequest):
+        """Test GitHub token and return rate limit info."""
+        try:
+            import requests
+
+            headers = {
+                "Authorization": f"Bearer {request.token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+
+            # Test authentication
+            response = requests.get("https://api.github.com/user", headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                user_data = response.json()
+
+                # Get rate limit
+                rate_response = requests.get("https://api.github.com/rate_limit", headers=headers, timeout=10)
+                rate_data = rate_response.json() if rate_response.status_code == 200 else None
+
+                return GitHubValidationResponse(
+                    valid=True,
+                    user=user_data.get("login"),
+                    rate_limit=rate_data.get("rate") if rate_data else None
+                )
+            elif response.status_code == 401:
+                return GitHubValidationResponse(
+                    valid=False,
+                    error="Invalid token or insufficient permissions"
+                )
+            else:
+                return GitHubValidationResponse(
+                    valid=False,
+                    error=f"Unexpected response: {response.status_code}"
+                )
+
+        except requests.exceptions.Timeout:
+            return GitHubValidationResponse(
+                valid=False,
+                error="Connection timeout"
+            )
+        except Exception as e:
+            return GitHubValidationResponse(
+                valid=False,
+                error=str(e)
+            )
+
+    @app.post("/api/setup/save-config", response_model=SuccessResponse)
+    async def save_configuration(config: SetupConfiguration):
+        """Generate and save all config files atomically."""
+        try:
+            from ..config.templates import ConfigGenerator
+
+            generator = ConfigGenerator(app.state.workspace)
+
+            # Convert to dict format
+            jira_data = {
+                "server": config.jira.server,
+                "email": config.jira.email,
+                "api_token": config.jira.api_token,
+                "project": config.jira.project
+            }
+
+            github_data = {
+                "token": config.github.token
+            }
+
+            repos = [
+                {
+                    "github_repo": r.github_repo,
+                    "jira_project": r.jira_project,
+                    "name": r.name
+                }
+                for r in config.repositories
+            ]
+
+            # Write all configs
+            created_files = generator.write_all_configs(jira_data, github_data, repos)
+
+            return SuccessResponse(
+                message=f"Configuration saved successfully. Created {len(created_files)} file(s)."
+            )
+
+        except Exception as e:
+            logger.exception(f"Error saving configuration: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save configuration: {str(e)}"
+            )
+
+    @app.get("/api/setup/status", response_model=SetupStatusResponse)
+    async def get_setup_status():
+        """Return current setup completion status."""
+        import os
+        from pathlib import Path
+
+        config_dir = app.state.workspace / "config"
+
+        # Check config files
+        framework_config_exists = (config_dir / "agent-framework.yaml").exists()
+        jira_config_exists = (config_dir / "jira.yaml").exists()
+        github_config_exists = (config_dir / "github.yaml").exists()
+        env_exists = (app.state.workspace / ".env").exists()
+
+        # Check environment variables
+        jira_configured = all([
+            os.getenv("JIRA_SERVER"),
+            os.getenv("JIRA_EMAIL"),
+            os.getenv("JIRA_API_TOKEN")
+        ]) and jira_config_exists
+
+        github_configured = os.getenv("GITHUB_TOKEN") and github_config_exists
+
+        # Count registered repositories
+        repo_count = 0
+        if framework_config_exists:
+            try:
+                from ..core.config import load_config
+                fw_config = load_config(config_dir / "agent-framework.yaml")
+                repo_count = len(fw_config.repositories)
+            except Exception:
+                pass
+
+        initialized = framework_config_exists and env_exists
+        ready_to_start = initialized and jira_configured and github_configured and repo_count > 0
+
+        return SetupStatusResponse(
+            initialized=initialized,
+            jira_configured=jira_configured,
+            github_configured=github_configured,
+            repositories_registered=repo_count,
+            mcp_enabled=False,  # Not implemented in MVP
+            ready_to_start=ready_to_start
+        )
+
+    # ============== Error Translation API ==============
+
+    @app.post("/api/errors/translate")
+    async def translate_error(request: Request):
+        """Translate technical error to user-friendly format."""
+        try:
+            from ..errors.translator import ErrorTranslator
+
+            body = await request.json()
+            error_message = body.get("error_message", "")
+
+            translator = ErrorTranslator()
+            exc = Exception(error_message)
+            friendly = translator.translate(exc)
+
+            return {
+                "title": friendly.title,
+                "explanation": friendly.explanation,
+                "actions": friendly.actions,
+                "documentation": friendly.documentation
+            }
+        except Exception as e:
+            logger.exception(f"Error translating error: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
     # ============== Operations API ==============
 

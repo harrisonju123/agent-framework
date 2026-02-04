@@ -541,6 +541,75 @@ def dashboard(ctx, port, no_browser, dev):
 
 
 @cli.command()
+@click.pass_context
+def doctor(ctx):
+    """Run health checks to validate system configuration.
+
+    Checks:
+    - Config files exist and are valid
+    - Credentials are set and working
+    - JIRA/GitHub connectivity
+    - Directory structure
+    - Agent definitions
+
+    Examples:
+        agent doctor                    # Run all health checks
+    """
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold cyan]Running system health checks...[/]")
+    console.print()
+
+    from ..health.checker import HealthChecker, CheckStatus
+
+    checker = HealthChecker(workspace)
+    results = checker.run_all_checks()
+
+    # Display results
+    passed = sum(1 for r in results if r.status == CheckStatus.PASSED)
+    failed = sum(1 for r in results if r.status == CheckStatus.FAILED)
+    warnings = sum(1 for r in results if r.status == CheckStatus.WARNING)
+
+    for result in results:
+        icon = {
+            CheckStatus.PASSED: "✓",
+            CheckStatus.FAILED: "✗",
+            CheckStatus.WARNING: "⚠",
+            CheckStatus.SKIPPED: "⊘"
+        }[result.status]
+
+        color = {
+            CheckStatus.PASSED: "green",
+            CheckStatus.FAILED: "red",
+            CheckStatus.WARNING: "yellow",
+            CheckStatus.SKIPPED: "dim"
+        }[result.status]
+
+        console.print(f"[{color}]{icon} {result.name}[/]: {result.message}")
+
+        if result.fix_action:
+            console.print(f"  [dim]→ {result.fix_action}[/]")
+
+        if result.documentation:
+            console.print(f"  [dim]📖 {result.documentation}[/]")
+
+        console.print()
+
+    # Summary
+    console.print("─" * 50)
+    if failed == 0 and warnings == 0:
+        console.print(f"[bold green]✓ All checks passed ({passed}/{len(results)})[/]")
+        console.print("\n[dim]System is ready. Run 'agent start' to begin.[/]")
+    elif failed == 0:
+        console.print(f"[bold yellow]⚠ {warnings} warning(s), {passed} passed[/]")
+        console.print("\n[dim]System will work but some features may be limited.[/]")
+    else:
+        console.print(f"[bold red]✗ {failed} critical issue(s), {warnings} warning(s)[/]")
+        console.print("\n[red]Fix critical issues before starting agents.[/]")
+        console.print("[dim]Run 'agent dashboard' and click Setup to reconfigure.[/]")
+
+
+@cli.command()
 @click.option("--watch", "-w", is_flag=True, help="Watch mode: auto-refresh every 2s")
 @click.pass_context
 def status(ctx, watch):

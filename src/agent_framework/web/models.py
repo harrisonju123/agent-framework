@@ -188,3 +188,59 @@ class LogEntry(BaseModel):
     line: str
     timestamp: datetime
     level: Optional[str] = None
+
+
+# Setup wizard models
+
+class JIRAValidationRequest(BaseModel):
+    """Request to validate JIRA credentials."""
+    server: str
+    email: str
+    api_token: str
+    project: Optional[str] = None
+
+
+class JIRAValidationResponse(BaseModel):
+    """Response from JIRA validation."""
+    valid: bool
+    message: str
+    user_info: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class GitHubValidationRequest(BaseModel):
+    """Request to validate GitHub token."""
+    token: str
+
+
+class GitHubValidationResponse(BaseModel):
+    """Response from GitHub validation."""
+    valid: bool
+    user: Optional[str] = None
+    rate_limit: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class RepositoryConfig(BaseModel):
+    """Repository configuration for setup."""
+    github_repo: str = Field(..., pattern=r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$')
+    jira_project: str
+    name: str
+
+
+class SetupConfiguration(BaseModel):
+    """Complete setup configuration."""
+    jira: JIRAValidationRequest
+    github: GitHubValidationRequest
+    repositories: List[RepositoryConfig]
+    enable_mcp: bool = False
+
+
+class SetupStatusResponse(BaseModel):
+    """Setup completion status."""
+    initialized: bool
+    jira_configured: bool
+    github_configured: bool
+    repositories_registered: int
+    mcp_enabled: bool
+    ready_to_start: bool

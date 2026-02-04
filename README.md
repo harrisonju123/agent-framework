@@ -74,11 +74,57 @@ source scripts/setup-env.sh
 
 ## Quick Start
 
-### Interactive Mode (Recommended)
+### 🚀 Setup Wizard (Recommended for New Users)
+
+The fastest way to get started:
 
 ```bash
-source scripts/setup-env.sh
+# Install agent framework
+pip install -e .
+
+# Launch web dashboard with setup wizard
+agent dashboard
+```
+
+Setup steps:
+1. **JIRA Configuration** - Server URL, credentials, test connection
+2. **GitHub Configuration** - Personal access token, test connection
+3. **Repository Setup** - Map repos to JIRA projects
+4. **Review & Save** - Generates all config files
+
+After setup completes, you can immediately start creating tasks via the dashboard!
+
+**See**: [Getting Started Guide](docs/GETTING_STARTED.md) for detailed walkthrough.
+
+### Manual Setup (Alternative)
+
+If you prefer manual configuration:
+
+```bash
+# Initialize workspace
+agent init
+
+# Copy and edit config files
+cp config/agents.yaml.example config/agents.yaml
+cp config/jira.yaml.example config/jira.yaml
+cp config/github.yaml.example config/github.yaml
+cp config/agent-framework.yaml.example config/agent-framework.yaml
+cp .env.example .env
+
+# Edit .env with your credentials
+# Edit config files as needed
+
+# Verify setup
+agent doctor
+```
+
+### Interactive Mode
+
+```bash
+# Describe what you want to build
 agent work
+
+# Or via dashboard: Click "New Work" button
 ```
 
 You'll be prompted for:
@@ -96,6 +142,8 @@ agent run PROJ-123
 
 # Assign to a specific agent type
 agent run PROJ-123 --agent engineer
+
+# Or via dashboard: Click "Run Ticket" button
 ```
 
 ### Traditional Mode
@@ -253,9 +301,10 @@ Load before running: `source scripts/setup-env.sh`
 
 | Command | Description |
 |---------|-------------|
+| `agent dashboard` | Start web dashboard server (includes setup wizard) |
+| `agent doctor` | Run health checks to validate configuration |
 | `agent work` | Interactive mode - describe goal, select repo, choose workflow |
 | `agent run PROJ-123` | Work on a specific JIRA ticket |
-| `agent dashboard` | Start web dashboard server |
 | `agent status --watch` | Live CLI dashboard |
 | `agent status` | One-time status snapshot |
 | `agent pull --project PROJ` | Pull JIRA backlog tickets |
@@ -487,6 +536,30 @@ Detailed technical documentation is available in the `docs/` directory:
 - **[Code Review Workflow](docs/CODE_REVIEW_WORKFLOW.md)** - How PRs are queued and picked up by reviewers
 
 ## Troubleshooting
+
+### Quick Diagnosis
+
+```bash
+# Run health checks
+agent doctor
+```
+
+This checks:
+- Config files exist and are valid
+- Credentials are set correctly
+- JIRA/GitHub connectivity
+- Directory structure
+- Agent definitions
+
+For detailed troubleshooting, see **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**.
+
+### Common Issues
+
+**Setup Problems**: Run the setup wizard via `agent dashboard` → Click "Setup" button
+
+**JIRA Auth Failed**: Generate new API token at https://id.atlassian.com/manage-profile/security/api-tokens
+
+**GitHub Auth Failed**: Generate new token at https://github.com/settings/tokens (needs `repo` scope)
 
 ### Environment variables not loaded
 ```bash
