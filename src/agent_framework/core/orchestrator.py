@@ -132,8 +132,22 @@ class Orchestrator:
         # Clean up stale PIDs
         self._clean_stale_pids()
 
+        # MCP-related environment variables to pass to agents
+        mcp_env_vars = [
+            "GITHUB_TOKEN",
+            "JIRA_URL",
+            "JIRA_EMAIL",
+            "JIRA_API_TOKEN",
+            "JIRA_SERVER",
+        ]
+
         # Environment variables to pass to agents
         env_vars = {"AGENT_LOG_LEVEL": log_level}
+
+        # Add MCP-related env vars if they exist
+        for var in mcp_env_vars:
+            if var in os.environ:
+                env_vars[var] = os.environ[var]
 
         # Spawn each agent with replicas
         for agent_def in enabled_agents:

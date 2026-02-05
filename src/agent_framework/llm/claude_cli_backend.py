@@ -1,6 +1,7 @@
 """Claude CLI subprocess backend implementation."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set
 
 from .base import LLMBackend, LLMRequest, LLMResponse
 from .model_selector import ModelSelector
@@ -51,6 +52,9 @@ class ClaudeCLIBackend(LLMBackend):
             timeout_simple=timeout_simple,
         )
         self.logs_dir = logs_dir or Path("logs")
+
+        # Clean up stale MCP cache files from terminated processes
+        self._cleanup_stale_cache_files()
 
         # Expand environment variables in MCP config if provided
         if mcp_config_path:
@@ -96,7 +100,10 @@ class ClaudeCLIBackend(LLMBackend):
 
         # Add MCP config if specified
         if self.mcp_config_path:
-            cmd.extend(["--mcp-config", str(self.mcp_config_path)])
+            cmd.extend([
+                "--mcp-config", str(self.mcp_config_path),
+                "--strict-mcp-config",  # Only use our MCP config, ignore global ~/.claude/mcp_settings.json
+            ])
 
         # Build prompt (combine system + user)
         full_prompt = ""
@@ -258,22 +265,49 @@ class ClaudeCLIBackend(LLMBackend):
         return self.model_selector.select(task_type, retry_count)
 
     def _expand_mcp_config(self, config_path: Path) -> Path:
-        """Expand environment variables in MCP config and write to temp file."""
+        """Expand environment variables in MCP config and write to process-specific temp file."""
         with open(config_path) as f:
             config = json.load(f)
+
+        # Collect all env vars referenced in the config
+        env_vars_used = self._collect_env_vars(config)
 
         # Recursively expand ${VAR} in all string values
         expanded = self._expand_env_vars_recursive(config)
 
-        # Write to temporary file
+        # Create hash of environment values for cache key
+        env_hash = hashlib.md5(
+            json.dumps({k: os.environ.get(k, '') for k in sorted(env_vars_used)}).encode()
+        ).hexdigest()[:8]
+
+        # Write to process-specific file
         temp_dir = Path.home() / ".cache" / "agent-framework"
         temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_path = temp_dir / "mcp-config-expanded.json"
+        temp_path = temp_dir / f"mcp-config-{os.getpid()}-{env_hash}.json"
 
         with open(temp_path, 'w') as f:
             json.dump(expanded, f, indent=2)
 
+        logger.debug(f"Expanded MCP config to process-specific file: {temp_path}")
         return temp_path
+
+    def _collect_env_vars(self, obj, vars_set: Optional[Set[str]] = None) -> Set[str]:
+        """Recursively collect all ${VAR} references in the config."""
+        if vars_set is None:
+            vars_set = set()
+
+        if isinstance(obj, dict):
+            for v in obj.values():
+                self._collect_env_vars(v, vars_set)
+        elif isinstance(obj, list):
+            for item in obj:
+                self._collect_env_vars(item, vars_set)
+        elif isinstance(obj, str):
+            # Find all ${VAR} patterns
+            for match in re.finditer(r'\$\{(\w+)\}', obj):
+                vars_set.add(match.group(1))
+
+        return vars_set
 
     def _expand_env_vars_recursive(self, obj):
         """Recursively expand ${VAR} in dict/list/str."""
@@ -285,7 +319,35 @@ class ClaudeCLIBackend(LLMBackend):
             # Expand ${VAR} patterns
             def replace_var(match):
                 var_name = match.group(1)
-                return os.environ.get(var_name, match.group(0))
+                value = os.environ.get(var_name)
+                if value is None:
+                    logger.warning(
+                        f"MCP config references undefined environment variable: {var_name}"
+                    )
+                    return match.group(0)  # Keep placeholder if var not set
+                return value
             return re.sub(r'\$\{(\w+)\}', replace_var, obj)
         else:
             return obj
+
+    def _cleanup_stale_cache_files(self):
+        """Remove stale MCP config cache files from terminated processes."""
+        temp_dir = Path.home() / ".cache" / "agent-framework"
+        if not temp_dir.exists():
+            return
+
+        for cache_file in temp_dir.glob("mcp-config-*.json"):
+            # Extract PID from filename (format: mcp-config-{PID}-{HASH}.json)
+            try:
+                parts = cache_file.stem.split("-")
+                if len(parts) >= 3:
+                    pid = int(parts[2])
+                    # Check if process still exists
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        # Process is dead, remove stale cache
+                        cache_file.unlink()
+                        logger.debug(f"Removed stale MCP cache: {cache_file}")
+            except (ValueError, IndexError):
+                pass

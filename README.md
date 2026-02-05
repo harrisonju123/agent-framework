@@ -594,6 +594,50 @@ agent stop && agent start
 ### MCP config not found
 Ensure `mcp_config_path` in `agent-framework.yaml` is an absolute path and the file exists.
 
+### MCP "Tool names must be unique" error (400)
+
+**Symptoms**: Subprocess agents fail with `API Error: 400 {"error":{"message":"tools: Tool names must be unique"}}`
+
+**Cause**: This occurs when Claude CLI loads both global MCP config (`~/.claude/mcp_settings.json`) and project-specific config, causing duplicate tool registrations.
+
+**Fix**: This is automatically handled by the framework as of commit [fix: resolve MCP subprocess race conditions]. The framework:
+- Uses `--strict-mcp-config` flag to ignore global MCP settings
+- Creates process-specific cache files to prevent race conditions
+- Explicitly passes MCP environment variables to subprocesses
+
+**If the issue persists**:
+
+1. **Check environment variables are set**:
+   ```bash
+   echo $GITHUB_TOKEN
+   echo $JIRA_URL
+   echo $JIRA_EMAIL
+   echo $JIRA_API_TOKEN
+   echo $JIRA_SERVER
+   ```
+
+2. **Verify MCP config has no syntax errors**:
+   ```bash
+   python -m json.tool config/mcp-config.json
+   ```
+
+3. **Check for stale cache files**:
+   ```bash
+   ls -la ~/.cache/agent-framework/mcp-config-*.json
+   # These are auto-cleaned, but you can manually remove them
+   rm ~/.cache/agent-framework/mcp-config-*.json
+   ```
+
+4. **Check Claude CLI version**:
+   ```bash
+   claude --version
+   # Ensure you have the latest version that supports --strict-mcp-config
+   ```
+
+**Prevention**: Always use absolute paths for MCP config in `agent-framework.yaml` and ensure environment variables are loaded before starting agents.
+
+See **[docs/proposals/fix-mcp-subprocess-race-condition.md](docs/proposals/fix-mcp-subprocess-race-condition.md)** for technical details.
+
 ### Dashboard not loading
 ```bash
 # Rebuild frontend
