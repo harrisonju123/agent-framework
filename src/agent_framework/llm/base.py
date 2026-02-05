@@ -32,6 +32,7 @@ class LLMResponse:
     latency_ms: float
     success: bool = True
     error: Optional[str] = None
+    reported_cost_usd: Optional[float] = None  # CLI-reported cost (accounts for prompt caching discounts)
 
 
 class LLMBackend(ABC):

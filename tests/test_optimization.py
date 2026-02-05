@@ -340,6 +340,40 @@ class TestCostEstimation:
         # Sonnet should cost more than Haiku
         assert sonnet_cost > haiku_cost
 
+    def test_reported_cost_preferred_over_calculation(self, agent):
+        """CLI-reported cost should be used when available."""
+        response = LLMResponse(
+            content="Done",
+            model_used="sonnet",
+            input_tokens=1000,
+            output_tokens=500,
+            finish_reason="stop",
+            latency_ms=1000,
+            success=True,
+            reported_cost_usd=0.0042,
+        )
+
+        cost = agent._estimate_cost(response)
+        assert cost == 0.0042
+
+    def test_fallback_to_calculation_when_no_reported_cost(self, agent):
+        """Static calculation used when reported_cost_usd is None."""
+        response = LLMResponse(
+            content="Done",
+            model_used="sonnet",
+            input_tokens=1000,
+            output_tokens=500,
+            finish_reason="stop",
+            latency_ms=1000,
+            success=True,
+            reported_cost_usd=None,
+        )
+
+        cost = agent._estimate_cost(response)
+        # Should use MODEL_PRICING calculation: (1000/1M * 3.0) + (500/1M * 15.0)
+        expected = 1000 / 1_000_000 * 3.0 + 500 / 1_000_000 * 15.0
+        assert cost == pytest.approx(expected)
+
 
 class TestShadowMode:
     """Test shadow mode validation."""

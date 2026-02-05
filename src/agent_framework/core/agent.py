@@ -933,14 +933,13 @@ Fix the failing tests and ensure all tests pass.
         """
         Estimate cost based on model and token usage.
 
-        Note: Pricing is approximate and subject to change. Check Anthropic's
-        pricing page for current rates.
-
-        Pricing as of 2025-01:
-        - Haiku: $0.25/$1.25 per 1M tokens (input/output)
-        - Sonnet: $3/$15 per 1M tokens
-        - Opus: $15/$75 per 1M tokens
+        Prefers CLI-reported cost when available (accounts for prompt caching
+        discounts). Falls back to static MODEL_PRICING calculation for other
+        backends or when reported cost is unavailable.
         """
+        if response.reported_cost_usd is not None:
+            return response.reported_cost_usd
+
         model_name_lower = response.model_used.lower()
 
         # Detect model family

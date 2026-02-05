@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Set
@@ -16,6 +15,86 @@ from .model_selector import ModelSelector
 from ..core.task import TaskType
 
 logger = logging.getLogger(__name__)
+
+
+def _process_stream_line(line: str, text_chunks: list, usage_result: dict, log_file=None):
+    """Parse a single JSON line from --output-format stream-json.
+
+    Extracts text content for log streaming and captures token usage
+    from the final result event.
+
+    Args:
+        line: Raw line from stdout (may or may not be JSON)
+        text_chunks: Accumulator for assistant text content
+        usage_result: Dict to populate with usage data from result event
+        log_file: Optional file handle for real-time log output
+    """
+    line = line.strip()
+    if not line:
+        return
+
+    try:
+        event = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        # Not JSON — CLI version mismatch or non-JSON output, treat as raw text
+        text_chunks.append(line + "\n")
+        if log_file:
+            log_file.write(line + "\n")
+            log_file.flush()
+        return
+
+    event_type = event.get("type")
+
+    if event_type == "assistant":
+        message = event.get("message", {})
+
+        # Accumulate per-turn usage as fallback when result event never arrives
+        # (known CLI bug: github.com/anthropics/claude-code/issues/1920)
+        msg_usage = message.get("usage", {})
+        if msg_usage:
+            usage_result["input_tokens"] = (
+                usage_result.get("input_tokens", 0) + msg_usage.get("input_tokens", 0)
+            )
+            usage_result["output_tokens"] = (
+                usage_result.get("output_tokens", 0) + msg_usage.get("output_tokens", 0)
+            )
+
+        # Extract text from message content blocks
+        for block in message.get("content", []):
+            if block.get("type") == "text":
+                text = block.get("text", "")
+                text_chunks.append(text)
+                if log_file:
+                    log_file.write(text)
+                    log_file.flush()
+            elif block.get("type") == "tool_use":
+                marker = f"\n[Tool Call: {block.get('name', 'unknown')}]\n"
+                text_chunks.append(marker)
+                if log_file:
+                    log_file.write(marker)
+                    log_file.flush()
+
+    elif event_type == "result":
+        # Final event — authoritative usage overwrites per-turn accumulation
+        usage = event.get("usage", {})
+        usage_result["input_tokens"] = usage.get("input_tokens", 0)
+        usage_result["output_tokens"] = usage.get("output_tokens", 0)
+        usage_result["total_cost_usd"] = event.get("total_cost_usd")
+
+        result_text = event.get("result", "")
+        if result_text:
+            usage_result["result_text"] = result_text
+
+    elif event_type == "system":
+        if log_file:
+            subtype = event.get("subtype", "")
+            session_id = event.get("session_id", "")
+            if subtype == "init" and session_id:
+                log_file.write(f"[Session: {session_id}]\n")
+                log_file.flush()
+
+    else:
+        logger.debug(f"Unknown stream-json event type: {event_type}")
 
 
 class ClaudeCLIBackend(LLMBackend):
@@ -94,6 +173,8 @@ class ClaudeCLIBackend(LLMBackend):
         cmd = [
             self.executable,
             "--print",  # Non-interactive mode - write to stdout and exit
+            "--output-format", "stream-json",  # Line-delimited JSON with token usage
+            "--verbose",  # Include system events for session tracking
             "--model", model,
             "--dangerously-skip-permissions",
             "--max-turns", str(self.max_turns),
@@ -154,28 +235,58 @@ class ClaudeCLIBackend(LLMBackend):
             process.stdin.close()
 
             # Stream output with timeout
-            stdout_chunks = []
+            text_chunks = []     # Human-readable text extracted from JSON events
+            usage_result = {}    # Token usage and cost from final result event
             stderr_chunks = []
             timed_out = False
 
             # Track whether we've written the stderr header
             stderr_header_written = [False]
 
-            async def read_stream(stream, chunks, name):
-                """Read from stream and write to log file in real-time."""
+            async def read_stdout_stream_json(stream):
+                """Read stdout as line-delimited JSON, parse each event."""
+                buffer = b""
                 try:
                     while True:
                         chunk = await asyncio.wait_for(
                             stream.read(4096),
-                            timeout=60  # Read timeout per chunk
+                            timeout=60
+                        )
+                        if not chunk:
+                            # Process any remaining buffered data
+                            if buffer:
+                                _process_stream_line(
+                                    buffer.decode(errors='replace'),
+                                    text_chunks, usage_result, log_file
+                                )
+                            break
+                        buffer += chunk
+                        # Split on newlines to get complete JSON lines
+                        while b"\n" in buffer:
+                            line_bytes, buffer = buffer.split(b"\n", 1)
+                            _process_stream_line(
+                                line_bytes.decode(errors='replace'),
+                                text_chunks, usage_result, log_file
+                            )
+                except asyncio.TimeoutError:
+                    pass
+                except Exception as e:
+                    logger.debug(f"Stream read error (stdout): {e}")
+
+            async def read_stderr_stream(stream):
+                """Read stderr chunks (unchanged — not JSON formatted)."""
+                try:
+                    while True:
+                        chunk = await asyncio.wait_for(
+                            stream.read(4096),
+                            timeout=60
                         )
                         if not chunk:
                             break
                         decoded = chunk.decode(errors='replace')
-                        chunks.append(decoded)
+                        stderr_chunks.append(decoded)
                         if log_file:
-                            # Write stderr header only once when first stderr content arrives
-                            if name == "stderr" and not stderr_header_written[0] and decoded.strip():
+                            if not stderr_header_written[0] and decoded.strip():
                                 log_file.write(f"\n{'='*50}\n")
                                 log_file.write(f"STDERR:\n")
                                 log_file.write(f"{'='*50}\n")
@@ -183,16 +294,16 @@ class ClaudeCLIBackend(LLMBackend):
                             log_file.write(decoded)
                             log_file.flush()
                 except asyncio.TimeoutError:
-                    pass  # Individual read timeout, continue
+                    pass
                 except Exception as e:
-                    logger.debug(f"Stream read error ({name}): {e}")
+                    logger.debug(f"Stream read error (stderr): {e}")
 
             try:
                 # Read stdout and stderr concurrently with overall timeout
                 await asyncio.wait_for(
                     asyncio.gather(
-                        read_stream(process.stdout, stdout_chunks, "stdout"),
-                        read_stream(process.stderr, stderr_chunks, "stderr"),
+                        read_stdout_stream_json(process.stdout),
+                        read_stderr_stream(process.stderr),
                     ),
                     timeout=timeout
                 )
@@ -201,7 +312,7 @@ class ClaudeCLIBackend(LLMBackend):
                 timed_out = True
                 if log_file:
                     log_file.write(f"\n\n{'=' * 50}\n")
-                    log_file.write(f"⚠️  TIMEOUT after {timeout} seconds\n")
+                    log_file.write(f"TIMEOUT after {timeout} seconds\n")
                     log_file.write(f"Process killed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     log_file.flush()
                 logger.warning(f"Claude CLI timed out after {timeout}s, killing process")
@@ -209,8 +320,14 @@ class ClaudeCLIBackend(LLMBackend):
                 await process.wait()
 
             latency_ms = (time.time() - start_time) * 1000
-            stdout_text = "".join(stdout_chunks)
+            # Prefer authoritative result text from result event, fall back to accumulated chunks
+            content = usage_result.get("result_text") or "".join(text_chunks)
             stderr_text = "".join(stderr_chunks)
+
+            # Extract usage data (available if result event was received)
+            input_tokens = usage_result.get("input_tokens", 0)
+            output_tokens = usage_result.get("output_tokens", 0)
+            reported_cost = usage_result.get("total_cost_usd")
 
             if log_file:
                 log_file.write(f"\n\n{'=' * 50}\n")
@@ -220,58 +337,63 @@ class ClaudeCLIBackend(LLMBackend):
                 log_file.write(f"Duration: {latency_ms/1000:.1f}s\n")
                 log_file.write(f"Exit code: {process.returncode}\n")
                 log_file.write(f"Timed out: {timed_out}\n")
+                log_file.write(f"Tokens: {input_tokens} in / {output_tokens} out\n")
+                if reported_cost is not None:
+                    log_file.write(f"Cost: ${reported_cost:.4f}\n")
                 if stderr_text:
                     log_file.write(f"\nSTDERR Summary:\n{stderr_text[:1000]}\n")
                 if process.returncode != 0:
-                    log_file.write(f"\n⚠️  FAILED - See stderr above for details\n")
-                log_file.close()
+                    log_file.write(f"\nFAILED - See stderr above for details\n")
 
             if timed_out:
                 return LLMResponse(
-                    content=stdout_text,  # Include partial output
+                    content=content,
                     model_used=model,
-                    input_tokens=0,
-                    output_tokens=0,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                     finish_reason="error",
                     latency_ms=latency_ms,
                     success=False,
                     error=f"Claude CLI timed out after {timeout} seconds. Output logged to {log_file_path}",
+                    reported_cost_usd=reported_cost,
                 )
 
             if process.returncode == 0:
                 return LLMResponse(
-                    content=stdout_text,
+                    content=content,
                     model_used=model,
-                    input_tokens=0,  # CLI doesn't report token usage
-                    output_tokens=0,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                     finish_reason="stop",
                     latency_ms=latency_ms,
                     success=True,
+                    reported_cost_usd=reported_cost,
                 )
             else:
                 # Build detailed error message with both stdout and stderr
                 error_parts = [f"Exit code {process.returncode}"]
                 if stderr_text.strip():
                     error_parts.append(f"STDERR: {stderr_text.strip()}")
-                if stdout_text.strip():
-                    error_parts.append(f"STDOUT: {stdout_text.strip()}")
+                if content.strip():
+                    error_parts.append(f"STDOUT: {content.strip()}")
                 error_msg = " | ".join(error_parts)
 
                 logger.error(
                     f"Claude CLI failed: returncode={process.returncode}\n"
                     f"STDERR: {stderr_text[:1000]}\n"
-                    f"STDOUT: {stdout_text[:1000]}\n"
+                    f"STDOUT: {content[:1000]}\n"
                     f"Log: {log_file_path}"
                 )
                 return LLMResponse(
-                    content=stdout_text,  # Include output even on failure for debugging
+                    content=content,
                     model_used=model,
-                    input_tokens=0,
-                    output_tokens=0,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                     finish_reason="error",
                     latency_ms=latency_ms,
                     success=False,
                     error=error_msg,
+                    reported_cost_usd=reported_cost,
                 )
 
         except Exception as e:
@@ -279,7 +401,6 @@ class ClaudeCLIBackend(LLMBackend):
             if log_file:
                 log_file.write(f"\n\n{'=' * 50}\n")
                 log_file.write(f"ERROR: {e}\n")
-                log_file.close()
             return LLMResponse(
                 content="",
                 model_used=model,
@@ -290,6 +411,10 @@ class ClaudeCLIBackend(LLMBackend):
                 success=False,
                 error=str(e),
             )
+
+        finally:
+            if log_file:
+                log_file.close()
 
     def select_model(self, task_type: TaskType, retry_count: int) -> str:
         """Select appropriate model based on task type and retry count."""
