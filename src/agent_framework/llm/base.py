@@ -18,6 +18,7 @@ class LLMRequest:
     task_type: Optional[TaskType] = None  # For automatic model selection
     retry_count: int = 0  # For escalation to stronger model
     context: dict = None  # Task context (github_repo, jira_project, etc.)
+    working_dir: Optional[str] = None  # Working directory for subprocess execution
 
 
 @dataclass

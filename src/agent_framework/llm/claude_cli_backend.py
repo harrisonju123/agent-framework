@@ -93,6 +93,7 @@ class ClaudeCLIBackend(LLMBackend):
         # Build command
         cmd = [
             self.executable,
+            "--print",  # Non-interactive mode - write to stdout and exit
             "--model", model,
             "--dangerously-skip-permissions",
             "--max-turns", str(self.max_turns),
@@ -121,6 +122,7 @@ class ClaudeCLIBackend(LLMBackend):
             log_file = open(log_file_path, "w")
             log_file.write(f"=== Claude CLI Task: {task_id} ===\n")
             log_file.write(f"Model: {model}\n")
+            log_file.write(f"Working Directory: {request.working_dir or 'current directory'}\n")
             log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             log_file.write(f"Timeout: {timeout}s\n")
             log_file.write("=" * 50 + "\n\n")
@@ -132,6 +134,10 @@ class ClaudeCLIBackend(LLMBackend):
             env = os.environ.copy()
             env.pop('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', None)
 
+            # Determine working directory for subprocess
+            # Use working_dir from request if provided, otherwise inherit current directory
+            cwd = request.working_dir if request.working_dir else None
+
             # Run subprocess with streaming output
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -139,6 +145,7 @@ class ClaudeCLIBackend(LLMBackend):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=cwd,
             )
 
             # Send prompt to stdin
@@ -150,6 +157,9 @@ class ClaudeCLIBackend(LLMBackend):
             stdout_chunks = []
             stderr_chunks = []
             timed_out = False
+
+            # Track whether we've written the stderr header
+            stderr_header_written = [False]
 
             async def read_stream(stream, chunks, name):
                 """Read from stream and write to log file in real-time."""
@@ -164,6 +174,12 @@ class ClaudeCLIBackend(LLMBackend):
                         decoded = chunk.decode(errors='replace')
                         chunks.append(decoded)
                         if log_file:
+                            # Write stderr header only once when first stderr content arrives
+                            if name == "stderr" and not stderr_header_written[0] and decoded.strip():
+                                log_file.write(f"\n{'='*50}\n")
+                                log_file.write(f"STDERR:\n")
+                                log_file.write(f"{'='*50}\n")
+                                stderr_header_written[0] = True
                             log_file.write(decoded)
                             log_file.flush()
                 except asyncio.TimeoutError:
@@ -198,10 +214,16 @@ class ClaudeCLIBackend(LLMBackend):
 
             if log_file:
                 log_file.write(f"\n\n{'=' * 50}\n")
+                log_file.write(f"SUMMARY\n")
+                log_file.write(f"{'=' * 50}\n")
                 log_file.write(f"Completed: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 log_file.write(f"Duration: {latency_ms/1000:.1f}s\n")
                 log_file.write(f"Exit code: {process.returncode}\n")
                 log_file.write(f"Timed out: {timed_out}\n")
+                if stderr_text:
+                    log_file.write(f"\nSTDERR Summary:\n{stderr_text[:1000]}\n")
+                if process.returncode != 0:
+                    log_file.write(f"\n⚠️  FAILED - See stderr above for details\n")
                 log_file.close()
 
             if timed_out:
@@ -227,13 +249,22 @@ class ClaudeCLIBackend(LLMBackend):
                     success=True,
                 )
             else:
-                error_msg = stderr_text or stdout_text or f"Exit code {process.returncode}"
+                # Build detailed error message with both stdout and stderr
+                error_parts = [f"Exit code {process.returncode}"]
+                if stderr_text.strip():
+                    error_parts.append(f"STDERR: {stderr_text.strip()}")
+                if stdout_text.strip():
+                    error_parts.append(f"STDOUT: {stdout_text.strip()}")
+                error_msg = " | ".join(error_parts)
+
                 logger.error(
-                    f"Claude CLI failed: returncode={process.returncode}, "
-                    f"stderr={stderr_text[:500]}, stdout={stdout_text[:500]}"
+                    f"Claude CLI failed: returncode={process.returncode}\n"
+                    f"STDERR: {stderr_text[:1000]}\n"
+                    f"STDOUT: {stdout_text[:1000]}\n"
+                    f"Log: {log_file_path}"
                 )
                 return LLMResponse(
-                    content="",
+                    content=stdout_text,  # Include output even on failure for debugging
                     model_used=model,
                     input_tokens=0,
                     output_tokens=0,

@@ -397,6 +397,16 @@ class Agent:
         from datetime import datetime
 
         task.last_error = response.error or "Unknown error"
+
+        # Log detailed error information for debugging
+        self.logger.error(
+            f"Task failed with detailed error:\n"
+            f"  Task ID: {task.id}\n"
+            f"  Error: {task.last_error}\n"
+            f"  Model: {response.model_used}\n"
+            f"  Latency: {response.latency_ms:.0f}ms\n"
+            f"  Finish reason: {response.finish_reason}"
+        )
         self.logger.task_failed(task.last_error, task.retry_count)
 
         self.activity_manager.append_event(ActivityEvent(
@@ -453,6 +463,10 @@ class Agent:
             # Initialize task execution
             self._initialize_task_execution(task, task_start_time)
 
+            # Get working directory for task (worktree, target repo, or framework workspace)
+            working_dir = self._get_working_directory(task)
+            self.logger.info(f"Working directory: {working_dir}")
+
             # Build prompt and execute LLM
             self.logger.phase_change("analyzing")
             prompt = self._build_prompt(task)
@@ -469,6 +483,7 @@ class Agent:
                     task_type=task.type,
                     retry_count=task.retry_count,
                     context=task.context,
+                    working_dir=str(working_dir),
                 ),
                 task_id=task.id,
             )

@@ -37,6 +37,8 @@ ENV/
 
 # Agent runtime data
 .agent-communication/
+.agent-context/
+.agent-tasks/
 queues/
 logs/
 *.log

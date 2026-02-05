@@ -18,9 +18,9 @@ class LLMConfig(BaseModel):
 
     # LiteLLM settings
     litellm_api_key: Optional[str] = None
-    litellm_cheap_model: str = "claude-3-5-haiku-20241022"
-    litellm_default_model: str = "claude-sonnet-4-20250514"
-    litellm_premium_model: str = "claude-opus-4-20250514"
+    litellm_cheap_model: str = "claude-haiku-4-5-20251001"
+    litellm_default_model: str = "claude-sonnet-4-5-20250929"
+    litellm_premium_model: str = "claude-sonnet-4-5-20250929"
 
     # Claude CLI settings
     claude_cli_executable: str = "claude"

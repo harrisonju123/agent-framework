@@ -18,9 +18,9 @@ llm:
 
   # LiteLLM settings (used when mode=litellm)
   # litellm_api_key: ${ANTHROPIC_API_KEY}
-  # litellm_cheap_model: claude-3-5-haiku-20241022
-  # litellm_default_model: claude-sonnet-4-20250514
-  # litellm_premium_model: claude-opus-4-20250514
+  # litellm_cheap_model: claude-haiku-4-5-20251001
+  # litellm_default_model: claude-sonnet-4-5-20250929
+  # litellm_premium_model: claude-opus-4-5-20251101
 
 # Task Processing Configuration
 task:

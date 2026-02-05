@@ -12,9 +12,9 @@ class ModelSelector:
 
     def __init__(
         self,
-        cheap_model: str = "claude-3-5-haiku-20241022",
-        default_model: str = "claude-sonnet-4-20250514",
-        premium_model: str = "claude-opus-4-20250514",
+        cheap_model: str = "claude-haiku-4-5-20251001",
+        default_model: str = "claude-sonnet-4-5-20250929",
+        premium_model: str = "claude-sonnet-4-5-20250929",
         timeout_large: int = 3600,
         timeout_bounded: int = 1800,
         timeout_simple: int = 900,
