@@ -36,7 +36,7 @@ llm:
   # Enables real-time JIRA/GitHub access during agent execution
   # Requires mode: claude_cli
   use_mcp: true
-  mcp_config_path: /Users/hju/PycharmProjects/agent-framework/config/mcp-config.json
+  mcp_config_path: config/mcp-config.json
 
 # Task Processing Configuration
 task:
