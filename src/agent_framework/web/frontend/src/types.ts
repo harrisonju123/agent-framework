@@ -9,6 +9,13 @@ export interface CurrentTask {
   started_at: string
 }
 
+export interface ToolActivity {
+  tool_name: string
+  tool_input_summary: string | null
+  started_at: string
+  tool_call_count: number
+}
+
 export interface Agent {
   id: string
   name: string
@@ -19,6 +26,7 @@ export interface Agent {
   phases_completed: number
   elapsed_seconds: number | null
   last_updated: string | null
+  tool_activity: ToolActivity | null
 }
 
 export interface QueueStats {

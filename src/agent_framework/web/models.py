@@ -47,6 +47,14 @@ class PhaseData(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+class ToolActivityData(BaseModel):
+    """Current tool activity during LLM execution."""
+    tool_name: str
+    tool_input_summary: Optional[str] = None
+    started_at: datetime
+    tool_call_count: int = 0
+
+
 class AgentData(BaseModel):
     """Agent data for API response."""
     id: str
@@ -58,6 +66,7 @@ class AgentData(BaseModel):
     phases_completed: int = 0
     elapsed_seconds: Optional[int] = None
     last_updated: Optional[datetime] = None
+    tool_activity: Optional[ToolActivityData] = None
 
 
 class QueueStats(BaseModel):

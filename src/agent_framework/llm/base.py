@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from ..core.task import TaskType
 
@@ -43,6 +43,7 @@ class LLMBackend(ABC):
         self,
         request: LLMRequest,
         task_id: Optional[str] = None,
+        on_tool_activity: Optional[Callable] = None,
     ) -> LLMResponse:
         """
         Send a completion request to the LLM.
@@ -50,6 +51,8 @@ class LLMBackend(ABC):
         Args:
             request: The LLM request with prompt and configuration.
             task_id: Optional task identifier for logging/streaming output.
+            on_tool_activity: Optional callback invoked with (tool_name, summary)
+                when a tool_use event is parsed from the stream.
         """
         pass
 

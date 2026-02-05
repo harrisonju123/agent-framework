@@ -74,3 +74,5 @@ docs/_build/
 
 # agent stuff
 task_results/*
+
+CLAUDE.md

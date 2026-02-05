@@ -8,7 +8,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Optional, Set
+from typing import Callable, Optional, Set
 
 from .base import LLMBackend, LLMRequest, LLMResponse
 from .model_selector import ModelSelector
@@ -17,7 +17,47 @@ from ..core.task import TaskType
 logger = logging.getLogger(__name__)
 
 
-def _process_stream_line(line: str, text_chunks: list, usage_result: dict, log_file=None):
+def _summarize_tool_input(tool_name: str, tool_input: dict) -> Optional[str]:
+    """Extract a short human-readable summary from tool input."""
+    if not tool_input:
+        return None
+
+    if tool_name in ("Read", "Edit", "Write"):
+        path = tool_input.get("file_path") or tool_input.get("path", "")
+        if path:
+            # Last 3 path segments for brevity
+            parts = path.replace("\\", "/").split("/")
+            return "/".join(parts[-3:]) if len(parts) > 3 else path
+    elif tool_name == "Bash":
+        cmd = tool_input.get("command", "")
+        return cmd[:60] if cmd else None
+    elif tool_name == "Grep":
+        pattern = tool_input.get("pattern", "")
+        path = tool_input.get("path", "")
+        if pattern and path:
+            parts = path.replace("\\", "/").split("/")
+            short_path = "/".join(parts[-2:]) if len(parts) > 2 else path
+            return f'"{pattern}" in {short_path}'
+        return f'"{pattern}"' if pattern else None
+    elif tool_name == "Glob":
+        return tool_input.get("pattern") or None
+    else:
+        # MCP tools or others — look for common identifier keys
+        for key in ("issueKey", "owner", "repo", "query", "jql", "summary"):
+            if key in tool_input:
+                val = str(tool_input[key])
+                return val[:60] if val else None
+
+    return None
+
+
+def _process_stream_line(
+    line: str,
+    text_chunks: list,
+    usage_result: dict,
+    log_file=None,
+    on_tool_activity: Optional[Callable] = None,
+):
     """Parse a single JSON line from --output-format stream-json.
 
     Extracts text content for log streaming and captures token usage
@@ -28,6 +68,7 @@ def _process_stream_line(line: str, text_chunks: list, usage_result: dict, log_f
         text_chunks: Accumulator for assistant text content
         usage_result: Dict to populate with usage data from result event
         log_file: Optional file handle for real-time log output
+        on_tool_activity: Optional callback invoked with (tool_name, tool_input_summary)
     """
     line = line.strip()
     if not line:
@@ -68,11 +109,16 @@ def _process_stream_line(line: str, text_chunks: list, usage_result: dict, log_f
                     log_file.write(text)
                     log_file.flush()
             elif block.get("type") == "tool_use":
-                marker = f"\n[Tool Call: {block.get('name', 'unknown')}]\n"
+                tool_name = block.get("name", "unknown")
+                marker = f"\n[Tool Call: {tool_name}]\n"
                 text_chunks.append(marker)
                 if log_file:
                     log_file.write(marker)
                     log_file.flush()
+                if on_tool_activity:
+                    tool_input = block.get("input", {})
+                    summary = _summarize_tool_input(tool_name, tool_input)
+                    on_tool_activity(tool_name, summary)
 
     elif event_type == "result":
         # Final event — authoritative usage overwrites per-turn accumulation
@@ -145,6 +191,7 @@ class ClaudeCLIBackend(LLMBackend):
         self,
         request: LLMRequest,
         task_id: Optional[str] = None,
+        on_tool_activity: Optional[Callable] = None,
     ) -> LLMResponse:
         """
         Send a completion request via Claude CLI subprocess.
@@ -257,7 +304,8 @@ class ClaudeCLIBackend(LLMBackend):
                             if buffer:
                                 _process_stream_line(
                                     buffer.decode(errors='replace'),
-                                    text_chunks, usage_result, log_file
+                                    text_chunks, usage_result, log_file,
+                                    on_tool_activity,
                                 )
                             break
                         buffer += chunk
@@ -266,7 +314,8 @@ class ClaudeCLIBackend(LLMBackend):
                             line_bytes, buffer = buffer.split(b"\n", 1)
                             _process_stream_line(
                                 line_bytes.decode(errors='replace'),
-                                text_chunks, usage_result, log_file
+                                text_chunks, usage_result, log_file,
+                                on_tool_activity,
                             )
                 except asyncio.TimeoutError:
                     pass

@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 
 from .task import Task, TaskStatus, TaskType
 from .task_validator import validate_task, ValidationResult
-from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase
+from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase, ToolActivity
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
@@ -477,6 +477,27 @@ class Agent:
                 f"🤖 Calling LLM (model: {task.type}, attempt: {task.retry_count + 1})"
             )
 
+            # Throttled callback so tool activity writes hit disk at most once/sec
+            _tool_call_count = [0]
+            _last_write_time = [0.0]
+
+            def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
+                try:
+                    _tool_call_count[0] += 1
+                    now = time.time()
+                    if now - _last_write_time[0] < 1.0:
+                        return
+                    _last_write_time[0] = now
+                    ta = ToolActivity(
+                        tool_name=tool_name,
+                        tool_input_summary=tool_input_summary,
+                        started_at=datetime.utcnow(),
+                        tool_call_count=_tool_call_count[0],
+                    )
+                    self.activity_manager.update_tool_activity(self.config.id, ta)
+                except Exception as e:
+                    self.logger.debug(f"Tool activity tracking error (non-fatal): {e}")
+
             response = await self.llm.complete(
                 LLMRequest(
                     prompt=prompt,
@@ -486,7 +507,14 @@ class Agent:
                     working_dir=str(working_dir),
                 ),
                 task_id=task.id,
+                on_tool_activity=_on_tool_activity,
             )
+
+            # Clear tool activity after LLM completes
+            try:
+                self.activity_manager.update_tool_activity(self.config.id, None)
+            except Exception:
+                pass
 
             # Handle response
             if response.success:

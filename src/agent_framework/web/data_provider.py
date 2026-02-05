@@ -21,6 +21,7 @@ from .models import (
     HealthReport,
     CurrentTaskData,
     LogEntry,
+    ToolActivityData,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,19 @@ class DashboardDataProvider:
                     else None
                 )
 
+                # Map tool activity if present during LLM execution
+                tool_activity_data = None
+                if (
+                    activity.tool_activity
+                    and activity.current_phase == TaskPhase.EXECUTING_LLM
+                ):
+                    tool_activity_data = ToolActivityData(
+                        tool_name=activity.tool_activity.tool_name,
+                        tool_input_summary=activity.tool_activity.tool_input_summary,
+                        started_at=activity.tool_activity.started_at,
+                        tool_call_count=activity.tool_activity.tool_call_count,
+                    )
+
                 agent_data = AgentData(
                     id=agent_def.id,
                     name=agent_def.name,
@@ -124,6 +138,7 @@ class DashboardDataProvider:
                     phases_completed=phases_completed,
                     elapsed_seconds=activity.get_elapsed_seconds(),
                     last_updated=activity.last_updated,
+                    tool_activity=tool_activity_data,
                 )
             else:
                 # Dead agent

@@ -111,6 +111,24 @@ const elapsedDisplay = computed(() => {
   return `${minutes}m ${seconds}s`
 })
 
+const TOOL_VERBS: Record<string, string> = {
+  Read: 'Reading',
+  Edit: 'Editing',
+  Write: 'Writing',
+  Bash: 'Running',
+  Grep: 'Searching',
+  Glob: 'Finding',
+  Task: 'Delegating',
+}
+
+const toolActivityDisplay = computed(() => {
+  const ta = props.agent.tool_activity
+  if (!ta) return null
+  const verb = TOOL_VERBS[ta.tool_name] || ta.tool_name
+  const summary = ta.tool_input_summary ? `: ${ta.tool_input_summary}` : ''
+  return { text: `${verb}${summary}`, count: ta.tool_call_count }
+})
+
 const progressDots = computed(() => {
   const total = 5
   const completed = Math.min(props.agent.phases_completed, total)
@@ -166,6 +184,15 @@ function handleRestart() {
         </span>
         <span v-if="elapsedDisplay" class="text-xs text-gray-500">
           {{ elapsedDisplay }}
+        </span>
+      </div>
+      <div v-if="toolActivityDisplay" class="flex items-center gap-2 mt-1">
+        <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse" aria-hidden="true"></span>
+        <span class="text-xs text-green-300 truncate" :title="toolActivityDisplay.text">
+          {{ toolActivityDisplay.text }}
+        </span>
+        <span class="text-xs text-gray-500 ml-auto whitespace-nowrap">
+          {{ toolActivityDisplay.count }} tools
         </span>
       </div>
       <div class="flex gap-1 mt-2" role="progressbar" :aria-valuenow="progressDots.filled" :aria-valuemin="0" :aria-valuemax="5" :aria-label="`Progress: ${progressDots.filled} of 5 phases completed`">

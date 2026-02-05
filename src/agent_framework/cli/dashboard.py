@@ -134,8 +134,23 @@ class AgentDashboard:
 
         return Panel(header_text, style="blue")
 
-    def _get_phase_display(self, phase: Optional[TaskPhase], phase_started: Optional[datetime]) -> Tuple[str, str]:
+    # Maps tool names to short action verbs for TUI display
+    TOOL_VERBS = {
+        "Read": "Read",
+        "Edit": "Edit",
+        "Write": "Write",
+        "Bash": "Run",
+        "Grep": "Grep",
+        "Glob": "Glob",
+        "Task": "Task",
+    }
+
+    def _get_phase_display(self, phase: Optional[TaskPhase], phase_started: Optional[datetime], tool_activity=None) -> Tuple[str, str]:
         """Get phase display text with spinner and progress dots.
+
+        Args:
+            tool_activity: Optional ToolActivity from activity file, shown
+                during EXECUTING_LLM to give visibility into Claude's actions.
 
         Returns:
             Tuple of (phase_text, elapsed_str)
@@ -146,10 +161,19 @@ class AgentDashboard:
         phase_val = phase.value if hasattr(phase, 'value') else str(phase)
         phase_text = phase_val.replace("_", " ").title()
 
-        # Add spinner for EXECUTING_LLM phase
+        # Show tool activity instead of generic "Executing Llm" when available
         if phase == TaskPhase.EXECUTING_LLM:
             spinner = self.SPINNER_FRAMES[self.spinner_frame % len(self.SPINNER_FRAMES)]
-            phase_text = f"{spinner} {phase_text}"
+            if tool_activity:
+                verb = self.TOOL_VERBS.get(tool_activity.tool_name, tool_activity.tool_name)
+                summary = f": {tool_activity.tool_input_summary}" if tool_activity.tool_input_summary else ""
+                # Truncate to fit column width
+                tool_text = f"{verb}{summary}"
+                if len(tool_text) > 25:
+                    tool_text = tool_text[:24] + "\u2026"
+                phase_text = f"{spinner} {tool_text}"
+            else:
+                phase_text = f"{spinner} {phase_text}"
 
         # Calculate phase elapsed time
         elapsed_str = ""
@@ -224,10 +248,11 @@ class AgentDashboard:
                     style=row_style
                 )
             elif activity.status == AgentStatus.WORKING and activity.current_task:
-                # Get phase info with spinner
+                # Get phase info with spinner (pass tool_activity for live tool visibility)
                 phase_text, phase_elapsed = self._get_phase_display(
                     activity.current_phase,
-                    activity.phases[-1].started_at if activity.phases else None
+                    activity.phases[-1].started_at if activity.phases else None,
+                    tool_activity=activity.tool_activity,
                 )
 
                 # Progress dots based on completed phases

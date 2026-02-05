@@ -61,6 +61,14 @@ class CurrentTask(BaseModel):
     started_at: datetime
 
 
+class ToolActivity(BaseModel):
+    """Ephemeral state tracking which tool Claude is currently using."""
+    tool_name: str
+    tool_input_summary: Optional[str] = None
+    started_at: datetime
+    tool_call_count: int = 1
+
+
 class AgentActivity(BaseModel):
     """Agent's current activity state."""
     agent_id: str
@@ -68,6 +76,7 @@ class AgentActivity(BaseModel):
     current_task: Optional[CurrentTask] = None
     current_phase: Optional[TaskPhase] = None
     phases: List[PhaseRecord] = []
+    tool_activity: Optional[ToolActivity] = None
     last_updated: datetime
 
     def get_elapsed_seconds(self) -> Optional[int]:
@@ -119,6 +128,13 @@ class ActivityManager:
         tmp_file = activity_file.with_suffix(".tmp")
         tmp_file.write_text(activity.model_dump_json(indent=2))
         tmp_file.rename(activity_file)
+
+    def update_tool_activity(self, agent_id: str, tool_activity: Optional[ToolActivity]) -> None:
+        """Update tool activity on an existing activity file (read-modify-write)."""
+        activity = self.get_activity(agent_id)
+        if activity:
+            activity.tool_activity = tool_activity
+            self.update_activity(activity)
 
     def get_activity(self, agent_id: str) -> Optional[AgentActivity]:
         """Get agent's current activity state."""
