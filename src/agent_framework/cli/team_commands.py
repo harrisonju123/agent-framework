@@ -31,11 +31,10 @@ def _launch_team_session(
 
     claude_cmd = ["claude"]
 
-    if template.plan_approval:
-        claude_cmd.append("--plan-approval")
-
     if template.delegate_mode:
-        claude_cmd.append("--delegate-mode")
+        claude_cmd.extend(["--permission-mode", "delegate"])
+    elif template.plan_approval:
+        claude_cmd.extend(["--permission-mode", "plan"])
 
     env = os.environ.copy()
     env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
@@ -71,6 +70,43 @@ def _launch_team_session(
         bridge.mark_session_ended(team_name)
 
 
+def _create_team_worktree(
+    repo_path: Path,
+    owner_repo: str,
+    team_name: str,
+    framework_config,
+) -> tuple[Path, str]:
+    """Create an isolated worktree for a team session.
+
+    Uses the base clone from ensure_repo() as the worktree parent so the
+    team works on its own branch without touching the default branch.
+
+    Returns:
+        Tuple of (worktree_path, branch_name), or (repo_path, "") if
+        worktree creation fails (falls back to bare clone).
+    """
+    from ..workspace.worktree_manager import WorktreeManager
+
+    branch_name = f"team/{team_name}"
+
+    try:
+        wt_config = framework_config.multi_repo.worktree.to_manager_config()
+        github_token = os.environ.get("GITHUB_TOKEN")
+        wt_manager = WorktreeManager(wt_config, github_token=github_token)
+
+        worktree_path = wt_manager.create_worktree(
+            base_repo=repo_path,
+            branch_name=branch_name,
+            agent_id="team",
+            task_id=team_name,
+            owner_repo=owner_repo,
+        )
+        return worktree_path, branch_name
+    except Exception as e:
+        console.print(f"[yellow]Worktree creation failed, using base clone: {e}[/]")
+        return repo_path, ""
+
+
 @click.group()
 def team():
     """Interactive Agent Teams - collaborative multi-agent sessions."""
@@ -85,8 +121,9 @@ def team():
     help="Team template: full (Architect+Engineer+QA), review (3 reviewers), debug (investigators)",
 )
 @click.option("--repo", "-r", help="Target repository (owner/repo)")
+@click.option("--epic", "-e", help="JIRA epic key - fetches tickets and includes in team context")
 @click.pass_context
-def start(ctx, template, repo):
+def start(ctx, template, repo, epic):
     """Launch an interactive Agent Team session.
 
     Spawns a Claude Agent Teams session with pre-configured team structure.
@@ -94,6 +131,7 @@ def start(ctx, template, repo):
 
     Examples:
         agent team start --template full --repo myorg/myapp
+        agent team start --template full --repo myorg/myapp --epic ME-443
         agent team start --template review --repo myorg/myapp
         agent team start --template debug
     """
@@ -120,7 +158,10 @@ def start(ctx, template, repo):
     except Exception:
         pass
 
-    # Resolve repo path if specified
+    # Generate team name upfront so worktree branch includes it
+    team_name = f"{tmpl.team_name_prefix}-{int(time.time())}"
+
+    # Resolve repo path if specified, then create isolated worktree
     repo_info = None
     repo_path = None
     if repo:
@@ -132,9 +173,18 @@ def start(ctx, template, repo):
                     framework_config.multi_repo.workspace_root,
                     github_token,
                 )
-                repo_path = manager.ensure_repo(repo)
-                repo_info = f"Repository: {repo}\nLocal path: {repo_path}"
-                console.print(f"[green]Repository ready: {repo_path}[/]")
+                base_clone = manager.ensure_repo(repo)
+
+                worktree_path, branch = _create_team_worktree(
+                    base_clone, repo, team_name, framework_config,
+                )
+                repo_path = worktree_path
+                if branch:
+                    repo_info = f"Repository: {repo}\nBranch: {branch}\nWorktree: {repo_path}"
+                    console.print(f"[green]Worktree ready: {repo_path} (branch: {branch})[/]")
+                else:
+                    repo_info = f"Repository: {repo}\nLocal path: {repo_path}"
+                    console.print(f"[green]Repository ready: {repo_path}[/]")
             elif not github_token:
                 console.print("[yellow]GITHUB_TOKEN not set, skipping repo setup[/]")
                 repo_info = f"Repository: {repo} (not cloned - no GITHUB_TOKEN)"
@@ -145,6 +195,42 @@ def start(ctx, template, repo):
             console.print(f"[yellow]Could not resolve repo: {e}[/]")
             repo_info = f"Repository: {repo} (resolution failed)"
 
+    # Fetch epic tickets if --epic provided
+    epic_context = None
+    if epic:
+        try:
+            from ..core.config import load_jira_config
+            from ..integrations.jira.client import JIRAClient
+
+            jira_config = load_jira_config(workspace / "config" / "jira.yaml")
+            if not jira_config:
+                console.print("[yellow]JIRA not configured - proceeding without epic context[/]")
+                epic_context = f"Epic: {epic} (JIRA not configured)"
+            else:
+                jira_client = JIRAClient(jira_config)
+                epic_data = jira_client.get_epic_with_subtasks(epic)
+
+                epic_issue = epic_data["epic"]
+                lines = [f"### Epic: {epic_issue.key} - {epic_issue.fields.summary}\n"]
+                if epic_issue.fields.description:
+                    lines.append(f"{epic_issue.fields.description}\n")
+
+                issues = epic_data["issues"]
+                lines.append(f"### Tickets ({len(issues)})\n")
+                for issue in issues:
+                    status = issue.fields.status.name
+                    issue_type = issue.fields.issuetype.name
+                    lines.append(f"- **{issue.key}** [{issue_type}] ({status}): {issue.fields.summary}")
+                    if issue.fields.description:
+                        desc = issue.fields.description[:500]
+                        lines.append(f"  {desc}")
+
+                epic_context = "\n".join(lines)
+                console.print(f"[green]Loaded epic {epic} with {len(issues)} tickets[/]")
+        except Exception as e:
+            console.print(f"[yellow]Could not fetch epic {epic}: {e}[/]")
+            epic_context = f"Epic: {epic} (fetch failed - work with available context)"
+
     # Load team context doc
     team_context_doc = None
     context_path = workspace / "config" / "docs" / "team_context.md"
@@ -154,18 +240,21 @@ def start(ctx, template, repo):
     # Build spawn prompt
     prompt = build_spawn_prompt(
         template=tmpl,
+        task_context=epic_context,
         repo_info=repo_info,
         team_context_doc=team_context_doc,
     )
 
-    # Generate team name
-    team_name = f"{tmpl.team_name_prefix}-{int(time.time())}"
-
     # Record session
+    session_metadata = {}
+    if repo:
+        session_metadata["repo"] = repo
+    if epic:
+        session_metadata["epic"] = epic
     bridge.record_team_session(
         team_name=team_name,
         template=template,
-        metadata={"repo": repo} if repo else None,
+        metadata=session_metadata or None,
     )
 
     console.print(f"\n[bold cyan]Launching Agent Team: {team_name}[/]")
@@ -238,10 +327,11 @@ def escalate(ctx, task_id, template):
     except Exception:
         pass
 
-    # Resolve repo if available
+    # Resolve repo if available, then create isolated worktree
     repo_info = None
     repo_path = None
     github_repo = task.context.get("github_repo")
+    team_name = f"{tmpl.team_name_prefix}-escalation-{int(time.time())}"
     if github_repo:
         try:
             github_token = os.environ.get("GITHUB_TOKEN")
@@ -251,8 +341,16 @@ def escalate(ctx, task_id, template):
                     framework_config.multi_repo.workspace_root,
                     github_token,
                 )
-                repo_path = manager.ensure_repo(github_repo)
-                repo_info = f"Repository: {github_repo}\nLocal path: {repo_path}"
+                base_clone = manager.ensure_repo(github_repo)
+
+                worktree_path, branch = _create_team_worktree(
+                    base_clone, github_repo, team_name, framework_config,
+                )
+                repo_path = worktree_path
+                if branch:
+                    repo_info = f"Repository: {github_repo}\nBranch: {branch}\nWorktree: {repo_path}"
+                else:
+                    repo_info = f"Repository: {github_repo}\nLocal path: {repo_path}"
         except Exception as e:
             console.print(f"[yellow]Could not resolve repo: {e}[/]")
 
@@ -270,14 +368,15 @@ def escalate(ctx, task_id, template):
         team_context_doc=team_context_doc,
     )
 
-    # Generate team name
-    team_name = f"{tmpl.team_name_prefix}-escalation-{int(time.time())}"
-
     # Record session
+    escalation_metadata = {}
+    if github_repo:
+        escalation_metadata["repo"] = github_repo
     bridge.record_team_session(
         team_name=team_name,
         template=template,
         source_task_id=task.id,
+        metadata=escalation_metadata or None,
     )
 
     console.print(f"\n[bold cyan]Launching debug team: {team_name}[/]")
