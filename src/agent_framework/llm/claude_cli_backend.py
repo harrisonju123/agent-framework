@@ -236,6 +236,11 @@ class ClaudeCLIBackend(LLMBackend):
                 "--strict-mcp-config",  # Only use our MCP config, ignore global ~/.claude/mcp_settings.json
             ])
 
+        # Add agent teammates for Claude Agent Teams
+        if request.agents:
+            cmd.extend(["--agents", json.dumps(request.agents)])
+            logger.debug(f"Team mode active: teammates={list(request.agents.keys())}")
+
         # Build prompt (combine system + user)
         full_prompt = ""
         if request.system_prompt:

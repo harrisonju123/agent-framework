@@ -31,13 +31,41 @@ def _launch_team_session(
 
     claude_cmd = ["claude"]
 
+    if template.agents:
+        claude_cmd.extend(["--agents", json.dumps(template.agents)])
+
     if template.delegate_mode:
         claude_cmd.extend(["--permission-mode", "delegate"])
     elif template.plan_approval:
         claude_cmd.extend(["--permission-mode", "plan"])
 
+    # Pass the prompt as a positional argument so stdin remains the user's
+    # terminal. Piping via input= closes stdin after the prompt, which
+    # breaks interactive features like plan approval and Agent Teams.
+    claude_cmd.append(prompt)
+
     env = os.environ.copy()
     env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
+
+    # Claude CLI authenticates via its own settings (ANTHROPIC_AUTH_TOKEN in
+    # .claude/settings.json). Shell-level auth vars (API key, base URL, auth
+    # token) would override that and point at the LiteLLM proxy which the
+    # interactive session shouldn't use.
+    for key in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"):
+        env.pop(key, None)
+
+    # Load .env from workspace so MCP servers get credentials (JIRA, GitHub, etc.)
+    # Skip auth keys — session auth is inherited from shell, not .env
+    _dotenv_skip = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}
+    dotenv_path = workspace / ".env"
+    if dotenv_path.exists():
+        try:
+            from dotenv import dotenv_values
+            for key, value in dotenv_values(dotenv_path).items():
+                if key not in _dotenv_skip and value is not None:
+                    env.setdefault(key, value)
+        except ImportError:
+            pass  # dotenv not installed, skip .env loading
 
     # Inject LLM proxy env if configured
     if framework_config is None:
@@ -51,15 +79,31 @@ def _launch_team_session(
 
     mcp_config = workspace / "config" / "mcp-config.json"
     if mcp_config.exists():
-        env["CLAUDE_MCP_CONFIG"] = str(mcp_config)
+        # MCP server commands use relative paths (e.g. mcp-servers/jira/build/index.js)
+        # that are relative to the workspace, but cwd may be a repo worktree.
+        # Resolve all args to absolute paths so servers start correctly.
+        mcp_data = json.loads(mcp_config.read_text())
+        workspace_str = str(workspace)
+        for _name, server in mcp_data.get("mcpServers", {}).items():
+            args = server.get("args", [])
+            server["args"] = [
+                str(workspace / a) if not os.path.isabs(a) else a
+                for a in args
+            ]
+            # Resolve WORKSPACE env var to absolute path too
+            srv_env = server.get("env", {})
+            if srv_env.get("WORKSPACE") == ".":
+                srv_env["WORKSPACE"] = workspace_str
+
+        resolved_mcp = workspace / "config" / ".mcp-config-resolved.json"
+        resolved_mcp.write_text(json.dumps(mcp_data, indent=2))
+        env["CLAUDE_MCP_CONFIG"] = str(resolved_mcp)
 
     try:
         subprocess.run(
             claude_cmd,
             cwd=cwd,
             env=env,
-            input=prompt,
-            text=True,
         )
     except FileNotFoundError:
         console.print("[red]Claude CLI not found. Install it first.[/]")

@@ -19,6 +19,7 @@ class LLMRequest:
     retry_count: int = 0  # For escalation to stronger model
     context: dict = None  # Task context (github_repo, jira_project, etc.)
     working_dir: Optional[str] = None  # Working directory for subprocess execution
+    agents: Optional[dict] = None  # Teammate definitions for Claude Agent Teams (--agents flag)
 
 
 @dataclass

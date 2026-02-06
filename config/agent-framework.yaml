@@ -99,6 +99,16 @@ optimization:
   #   escalation: 80000
   #   review: 25000
 
+# Team mode: use Claude Agent Teams for multi-agent workflows
+# When enabled, standard/full workflow tasks run as a team session
+# instead of bouncing between queues
+team_mode:
+  enabled: false          # Start disabled, enable when ready
+  min_workflow: standard  # minimum workflow complexity to trigger teams
+  # simple = never use teams (single-agent)
+  # standard = engineer + QA team
+  # full = architect + engineer + QA team
+
 # Multi-Repository Configuration
 # Used by the 'agent apply-pattern' command
 multi_repo:

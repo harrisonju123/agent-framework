@@ -191,6 +191,10 @@ def main():
             mcp_enabled=framework_config.llm.use_mcp,
             optimization_config=optimization_config,
             worktree_manager=worktree_manager,
+            agents_config=agents,
+            team_mode_enabled=framework_config.team_mode.enabled,
+            team_mode_min_workflow=framework_config.team_mode.min_workflow,
+            team_mode_default_model=framework_config.llm.claude_cli_default_model,
         )
 
         logger.info(f"Starting agent {agent_id}")

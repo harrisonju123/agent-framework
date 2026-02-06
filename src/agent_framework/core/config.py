@@ -202,6 +202,12 @@ class WorktreeConfig(BaseModel):
         )
 
 
+class TeamModeConfig(BaseModel):
+    """Team mode configuration for Claude Agent Teams."""
+    enabled: bool = False
+    min_workflow: Literal["simple", "standard", "full", "quality-focused"] = "standard"
+
+
 class MultiRepoConfig(BaseModel):
     """Multi-repository configuration."""
     workspace_root: Path = Field(default=Path("~/.agent-workspaces"))
@@ -274,6 +280,7 @@ class FrameworkConfig(BaseSettings):
     task: TaskConfig = Field(default_factory=TaskConfig)
     safeguards: SafeguardsConfig = Field(default_factory=SafeguardsConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
+    team_mode: TeamModeConfig = Field(default_factory=TeamModeConfig)
     multi_repo: MultiRepoConfig = Field(default_factory=MultiRepoConfig)
     repositories: List[RepositoryConfig] = Field(default_factory=list)
 

@@ -1,7 +1,7 @@
 """Team template loading and prompt building for Claude Agent Teams."""
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +20,7 @@ class TeamTemplate:
     spawn_prompt: str
     plan_approval: bool = True
     delegate_mode: bool = False
+    agents: dict = field(default_factory=dict)
 
 
 def load_team_templates(config_dir: Path) -> dict[str, TeamTemplate]:
@@ -48,6 +49,7 @@ def load_team_templates(config_dir: Path) -> dict[str, TeamTemplate]:
             spawn_prompt=config.get("spawn_prompt", ""),
             plan_approval=config.get("plan_approval", True),
             delegate_mode=config.get("delegate_mode", False),
+            agents=config.get("agents", {}),
         )
 
     return templates

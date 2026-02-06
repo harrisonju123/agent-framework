@@ -1,5 +1,6 @@
 # Team templates for Claude Agent Teams integration.
 # Each template defines a pre-configured team structure for interactive sessions.
+# The "agents" field maps directly to Claude CLI's --agents flag.
 
 templates:
   full:
@@ -7,6 +8,21 @@ templates:
     lead_role: "Architect"
     plan_approval: true
     delegate_mode: false
+    agents:
+      engineer:
+        description: "Implements code changes, writes tests, handles refactoring"
+        prompt: |
+          You are the Engineer on this implementation team. You take direction
+          from the Architect and implement code changes with tests. Focus on
+          clean, working code. Ask the Architect for clarification when specs
+          are ambiguous.
+      qa:
+        description: "Validates implementation, runs test suites, checks edge cases"
+        prompt: |
+          You are QA on this implementation team. Validate that the Engineer's
+          implementation meets the Architect's spec. Run test suites, check
+          edge cases, and verify no regressions. Report findings back to the
+          Architect.
     spawn_prompt: |
       You are the lead architect for this implementation team.
 
@@ -28,6 +44,25 @@ templates:
     lead_role: "Review Lead"
     plan_approval: false
     delegate_mode: true
+    agents:
+      security_reviewer:
+        description: "Reviews code for auth, injection, data exposure, OWASP top 10"
+        prompt: |
+          You are the Security Reviewer. Focus on authentication, injection
+          vulnerabilities, data exposure, and OWASP top 10 issues. Report
+          findings with severity levels.
+      performance_reviewer:
+        description: "Reviews code for N+1 queries, memory leaks, caching opportunities"
+        prompt: |
+          You are the Performance Reviewer. Focus on N+1 queries, memory leaks,
+          caching opportunities, and algorithmic complexity. Report findings
+          with severity levels.
+      test_coverage_reviewer:
+        description: "Reviews code for missing tests, edge cases, regression risks"
+        prompt: |
+          You are the Test Coverage Reviewer. Focus on missing tests, edge
+          cases, regression risks, and test quality. Report findings with
+          severity levels.
     spawn_prompt: |
       You are the lead for this code review team.
 
@@ -47,6 +82,19 @@ templates:
     lead_role: "Debug Lead"
     plan_approval: false
     delegate_mode: false
+    agents:
+      investigator_a:
+        description: "Investigates error traces and reproduction steps"
+        prompt: |
+          You are Investigator A on this debugging team. Focus on the error
+          trace and reproduction steps. Form a hypothesis about root cause
+          and gather evidence.
+      investigator_b:
+        description: "Investigates recent changes and environmental factors"
+        prompt: |
+          You are Investigator B on this debugging team. Focus on recent
+          changes, environmental factors, and configuration. Form a hypothesis
+          about root cause and gather evidence.
     spawn_prompt: |
       You are the lead for this debugging team investigating a failed task.
 

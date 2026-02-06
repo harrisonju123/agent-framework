@@ -12,11 +12,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from .config import AgentDefinition
 
 from .task import Task, TaskStatus, TaskType
 from .task_validator import validate_task, ValidationResult
 from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase, ToolActivity
+from .team_composer import compose_team
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
@@ -98,6 +102,10 @@ class Agent:
         mcp_enabled: bool = False,
         optimization_config: Optional[dict] = None,
         worktree_manager: Optional[WorktreeManager] = None,
+        agents_config: Optional["List[AgentDefinition]"] = None,
+        team_mode_enabled: bool = False,
+        team_mode_min_workflow: str = "standard",
+        team_mode_default_model: str = "sonnet",
     ):
         self.config = config
         self.llm = llm
@@ -113,6 +121,12 @@ class Agent:
         self._current_task_id: Optional[str] = None
         self.worktree_manager = worktree_manager
         self._active_worktree: Optional[Path] = None  # Track active worktree for cleanup
+
+        # Team mode: use Claude Agent Teams for multi-agent workflows
+        self._agents_config = agents_config or []
+        self._team_mode_enabled = team_mode_enabled
+        self._team_mode_min_workflow = team_mode_min_workflow
+        self._team_mode_default_model = team_mode_default_model
 
         # Setup rich logging (log_level passed from CLI via environment)
         import os
@@ -498,6 +512,19 @@ class Agent:
                 except Exception as e:
                     self.logger.debug(f"Tool activity tracking error (non-fatal): {e}")
 
+            # Compose team if team mode is enabled
+            team_agents = None
+            if self._team_mode_enabled:
+                workflow = task.context.get("workflow", "full")
+                team_agents = compose_team(
+                    task.context, workflow, self._agents_config,
+                    min_workflow=self._team_mode_min_workflow,
+                    default_model=self._team_mode_default_model,
+                    caller_agent_id=self.config.id,
+                )
+                if team_agents:
+                    self.logger.info(f"Using team mode: {list(team_agents.keys())}")
+
             response = await self.llm.complete(
                 LLMRequest(
                     prompt=prompt,
@@ -505,6 +532,7 @@ class Agent:
                     retry_count=task.retry_count,
                     context=task.context,
                     working_dir=str(working_dir),
+                    agents=team_agents,
                 ),
                 task_id=task.id,
                 on_tool_activity=_on_tool_activity,
