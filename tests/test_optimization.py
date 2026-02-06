@@ -202,7 +202,7 @@ class TestErrorTruncation:
         """Verify error truncation keeps error type and key lines."""
         long_error = "ValueError: Invalid input\n" + "\n".join([f"Line {i}" for i in range(100)])
 
-        truncated = agent.escalation_handler._truncate_error(long_error, max_lines=35)
+        truncated = agent.escalation_handler.truncate_error(long_error, max_lines=35)
 
         # Should preserve error type
         assert "ValueError" in truncated
@@ -217,7 +217,7 @@ class TestErrorTruncation:
         """Verify short errors are not truncated."""
         short_error = "ValueError: Invalid input"
 
-        truncated = agent.escalation_handler._truncate_error(short_error)
+        truncated = agent.escalation_handler.truncate_error(short_error)
 
         # Should be unchanged
         assert truncated == short_error
@@ -226,7 +226,7 @@ class TestErrorTruncation:
         """Verify already truncated errors are not re-truncated."""
         already_truncated = "Error\n... (50 lines omitted) ..."
 
-        truncated = agent.escalation_handler._truncate_error(already_truncated)
+        truncated = agent.escalation_handler.truncate_error(already_truncated)
 
         # Should not be re-truncated
         assert truncated == already_truncated

@@ -1,5 +1,6 @@
 """Data provider for web dashboard - shared data access layer."""
 
+import json
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ from .models import (
     HealthReport,
     CurrentTaskData,
     LogEntry,
+    TeamSessionData,
     ToolActivityData,
 )
 
@@ -41,7 +43,9 @@ class DashboardDataProvider:
         self.circuit_breaker = CircuitBreaker(workspace)
         self._agents_config_cache: Optional[List[AgentDefinition]] = None
         self._cache_time: Optional[datetime] = None
-        self._cache_ttl_seconds = 5  # Refresh agent config every 5 seconds
+        self._cache_ttl_seconds = 5  # Refresh config/teams every 5 seconds
+        self._teams_cache: Optional[List[TeamSessionData]] = None
+        self._teams_cache_time: Optional[datetime] = None
 
     def _get_agents_config(self) -> List[AgentDefinition]:
         """Get agents config with caching."""
@@ -306,6 +310,47 @@ class DashboardDataProvider:
             last_error=task.last_error,
             failed_at=task.failed_at,
         )
+
+    def get_active_teams(self) -> List[TeamSessionData]:
+        """Get active Agent Team sessions from local workspace."""
+        now = datetime.now(timezone.utc)
+        if (
+            self._teams_cache is not None
+            and self._teams_cache_time is not None
+            and (now - self._teams_cache_time).total_seconds() <= self._cache_ttl_seconds
+        ):
+            return self._teams_cache
+
+        teams_dir = self.workspace / ".agent-communication" / "teams"
+        claude_teams_dir = Path.home() / ".claude" / "teams"
+
+        sessions: List[TeamSessionData] = []
+
+        for search_dir in [teams_dir, claude_teams_dir]:
+            if not search_dir.exists():
+                continue
+            for session_file in search_dir.glob("*.json"):
+                try:
+                    data = json.loads(session_file.read_text())
+                    started_at = None
+                    if data.get("started_at"):
+                        try:
+                            started_at = datetime.fromisoformat(data["started_at"])
+                        except (ValueError, TypeError):
+                            pass
+                    sessions.append(TeamSessionData(
+                        team_name=data.get("team_name", session_file.stem),
+                        template=data.get("template", "unknown"),
+                        started_at=started_at,
+                        source_task_id=data.get("source_task_id"),
+                        status=data.get("status", "unknown"),
+                    ))
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+        self._teams_cache = sessions
+        self._teams_cache_time = now
+        return sessions
 
     # ============== Log Reading Methods ==============
 

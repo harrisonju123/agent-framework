@@ -116,6 +116,15 @@ class HealthReport(BaseModel):
     warnings: List[str] = []
 
 
+class TeamSessionData(BaseModel):
+    """Active Agent Team session."""
+    team_name: str
+    template: str
+    started_at: Optional[datetime] = None
+    source_task_id: Optional[str] = None
+    status: str = "active"
+
+
 class DashboardState(BaseModel):
     """Complete dashboard state for WebSocket updates."""
     agents: List[AgentData]
@@ -125,6 +134,7 @@ class DashboardState(BaseModel):
     health: HealthReport
     is_paused: bool
     uptime_seconds: int
+    active_teams: List[TeamSessionData] = []
 
 
 # API Response models

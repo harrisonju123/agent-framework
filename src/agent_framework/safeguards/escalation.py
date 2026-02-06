@@ -23,7 +23,7 @@ class EscalationHandler:
         self.product_owner_queue = product_owner_queue
         self.enable_error_truncation = enable_error_truncation
 
-    def _truncate_error(self, error: str, max_lines: int = 35) -> str:
+    def truncate_error(self, error: str, max_lines: int = 35) -> str:
         """
         Intelligently truncate error messages.
 
@@ -102,7 +102,7 @@ class EscalationHandler:
         # Truncate error if enabled (Strategy 8: Error Truncation)
         error_msg = failed_task.last_error or "Unknown error"
         if self.enable_error_truncation:
-            error_msg = self._truncate_error(error_msg)
+            error_msg = self.truncate_error(error_msg)
 
         escalation = Task(
             id=escalation_id,

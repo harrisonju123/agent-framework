@@ -31,6 +31,7 @@ from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
 from ..workspace.multi_repo_manager import MultiRepoManager
 from ..workspace.worktree_manager import WorktreeManager
+from .team_commands import team
 
 
 console = Console()
@@ -43,6 +44,9 @@ def cli(ctx, workspace):
     """Agent Framework - AI-powered JIRA ticket automation."""
     ctx.ensure_object(dict)
     ctx.obj["workspace"] = Path(workspace)
+
+
+cli.add_command(team)
 
 
 @cli.command()

@@ -38,6 +38,7 @@ from .models import (
     GitHubValidationResponse,
     SetupConfiguration,
     SetupStatusResponse,
+    TeamSessionData,
 )
 
 logger = logging.getLogger(__name__)
@@ -435,6 +436,33 @@ def register_routes(app: FastAPI):
             logger.exception(f"Error translating error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ============== Teams API ==============
+
+    @app.get("/api/teams", response_model=list[TeamSessionData])
+    async def get_teams():
+        """List active Agent Team sessions."""
+        return app.state.data_provider.get_active_teams()
+
+    @app.post("/api/tasks/{task_id}/escalate-to-team")
+    async def escalate_to_team(task_id: str):
+        """Get CLI command to escalate a failed task to an interactive team.
+
+        Agent Teams require an interactive terminal, so this returns
+        the CLI command rather than launching directly.
+        """
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
+            raise HTTPException(status_code=400, detail=f"Invalid task_id: {task_id}")
+
+        task_data = app.state.data_provider.get_task(task_id)
+        if not task_data:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+        return {
+            "command": f"agent team escalate {task_id}",
+            "task_id": task_id,
+            "task_title": task_data.title,
+        }
+
     # ============== Operations API ==============
 
     @app.post("/api/operations/work", response_model=OperationResponse)
@@ -631,6 +659,7 @@ def register_routes(app: FastAPI):
                     health=app.state.data_provider.get_health_status(),
                     is_paused=app.state.data_provider.is_paused(),
                     uptime_seconds=int(uptime),
+                    active_teams=app.state.data_provider.get_active_teams(),
                 )
 
                 await websocket.send_json(state.model_dump(mode="json"))
