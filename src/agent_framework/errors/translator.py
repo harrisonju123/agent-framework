@@ -80,6 +80,30 @@ class ErrorTranslator:
             ]
         },
 
+        # LLM proxy errors (must precede generic network pattern)
+        r"connection.*refused.*ANTHROPIC_BASE_URL|Cannot reach LLM proxy": {
+            "title": "Cannot reach LLM proxy",
+            "explanation": "The agent cannot connect to the configured LiteLLM proxy server.",
+            "actions": [
+                "Verify proxy_url in config/agent-framework.yaml",
+                "Check the proxy server is running",
+                "Check network connectivity: curl <proxy_url>/health",
+                "Run health check: agent doctor"
+            ],
+            "documentation": "docs/TROUBLESHOOTING.md#proxy"
+        },
+
+        r"proxy.*401|proxy.*unauthorized|ANTHROPIC_AUTH_TOKEN.*invalid": {
+            "title": "LLM proxy authentication failed",
+            "explanation": "The proxy rejected the authentication token.",
+            "actions": [
+                "Check proxy_auth_token in config/agent-framework.yaml",
+                "Verify the token hasn't expired",
+                "Contact your proxy administrator for a new token"
+            ],
+            "documentation": "docs/TROUBLESHOOTING.md#proxy"
+        },
+
         # Network errors
         r"connection.*refused|connection.*timeout|network.*unreachable": {
             "title": "Cannot connect to service",

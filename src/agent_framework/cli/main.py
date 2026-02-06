@@ -1816,6 +1816,10 @@ def _run_claude_cli(prompt: str, cwd: Path, framework_config, timeout: int = 360
     ).returncode == 0:
         raise RuntimeError(f"Claude CLI executable not found: {claude_cmd}")
 
+    # Build env with proxy vars if configured
+    env = os.environ.copy()
+    env.update(framework_config.llm.get_proxy_env())
+
     # Run Claude CLI with timeout
     # Send prompt via stdin and use dangerously-skip-permissions for automation
     try:
@@ -1826,6 +1830,7 @@ def _run_claude_cli(prompt: str, cwd: Path, framework_config, timeout: int = 360
             capture_output=False,  # Let Claude output directly to console
             text=True,
             timeout=timeout,
+            env=env,
         )
 
         if result.returncode != 0:

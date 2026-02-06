@@ -3,7 +3,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -14,10 +14,24 @@ logger = logging.getLogger(__name__)
 
 class LLMConfig(BaseModel):
     """LLM configuration."""
-    mode: str = "litellm"  # "litellm" or "claude_cli"
+    mode: Literal["claude_cli", "litellm"] = "claude_cli"
 
-    # LiteLLM settings
+    # Proxy passthrough: route Claude CLI API calls through LiteLLM proxy
+    proxy_url: Optional[str] = None
+    proxy_auth_token: Optional[str] = None
+
+    @field_validator('proxy_url')
+    @classmethod
+    def validate_proxy_url(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.startswith(("http://", "https://")):
+            raise ValueError(
+                f"proxy_url must start with http:// or https://, got '{v}'"
+            )
+        return v
+
+    # LiteLLM direct settings
     litellm_api_key: Optional[str] = None
+    litellm_api_base: Optional[str] = None
     litellm_cheap_model: str = "claude-haiku-4-5-20251001"
     litellm_default_model: str = "claude-sonnet-4-5-20250929"
     litellm_premium_model: str = "claude-sonnet-4-5-20250929"
@@ -38,6 +52,15 @@ class LLMConfig(BaseModel):
     # MCP settings
     mcp_config_path: Optional[str] = None
     use_mcp: bool = False
+
+    def get_proxy_env(self) -> Dict[str, str]:
+        """Build env vars dict for proxy passthrough to Claude CLI subprocesses."""
+        env: Dict[str, str] = {}
+        if self.proxy_url:
+            env["ANTHROPIC_BASE_URL"] = self.proxy_url
+        if self.proxy_auth_token:
+            env["ANTHROPIC_AUTH_TOKEN"] = self.proxy_auth_token
+        return env
 
 
 class TaskConfig(BaseModel):

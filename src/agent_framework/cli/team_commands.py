@@ -20,6 +20,7 @@ def _launch_team_session(
     workspace: Path,
     prompt: str,
     team_name: str,
+    framework_config=None,
 ):
     """Build and run a Claude Agent Teams subprocess.
 
@@ -38,6 +39,16 @@ def _launch_team_session(
 
     env = os.environ.copy()
     env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "1"
+
+    # Inject LLM proxy env if configured
+    if framework_config is None:
+        from ..core.config import load_config
+        try:
+            framework_config = load_config(workspace / "config" / "agent-framework.yaml")
+        except Exception:
+            pass
+    if framework_config:
+        env.update(framework_config.llm.get_proxy_env())
 
     mcp_config = workspace / "config" / "mcp-config.json"
     if mcp_config.exists():
@@ -101,16 +112,21 @@ def start(ctx, template, repo):
     tmpl = templates[template]
     bridge = TeamBridge(workspace)
 
+    # Load framework config (used for repo resolution and proxy env)
+    from ..core.config import load_config
+    framework_config = None
+    try:
+        framework_config = load_config(workspace / "config" / "agent-framework.yaml")
+    except Exception:
+        pass
+
     # Resolve repo path if specified
     repo_info = None
     repo_path = None
     if repo:
         try:
-            from ..core.config import load_config
-            framework_config = load_config(workspace / "config" / "agent-framework.yaml")
-
             github_token = os.environ.get("GITHUB_TOKEN")
-            if github_token:
+            if github_token and framework_config:
                 from ..workspace.multi_repo_manager import MultiRepoManager
                 manager = MultiRepoManager(
                     framework_config.multi_repo.workspace_root,
@@ -119,9 +135,12 @@ def start(ctx, template, repo):
                 repo_path = manager.ensure_repo(repo)
                 repo_info = f"Repository: {repo}\nLocal path: {repo_path}"
                 console.print(f"[green]Repository ready: {repo_path}[/]")
-            else:
+            elif not github_token:
                 console.print("[yellow]GITHUB_TOKEN not set, skipping repo setup[/]")
                 repo_info = f"Repository: {repo} (not cloned - no GITHUB_TOKEN)"
+            else:
+                console.print("[yellow]Config not loaded, skipping repo setup[/]")
+                repo_info = f"Repository: {repo} (config unavailable)"
         except Exception as e:
             console.print(f"[yellow]Could not resolve repo: {e}[/]")
             repo_info = f"Repository: {repo} (resolution failed)"
@@ -159,7 +178,7 @@ def start(ctx, template, repo):
 
     cwd = repo_path or workspace
 
-    _launch_team_session(tmpl, cwd, workspace, prompt, team_name)
+    _launch_team_session(tmpl, cwd, workspace, prompt, team_name, framework_config)
 
 
 @team.command()
@@ -211,16 +230,22 @@ def escalate(ctx, task_id, template):
 
     tmpl = templates[template]
 
+    # Load framework config (used for repo resolution and proxy env)
+    from ..core.config import load_config
+    framework_config = None
+    try:
+        framework_config = load_config(workspace / "config" / "agent-framework.yaml")
+    except Exception:
+        pass
+
     # Resolve repo if available
     repo_info = None
     repo_path = None
     github_repo = task.context.get("github_repo")
     if github_repo:
         try:
-            from ..core.config import load_config
-            framework_config = load_config(workspace / "config" / "agent-framework.yaml")
             github_token = os.environ.get("GITHUB_TOKEN")
-            if github_token:
+            if github_token and framework_config:
                 from ..workspace.multi_repo_manager import MultiRepoManager
                 manager = MultiRepoManager(
                     framework_config.multi_repo.workspace_root,
@@ -260,7 +285,7 @@ def escalate(ctx, task_id, template):
 
     cwd = repo_path or workspace
 
-    _launch_team_session(tmpl, cwd, workspace, prompt, team_name)
+    _launch_team_session(tmpl, cwd, workspace, prompt, team_name, framework_config)
 
 
 @team.command("status")

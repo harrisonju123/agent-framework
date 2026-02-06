@@ -166,10 +166,12 @@ class ClaudeCLIBackend(LLMBackend):
         timeout_bounded: int = 1800,
         timeout_simple: int = 900,
         logs_dir: Optional[Path] = None,
+        proxy_env: Optional[dict] = None,
     ):
         self.executable = executable
         self.max_turns = max_turns
         self.timeout = timeout  # Fallback timeout when task_type not specified
+        self.proxy_env = proxy_env or {}
         self.model_selector = ModelSelector(
             cheap_model, default_model, premium_model,
             timeout_large=timeout_large,
@@ -261,6 +263,7 @@ class ClaudeCLIBackend(LLMBackend):
             # Prepare clean environment (exclude problematic beta flag)
             env = os.environ.copy()
             env.pop('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', None)
+            env.update(self.proxy_env)
 
             # Determine working directory for subprocess
             # Use working_dir from request if provided, otherwise inherit current directory

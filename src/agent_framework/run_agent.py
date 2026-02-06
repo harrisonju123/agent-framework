@@ -91,29 +91,46 @@ def main():
             validation_mode=framework_config.task.validation_mode,
         )
 
-        # Create LLM backend (Claude CLI mode only for now)
-        mcp_config_path = None
-        if framework_config.llm.use_mcp and framework_config.llm.mcp_config_path:
-            mcp_path = Path(framework_config.llm.mcp_config_path)
-            if not mcp_path.exists():
-                logger.error(f"MCP config file not found: {mcp_path}")
-                raise FileNotFoundError(f"MCP config file not found: {mcp_path}")
-            mcp_config_path = str(mcp_path)
-            logger.info(f"MCP enabled, config path: {mcp_config_path}")
+        # Create LLM backend based on configured mode
+        if framework_config.llm.mode == "litellm":
+            from .llm.litellm_backend import LiteLLMBackend
+            llm = LiteLLMBackend(
+                api_key=framework_config.llm.litellm_api_key,
+                api_base=framework_config.llm.litellm_api_base,
+                cheap_model=framework_config.llm.litellm_cheap_model,
+                default_model=framework_config.llm.litellm_default_model,
+                premium_model=framework_config.llm.litellm_premium_model,
+                logs_dir=Path(framework_config.workspace) / "logs",
+            )
+            logger.info("Using LiteLLM direct backend")
+        else:
+            mcp_config_path = None
+            if framework_config.llm.use_mcp and framework_config.llm.mcp_config_path:
+                mcp_path = Path(framework_config.llm.mcp_config_path)
+                if not mcp_path.exists():
+                    logger.error(f"MCP config file not found: {mcp_path}")
+                    raise FileNotFoundError(f"MCP config file not found: {mcp_path}")
+                mcp_config_path = str(mcp_path)
+                logger.info(f"MCP enabled, config path: {mcp_config_path}")
 
-        llm = ClaudeCLIBackend(
-            executable=framework_config.llm.claude_cli_executable,
-            max_turns=framework_config.llm.claude_cli_max_turns,
-            timeout=framework_config.llm.claude_cli_timeout,
-            timeout_large=framework_config.llm.claude_cli_timeout_large,
-            timeout_bounded=framework_config.llm.claude_cli_timeout_bounded,
-            timeout_simple=framework_config.llm.claude_cli_timeout_simple,
-            cheap_model=framework_config.llm.claude_cli_cheap_model,
-            default_model=framework_config.llm.claude_cli_default_model,
-            premium_model=framework_config.llm.claude_cli_premium_model,
-            mcp_config_path=mcp_config_path,
-            logs_dir=Path(framework_config.workspace) / "logs",
-        )
+            proxy_env = framework_config.llm.get_proxy_env()
+            if proxy_env:
+                logger.info(f"LLM proxy enabled: {framework_config.llm.proxy_url}")
+
+            llm = ClaudeCLIBackend(
+                executable=framework_config.llm.claude_cli_executable,
+                max_turns=framework_config.llm.claude_cli_max_turns,
+                timeout=framework_config.llm.claude_cli_timeout,
+                timeout_large=framework_config.llm.claude_cli_timeout_large,
+                timeout_bounded=framework_config.llm.claude_cli_timeout_bounded,
+                timeout_simple=framework_config.llm.claude_cli_timeout_simple,
+                cheap_model=framework_config.llm.claude_cli_cheap_model,
+                default_model=framework_config.llm.claude_cli_default_model,
+                premium_model=framework_config.llm.claude_cli_premium_model,
+                mcp_config_path=mcp_config_path,
+                logs_dir=Path(framework_config.workspace) / "logs",
+                proxy_env=proxy_env,
+            )
 
         # Create queue
         queue = FileQueue(

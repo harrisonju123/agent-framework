@@ -41,6 +41,7 @@ class HealthChecker:
             self.check_environment_variables(),
             self.check_jira_connectivity(),
             self.check_github_connectivity(),
+            self.check_proxy_connectivity(),
             self.check_directory_structure(),
             self.check_agent_definitions(),
         ]
@@ -206,6 +207,77 @@ class HealthChecker:
                 name="GitHub Connection",
                 status=CheckStatus.WARNING,
                 message=f"Connection issue: {str(e)[:100]}"
+            )
+
+    def check_proxy_connectivity(self) -> CheckResult:
+        """Test LLM proxy connectivity if configured."""
+        import requests
+
+        try:
+            from ..core.config import load_config
+            config = load_config(self.config_dir / "agent-framework.yaml")
+        except Exception as e:
+            return CheckResult(
+                name="LLM Proxy",
+                status=CheckStatus.WARNING,
+                message=f"Could not load config: {str(e)[:100]}"
+            )
+
+        if not config.llm.proxy_url:
+            return CheckResult(
+                name="LLM Proxy",
+                status=CheckStatus.SKIPPED,
+                message="No proxy configured"
+            )
+
+        try:
+            health_url = config.llm.proxy_url.rstrip("/") + "/health"
+            headers = {}
+            if config.llm.proxy_auth_token:
+                headers["Authorization"] = f"Bearer {config.llm.proxy_auth_token}"
+
+            response = requests.get(health_url, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                return CheckResult(
+                    name="LLM Proxy",
+                    status=CheckStatus.PASSED,
+                    message=f"Proxy reachable at {config.llm.proxy_url}"
+                )
+            elif response.status_code == 401:
+                return CheckResult(
+                    name="LLM Proxy",
+                    status=CheckStatus.FAILED,
+                    message="Proxy authentication failed",
+                    fix_action="Check proxy_auth_token in config",
+                    documentation="docs/TROUBLESHOOTING.md#proxy"
+                )
+            else:
+                return CheckResult(
+                    name="LLM Proxy",
+                    status=CheckStatus.WARNING,
+                    message=f"Proxy returned status {response.status_code}"
+                )
+
+        except requests.exceptions.ConnectionError:
+            return CheckResult(
+                name="LLM Proxy",
+                status=CheckStatus.FAILED,
+                message="Cannot reach LLM proxy",
+                fix_action="Verify proxy_url in config and network connectivity"
+            )
+        except requests.exceptions.Timeout:
+            return CheckResult(
+                name="LLM Proxy",
+                status=CheckStatus.FAILED,
+                message="Proxy connection timed out",
+                fix_action="Check network connectivity to proxy"
+            )
+        except Exception as e:
+            return CheckResult(
+                name="LLM Proxy",
+                status=CheckStatus.WARNING,
+                message=f"Proxy check error: {str(e)[:100]}"
             )
 
     def check_directory_structure(self) -> CheckResult:

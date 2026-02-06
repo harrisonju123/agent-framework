@@ -9,6 +9,11 @@ llm:
   # Mode: "claude_cli" (Claude Code subprocess) or "litellm" (API calls)
   mode: claude_cli
 
+  # Proxy: route Claude CLI API calls through LiteLLM proxy for billing/routing
+  # Only applies when mode: claude_cli
+  # proxy_url: ${LITELLM_PROXY_URL}
+  # proxy_auth_token: ${LITELLM_AUTH_TOKEN}
+
   # Claude CLI settings (used when mode=claude_cli)
   claude_cli_executable: claude
   claude_cli_max_turns: 999
@@ -26,11 +31,13 @@ llm:
   claude_cli_default_model: claude-sonnet-4-20250514
   claude_cli_premium_model: claude-sonnet-4-20250514
 
-  # LiteLLM settings (used when mode=litellm)
-  # litellm_api_key: ${ANTHROPIC_API_KEY}
-  # litellm_cheap_model: claude-3-5-haiku-20241022
-  # litellm_default_model: claude-sonnet-4-20250514
-  # litellm_premium_model: claude-opus-4-20250514
+  # LiteLLM direct settings (used when mode=litellm)
+  # pip install 'agent-framework[litellm]' required
+  # litellm_api_key: ${LITELLM_API_KEY}
+  # litellm_api_base: ${LITELLM_API_BASE}
+  # litellm_cheap_model: claude-haiku-4-5-20251001
+  # litellm_default_model: claude-sonnet-4-5-20250929
+  # litellm_premium_model: claude-sonnet-4-5-20250929
 
   # MCP (Model Context Protocol) settings
   # Enables real-time JIRA/GitHub access during agent execution
