@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 from .task import Task, TaskStatus, TaskType
 from .task_validator import validate_task, ValidationResult
 from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase, ToolActivity
-from .team_composer import compose_team
+from .team_composer import compose_default_team, compose_team
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
@@ -106,6 +106,7 @@ class Agent:
         team_mode_enabled: bool = False,
         team_mode_min_workflow: str = "standard",
         team_mode_default_model: str = "sonnet",
+        agent_definition: Optional["AgentDefinition"] = None,
     ):
         self.config = config
         self.llm = llm
@@ -124,6 +125,7 @@ class Agent:
 
         # Team mode: use Claude Agent Teams for multi-agent workflows
         self._agents_config = agents_config or []
+        self._agent_definition = agent_definition
         self._team_mode_enabled = team_mode_enabled
         self._team_mode_min_workflow = team_mode_min_workflow
         self._team_mode_default_model = team_mode_default_model
@@ -514,16 +516,28 @@ class Agent:
 
             # Compose team if team mode is enabled
             team_agents = None
-            if self._team_mode_enabled:
-                workflow = task.context.get("workflow", "full")
-                team_agents = compose_team(
-                    task.context, workflow, self._agents_config,
-                    min_workflow=self._team_mode_min_workflow,
-                    default_model=self._team_mode_default_model,
-                    caller_agent_id=self.config.id,
-                )
+            team_override = task.context.get("team_override")
+            if self._team_mode_enabled and team_override is not False:
+                # Precedence: configured teammates > workflow-based composition.
+                # team_override=True only affects the workflow fallback path.
+                if self._agent_definition and self._agent_definition.teammates:
+                    team_agents = compose_default_team(
+                        self._agent_definition,
+                        default_model=self._team_mode_default_model,
+                    )
+                else:
+                    # Fallback: workflow-based composition (backward compat)
+                    workflow = task.context.get("workflow", "full")
+                    team_agents = compose_team(
+                        task.context, workflow, self._agents_config,
+                        min_workflow=self._team_mode_min_workflow,
+                        default_model=self._team_mode_default_model,
+                        caller_agent_id=self.config.id,
+                    )
                 if team_agents:
-                    self.logger.info(f"Using team mode: {list(team_agents.keys())}")
+                    self.logger.info(f"Team mode: {list(team_agents.keys())}")
+            elif team_override is False:
+                self.logger.debug("Team mode skipped via task team_override=False")
 
             response = await self.llm.complete(
                 LLMRequest(
@@ -618,7 +632,7 @@ class Agent:
         (infinite loop). Instead, write it to a dedicated directory where humans
         can review and resolve it.
         """
-        escalations_dir = self.workspace_root / ".agent-communication" / "escalations"
+        escalations_dir = self.workspace / ".agent-communication" / "escalations"
         escalations_dir.mkdir(parents=True, exist_ok=True)
 
         escalation_file = escalations_dir / f"{task.id}.json"

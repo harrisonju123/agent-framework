@@ -29,6 +29,29 @@ WORKFLOW_RANK = {
 }
 
 
+def compose_default_team(
+    agent_def: AgentDefinition,
+    default_model: str = "sonnet",
+) -> Optional[dict]:
+    """Build team from agent's configured teammates (always-on mode).
+
+    Each agent defines its own teammates in agents.yaml. This function
+    converts those definitions into the dict format expected by --agents.
+    """
+    if not agent_def.teammates:
+        return None
+
+    agents_dict = {}
+    for teammate_id, teammate in agent_def.teammates.items():
+        agents_dict[teammate_id] = {
+            "model": teammate.model or default_model,
+            "description": teammate.description,
+            "prompt": teammate.prompt,
+        }
+
+    return agents_dict
+
+
 def compose_team(
     task_context: dict,
     workflow: str,

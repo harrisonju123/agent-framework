@@ -44,6 +44,9 @@ def main():
     agent_id = sys.argv[1]
     workspace = Path.cwd()
 
+    # Expose agent ID to child processes (MCP servers use this for task attribution)
+    os.environ["AGENT_ID"] = agent_id
+
     # Setup logging
     setup_logging(agent_id, workspace)
     logger = logging.getLogger(__name__)
@@ -195,6 +198,7 @@ def main():
             team_mode_enabled=framework_config.team_mode.enabled,
             team_mode_min_workflow=framework_config.team_mode.min_workflow,
             team_mode_default_model=framework_config.llm.claude_cli_default_model,
+            agent_definition=agent_def,
         )
 
         logger.info(f"Starting agent {agent_id}")

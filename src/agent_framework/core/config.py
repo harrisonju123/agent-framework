@@ -204,8 +204,8 @@ class WorktreeConfig(BaseModel):
 
 class TeamModeConfig(BaseModel):
     """Team mode configuration for Claude Agent Teams."""
-    enabled: bool = False
-    min_workflow: Literal["simple", "standard", "full", "quality-focused"] = "standard"
+    enabled: bool = True
+    min_workflow: Literal["simple", "standard", "full", "quality-focused"] = "simple"
 
 
 class MultiRepoConfig(BaseModel):
@@ -226,6 +226,22 @@ class RepositoryConfig(BaseModel):
         return self.display_name or self.github_repo.split("/")[1]
 
 
+class TeammateDefinition(BaseModel):
+    """Teammate definition for always-on Agent Teams."""
+    description: str
+    prompt: str
+    model: Optional[str] = None  # None = use team_mode default model
+
+    @field_validator('model')
+    @classmethod
+    def validate_model(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("haiku", "sonnet", "opus"):
+            raise ValueError(
+                f"model must be 'haiku', 'sonnet', or 'opus', got '{v}'"
+            )
+        return v
+
+
 class AgentDefinition(BaseModel):
     """Agent definition from agents.yaml."""
     id: str
@@ -233,6 +249,9 @@ class AgentDefinition(BaseModel):
     queue: str
     prompt: str
     enabled: bool = True
+
+    # Always-on teammates for Claude Agent Teams
+    teammates: Dict[str, TeammateDefinition] = Field(default_factory=dict)
 
     # JIRA settings
     jira_can_create_tickets: bool = False

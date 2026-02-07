@@ -134,3 +134,23 @@ export interface EpicProgress {
   percent_complete: number;
   tasks: TaskSummary[];
 }
+
+// Inter-agent consultation types
+
+export interface ConsultationInput {
+  target_agent: AgentId;
+  question: string;
+  context?: string;
+}
+
+export interface ShareKnowledgeInput {
+  topic: string;
+  key: string;
+  value: string;
+}
+
+export interface GetKnowledgeInput {
+  topic: string;
+  key?: string;
+  max_age_hours?: number;
+}

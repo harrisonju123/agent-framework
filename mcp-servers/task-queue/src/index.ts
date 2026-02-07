@@ -15,6 +15,8 @@ import {
   getTaskDetails,
   getEpicProgress,
 } from "./queue-tools.js";
+import { consultAgent } from "./consultation.js";
+import { shareKnowledge, getKnowledge } from "./knowledge.js";
 import type { QueueTaskInput, AgentId } from "./types.js";
 
 const logger = createLogger();
@@ -31,7 +33,7 @@ const TOOLS: Tool[] = [
       properties: {
         agent_id: {
           type: "string",
-          enum: ["engineer", "qa", "architect", "product-owner", "repo-analyzer"],
+          enum: ["engineer", "qa", "architect", "product-owner", "code-reviewer", "testing", "static-analysis", "repo-analyzer"],
           description: "Target agent to receive the task",
         },
         task_type: {
@@ -163,7 +165,7 @@ const TOOLS: Tool[] = [
       properties: {
         agent_id: {
           type: "string",
-          enum: ["engineer", "qa", "architect", "product-owner", "repo-analyzer"],
+          enum: ["engineer", "qa", "architect", "product-owner", "code-reviewer", "testing", "static-analysis", "repo-analyzer"],
           description: "Agent queue to list tasks from",
         },
       },
@@ -198,6 +200,76 @@ const TOOLS: Tool[] = [
       required: ["epic_key"],
     },
   },
+  {
+    name: "consult_agent",
+    description:
+      "Consult another agent for expert advice. Use this when you need architectural guidance, QA strategy, or implementation help from a specialist. Returns a concise response. Limited to 5 consultations per session.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        target_agent: {
+          type: "string",
+          enum: ["engineer", "qa", "architect", "product-owner", "code-reviewer", "repo-analyzer"],
+          description: "Agent to consult for expert advice",
+        },
+        question: {
+          type: "string",
+          description: "The question to ask the expert agent",
+        },
+        context: {
+          type: "string",
+          description: "Optional context about your current situation to help the expert give relevant advice",
+        },
+      },
+      required: ["target_agent", "question"],
+    },
+  },
+  {
+    name: "share_knowledge",
+    description:
+      "Share a discovery or insight with other agents via the shared knowledge base. Use this to store reusable information like repo structure, test frameworks, or conventions discovered during your work.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          description: "Knowledge topic category (e.g., 'repo-structure', 'conventions', 'dependencies')",
+        },
+        key: {
+          type: "string",
+          description: "Specific key within the topic (e.g., 'test_framework', 'primary_language')",
+        },
+        value: {
+          type: "string",
+          description: "The knowledge value to store",
+        },
+      },
+      required: ["topic", "key", "value"],
+    },
+  },
+  {
+    name: "get_knowledge",
+    description:
+      "Read from the shared knowledge base. Use this to check what other agents have discovered about the repo, conventions, or other shared context before starting work.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          description: "Knowledge topic to read (e.g., 'repo-structure', 'conventions')",
+        },
+        key: {
+          type: "string",
+          description: "Optional specific key to read. Omit to get all entries for the topic.",
+        },
+        max_age_hours: {
+          type: "number",
+          description: "Maximum age in hours for entries (default: 24). Older entries are marked stale.",
+        },
+      },
+      required: ["topic"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -227,8 +299,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "queue_task_for_agent": {
         const input = args as unknown as QueueTaskInput;
-        // Determine who is calling (from MCP context or default to "mcp-client")
-        const createdBy = "product-owner"; // In practice, this would come from the calling agent's context
+        // Each agent subprocess sets AGENT_ID in its environment
+        const createdBy = process.env.AGENT_ID || "mcp-client";
         result = await queueTaskForAgent(workspace, input, createdBy);
         break;
       }
@@ -251,6 +323,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "get_epic_progress": {
         const epicKey = (args as { epic_key: string }).epic_key;
         result = getEpicProgress(workspace, epicKey);
+        break;
+      }
+      case "consult_agent": {
+        const { target_agent, question, context } = args as Record<string, unknown>;
+        if (typeof target_agent !== "string" || typeof question !== "string") {
+          throw new Error("consult_agent requires string target_agent and question");
+        }
+        result = consultAgent(
+          workspace,
+          target_agent,
+          question,
+          typeof context === "string" ? context : undefined,
+        );
+        break;
+      }
+      case "share_knowledge": {
+        const { topic, key, value } = args as Record<string, unknown>;
+        if (typeof topic !== "string" || typeof key !== "string" || typeof value !== "string") {
+          throw new Error("share_knowledge requires string topic, key, and value");
+        }
+        result = shareKnowledge(workspace, topic, key, value);
+        break;
+      }
+      case "get_knowledge": {
+        const { topic: getTopic, key: getKey, max_age_hours } = args as Record<string, unknown>;
+        if (typeof getTopic !== "string") {
+          throw new Error("get_knowledge requires string topic");
+        }
+        result = getKnowledge(
+          workspace,
+          getTopic,
+          typeof getKey === "string" ? getKey : undefined,
+          typeof max_age_hours === "number" ? max_age_hours : undefined,
+        );
         break;
       }
       default:
