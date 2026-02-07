@@ -167,7 +167,14 @@ class WorktreeManager:
         """Generate registry key for a worktree."""
         agent_id = self._validate_identifier(agent_id, "agent_id")
         task_id = self._validate_identifier(task_id, "task_id")
-        return f"{agent_id}-{task_id[:8]}"
+        # Extract JIRA key (e.g., "ME-429") from task IDs like "jira-ME-429-1770446158"
+        # so retries reuse the same worktree and each ticket gets its own
+        ticket_key = task_id
+        if task_id.startswith("jira-"):
+            parts = task_id.split("-")
+            if len(parts) >= 3:
+                ticket_key = f"{parts[1]}-{parts[2]}"
+        return f"{agent_id}-{ticket_key}"
 
     def _get_worktree_path(self, owner_repo: str, agent_id: str, task_id: str) -> Path:
         """Generate worktree path."""
@@ -252,6 +259,15 @@ class WorktreeManager:
                 )
 
             logger.info(f"Created worktree: {worktree_path} (branch: {branch_name})")
+
+            # Copy CLAUDE.md from base repo if present but not in worktree
+            # (handles uncommitted CLAUDE.md that won't be in git worktree checkouts)
+            claude_md_src = base_repo / "CLAUDE.md"
+            claude_md_dst = worktree_path / "CLAUDE.md"
+            if claude_md_src.exists() and not claude_md_dst.exists():
+                import shutil
+                shutil.copy2(str(claude_md_src), str(claude_md_dst))
+                logger.info(f"Copied CLAUDE.md from base repo to worktree")
 
             # Register worktree
             now = datetime.now(timezone.utc).isoformat()
