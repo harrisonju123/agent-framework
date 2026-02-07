@@ -222,8 +222,8 @@ class Orchestrator:
             logger.info(f"Sending SIGTERM to {agent_id} (PID {pid})")
             try:
                 os.kill(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                logger.warning(f"Process {pid} not found")
+            except (ProcessLookupError, PermissionError):
+                logger.warning(f"Process {pid} not found or not owned by this user")
                 return
 
             # Wait for process to exit
@@ -242,61 +242,81 @@ class Orchestrator:
         try:
             os.kill(pid, signal.SIGKILL)
             logger.info(f"Sent SIGKILL to {agent_id} (PID {pid})")
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
         del self.processes[agent_id]
 
-    def stop_all_agents(self, graceful: bool = True) -> None:
+    def stop_all_agents(self, graceful: bool = True, timeout: int = 5) -> None:
         """
         Stop all running agents.
 
         Args:
             graceful: Use graceful shutdown (SIGTERM -> SIGKILL)
+            timeout: Seconds to wait after SIGTERM before escalating to SIGKILL
         """
         logger.info("Stopping all agents")
 
-        # Send SIGTERM to all agents
+        # If called from a separate process (e.g. `agent stop`),
+        # self.processes is empty — recover PIDs from the pid file.
+        pids_to_kill: Dict[str, int] = {}
+        for agent_id, proc in self.processes.items():
+            pids_to_kill[agent_id] = proc.pid
+
+        if not pids_to_kill:
+            loaded = self._load_pids()
+            # Guard against recycled PIDs when loading from file
+            for agent_id, pid in loaded.items():
+                if self._is_agent_process(pid):
+                    pids_to_kill[agent_id] = pid
+                else:
+                    logger.warning(f"Skipping {agent_id} PID {pid} — not an agent process (stale or recycled)")
+            if pids_to_kill:
+                logger.info(f"Loaded {len(pids_to_kill)} PIDs from pid file")
+
+        if not pids_to_kill:
+            logger.info("No agent processes to stop")
+            self._cleanup()
+            return
+
         if graceful:
-            for agent_id, proc in list(self.processes.items()):
+            # Send SIGTERM to all agents
+            for agent_id, pid in pids_to_kill.items():
                 try:
-                    os.kill(proc.pid, signal.SIGTERM)
-                    logger.info(f"Sent SIGTERM to {agent_id} (PID {proc.pid})")
-                except ProcessLookupError:
+                    os.kill(pid, signal.SIGTERM)
+                    logger.info(f"Sent SIGTERM to {agent_id} (PID {pid})")
+                except (ProcessLookupError, PermissionError):
                     pass
 
-            # Wait 2 seconds
-            time.sleep(2)
+            # Wait for graceful shutdown
+            time.sleep(min(timeout, 2))
 
-            # Check which are still running
-            still_running = []
-            for agent_id, proc in list(self.processes.items()):
-                if self._is_running(proc.pid):
-                    still_running.append((agent_id, proc.pid))
+            # Force kill any still running
+            still_running = {}
+            for aid, pid in pids_to_kill.items():
+                if self._is_running(pid):
+                    still_running[aid] = pid
                 else:
-                    logger.info(f"Agent {agent_id} stopped")
-                    del self.processes[agent_id]
-
-            # Force kill remaining
+                    logger.info(f"Agent {aid} stopped gracefully")
             if still_running:
-                time.sleep(3)
-                for agent_id, pid in still_running:
+                remaining = max(0, timeout - 2)
+                if remaining:
+                    time.sleep(remaining)
+                for agent_id, pid in still_running.items():
                     if self._is_running(pid):
                         logger.warning(f"Force killing {agent_id} (PID {pid})")
                         try:
                             os.kill(pid, signal.SIGKILL)
-                        except ProcessLookupError:
+                        except (ProcessLookupError, PermissionError):
                             pass
-                        if agent_id in self.processes:
-                            del self.processes[agent_id]
         else:
-            # Kill immediately
-            for agent_id, proc in list(self.processes.items()):
+            for agent_id, pid in pids_to_kill.items():
                 try:
-                    os.kill(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
                     pass
-                del self.processes[agent_id]
+
+        self.processes.clear()
 
         # Clean up
         self._cleanup()
@@ -324,7 +344,18 @@ class Orchestrator:
         try:
             os.kill(pid, 0)  # Signal 0 = check existence
             return True
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
+            return False
+
+    def _is_agent_process(self, pid: int) -> bool:
+        """Check if PID belongs to an agent framework process (not a recycled PID)."""
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "args="],
+                capture_output=True, text=True, timeout=5,
+            )
+            return "agent_framework." in result.stdout
+        except Exception:
             return False
 
     def _save_pids(self) -> None:
@@ -345,8 +376,11 @@ class Orchestrator:
         for line in self.pid_file.read_text().strip().split("\n"):
             if not line:
                 continue
-            agent_id, pid_str = line.split(":", 1)
-            pids[agent_id] = int(pid_str)
+            try:
+                agent_id, pid_str = line.split(":", 1)
+                pids[agent_id] = int(pid_str)
+            except (ValueError, TypeError):
+                logger.warning(f"Skipping malformed PID line: {line!r}")
 
         return pids
 
