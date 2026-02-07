@@ -1598,7 +1598,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         # Filter out completed tickets
         pending_issues = [
             issue for issue in issues
-            if issue.fields.status.name.lower() not in ("done", "closed", "resolved")
+            if issue.fields.status.name.lower() not in ("done", "closed", "resolved", "in progress", "code review", "won't do")
         ]
 
         if len(pending_issues) < len(issues):
