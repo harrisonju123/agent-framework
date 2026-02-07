@@ -518,22 +518,34 @@ class Agent:
             team_agents = None
             team_override = task.context.get("team_override")
             if self._team_mode_enabled and team_override is not False:
-                # Precedence: configured teammates > workflow-based composition.
-                # team_override=True only affects the workflow fallback path.
+                team_agents = {}
+
+                # Layer 1: agent's configured teammates (peer-engineer, test-runner, etc.)
                 if self._agent_definition and self._agent_definition.teammates:
-                    team_agents = compose_default_team(
+                    configured = compose_default_team(
                         self._agent_definition,
                         default_model=self._team_mode_default_model,
                     )
-                else:
-                    # Fallback: workflow-based composition (backward compat)
-                    workflow = task.context.get("workflow", "full")
-                    team_agents = compose_team(
-                        task.context, workflow, self._agents_config,
-                        min_workflow=self._team_mode_min_workflow,
-                        default_model=self._team_mode_default_model,
-                        caller_agent_id=self.config.id,
-                    )
+                    if configured:
+                        team_agents.update(configured)
+
+                # Layer 2: workflow-required agents (QA for standard, engineer+QA for full)
+                workflow = task.context.get("workflow", "full")
+                workflow_teammates = compose_team(
+                    task.context, workflow, self._agents_config,
+                    min_workflow=self._team_mode_min_workflow,
+                    default_model=self._team_mode_default_model,
+                    caller_agent_id=self.config.id,
+                )
+                if workflow_teammates:
+                    collisions = sorted(set(team_agents) & set(workflow_teammates))
+                    if collisions:
+                        self.logger.warning(
+                            f"Teammate ID collision: {collisions} - workflow agents take precedence"
+                        )
+                    team_agents.update(workflow_teammates)
+
+                team_agents = team_agents or None
                 if team_agents:
                     self.logger.info(f"Team mode: {list(team_agents.keys())}")
             elif team_override is False:
