@@ -199,6 +199,7 @@ def main():
             team_mode_min_workflow=framework_config.team_mode.min_workflow,
             team_mode_default_model=framework_config.llm.claude_cli_default_model,
             agent_definition=agent_def,
+            workflows_config=framework_config.workflows,
         )
 
         logger.info(f"Starting agent {agent_id}")

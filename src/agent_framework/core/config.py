@@ -208,6 +208,16 @@ class TeamModeConfig(BaseModel):
     min_workflow: Literal["simple", "standard", "full"] = "simple"
 
 
+class WorkflowDefinition(BaseModel):
+    """Defines a workflow's agent chain and behaviour."""
+    description: str = ""
+    agents: List[str] = Field(default_factory=list)
+    pr_creator: Optional[str] = None
+    auto_review: bool = True
+    require_tests: bool = True
+    output: Optional[str] = None
+
+
 class MultiRepoConfig(BaseModel):
     """Multi-repository configuration."""
     workspace_root: Path = Field(default=Path("~/.agent-workspaces"))
@@ -300,6 +310,7 @@ class FrameworkConfig(BaseSettings):
     safeguards: SafeguardsConfig = Field(default_factory=SafeguardsConfig)
     optimization: OptimizationConfig = Field(default_factory=OptimizationConfig)
     team_mode: TeamModeConfig = Field(default_factory=TeamModeConfig)
+    workflows: Dict[str, WorkflowDefinition] = Field(default_factory=dict)
     multi_repo: MultiRepoConfig = Field(default_factory=MultiRepoConfig)
     repositories: List[RepositoryConfig] = Field(default_factory=list)
 

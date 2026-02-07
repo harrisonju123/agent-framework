@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from .config import AgentDefinition
+    from .config import AgentDefinition, WorkflowDefinition
 
 from .task import Task, TaskStatus, TaskType
 from .task_validator import validate_task, ValidationResult
@@ -59,6 +59,13 @@ MODEL_PRICING = {
     "opus": {"input": 15.0, "output": 75.0},
 }
 
+# Downstream agents get the correct task type for model selection
+CHAIN_TASK_TYPES = {
+    "engineer": TaskType.IMPLEMENTATION,
+    "qa": TaskType.QA_VERIFICATION,
+    "architect": TaskType.REVIEW,
+}
+
 
 @dataclass
 class AgentConfig:
@@ -78,6 +85,12 @@ class AgentConfig:
     # Task validation
     validate_tasks: bool = True
     validation_mode: str = "warn"  # "warn" or "reject"
+
+    @property
+    def base_id(self) -> str:
+        """Strip replica suffix (e.g., 'engineer-2' -> 'engineer')."""
+        parts = self.id.rsplit("-", 1)
+        return parts[0] if len(parts) == 2 and parts[1].isdigit() else self.id
 
 
 class Agent:
@@ -107,6 +120,7 @@ class Agent:
         team_mode_min_workflow: str = "standard",
         team_mode_default_model: str = "sonnet",
         agent_definition: Optional["AgentDefinition"] = None,
+        workflows_config: Optional[Dict[str, "WorkflowDefinition"]] = None,
     ):
         self.config = config
         self.llm = llm
@@ -129,6 +143,9 @@ class Agent:
         self._team_mode_enabled = team_mode_enabled
         self._team_mode_min_workflow = team_mode_min_workflow
         self._team_mode_default_model = team_mode_default_model
+
+        # Workflow chain definitions for automatic next-agent queuing
+        self._workflows_config = workflows_config or {}
 
         # Setup rich logging (log_level passed from CLI via environment)
         import os
@@ -356,9 +373,13 @@ class Agent:
         except asyncio.CancelledError:
             pass
 
-        # Queue code review if needed
+        # Code review runs first: if a PR is found, it writes pr_url into
+        # task.context, which chain enforcement then sees and correctly skips.
         self.logger.debug(f"Checking if code review needed for {task.id}")
         self._queue_code_review_if_needed(task, response)
+
+        # Enforce workflow chain: queue next agent if no PR was created
+        self._enforce_workflow_chain(task, response)
 
         # Log metrics and events
         self._log_task_completion_metrics(task, response, task_start_time)
@@ -1710,3 +1731,119 @@ IMPORTANT:
 
         except Exception as e:
             self.logger.error(f"Failed to queue code review for PR #{pr_number}: {e}")
+
+    # -- Workflow chain enforcement --
+
+    def _enforce_workflow_chain(self, task: Task, response) -> None:
+        """Queue next agent in the workflow chain when no PR was created.
+
+        Complements _queue_code_review_if_needed: if a PR exists, review
+        gets queued (existing path) and the chain stops. If no PR, this
+        method forwards the task to the next agent in the configured chain.
+        """
+        workflow_name = task.context.get("workflow")
+        if not workflow_name or workflow_name not in self._workflows_config:
+            return
+
+        workflow = self._workflows_config[workflow_name]
+        agents = workflow.agents
+        if len(agents) <= 1:
+            return
+
+        # Skip when team mode already handled this workflow
+        if self._team_mode_handled_workflow(task):
+            return
+
+        # Skip if a PR was created — workflow reached its natural endpoint
+        pr_info = self._get_pr_info(task, response)
+        if pr_info:
+            return
+
+        # Find current agent position, determine next
+        current = self.config.base_id
+        try:
+            idx = agents.index(current)
+        except ValueError:
+            return
+        if idx >= len(agents) - 1:
+            return
+
+        next_agent = agents[idx + 1]
+
+        # O(1) duplicate check via deterministic task ID
+        if self._is_chain_task_already_queued(next_agent, task.id):
+            self.logger.debug(
+                f"Chain task for {next_agent} already queued from {task.id}"
+            )
+            return
+
+        chain_task = self._build_chain_task(task, next_agent)
+        try:
+            self.queue.push(chain_task, next_agent)
+            self.logger.info(
+                f"🔗 Workflow chain: queued {next_agent} for task {task.id}"
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to queue chain task for {next_agent}: {e}"
+            )
+
+    def _team_mode_handled_workflow(self, task: Task) -> bool:
+        """Return True if team mode already handled this workflow's agents.
+
+        Mirrors the check in _handle_task (and compose_team): team_override=True
+        forces teams on regardless of rank, team_override=False skips teams.
+        """
+        from .team_composer import WORKFLOW_RANK
+
+        if not self._team_mode_enabled:
+            return False
+
+        team_override = task.context.get("team_override")
+        if team_override is False:
+            return False
+
+        # team_override=True forces team mode regardless of workflow rank
+        if team_override is True:
+            return True
+
+        workflow = task.context.get("workflow", "full")
+        workflow_rank = WORKFLOW_RANK.get(workflow, 0)
+        min_rank = WORKFLOW_RANK.get(self._team_mode_min_workflow, 1)
+        return workflow_rank >= min_rank
+
+    def _is_chain_task_already_queued(self, next_agent: str, source_task_id: str) -> bool:
+        """O(1) file existence check using deterministic chain task ID.
+
+        Only checks the pending queue directory. If the task was already picked
+        up (moved to completed/in-progress), this won't detect it — acceptable
+        because _handle_successful_response only runs once per task lifecycle.
+        """
+        chain_id = f"chain-{source_task_id[:12]}-{next_agent}"
+        queue_path = self.queue.queue_dir / next_agent / f"{chain_id}.json"
+        return queue_path.exists()
+
+    def _build_chain_task(self, task: Task, next_agent: str) -> Task:
+        """Create a continuation task for the next agent in the chain."""
+        from datetime import datetime
+
+        chain_id = f"chain-{task.id[:12]}-{next_agent}"
+        task_type = CHAIN_TASK_TYPES.get(next_agent, task.type)
+
+        return Task(
+            id=chain_id,
+            type=task_type,
+            status=TaskStatus.PENDING,
+            priority=task.priority,
+            created_by=self.config.id,
+            assigned_to=next_agent,
+            created_at=datetime.utcnow(),
+            title=f"[chain] {task.title}",
+            description=task.description,
+            context={
+                **task.context,
+                "source_task_id": task.id,
+                "source_agent": self.config.id,
+                "chain_step": True,
+            },
+        )
