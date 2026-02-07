@@ -27,9 +27,9 @@ llm:
   claude_cli_timeout_bounded: 1800 # 30 minutes
   claude_cli_timeout_simple: 900   # 15 minutes
 
-  claude_cli_cheap_model: claude-3-5-haiku-20241022
-  claude_cli_default_model: claude-sonnet-4-20250514
-  claude_cli_premium_model: claude-sonnet-4-20250514
+  claude_cli_cheap_model: claude-haiku-4-5-20251001
+  claude_cli_default_model: claude-sonnet-4-5-20250929
+  claude_cli_premium_model: claude-sonnet-4-5-20250929
 
   # LiteLLM direct settings (used when mode=litellm)
   # pip install 'agent-framework[litellm]' required
