@@ -179,6 +179,7 @@ class ClaudeCLIBackend(LLMBackend):
             timeout_simple=timeout_simple,
         )
         self.logs_dir = logs_dir or Path("logs")
+        self._current_process: Optional[asyncio.subprocess.Process] = None
 
         # Clean up stale MCP cache files from terminated processes
         self._cleanup_stale_cache_files()
@@ -283,6 +284,7 @@ class ClaudeCLIBackend(LLMBackend):
                 env=env,
                 cwd=cwd,
             )
+            self._current_process = process
 
             # Send prompt to stdin
             process.stdin.write(full_prompt.encode())
@@ -470,8 +472,18 @@ class ClaudeCLIBackend(LLMBackend):
             )
 
         finally:
+            self._current_process = None
             if log_file:
                 log_file.close()
+
+    def cancel(self) -> None:
+        """Kill the in-flight claude CLI subprocess if one is running."""
+        proc = self._current_process
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
 
     def select_model(self, task_type: TaskType, retry_count: int) -> str:
         """Select appropriate model based on task type and retry count."""

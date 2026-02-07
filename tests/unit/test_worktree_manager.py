@@ -147,14 +147,19 @@ class TestWorktreeKeyGeneration:
     def test_get_worktree_key(self, manager):
         """Test worktree key generation."""
         key = manager._get_worktree_key("engineer", "task-12345678-abcd")
-        assert key == "engineer-task-123"
+        assert key == "engineer-task-12345678-abcd"
+
+    def test_get_worktree_key_jira_prefix(self, manager):
+        """Test worktree key extracts JIRA ticket from jira-prefixed IDs."""
+        key = manager._get_worktree_key("engineer", "jira-ME-429-1770446158")
+        assert key == "engineer-ME-429"
 
     def test_get_worktree_path(self, manager):
         """Test worktree path generation."""
         path = manager._get_worktree_path("owner/repo", "engineer", "task-12345678")
         assert "owner" in str(path)
         assert "repo" in str(path)
-        assert "engineer-task-123" in str(path)
+        assert "engineer-task-12345678" in str(path)
 
 
 class TestRegistryOperations:

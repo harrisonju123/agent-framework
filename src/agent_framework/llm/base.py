@@ -57,6 +57,11 @@ class LLMBackend(ABC):
         """
         pass
 
+    def cancel(self) -> None:
+        """Cancel any in-flight LLM request. Default no-op for backends that
+        don't support cancellation."""
+        pass
+
     @abstractmethod
     def select_model(self, task_type: TaskType, retry_count: int) -> str:
         """

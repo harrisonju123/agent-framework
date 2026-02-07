@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 
 from ..core.task import Task, TaskStatus
 from ..core.activity import ActivityManager, AgentActivity, AgentStatus
+from ..utils.process_utils import kill_process_tree
 
 
 logger = logging.getLogger(__name__)
@@ -141,17 +142,17 @@ class Watchdog:
             if self._is_running(pid):
                 logger.warning(f"Stopping process for {agent_id} (PID {pid})")
                 try:
-                    # Send SIGTERM first for graceful shutdown
-                    os.kill(pid, signal.SIGTERM)
+                    # Send SIGTERM to entire process group for graceful shutdown
+                    kill_process_tree(pid, signal.SIGTERM)
                     # Wait up to 5 seconds for graceful exit
                     for _ in range(10):
                         await asyncio.sleep(0.5)
                         if not self._is_running(pid):
                             break
                     else:
-                        # Force kill if still running after grace period
+                        # Force kill entire group if still running
                         logger.warning(f"Force killing process for {agent_id} (PID {pid})")
-                        os.kill(pid, signal.SIGKILL)
+                        kill_process_tree(pid, signal.SIGKILL)
                         await asyncio.sleep(0.5)
                 except ProcessLookupError:
                     pass
@@ -159,7 +160,7 @@ class Watchdog:
         # Reset in-progress tasks AFTER process is dead to prevent corruption
         await self.reset_in_progress_tasks(agent_id)
 
-        # Spawn new agent process
+        # Spawn new agent process in its own session for clean group kills
         log_file_path = self.workspace / "logs" / f"{agent_id}.log"
         log_file = open(log_file_path, "a")  # Append to existing log
 
@@ -169,6 +170,7 @@ class Watchdog:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 cwd=self.workspace,
+                start_new_session=True,
             )
         except Exception:
             log_file.close()

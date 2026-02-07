@@ -18,6 +18,7 @@ from .subprocess_utils import (
     check_command_exists,
     get_command_output,
 )
+from .process_utils import kill_process_tree
 from .type_helpers import get_type_str
 from .validators import validate_branch_name, validate_identifier, validate_owner_repo
 
@@ -42,6 +43,8 @@ __all__ = [
     "run_with_retry",
     "check_command_exists",
     "get_command_output",
+    # Process management
+    "kill_process_tree",
     # Type helpers
     "get_type_str",
     # Validators

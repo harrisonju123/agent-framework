@@ -1,23 +1,33 @@
 """Basic import and instantiation tests for Task model."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
 
-def test_task_creation():
-    """Test basic task creation."""
-    task = Task(
+def _make_task(**overrides) -> Task:
+    """Create a Task with sensible defaults for testing."""
+    defaults = dict(
         id="test-123",
-        type=TaskType.DEFAULT,
+        type=TaskType.IMPLEMENTATION,
+        status=TaskStatus.PENDING,
+        priority=1,
         title="Test task",
         description="Test description",
         created_by="test",
         assigned_to="engineer",
+        created_at=datetime.now(timezone.utc),
     )
+    defaults.update(overrides)
+    return Task(**defaults)
+
+
+def test_task_creation():
+    """Test basic task creation."""
+    task = _make_task()
 
     assert task.id == "test-123"
-    assert task.type == TaskType.DEFAULT
+    assert task.type == "implementation"
     assert task.status == TaskStatus.PENDING
     assert task.retry_count == 0
     assert task.title == "Test task"
@@ -28,13 +38,8 @@ def test_task_creation():
 
 def test_task_with_dependencies():
     """Test task creation with dependencies."""
-    task = Task(
+    task = _make_task(
         id="test-456",
-        type=TaskType.DEFAULT,
-        title="Dependent task",
-        description="Task with dependencies",
-        created_by="test",
-        assigned_to="engineer",
         depends_on=["task-1", "task-2"],
     )
 
@@ -45,14 +50,7 @@ def test_task_with_dependencies():
 
 def test_task_mark_in_progress():
     """Test marking task as in progress."""
-    task = Task(
-        id="test-789",
-        type=TaskType.DEFAULT,
-        title="Test task",
-        description="Test",
-        created_by="test",
-        assigned_to="engineer",
-    )
+    task = _make_task(id="test-789")
 
     task.mark_in_progress("engineer")
 
@@ -63,14 +61,7 @@ def test_task_mark_in_progress():
 
 def test_task_mark_completed():
     """Test marking task as completed."""
-    task = Task(
-        id="test-abc",
-        type=TaskType.DEFAULT,
-        title="Test task",
-        description="Test",
-        created_by="test",
-        assigned_to="engineer",
-    )
+    task = _make_task(id="test-abc")
 
     task.mark_in_progress("engineer")
     task.mark_completed("engineer")
@@ -82,32 +73,18 @@ def test_task_mark_completed():
 
 def test_task_mark_failed():
     """Test marking task as failed."""
-    task = Task(
-        id="test-def",
-        type=TaskType.DEFAULT,
-        title="Test task",
-        description="Test",
-        created_by="test",
-        assigned_to="engineer",
-    )
+    task = _make_task(id="test-def")
 
     task.mark_failed("engineer")
 
     assert task.status == TaskStatus.FAILED
-    assert task.retry_count == 1
-    assert task.last_failed_at is not None
+    assert task.failed_at is not None
+    assert task.failed_by == "engineer"
 
 
 def test_task_reset_to_pending():
     """Test resetting task to pending after failure."""
-    task = Task(
-        id="test-ghi",
-        type=TaskType.DEFAULT,
-        title="Test task",
-        description="Test",
-        created_by="test",
-        assigned_to="engineer",
-    )
+    task = _make_task(id="test-ghi")
 
     task.mark_in_progress("engineer")
     task.reset_to_pending()

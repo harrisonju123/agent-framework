@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import signal
 import sys
 from pathlib import Path
 
@@ -201,6 +202,13 @@ def main():
             agent_definition=agent_def,
             workflows_config=framework_config.workflows,
         )
+
+        # Let SIGTERM trigger a clean exit through the polling loop
+        # so the agent can release locks and reset in-progress tasks
+        def _handle_sigterm(signum, frame):
+            agent._running = False
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
 
         logger.info(f"Starting agent {agent_id}")
         asyncio.run(agent.run())

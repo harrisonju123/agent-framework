@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 from .config import load_agents, AgentDefinition
 from ..safeguards.circuit_breaker import CircuitBreaker
+from ..utils.process_utils import kill_process_tree
 
 
 logger = logging.getLogger(__name__)
@@ -70,13 +71,15 @@ class Orchestrator:
             env.update(env_vars)
 
         try:
-            # Spawn agent process
+            # Spawn agent process in its own session so all child processes
+            # (e.g. claude CLI) inherit the group and can be killed together
             proc = subprocess.Popen(
                 [sys.executable, "-m", "agent_framework.run_agent", agent_id],
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 cwd=self.workspace,
                 env=env,
+                start_new_session=True,
             )
         except Exception:
             log_file.close()
@@ -185,6 +188,7 @@ class Orchestrator:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 cwd=self.workspace,
+                start_new_session=True,
             )
         except Exception:
             log_file.close()
@@ -218,13 +222,9 @@ class Orchestrator:
         pid = proc.pid
 
         if graceful:
-            # Try SIGTERM first
+            # Send SIGTERM to entire process group
             logger.info(f"Sending SIGTERM to {agent_id} (PID {pid})")
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                logger.warning(f"Process {pid} not found or not owned by this user")
-                return
+            kill_process_tree(pid, signal.SIGTERM)
 
             # Wait for process to exit
             start_time = time.time()
@@ -238,12 +238,9 @@ class Orchestrator:
             # Still running, escalate to SIGKILL
             logger.warning(f"Agent {agent_id} didn't stop after {timeout}s, sending SIGKILL")
 
-        # Force kill
-        try:
-            os.kill(pid, signal.SIGKILL)
-            logger.info(f"Sent SIGKILL to {agent_id} (PID {pid})")
-        except (ProcessLookupError, PermissionError):
-            pass
+        # Force kill entire process group
+        kill_process_tree(pid, signal.SIGKILL)
+        logger.info(f"Sent SIGKILL to {agent_id} (PID {pid})")
 
         del self.processes[agent_id]
 
@@ -280,13 +277,10 @@ class Orchestrator:
             return
 
         if graceful:
-            # Send SIGTERM to all agents
+            # Send SIGTERM to all agent process groups
             for agent_id, pid in pids_to_kill.items():
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    logger.info(f"Sent SIGTERM to {agent_id} (PID {pid})")
-                except (ProcessLookupError, PermissionError):
-                    pass
+                kill_process_tree(pid, signal.SIGTERM)
+                logger.info(f"Sent SIGTERM to {agent_id} (PID {pid})")
 
             # Wait for graceful shutdown
             time.sleep(min(timeout, 2))
@@ -305,16 +299,10 @@ class Orchestrator:
                 for agent_id, pid in still_running.items():
                     if self._is_running(pid):
                         logger.warning(f"Force killing {agent_id} (PID {pid})")
-                        try:
-                            os.kill(pid, signal.SIGKILL)
-                        except (ProcessLookupError, PermissionError):
-                            pass
+                        kill_process_tree(pid, signal.SIGKILL)
         else:
             for agent_id, pid in pids_to_kill.items():
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+                kill_process_tree(pid, signal.SIGKILL)
 
         self.processes.clear()
 

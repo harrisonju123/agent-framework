@@ -249,6 +249,9 @@ class Agent:
         self.logger.info(f"Stopping {self.config.id}")
         self._running = False
 
+        # Kill any in-flight LLM subprocess so the agent doesn't block
+        self.llm.cancel()
+
         # Release current task lock if any
         if self._current_task_id:
             self.logger.warning(
@@ -475,6 +478,15 @@ class Agent:
             self.queue.release_lock(lock)
         self._current_task_id = None
 
+    async def _watch_for_interruption(self) -> None:
+        """Poll for pause/stop signals during LLM execution.
+
+        Completes (returns) when an interruption is detected, which causes
+        the asyncio.wait race in _handle_task to cancel the LLM call.
+        """
+        while self._running and not self._check_pause_signal():
+            await asyncio.sleep(2)
+
     async def _handle_task(self, task: Task) -> None:
         """Handle task execution with retry/escalation logic."""
         from datetime import datetime
@@ -572,7 +584,9 @@ class Agent:
             elif team_override is False:
                 self.logger.debug("Team mode skipped via task team_override=False")
 
-            response = await self.llm.complete(
+            # Race LLM execution against pause/stop signal watcher so we can
+            # interrupt mid-task instead of waiting 30+ minutes for completion
+            llm_coro = self.llm.complete(
                 LLMRequest(
                     prompt=prompt,
                     task_type=task.type,
@@ -584,6 +598,46 @@ class Agent:
                 task_id=task.id,
                 on_tool_activity=_on_tool_activity,
             )
+            llm_task = asyncio.create_task(llm_coro)
+            watcher_task = asyncio.create_task(self._watch_for_interruption())
+
+            done, pending = await asyncio.wait(
+                [llm_task, watcher_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if watcher_task in done:
+                # Pause or stop detected mid-task — kill LLM and reset task
+                self.logger.info(f"Interruption detected during task {task.id}, cancelling LLM")
+                self.llm.cancel()
+                llm_task.cancel()
+                try:
+                    await llm_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    self.logger.debug(f"LLM task raised during cancellation: {e}")
+
+                task.reset_to_pending()
+                self.queue.update(task)
+
+                self.activity_manager.append_event(ActivityEvent(
+                    type="interrupted",
+                    agent=self.config.id,
+                    task_id=task.id,
+                    title=task.title,
+                    timestamp=datetime.utcnow(),
+                ))
+                self.logger.info(f"Task {task.id} reset to pending after interruption")
+                return
+            else:
+                # LLM finished first — cancel the watcher and proceed normally
+                watcher_task.cancel()
+                try:
+                    await watcher_task
+                except asyncio.CancelledError:
+                    pass
+                response = llm_task.result()
 
             # Clear tool activity after LLM completes
             try:
@@ -862,8 +916,12 @@ class Agent:
         # Try regex extraction first (fast, no cost)
         extracted = []
 
-        # Extract JIRA keys (2-5 char project, 1-6 digit ticket - more realistic)
-        jira_keys = re.findall(r'\b([A-Z]{2,5}-\d{1,6})\b', response)
+        # Extract JIRA keys: project prefix must NOT be a known non-JIRA
+        # acronym (HTTP, UTF, ISO, etc.) and must be followed by a digit-only ticket number
+        jira_keys = [
+            m for m in re.findall(r'\b([A-Z]{2,5}-\d{1,6})\b', response)
+            if not re.match(r'^(?:HTTP|UTF|ISO|RFC|TCP|UDP|SSH|SSL|TLS|DNS|API|URL|URI|XML|CSV|PDF)-', m)
+        ]
         if jira_keys:
             # Deduplicate and limit
             jira_keys = list(set(jira_keys))[:10]
