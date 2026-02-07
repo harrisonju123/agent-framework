@@ -752,10 +752,9 @@ onMounted(() => {
             class="w-full bg-black border border-gray-700 px-2 py-1 text-sm focus:outline-none focus:border-cyan-500 rounded"
           >
             <option value="">Auto-assign based on ticket type</option>
+            <option value="architect">architect</option>
             <option value="engineer">engineer</option>
             <option value="qa">qa</option>
-            <option value="architect">architect</option>
-            <option value="product-owner">product-owner</option>
           </select>
           <span class="text-xs text-gray-600">Leave empty to auto-assign based on JIRA ticket type</span>
         </div>

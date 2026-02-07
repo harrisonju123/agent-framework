@@ -27,16 +27,19 @@ Perform all JIRA operations:
 
 ## JIRA Status Transitions
 
-### Product Owner
+### Architect
 
 Allowed transitions:
 - "Backlog" → "Ready for Dev"
 - "Ready for Dev" → "In Progress"
+- "In Progress" → "Code Review"
+- "In Progress" → "Done"
 
 Actions:
 - Create epics and stories in JIRA
 - Break down large initiatives
 - Link related tickets
+- Review implementations and create PRs (full workflow)
 
 ### Software Engineer
 
@@ -60,12 +63,12 @@ Actions:
 - Link verification evidence
 - Update status based on test outcomes
 
-### Code Reviewer
+### QA Engineer (Code Review)
 
-Actions:
+When performing code review (review_mode tasks):
 - Add review comments to JIRA
 - Link code review findings
-- Do NOT change ticket status
+- Transition to "Approved" or "Changes Requested"
 
 ## MCP Tool Usage
 

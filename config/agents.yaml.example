@@ -1,4 +1,20 @@
 agents:
+  - id: architect
+    name: Technical Architect
+    queue: architect
+    enabled: true
+    prompt: |
+      Plans, routes, analyzes repos, breaks down work, creates tickets,
+      reviews architecture and creates PRs (full workflow).
+    jira_can_create_tickets: true
+    jira_can_update_status: true
+    jira_allowed_transitions:
+      - "In Progress"
+      - "Code Review"
+      - "Done"
+    can_commit: true
+    can_create_pr: true
+
   - id: engineer
     name: Software Engineer
     queue: engineer
@@ -10,50 +26,23 @@ agents:
     jira_allowed_transitions:
       - "In Progress"
       - "Code Review"
+      - "Done"
     can_commit: true
-    can_create_pr: false
+    can_create_pr: true
 
   - id: qa
     name: QA Engineer
     queue: qa
     enabled: true
     prompt: |
-      Run tests and verify implementations meet acceptance criteria.
-      If tests pass, create PR request for architect.
-      If tests fail, create fix task for engineer.
+      Single quality gate — linting, testing, security scanning, code review.
+      If checks pass, create PR (standard) or queue architect (full).
+      If checks fail, create fix task for engineer.
     jira_can_update_status: true
     jira_allowed_transitions:
       - "Code Review"
+      - "Approved"
+      - "Changes Requested"
       - "Done"
     can_commit: false
-    can_create_pr: false
-
-  - id: architect
-    name: Technical Architect
-    queue: architect
-    enabled: true
-    prompt: |
-      Review code and approve PRs. Make architectural decisions.
-      Create implementation tasks for engineers.
-    jira_can_create_tickets: true
-    jira_can_update_status: true
-    jira_allowed_transitions:
-      - "In Progress"
-      - "Code Review"
-      - "Done"
-    can_commit: true
     can_create_pr: true
-
-  - id: product-owner
-    name: Product Owner
-    queue: product-owner
-    enabled: true
-    prompt: |
-      Pull unassigned tickets from JIRA backlog. Define features and
-      break down epics into stories. Assign work to appropriate agents.
-    jira_can_create_tickets: true
-    jira_can_update_status: true
-    jira_allowed_transitions:
-      - "In Progress"
-    can_commit: false
-    can_create_pr: false

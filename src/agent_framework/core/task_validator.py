@@ -1,6 +1,6 @@
 """Task validation to detect vague/underspecified tasks before processing.
 
-Only validates internally-generated tasks (from agents like architect, product-owner).
+Only validates internally-generated tasks (from agents like architect).
 JIRA tickets are skipped since they come from an external system with their own review process.
 """
 
@@ -89,7 +89,7 @@ def validate_task(task: Task, mode: str = "warn") -> ValidationResult:
 
     # Check 3: Agent-generated IMPLEMENTATION tasks should have acceptance_criteria
     impl_types = {TaskType.IMPLEMENTATION, TaskType.ARCHITECTURE, TaskType.ENHANCEMENT}
-    agent_creators = {"architect", "product-owner", "planner"}
+    agent_creators = {"architect", "planner"}
     if task.type in impl_types and not task.acceptance_criteria:
         if task.created_by in agent_creators:
             issues.append("Agent-generated implementation task should have acceptance_criteria")

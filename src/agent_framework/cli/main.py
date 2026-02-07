@@ -151,7 +151,7 @@ def analyze(ctx, repo, severity, max_issues, dry_run, focus):
         console.print("[yellow]DRY RUN: Will show findings without creating JIRA tickets[/]")
         console.print()
 
-    # Create analysis task for repo-analyzer agent
+    # Create analysis task for architect agent
     import time
     from datetime import datetime
 
@@ -203,7 +203,7 @@ When analyzing this repository:
         status=TaskStatus.PENDING,
         priority=1,
         created_by="cli",
-        assigned_to="repo-analyzer",
+        assigned_to="architect",
         created_at=datetime.utcnow(),
         title=f"Analyze repository: {repo}",
         description=description,
@@ -212,7 +212,7 @@ When analyzing this repository:
 
     # Queue the analysis task
     queue = FileQueue(workspace)
-    queue.push(task, "repo-analyzer")
+    queue.push(task, "architect")
 
     console.print(f"[green]✓ Analysis task queued: {task_id}[/]")
 
@@ -231,18 +231,18 @@ When analyzing this repository:
     console.print()
     console.print(f"[bold cyan]Analysis in progress...[/]")
     console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
-    console.print(f"[dim]📝 View logs: tail -f logs/repo-analyzer.log[/]")
+    console.print(f"[dim]📝 View logs: tail -f logs/architect.log[/]")
     console.print()
 
     if not dry_run:
-        console.print("[yellow]The repo-analyzer agent will:[/]")
+        console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {repo}")
         console.print(f"  2. Detect languages and run static analyzers")
         console.print(f"  3. Aggregate findings by file/module")
         console.print(f"  4. Create JIRA epic in project {jira_project}")
         console.print(f"  5. Create subtasks for each file group")
     else:
-        console.print("[yellow]The repo-analyzer agent will:[/]")
+        console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {repo}")
         console.print(f"  2. Detect languages and run static analyzers")
         console.print(f"  3. Aggregate findings by file/module")
@@ -320,7 +320,7 @@ def pull(ctx, project, max):
 @click.option("--parallel", "-p", is_flag=True, help="Process epic tickets in parallel (requires worktrees)")
 @click.pass_context
 def work(ctx, no_dashboard, workflow, epic, parallel):
-    """Interactive mode: describe what to build, delegate to Product Owner agent.
+    """Interactive mode: describe what to build, delegate to Architect agent.
 
     With --epic: Process all tickets in an existing JIRA epic.
     Without --epic: Describe a new feature to implement.
@@ -389,7 +389,7 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
 
     console.print(f"\n[green]✓[/] Workflow: [bold]{workflow}[/]")
 
-    # Step 4: Create planning task for Product Owner
+    # Step 4: Create planning task for Architect
     from ..core.task_builder import build_planning_task
 
     task = build_planning_task(
@@ -403,7 +403,7 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
 
     # Queue the planning task
     queue = FileQueue(workspace)
-    queue.push(task, "product-owner")
+    queue.push(task, "architect")
 
     console.print(f"\n[green]✓[/] Task queued: Analyze goal and create JIRA epic with breakdown")
 
@@ -428,9 +428,9 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
         else:
             console.print(f"\n[bold cyan]🎯 Tasks will be created in local queues[/]")
         console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
-        console.print(f"[dim]📝 View logs: tail -f logs/product-owner.log[/]")
+        console.print(f"[dim]📝 View logs: tail -f logs/architect.log[/]")
         console.print()
-        console.print("[yellow]The Product Owner agent will:[/]")
+        console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {selected_repo.github_repo} to ~/.agent-workspaces/")
         console.print(f"  2. Analyze the codebase")
         if selected_repo.jira_project:

@@ -158,9 +158,9 @@ def test_dashboard_render():
         agents_config = config_dir / "agents.yaml"
         agents_config.write_text("""
 agents:
-  - id: product-owner
-    name: Product Owner
-    queue: product-owner
+  - id: architect
+    name: Technical Architect
+    queue: architect
     enabled: true
     prompt: "Test prompt"
 
@@ -174,7 +174,7 @@ agents:
         # Create activity manager and add some data
         activity_manager = ActivityManager(workspace)
         activity_manager.update_activity(AgentActivity(
-            agent_id="product-owner",
+            agent_id="architect",
             status=AgentStatus.IDLE,
             last_updated=datetime.utcnow()
         ))

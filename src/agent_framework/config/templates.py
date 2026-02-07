@@ -87,9 +87,9 @@ class ConfigGenerator:
                     "prompt": "See config/docs/workflow_modes.md for details"
                 },
                 {
-                    "id": "product-owner",
-                    "name": "Product Owner",
-                    "queue": "product-owner",
+                    "id": "architect",
+                    "name": "Technical Architect",
+                    "queue": "architect",
                     "enabled": True,
                     "prompt": "See config/docs/workflow_modes.md for details"
                 }

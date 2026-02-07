@@ -1,12 +1,12 @@
 # Workflow Modes
 
-**Version:** 1.0
-**Last Updated:** 2026-02-04
+**Version:** 2.0
+**Last Updated:** 2026-02-07
 **Status:** Active
 
 ## Overview
 
-The agent framework supports three workflow modes to balance speed, thoroughness, and team coordination. The workflow mode is set in `task.context.workflow`.
+The agent framework uses 3 agents (Architect, Engineer, QA) with three workflow modes to balance speed, thoroughness, and team coordination. The workflow mode is set in `task.context.workflow`.
 
 ## Workflow Types
 
@@ -16,14 +16,14 @@ The agent framework supports three workflow modes to balance speed, thoroughness
 
 **Flow:**
 ```
-Product Owner → Engineer → Code Reviewer
+Architect → Engineer (creates PR + self-reviews)
 ```
 
 **Characteristics:**
+- Architect routes task directly to Engineer
 - Engineer explores codebase independently
 - Engineer creates PR directly after implementation
-- Code review happens post-PR (on GitHub)
-- No QA verification step
+- Engineer self-reviews before submitting
 - Fastest path to production
 
 **When to use:**
@@ -37,24 +37,25 @@ Product Owner → Engineer → Code Reviewer
 - Explore codebase and understand structure
 - Implement following existing patterns
 - Write tests
-- Commit and create PR immediately
-- Queue code-reviewer task after PR creation
+- Use test-runner teammate to verify before PR
+- Commit and create PR
 - Update JIRA to "Code Review" (if jira_key exists)
 
 ### Standard Workflow
 
-**Use case:** Medium-sized features that need testing but not architecture planning
+**Use case:** Medium-sized features that need testing and code review
 
 **Flow:**
 ```
-Product Owner → Engineer → QA → (QA creates PR) → Code Reviewer
+Architect → Engineer → QA (reviews + creates PR)
 ```
 
 **Characteristics:**
+- Architect routes task to Engineer
 - Engineer explores codebase independently
 - Engineer commits but does NOT create PR
-- QA verifies implementation and tests
-- QA creates PR if verification passes
+- QA runs tests, linting, security scanning, and code review
+- QA creates PR if everything passes
 - Pre-PR verification ensures quality
 
 **When to use:**
@@ -65,6 +66,7 @@ Product Owner → Engineer → QA → (QA creates PR) → Code Reviewer
 
 **Engineer responsibilities:**
 - Implement and test
+- Use test-runner teammate to catch issues early
 - Commit changes locally
 - DO NOT create PR
 - Queue QA task with acceptance criteria
@@ -72,9 +74,9 @@ Product Owner → Engineer → QA → (QA creates PR) → Code Reviewer
 **QA responsibilities:**
 - Run linting/static analysis
 - Execute tests and verify acceptance criteria
-- If tests pass: Create PR with structured description
-- If tests fail: Queue fix task back to Engineer
-- Update JIRA status appropriately
+- Code review (correctness, security, performance, readability)
+- If checks pass: Create PR with structured description
+- If checks fail: Queue fix task back to Engineer
 
 ### Full Workflow
 
@@ -82,14 +84,14 @@ Product Owner → Engineer → QA → (QA creates PR) → Code Reviewer
 
 **Flow:**
 ```
-Product Owner → Architect → Engineer → QA → (Architect creates PR) → Code Reviewer
+Architect → Engineer → QA → Architect (reviews + creates PR)
 ```
 
 **Characteristics:**
 - Architect creates detailed implementation plan
 - Engineer follows architectural guidance
-- QA verifies against acceptance criteria
-- Architect reviews and creates PR
+- QA verifies tests, linting, security, and reviews code
+- Architect does final review and creates PR
 - Most thorough review process
 
 **When to use:**
@@ -101,17 +103,18 @@ Product Owner → Architect → Engineer → QA → (Architect creates PR) → C
 - Features affecting >8 files
 
 **Architect responsibilities:**
-- Review product requirements
+- Review requirements
 - Design system architecture
 - Create detailed implementation plan
 - Specify file changes and patterns
 - Queue implementation task to Engineer
+- Post-QA: Review implementation against plan, create PR
 
 **Engineer responsibilities:**
 - Review architect's plan
-- Ask questions if plan is unclear (via task creation)
 - Implement according to plan
 - Write tests
+- Use test-runner teammate to verify
 - Commit changes locally
 - DO NOT create PR
 - Queue QA task
@@ -120,14 +123,18 @@ Product Owner → Architect → Engineer → QA → (Architect creates PR) → C
 - Run linting/static analysis
 - Execute tests
 - Verify acceptance criteria
-- If tests pass: Queue review task to Architect
-- If tests fail: Queue fix task to Engineer
+- Code review (correctness, security, performance, readability)
+- If checks pass: Queue review task to Architect
+- If checks fail: Queue fix task to Engineer
 
-**Architect (post-QA):**
-- Review implementation against plan
-- Verify architectural patterns followed
-- Create PR if satisfied
-- Otherwise queue fixes to Engineer
+### Failure Loop
+
+When QA finds issues, the failure loop handles retries:
+
+```
+QA finds issues → queues fix task to Engineer → Engineer fixes → back to QA
+After 5 retries → escalate to Architect for replanning
+```
 
 ## Workflow Decision Matrix
 
@@ -138,7 +145,7 @@ Product Owner → Architect → Engineer → QA → (Architect creates PR) → C
 | New API/schema | No | No | Yes |
 | Architecture impact | None | Low | High |
 | Time to PR | ~1 hour | ~2-3 hours | ~4-6 hours |
-| Team review | Post-PR | Pre-PR (QA) | Pre-PR (Architect + QA) |
+| Team review | Self-review | Pre-PR (QA) | Pre-PR (Architect + QA) |
 
 ## Checking Workflow Mode
 
@@ -160,13 +167,13 @@ elif workflow == "full":
 
 ## Workflow Mode Assignment
 
-**Product Owner sets workflow mode** when creating tasks:
+**Architect sets workflow mode** when creating tasks:
 
 ```json
 {
   "task_type": "implementation",
   "context": {
-    "workflow": "simple",  // or "standard" or "full"
+    "workflow": "simple",
     "jira_key": "PROJ-123",
     ...
   }
@@ -177,7 +184,6 @@ Decision criteria:
 - Analyze task complexity
 - Estimate lines of code
 - Consider architectural impact
-- Check if plan exists from Architect
 - Default to "full" if uncertain
 
 ## PR Creation Responsibility
@@ -185,28 +191,28 @@ Decision criteria:
 | Workflow | Who Creates PR? | When? |
 |----------|-----------------|-------|
 | Simple | Engineer | Immediately after implementation |
-| Standard | QA | After verification passes |
+| Standard | QA | After quality checks and code review pass |
 | Full | Architect | After QA passes and architecture review |
 
 ## Benefits by Workflow
 
 ### Simple
-- ✓ Fast iteration
-- ✓ Minimal overhead
-- ✓ Good for experienced changes
-- ✗ Less thorough review
+- Fast iteration
+- Minimal overhead
+- Good for experienced changes
+- Self-review catches obvious issues
 
 ### Standard
-- ✓ Pre-PR quality gate
-- ✓ Verified tests
-- ✓ Documented acceptance
-- ✓ Good balance of speed/quality
+- Pre-PR quality gate
+- Verified tests and linting
+- Code review by QA
+- Good balance of speed/quality
 
 ### Full
-- ✓ Architectural consistency
-- ✓ Design review before implementation
-- ✓ Comprehensive verification
-- ✗ Slower (but prevents rework)
+- Architectural consistency
+- Design review before implementation
+- Comprehensive verification
+- Prevents rework on complex features
 
 ## Best Practices
 

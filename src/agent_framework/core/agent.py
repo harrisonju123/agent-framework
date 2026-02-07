@@ -1623,7 +1623,7 @@ IMPORTANT:
             status=TaskStatus.PENDING,
             priority=task.priority,
             created_by=self.config.id,
-            assigned_to="code-reviewer",
+            assigned_to="qa",
             created_at=datetime.utcnow(),
             title=f"Review PR #{pr_number} - [{jira_key}] {task.title[:50]}",
             description=f"""Automated code review request for PR #{pr_number}.
@@ -1654,6 +1654,7 @@ IMPORTANT:
                 "github_repo": pr_info["github_repo"],
                 "branch_name": task.context.get("branch_name"),
                 "workflow": task.context.get("workflow", "standard"),
+                "review_mode": True,
                 "source_task_id": task.id,
                 "source_agent": self.config.id,
             },
@@ -1663,11 +1664,11 @@ IMPORTANT:
         """
         Automatically queue a code review task if a PR was created.
 
-        This ensures every PR gets reviewed by the code-reviewer agent,
+        This ensures every PR gets reviewed by the QA agent,
         regardless of whether the creating agent remembered to queue the review.
         """
-        # Skip if this agent IS the code-reviewer (avoid infinite loop)
-        if self.config.id == "code-reviewer":
+        # Skip if this agent IS the QA (avoid infinite loop)
+        if self.config.id == "qa":
             return
 
         # Skip if task type is already a review
@@ -1685,9 +1686,9 @@ IMPORTANT:
         pr_number = pr_info["pr_number"]
 
         try:
-            self.queue.push(review_task, "code-reviewer")
+            self.queue.push(review_task, "qa")
             self.logger.info(
-                f"🔍 Queued code review for PR #{pr_number} ({pr_info['github_repo']}) -> code-reviewer"
+                f"🔍 Queued code review for PR #{pr_number} ({pr_info['github_repo']}) -> qa"
             )
 
             # Store PR URL in original task context for tracking

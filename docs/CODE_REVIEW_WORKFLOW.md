@@ -16,7 +16,7 @@ This document describes how pull requests are queued for and picked up by the co
 
 ## Overview
 
-The code review agent uses a **pull-based queue model** rather than webhooks or push notifications. PRs don't automatically trigger reviews - instead, tasks are explicitly created and queued for the code-reviewer agent.
+The code review agent uses a **pull-based queue model** rather than webhooks or push notifications. PRs don't automatically trigger reviews - instead, tasks are explicitly created and queued for the qa agent.
 
 ### Key Characteristics
 
@@ -37,7 +37,7 @@ The code review agent uses a **pull-based queue model** rather than webhooks or 
 │  1. Creates PR via github_create_pr                     │
 │  2. Transitions JIRA to "Code Review"                   │
 │  3. Queues task: queue_task_for_agent(                  │
-│       agent_id: "code-reviewer",                        │
+│       agent_id: "qa",                        │
 │       task_type: "review",                              │
 │       context: { pr_number, jira_key, ... }             │
 │     )                                                    │
@@ -47,7 +47,7 @@ The code review agent uses a **pull-based queue model** rather than webhooks or 
                      ↓
          ┌───────────────────────────┐
          │ .agent-communication/     │
-         │   queues/code-reviewer/   │
+         │   queues/qa/   │
          │     task-abc123.json      │  ← PENDING
          └───────────┬───────────────┘
                      │
@@ -84,7 +84,7 @@ Tasks are created programmatically using the `queue_task_for_agent` MCP tool:
 ```typescript
 // Example: Engineer queues review task after creating PR
 queue_task_for_agent({
-  agent_id: "code-reviewer",
+  agent_id: "qa",
   task_type: "review",
   title: "Review PR #456 - Add authentication",
   description: "PR ready for review. Check security and correctness.",
@@ -130,7 +130,7 @@ This signals that the PR is ready for review.
 
 ```typescript
 {
-  agent_id: "code-reviewer",
+  agent_id: "qa",
   task_type: "review",
   title: "Review PR #456",
   description: "Review diff against criteria",
@@ -144,7 +144,7 @@ This signals that the PR is ready for review.
 
 **Result**: Creates JSON file at:
 ```
-.agent-communication/queues/code-reviewer/{task-id}.json
+.agent-communication/queues/qa/{task-id}.json
 ```
 
 **Implementation**: `mcp-servers/task-queue/src/queue-tools.ts:59-100`
@@ -243,14 +243,14 @@ The code reviewer analyzes the PR against these criteria:
 ```
 .agent-communication/
 ├── queues/
-│   ├── code-reviewer/          # Code review tasks
+│   ├── qa/          # Code review tasks
 │   │   ├── task-abc123.json    # PENDING
 │   │   └── task-def456.json    # IN_PROGRESS
 │   ├── engineer/               # Implementation tasks
 │   ├── qa/                     # QA verification tasks
 │   └── architect/              # Architecture planning tasks
 ├── completed/                  # Archived completed tasks
-│   └── code-reviewer/
+│   └── qa/
 │       └── task-abc123.json
 └── locks/                      # File locks for in-progress tasks
     └── task-def456.lock
@@ -260,12 +260,12 @@ The code reviewer analyzes the PR against these criteria:
 
 ```json
 {
-  "id": "review-code-reviewer-1738588800000-a1b2c3",
+  "id": "review-qa-1738588800000-a1b2c3",
   "type": "review",
   "status": "pending",
   "priority": 50,
   "created_by": "engineer-1",
-  "assigned_to": "code-reviewer",
+  "assigned_to": "qa",
   "created_at": "2026-02-03T10:00:00.000Z",
   "title": "Review PR #456 - Add authentication",
   "description": "Review PR for security and correctness",
@@ -331,9 +331,9 @@ Multiple agents can poll the same queue safely - only one will acquire each task
 **Location**: `config/agents.yaml:255-314`
 
 ```yaml
-- id: code-reviewer
+- id: qa
   name: Code Reviewer
-  queue: code-reviewer            # Queue directory name
+  queue: qa            # Queue directory name
   enabled: true
   poll_interval: 30               # Seconds between polls (default)
   max_retries: 5                  # Max attempts for failed tasks
@@ -416,7 +416,7 @@ def pop(self, queue_id: str) -> Optional[Task]:
 
 **Location**: `src/agent_framework/core/orchestrator.py`
 
-You can run multiple code-reviewer agents in parallel:
+You can run multiple qa agents in parallel:
 
 ```bash
 # Start 3 code reviewer replicas
@@ -424,19 +424,19 @@ agent start --replicas 3
 ```
 
 This spawns:
-- `code-reviewer-1`
-- `code-reviewer-2`
-- `code-reviewer-3`
+- `qa-1`
+- `qa-2`
+- `qa-3`
 
-All poll the same `code-reviewer` queue concurrently.
+All poll the same `qa` queue concurrently.
 
 ### How Parallel Processing Works
 
 ```
-.agent-communication/queues/code-reviewer/
-├── task-1.json   ← code-reviewer-1 acquires lock
-├── task-2.json   ← code-reviewer-2 acquires lock
-└── task-3.json   ← code-reviewer-3 acquires lock
+.agent-communication/queues/qa/
+├── task-1.json   ← qa-1 acquires lock
+├── task-2.json   ← qa-2 acquires lock
+└── task-3.json   ← qa-3 acquires lock
 
 All 3 tasks processed simultaneously!
 ```
@@ -507,24 +507,24 @@ safeguards:
 
 ```bash
 # View pending review tasks
-ls -la .agent-communication/queues/code-reviewer/
+ls -la .agent-communication/queues/qa/
 
 # Example output:
-# task-review-code-reviewer-1738588800000-a1b2c3.json  # PENDING
-# task-review-code-reviewer-1738588900000-d4e5f6.json  # PENDING
+# task-review-qa-1738588800000-a1b2c3.json  # PENDING
+# task-review-qa-1738588900000-d4e5f6.json  # PENDING
 ```
 
 ### Monitor Agent Logs
 
 ```bash
 # Tail code reviewer logs
-tail -f logs/code-reviewer.log
+tail -f logs/qa.log
 
 # Example log output:
-# 16:17:23 INFO [code-reviewer] Polling queue: code-reviewer
-# 16:17:23 INFO [code-reviewer] Found task: review-code-reviewer-...
-# 16:17:23 INFO [code-reviewer] [PROJ-123] Starting review of PR #456
-# 16:18:45 INFO [code-reviewer] [PROJ-123] Review completed (82.3s)
+# 16:17:23 INFO [qa] Polling queue: qa
+# 16:17:23 INFO [qa] Found task: review-qa-...
+# 16:17:23 INFO [qa] [PROJ-123] Starting review of PR #456
+# 16:18:45 INFO [qa] [PROJ-123] Review completed (82.3s)
 ```
 
 ### Check Agent Heartbeats
@@ -534,7 +534,7 @@ tail -f logs/code-reviewer.log
 ls -la .agent-communication/heartbeats/
 
 # Example:
-# code-reviewer.json    # Updated 5s ago
+# qa.json    # Updated 5s ago
 # engineer-1.json       # Updated 10s ago
 ```
 
@@ -544,14 +544,14 @@ Create a test task manually:
 
 ```bash
 # Create test review task
-cat > .agent-communication/queues/code-reviewer/test-task.json << 'EOF'
+cat > .agent-communication/queues/qa/test-task.json << 'EOF'
 {
   "id": "test-review-task",
   "type": "review",
   "status": "pending",
   "priority": 50,
   "created_by": "manual-test",
-  "assigned_to": "code-reviewer",
+  "assigned_to": "qa",
   "created_at": "2026-02-03T10:00:00.000Z",
   "title": "Test Review",
   "description": "Test task for verification",
@@ -567,7 +567,7 @@ cat > .agent-communication/queues/code-reviewer/test-task.json << 'EOF'
 EOF
 
 # Watch logs for pickup
-tail -f logs/code-reviewer.log
+tail -f logs/qa.log
 
 # Expect: Task picked up within 30 seconds
 ```
@@ -576,13 +576,13 @@ tail -f logs/code-reviewer.log
 
 ```bash
 # Check task status changes
-watch -n 5 'ls -la .agent-communication/queues/code-reviewer/'
+watch -n 5 'ls -la .agent-communication/queues/qa/'
 
 # Lifecycle:
 # 1. task-abc123.json exists (PENDING)
 # 2. .agent-communication/locks/task-abc123.lock created
 # 3. task-abc123.json status changes to IN_PROGRESS
-# 4. Task completes, moved to completed/code-reviewer/
+# 4. Task completes, moved to completed/qa/
 # 5. Lock released
 ```
 
@@ -647,7 +647,7 @@ jobs:
         run: |
           # Call API endpoint or directly write task file
           curl -X POST $QUEUE_ENDPOINT/queue \
-            -d '{"agent_id":"code-reviewer","pr":"${{ github.event.number }}"}'
+            -d '{"agent_id":"qa","pr":"${{ github.event.number }}"}'
 ```
 
 #### 4. JIRA Automation
@@ -662,7 +662,7 @@ JIRA Ticket → Transitions to "Code Review" → Automation Rule → Webhook →
 1. Create JIRA automation rule
 2. Trigger: Status changes to "Code Review"
 3. Action: Send webhook to queue service
-4. Service queues task for code-reviewer
+4. Service queues task for qa
 
 ### Tradeoffs
 

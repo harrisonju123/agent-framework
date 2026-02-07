@@ -10,14 +10,16 @@ Multi-agent system for autonomous software development. Agents plan, implement, 
 You describe what to build (or point at a JIRA epic)
   |
   v
-Product Owner breaks it down into tickets
+Architect plans, routes, and breaks down work
   |
   v
-Architect plans --> Engineer implements --> QA verifies --> Code Reviewer approves
+Engineer implements --> QA verifies + reviews --> PRs created
   |
   v
-PRs created, JIRA updated, ready for merge
+JIRA updated, ready for merge
 ```
+
+Three self-sufficient agents form a complete autonomous engineering team. Fewer agents = fewer queue hops = faster execution = more autonomy.
 
 With **Team Mode** enabled, each ticket runs as a single Claude Agent Teams session — the full architect/engineer/QA workflow happens in one pass instead of bouncing between queues.
 
@@ -100,23 +102,31 @@ agent team start --template full --repo justworkshr/pto
 # Full team with epic context loaded
 agent team start --template full --repo justworkshr/pto --epic ME-443
 
-# Code review team (3 specialized reviewers)
+# Code review team (2 specialized reviewers)
 agent team start --template review --repo justworkshr/pto
 
 # Debug a failed task
 agent team escalate task-impl-1234
 ```
 
-Templates: `full` (Architect + Engineer + QA), `review` (Security + Performance + Test Coverage), `debug` (2 investigators).
+Templates: `full` (Architect + Engineer + QA), `review` (QA + Security + Performance), `debug` (2 investigators).
 
 ## Workflow Modes
 
 | Mode | Flow | Best For |
 |------|------|----------|
-| **simple** | Engineer | Bug fixes, small changes |
-| **standard** | Engineer + QA | Features needing verification |
-| **full** | Architect + Engineer + QA + Review | Complex features |
-| **quality-focused** | Full + Static Analysis | Security-sensitive changes |
+| **simple** | Architect → Engineer | Bug fixes, small changes |
+| **standard** | Architect → Engineer → QA | Features needing verification |
+| **full** | Architect → Engineer → QA → Architect | Complex features |
+
+### Failure Loop
+
+When QA finds issues, tasks loop back to Engineer automatically:
+
+```
+QA finds issues → Engineer fixes → QA re-verifies
+After 5 retries → escalate to Architect for replanning
+```
 
 ## CLI Reference
 
@@ -225,14 +235,9 @@ src/agent_framework/
 
 | Agent | Role |
 |-------|------|
-| **Product Owner** | Breaks down goals into tickets, routes to workflows |
-| **Architect** | Plans complex features, reviews final PRs |
-| **Engineer** | Implements code, creates branches, commits |
-| **QA** | Runs tests, verifies acceptance criteria |
-| **Code Reviewer** | Reviews PRs for correctness, security, performance |
-| **Testing** | Executes test suites in Docker sandbox |
-| **Static Analysis** | Runs linters and security scanners |
-| **Repo Analyzer** | Scans repos for tech debt, creates remediation epics |
+| **Architect** | Plans, routes, analyzes repos, breaks down work, creates tickets, reviews architecture, creates PRs (full workflow) |
+| **Engineer** | Implements code, writes tests, creates PRs (simple workflow), self-heals via test-runner teammate |
+| **QA** | Single quality gate — linting, testing, security scanning, code review, PR creation (standard workflow) |
 
 ### MCP Integration
 

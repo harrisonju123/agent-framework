@@ -30,12 +30,9 @@ const filteredLogs = computed(() => {
 
 // Agent colors for visual distinction
 const agentColors: Record<string, string> = {
+  'architect': 'text-purple-400',
   'engineer': 'text-sky-400',
   'qa': 'text-green-400',
-  'architect': 'text-purple-400',
-  'product-owner': 'text-yellow-400',
-  'repo-analyzer': 'text-orange-400',
-  'code-reviewer': 'text-pink-400',
   'watchdog': 'text-gray-400',
 }
 

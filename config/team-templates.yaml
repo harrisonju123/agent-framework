@@ -41,7 +41,7 @@ templates:
 
   review:
     team_name_prefix: "review"
-    lead_role: "Review Lead"
+    lead_role: "QA Lead"
     plan_approval: false
     delegate_mode: true
     agents:
@@ -57,19 +57,12 @@ templates:
           You are the Performance Reviewer. Focus on N+1 queries, memory leaks,
           caching opportunities, and algorithmic complexity. Report findings
           with severity levels.
-      test_coverage_reviewer:
-        description: "Reviews code for missing tests, edge cases, regression risks"
-        prompt: |
-          You are the Test Coverage Reviewer. Focus on missing tests, edge
-          cases, regression risks, and test quality. Report findings with
-          severity levels.
     spawn_prompt: |
-      You are the lead for this code review team.
+      You are the QA lead for this code review team.
 
       Your teammates are:
       - Security Reviewer: Focuses on auth, injection, data exposure, OWASP top 10
       - Performance Reviewer: Focuses on N+1 queries, memory leaks, caching opportunities
-      - Test Coverage Reviewer: Focuses on missing tests, edge cases, regression risks
 
       Workflow:
       1. Assign each reviewer their focus area (use delegate mode)

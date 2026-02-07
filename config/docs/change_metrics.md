@@ -81,7 +81,7 @@ Managing PR size is critical for effective code review and maintainability. This
 
 **Action required:**
 - DO NOT create PR
-- Create escalation task for Product Owner
+- Create escalation task for Architect
 - Document why change is large
 - Suggest how to split into smaller pieces
 - Break into multiple PRs
@@ -188,7 +188,7 @@ elif [ $LINES -lt 500 ]; then
   echo "⚠️ Size: Large ($LINES lines, $FILES files) - Consider splitting"
 else
   echo "❌ Size: Too Large ($LINES lines, $FILES files) - MUST split"
-  echo "Create escalation task for Product Owner to break down"
+  echo "Create escalation task for Architect to break down"
   exit 1
 fi
 ```
@@ -243,7 +243,7 @@ fi
    ```json
    {
      "task_type": "breakdown",
-     "assigned_to": "product-owner",
+     "assigned_to": "architect",
      "title": "Break down large implementation: {feature_name}",
      "description": "Implementation of {feature} requires {line_count} lines across {file_count} files. This exceeds reviewable size (500 lines). Recommend splitting into: [list suggestions]",
      "context": {
@@ -260,12 +260,12 @@ fi
    }
    ```
 
-3. **Wait for Product Owner breakdown**
-   - Product Owner creates sub-tasks
+3. **Wait for Architect breakdown**
+   - Architect creates sub-tasks
    - Each sub-task is <500 lines
    - Tasks have clear dependencies
 
-### When Product Owner Creates Large Task
+### When Architect Creates Large Task
 
 Before assigning to Engineer, check complexity:
 

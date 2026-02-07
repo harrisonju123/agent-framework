@@ -19,8 +19,8 @@ class EscalationHandler:
     - If an escalation fails 5 times, it logs for human intervention only
     """
 
-    def __init__(self, product_owner_queue: str = "product-owner", enable_error_truncation: bool = False):
-        self.product_owner_queue = product_owner_queue
+    def __init__(self, escalation_queue: str = "architect", enable_error_truncation: bool = False):
+        self.escalation_queue = escalation_queue
         self.enable_error_truncation = enable_error_truncation
 
     def truncate_error(self, error: str, max_lines: int = 35) -> str:
@@ -110,7 +110,7 @@ class EscalationHandler:
             status=TaskStatus.PENDING,
             priority=0,  # Highest priority
             created_by=agent_id,
-            assigned_to=self.product_owner_queue,
+            assigned_to=self.escalation_queue,
             created_at=datetime.utcnow(),
             title=f"ESCALATION: Task failed after {failed_task.retry_count} retries",
             description=self._build_description(failed_task),

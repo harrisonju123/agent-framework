@@ -159,55 +159,31 @@ repositories:
 workflows:
   simple:
     description: "Fast workflow for small changes"
-    agents: [engineer, testing]
+    agents: [architect, engineer]
     pr_creator: engineer
     auto_review: true
     require_tests: true
 
   standard:
     description: "Standard workflow with QA verification"
-    agents: [engineer, qa]
+    agents: [architect, engineer, qa]
     pr_creator: qa
     auto_review: true
     require_tests: true
 
   full:
     description: "Full workflow with architecture planning"
-    agents: [architect, engineer, qa, architect]
+    agents: [architect, engineer, qa]
     pr_creator: architect
     auto_review: true
     require_tests: true
 
-  quality-focused:
-    description: "Enhanced workflow with static analysis"
-    agents: [architect, engineer, testing, qa, static-analysis, code-reviewer]
-    pr_creator: code-reviewer
-    auto_review: true
-    require_tests: true
-    require_static_analysis: true
-    block_on_critical: true
-
   analysis:
     description: "Full repository analysis workflow"
-    agents: [repo-analyzer]
+    agents: [architect]
     output: jira_epic  # Creates epic with file-grouped subtasks
     auto_review: false
     require_tests: false
-
-# Static Analysis Configuration
-static_analysis:
-  enabled: true
-  severity_thresholds:
-    critical: block    # Block workflow on critical issues
-    high: warn         # Warn but allow to proceed
-    medium: warn       # Warn but allow to proceed
-    low: ignore        # Ignore low severity issues
-  tools:
-    go: golangci-lint
-    python: [pylint, mypy, bandit]
-    javascript: eslint
-    typescript: eslint
-    ruby: rubocop
 
 # Circuit Breaker Configuration
 # Orchestrator-level health checks to prevent cascading failures

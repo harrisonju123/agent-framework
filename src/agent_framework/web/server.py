@@ -469,7 +469,7 @@ def register_routes(app: FastAPI):
     async def create_work(request: WorkRequest):
         """Create new work task (like CLI `agent work`).
 
-        Queues a PLANNING task for the product-owner agent.
+        Queues a PLANNING task for the architect agent.
         """
         try:
             from ..core.task_builder import build_planning_task
@@ -495,7 +495,7 @@ def register_routes(app: FastAPI):
 
             # Queue the task
             queue = FileQueue(app.state.workspace)
-            queue.push(task, "product-owner")
+            queue.push(task, "architect")
 
             return OperationResponse(
                 success=True,
@@ -513,7 +513,7 @@ def register_routes(app: FastAPI):
     async def analyze_repo(request: AnalyzeRequest):
         """Trigger repository analysis (like CLI `agent analyze`).
 
-        Queues an ANALYSIS task for the repo-analyzer agent.
+        Queues an ANALYSIS task for the architect agent.
         """
         try:
             from ..core.task_builder import build_analysis_task
@@ -537,7 +537,7 @@ def register_routes(app: FastAPI):
             )
 
             queue = FileQueue(app.state.workspace)
-            queue.push(task, "repo-analyzer")
+            queue.push(task, "architect")
 
             return OperationResponse(
                 success=True,

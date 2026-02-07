@@ -25,7 +25,6 @@ def agents():
         _make_agent("engineer", "Software Engineer"),
         _make_agent("qa", "QA Engineer"),
         _make_agent("architect", "Technical Architect"),
-        _make_agent("static-analysis", "Static Analysis"),
     ]
 
 
@@ -46,11 +45,6 @@ class TestWorkflowMapping:
         assert result is not None
         assert set(result.keys()) == {"engineer", "qa"}
 
-    def test_quality_focused_returns_three_teammates(self, agents):
-        result = compose_team({}, "quality-focused", agents)
-        assert result is not None
-        assert set(result.keys()) == {"engineer", "qa", "static-analysis"}
-
     def test_unknown_workflow_returns_none(self, agents):
         result = compose_team({}, "nonexistent", agents)
         assert result is None
@@ -65,10 +59,6 @@ class TestMinWorkflow:
 
     def test_full_meets_full_min(self, agents):
         result = compose_team({}, "full", agents, min_workflow="full")
-        assert result is not None
-
-    def test_quality_focused_above_full_min(self, agents):
-        result = compose_team({}, "quality-focused", agents, min_workflow="full")
         assert result is not None
 
     def test_simple_min_allows_standard(self, agents):
@@ -179,6 +169,6 @@ class TestConstants:
         assert set(WORKFLOW_TEAMMATES.keys()) == set(WORKFLOW_RANK.keys())
 
     def test_ranks_are_monotonically_increasing(self):
-        ordered = ["simple", "standard", "full", "quality-focused"]
+        ordered = ["simple", "standard", "full"]
         for i in range(len(ordered) - 1):
             assert WORKFLOW_RANK[ordered[i]] < WORKFLOW_RANK[ordered[i + 1]]

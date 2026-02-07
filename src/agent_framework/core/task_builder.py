@@ -14,7 +14,7 @@ def build_planning_task(
     jira_project: Optional[str] = None,
     created_by: str = "cli",
 ) -> Task:
-    """Build a planning task for the Product Owner agent.
+    """Build a planning task for the Architect agent.
 
     Args:
         goal: The user's goal/request
@@ -25,7 +25,7 @@ def build_planning_task(
         created_by: Source of the task (cli/web-dashboard)
 
     Returns:
-        Task configured for product-owner queue
+        Task configured for architect queue
     """
     import time
 
@@ -54,7 +54,7 @@ def build_planning_task(
         status=TaskStatus.PENDING,
         priority=1,
         created_by=created_by,
-        assigned_to="product-owner",
+        assigned_to="architect",
         created_at=datetime.now(timezone.utc),
         title=f"Plan and delegate: {goal}",
         description=instructions,
@@ -71,7 +71,7 @@ def build_analysis_task(
     jira_project: Optional[str] = None,
     created_by: str = "cli",
 ) -> Task:
-    """Build an analysis task for the repo-analyzer agent.
+    """Build an analysis task for the Architect agent.
 
     Args:
         repository: GitHub repository in owner/repo format
@@ -83,7 +83,7 @@ def build_analysis_task(
         created_by: Source of the task (cli/web-dashboard)
 
     Returns:
-        Task configured for repo-analyzer queue
+        Task configured for architect queue
     """
     import time
 
@@ -114,7 +114,7 @@ def build_analysis_task(
         status=TaskStatus.PENDING,
         priority=1,
         created_by=created_by,
-        assigned_to="repo-analyzer",
+        assigned_to="architect",
         created_at=datetime.now(timezone.utc),
         title=f"Analyze repository: {repository}",
         description=description,
@@ -129,7 +129,7 @@ def _build_planning_instructions(
     if jira_project:
         return f"""User Goal: {goal}
 
-Instructions for Product Owner Agent:
+Instructions for Architect Agent:
 1. Clone/update repository (use MultiRepoManager)
 2. Explore the codebase to understand structure
 3. Validate the goal is feasible
@@ -138,7 +138,7 @@ Instructions for Product Owner Agent:
     else:
         return f"""User Goal: {goal}
 
-Instructions for Product Owner Agent:
+Instructions for Architect Agent:
 1. Clone/update repository (use MultiRepoManager)
 2. Explore the codebase to understand structure
 3. Validate the goal is feasible

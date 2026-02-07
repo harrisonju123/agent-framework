@@ -17,7 +17,6 @@ WORKFLOW_TEAMMATES: Dict[str, List[str]] = {
     "simple": [],
     "standard": ["qa"],
     "full": ["engineer", "qa"],
-    "quality-focused": ["engineer", "qa", "static-analysis"],
 }
 
 # Minimum workflow rank for ordering comparisons
@@ -25,7 +24,6 @@ WORKFLOW_RANK = {
     "simple": 0,
     "standard": 1,
     "full": 2,
-    "quality-focused": 3,
 }
 
 
@@ -70,7 +68,7 @@ def compose_team(
 
     Args:
         task_context: Task context dict, checked for team_override
-        workflow: Workflow name (simple/standard/full/quality-focused)
+        workflow: Workflow name (simple/standard/full)
         agents_config: Agent definitions from agents.yaml
         min_workflow: Minimum workflow complexity to trigger teams
         default_model: Model name for teammates (from framework config)

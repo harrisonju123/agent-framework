@@ -36,10 +36,10 @@ class TaskPhase(str, Enum):
     EXECUTING_LLM = "executing_llm"  # When LLM is processing (Claude running)
     IMPLEMENTING = "implementing"
     TESTING = "testing"
-    EXPLORING_CODEBASE = "exploring_codebase"  # Product Owner specific
-    CREATING_EPIC = "creating_epic"  # Product Owner specific
-    CREATING_SUBTASKS = "creating_subtasks"  # Product Owner specific
-    QUEUING_TASKS = "queuing_tasks"  # Product Owner specific
+    EXPLORING_CODEBASE = "exploring_codebase"  # Architect planning phase
+    CREATING_EPIC = "creating_epic"  # Architect planning phase
+    CREATING_SUBTASKS = "creating_subtasks"  # Architect planning phase
+    QUEUING_TASKS = "queuing_tasks"  # Architect planning phase
     COMMITTING = "committing"
     CREATING_PR = "creating_pr"
     UPDATING_JIRA = "updating_jira"

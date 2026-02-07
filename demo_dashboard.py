@@ -23,7 +23,7 @@ async def simulate_agent_activity(workspace: Path):
     manager = ActivityManager(workspace)
 
     # Simulate agents starting
-    agents = ["product-owner", "architect", "engineer", "qa"]
+    agents = ["architect", "architect", "engineer", "qa"]
     for agent in agents:
         manager.update_activity(AgentActivity(
             agent_id=agent,
@@ -34,7 +34,7 @@ async def simulate_agent_activity(workspace: Path):
     # Simulate Product Owner starting work
     await asyncio.sleep(2)
     manager.update_activity(AgentActivity(
-        agent_id="product-owner",
+        agent_id="architect",
         status=AgentStatus.WORKING,
         current_task=CurrentTask(
             id="planning-PTO-1738573234",
@@ -48,7 +48,7 @@ async def simulate_agent_activity(workspace: Path):
 
     manager.append_event(ActivityEvent(
         type="start",
-        agent="product-owner",
+        agent="architect",
         task_id="planning-PTO-1738573234",
         title="Create epic and breakdown for: Add MFA to login flow",
         timestamp=datetime.utcnow()
@@ -56,12 +56,12 @@ async def simulate_agent_activity(workspace: Path):
 
     # Progress through phases
     await asyncio.sleep(3)
-    activity = manager.get_activity("product-owner")
+    activity = manager.get_activity("architect")
     activity.current_phase = TaskPhase.CREATING_EPIC
     manager.update_activity(activity)
 
     await asyncio.sleep(3)
-    activity = manager.get_activity("product-owner")
+    activity = manager.get_activity("architect")
     activity.current_phase = TaskPhase.CREATING_SUBTASKS
     manager.update_activity(activity)
 
@@ -91,14 +91,14 @@ async def simulate_agent_activity(workspace: Path):
     # Complete Product Owner task
     await asyncio.sleep(3)
     manager.update_activity(AgentActivity(
-        agent_id="product-owner",
+        agent_id="architect",
         status=AgentStatus.IDLE,
         last_updated=datetime.utcnow()
     ))
 
     manager.append_event(ActivityEvent(
         type="complete",
-        agent="product-owner",
+        agent="architect",
         task_id="planning-PTO-1738573234",
         title="Create epic and breakdown for: Add MFA to login flow",
         timestamp=datetime.utcnow(),
