@@ -539,29 +539,29 @@ onMounted(() => {
             </div>
           </div>
         </div>
+      </div>
 
-        <!-- Collapsible Log Panel -->
-        <div class="border-t border-gray-800">
-          <button
-            @click="logsExpanded = !logsExpanded"
-            class="w-full px-4 py-2 flex items-center justify-between text-sm font-mono text-gray-400 hover:bg-gray-900/30 transition-colors"
-            :aria-expanded="logsExpanded"
-            aria-controls="log-panel"
-          >
-            <span class="flex items-center gap-2">
-              <span :class="logsExpanded ? 'rotate-90' : ''" class="transition-transform">></span>
-              Live Logs
-              <span v-if="!logsConnected" class="text-yellow-500 text-xs">(disconnected)</span>
-            </span>
-            <span class="text-xs text-gray-600">{{ logs.length }} entries</span>
-          </button>
-          <div
-            v-show="logsExpanded"
-            id="log-panel"
-            class="h-64 border-t border-gray-800"
-          >
-            <LogViewer :logs="logs" :agents="agentIds" />
-          </div>
+      <!-- Collapsible Log Panel -->
+      <div class="border-t border-gray-800 shrink-0">
+        <button
+          @click="logsExpanded = !logsExpanded"
+          class="w-full px-4 py-2 flex items-center justify-between text-sm font-mono text-gray-400 hover:bg-gray-900/30 transition-colors"
+          :aria-expanded="logsExpanded"
+          aria-controls="log-panel"
+        >
+          <span class="flex items-center gap-2">
+            <span :class="logsExpanded ? 'rotate-90' : ''" class="transition-transform">></span>
+            Live Logs
+            <span v-if="!logsConnected" class="text-yellow-500 text-xs">(disconnected)</span>
+          </span>
+          <span class="text-xs text-gray-600">{{ logs.length }} entries</span>
+        </button>
+        <div
+          v-show="logsExpanded"
+          id="log-panel"
+          class="h-96 border-t border-gray-800"
+        >
+          <LogViewer :logs="logs" :agents="agentIds" />
         </div>
       </div>
 
