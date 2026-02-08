@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 # Keep in sync with the workflows section in config/agent-framework.yaml.
 WORKFLOW_TEAMMATES: Dict[str, List[str]] = {
     "simple": [],
-    "standard": ["qa"],
+    "standard": [],
     "full": ["engineer", "qa"],
 }
 

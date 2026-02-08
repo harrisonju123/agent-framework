@@ -104,9 +104,9 @@ optimization:
 # instead of bouncing between queues
 team_mode:
   enabled: true           # Teams handle full workflow in one session
-  min_workflow: standard  # minimum workflow complexity to trigger teams
+  min_workflow: full      # minimum workflow complexity to trigger teams
   # simple = never use teams (single-agent)
-  # standard = engineer + QA team
+  # standard = engineer handles alone (QA reviews PR independently)
   # full = architect + engineer + QA team
 
 # Multi-Repository Configuration
@@ -167,7 +167,7 @@ workflows:
   standard:
     description: "Standard workflow with QA verification"
     agents: [architect, engineer, qa]
-    pr_creator: qa
+    pr_creator: engineer
     auto_review: true
     require_tests: true
 

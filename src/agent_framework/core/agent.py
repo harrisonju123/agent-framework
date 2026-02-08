@@ -1173,14 +1173,14 @@ Available tools:
 - github_add_pr_comment(owner="{owner}", repo="{repo}", prNumber=123, body="...")
 - github_link_pr_to_jira(owner="{owner}", repo="{repo}", prNumber=123, jiraKey="{jira_key or 'PROJ-123'}")
 
-NOTE: Git operations (clone, commit, push) are handled by the framework.
-You focus on PR creation and management via GitHub API.
+NOTE: You are responsible for committing and pushing your changes.
 
 Workflow coordination:
 1. Make your code changes
-2. Your changes will be automatically committed after task completion
-3. Create a PR using github_create_pr
-4. Update JIRA using jira_transition_issue and jira_add_comment
+2. Commit changes: git add <files> && git commit -m "[TICKET] description"
+3. Push to feature branch: git push
+4. Create a PR using github_create_pr (if your workflow requires it)
+5. Update JIRA using jira_transition_issue and jira_add_comment
 
 """
 

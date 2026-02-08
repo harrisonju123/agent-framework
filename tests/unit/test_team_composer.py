@@ -42,10 +42,10 @@ class TestWorkflowMapping:
         result = compose_team({}, "simple", agents)
         assert result is None
 
-    def test_standard_returns_qa(self, agents):
+    def test_standard_returns_none(self, agents):
+        """Standard workflow has no workflow teammates (QA reviews independently)."""
         result = compose_team({}, "standard", agents)
-        assert result is not None
-        assert list(result.keys()) == ["qa"]
+        assert result is None
 
     def test_full_returns_engineer_and_qa(self, agents):
         result = compose_team({}, "full", agents)
@@ -69,13 +69,14 @@ class TestMinWorkflow:
         assert result is not None
 
     def test_simple_min_allows_standard(self, agents):
+        """Standard with min_workflow=simple passes threshold, but standard has no teammates."""
         result = compose_team({}, "standard", agents, min_workflow="simple")
-        assert result is not None
+        assert result is None
 
     def test_default_min_is_standard(self, agents):
-        """Standard workflow should pass with default min_workflow."""
+        """Standard workflow has no teammates, so returns None regardless of min_workflow."""
         result = compose_team({}, "standard", agents)
-        assert result is not None
+        assert result is None
 
 
 # -- Task-level overrides --
@@ -86,11 +87,11 @@ class TestTaskOverride:
         assert result is None
 
     def test_override_true_bypasses_min_workflow(self, agents):
+        """Override bypasses min_workflow check, but standard has no teammates → None."""
         result = compose_team(
             {"team_override": True}, "standard", agents, min_workflow="full",
         )
-        assert result is not None
-        assert "qa" in result
+        assert result is None
 
     def test_override_true_still_needs_teammates(self, agents):
         """Override can't conjure teammates for simple workflow (empty list)."""
@@ -114,9 +115,14 @@ class TestCallerExclusion:
         assert set(result.keys()) == {"engineer", "qa"}
 
     def test_caller_exclusion_can_empty_team(self, agents):
-        """Standard has only qa; if qa is the caller, team becomes empty → None."""
-        result = compose_team({}, "standard", agents, caller_agent_id="qa")
-        assert result is None
+        """Full has engineer+qa; if both excluded, team becomes empty → None."""
+        result = compose_team(
+            {}, "full", agents, min_workflow="full", caller_agent_id="engineer",
+        )
+        # Only qa remains
+        assert result is not None
+        assert "qa" in result
+        assert "engineer" not in result
 
 
 # -- Missing agent config --
@@ -143,7 +149,8 @@ class TestMissingConfig:
 
 class TestModelPassthrough:
     def test_default_model_is_sonnet(self, agents):
-        result = compose_team({}, "standard", agents)
+        result = compose_team({}, "full", agents, min_workflow="full")
+        assert result["engineer"]["model"] == "sonnet"
         assert result["qa"]["model"] == "sonnet"
 
     def test_custom_model_passed_through(self, agents):
@@ -158,14 +165,14 @@ class TestModelPassthrough:
 
 class TestOutputStructure:
     def test_teammate_has_required_keys(self, agents):
-        result = compose_team({}, "standard", agents)
+        result = compose_team({}, "full", agents, min_workflow="full")
         qa = result["qa"]
         assert "model" in qa
         assert "description" in qa
         assert "prompt" in qa
 
     def test_prompt_comes_from_agent_config(self, agents):
-        result = compose_team({}, "standard", agents)
+        result = compose_team({}, "full", agents, min_workflow="full")
         assert result["qa"]["prompt"] == "You are qa."
 
 
@@ -282,8 +289,8 @@ class TestTeamMerge:
 
         return team_agents or None
 
-    def test_engineer_standard_gets_configured_and_qa(self, agents):
-        """Engineer with configured teammates + standard workflow → all merged."""
+    def test_engineer_standard_gets_only_configured(self, agents):
+        """Engineer with configured teammates + standard workflow → only configured (no workflow teammates)."""
         engineer_def = _make_agent("engineer")
         engineer_def.teammates = {
             "peer-engineer": _make_teammate("Peer", "Review."),
@@ -293,7 +300,7 @@ class TestTeamMerge:
             engineer_def, "standard", agents, caller_agent_id="engineer",
         )
         assert result is not None
-        assert set(result.keys()) == {"peer-engineer", "test-runner", "qa"}
+        assert set(result.keys()) == {"peer-engineer", "test-runner"}
 
     def test_engineer_simple_gets_only_configured(self, agents):
         """Simple workflow adds no workflow agents, only configured teammates remain."""
@@ -320,8 +327,8 @@ class TestTeamMerge:
         assert "engineer" in result
         assert "qa" in result
 
-    def test_qa_standard_excludes_self_from_workflow(self, agents):
-        """QA is the caller — standard workflow only adds QA, which gets excluded."""
+    def test_qa_standard_gets_only_configured(self, agents):
+        """QA in standard workflow gets only configured teammates (no workflow teammates)."""
         qa_def = _make_agent("qa")
         qa_def.teammates = {
             "security-reviewer": _make_teammate("Security", "Check security."),
@@ -330,17 +337,16 @@ class TestTeamMerge:
             qa_def, "standard", agents, caller_agent_id="qa",
         )
         assert result is not None
-        # Only configured teammate remains; workflow QA excluded as caller
         assert set(result.keys()) == {"security-reviewer"}
 
     def test_collision_workflow_takes_precedence(self, agents):
         """When configured teammate shares an ID with workflow agent, workflow wins."""
-        engineer_def = _make_agent("engineer")
-        engineer_def.teammates = {
+        architect_def = _make_agent("architect")
+        architect_def.teammates = {
             "qa": _make_teammate("Custom QA", "Custom prompt."),
         }
         result = self._merge_teams(
-            engineer_def, "standard", agents, caller_agent_id="engineer",
+            architect_def, "full", agents, caller_agent_id="architect",
         )
         assert result is not None
         assert "qa" in result
@@ -348,14 +354,14 @@ class TestTeamMerge:
         assert result["qa"]["prompt"] == "You are qa."
 
     def test_collision_is_logged(self, agents, caplog):
-        engineer_def = _make_agent("engineer")
-        engineer_def.teammates = {
+        architect_def = _make_agent("architect")
+        architect_def.teammates = {
             "qa": _make_teammate("Custom QA", "Custom prompt."),
         }
         with caplog.at_level(logging.WARNING):
             self._merge_teams(
-                engineer_def, "standard", agents,
-                caller_agent_id="engineer",
+                architect_def, "full", agents,
+                caller_agent_id="architect",
                 logger_instance=logging.getLogger(__name__),
             )
         assert "collision" in caplog.text.lower()
