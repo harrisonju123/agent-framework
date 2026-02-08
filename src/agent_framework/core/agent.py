@@ -66,6 +66,30 @@ CHAIN_TASK_TYPES = {
     "architect": TaskType.REVIEW,
 }
 
+# Cap review cycles to prevent infinite QA ↔ Engineer loops
+MAX_REVIEW_CYCLES = 3
+
+REVIEW_OUTCOME_PATTERNS = {
+    "request_changes": [r'\bREQUEST_CHANGES\b', r'\bCHANGES REQUESTED\b'],
+    "critical_issues": [r'\bCRITICAL\b.*?:', r'severity:\s*CRITICAL'],
+    "test_failures": [r'tests?\s+fail', r'[1-9]\d*\s+failed'],
+    "approve": [r'\bAPPROVE[D]?\b', r'\bLGTM\b'],
+}
+
+
+@dataclass
+class ReviewOutcome:
+    """Parsed result of a QA review."""
+    approved: bool
+    has_critical_issues: bool
+    has_test_failures: bool
+    has_change_requests: bool
+    findings_summary: str
+
+    @property
+    def needs_fix(self) -> bool:
+        return self.has_critical_issues or self.has_test_failures or self.has_change_requests
+
 
 @dataclass
 class AgentConfig:
@@ -380,6 +404,10 @@ class Agent:
         # task.context, which chain enforcement then sees and correctly skips.
         self.logger.debug(f"Checking if code review needed for {task.id}")
         self._queue_code_review_if_needed(task, response)
+
+        # QA review feedback: deterministically queue fix task to engineer
+        # when QA finds issues, mirroring the hard-coded code review above
+        self._queue_review_fix_if_needed(task, response)
 
         # Enforce workflow chain: queue next agent if no PR was created
         self._enforce_workflow_chain(task, response)
@@ -1748,6 +1776,8 @@ IMPORTANT:
                 "review_mode": True,
                 "source_task_id": task.id,
                 "source_agent": self.config.id,
+                # Carry review cycle count so QA → Engineer loop is capped
+                "_review_cycle_count": task.context.get("_review_cycle_count", 0),
             },
         )
 
@@ -1758,8 +1788,8 @@ IMPORTANT:
         This ensures every PR gets reviewed by the QA agent,
         regardless of whether the creating agent remembered to queue the review.
         """
-        # Skip if this agent IS the QA (avoid infinite loop)
-        if self.config.id == "qa":
+        # Skip if this agent IS the QA (avoid infinite loop); use base_id for replica support
+        if self.config.base_id == "qa":
             return
 
         # Skip if task type is already a review
@@ -1789,6 +1819,179 @@ IMPORTANT:
 
         except Exception as e:
             self.logger.error(f"Failed to queue code review for PR #{pr_number}: {e}")
+
+    # -- QA → Engineer review feedback loop --
+
+    def _queue_review_fix_if_needed(self, task: Task, response) -> None:
+        """Deterministically queue a fix task to engineer when QA finds issues.
+
+        Mirrors _queue_code_review_if_needed: that method hard-codes the
+        Engineer → QA direction; this method hard-codes QA → Engineer.
+        """
+        if self.config.base_id != "qa":
+            return
+        if task.type != TaskType.REVIEW:
+            return
+
+        outcome = self._parse_review_outcome(response.content)
+        if not outcome.needs_fix:
+            return
+
+        cycle_count = task.context.get("_review_cycle_count", 0) + 1
+
+        if cycle_count > MAX_REVIEW_CYCLES:
+            self._escalate_review_to_architect(task, outcome, cycle_count)
+            return
+
+        fix_task = self._build_review_fix_task(task, outcome, cycle_count)
+
+        # Deduplicate: skip if fix task file already exists in engineer queue
+        fix_path = self.queue.queue_dir / "engineer" / f"{fix_task.id}.json"
+        if fix_path.exists():
+            self.logger.debug(f"Review fix task {fix_task.id} already queued, skipping")
+            return
+
+        try:
+            self.queue.push(fix_task, "engineer")
+            self.logger.info(
+                f"🔧 Queued review fix (cycle {cycle_count}/{MAX_REVIEW_CYCLES}) -> engineer"
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to queue review fix task: {e}")
+
+    def _parse_review_outcome(self, content: str) -> ReviewOutcome:
+        """Parse QA response for review verdict using regex patterns."""
+        if not content:
+            return ReviewOutcome(
+                approved=False, has_critical_issues=False,
+                has_test_failures=False, has_change_requests=False,
+                findings_summary="",
+            )
+
+        def _matches(key: str) -> bool:
+            return any(re.search(p, content, re.IGNORECASE) for p in REVIEW_OUTCOME_PATTERNS[key])
+
+        approved = _matches("approve")
+        has_critical = _matches("critical_issues")
+        has_test_fail = _matches("test_failures")
+        has_changes = _matches("request_changes")
+
+        # Approval is overridden if issues are also present
+        if has_critical or has_test_fail or has_changes:
+            approved = False
+
+        findings = self._extract_review_findings(content)
+
+        return ReviewOutcome(
+            approved=approved,
+            has_critical_issues=has_critical,
+            has_test_failures=has_test_fail,
+            has_change_requests=has_changes,
+            findings_summary=findings,
+        )
+
+    def _extract_review_findings(self, content: str) -> str:
+        """Extract severity-tagged lines from QA review output."""
+        findings = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            # Case-sensitive: we want structured output tags (CRITICAL, HIGH, …),
+            # not prose that happens to contain the word. _parse_review_outcome
+            # uses IGNORECASE for leniency; here we want precision.
+            if re.match(r'^(CRITICAL|HIGH|MAJOR|MEDIUM|MINOR|LOW|SUGGESTION)\b', stripped):
+                findings.append(stripped)
+        # Fall back to first 500 chars if no tagged lines found
+        if not findings:
+            return content[:500]
+        return "\n".join(findings)
+
+    def _build_review_fix_task(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> Task:
+        """Build a fix task for the engineer with QA review findings."""
+        from datetime import datetime
+
+        jira_key = task.context.get("jira_key", "UNKNOWN")
+        pr_url = task.context.get("pr_url", "")
+        pr_number = task.context.get("pr_number", "")
+
+        return Task(
+            id=f"review-fix-{task.id[:12]}-c{cycle_count}",
+            type=TaskType.FIX,
+            status=TaskStatus.PENDING,
+            priority=task.priority,
+            created_by=self.config.id,
+            assigned_to="engineer",
+            created_at=datetime.utcnow(),
+            title=f"Fix review issues (cycle {cycle_count}) - [{jira_key}]",
+            description=f"""QA review found issues that need fixing.
+
+## Review Findings
+{outcome.findings_summary}
+
+## Context
+- **PR**: {pr_url}
+- **JIRA**: {jira_key}
+- **Review cycle**: {cycle_count}/{MAX_REVIEW_CYCLES}
+- **Critical issues**: {outcome.has_critical_issues}
+- **Test failures**: {outcome.has_test_failures}
+- **Changes requested**: {outcome.has_change_requests}
+
+## Instructions
+1. Address all findings listed above
+2. Fix any failing tests
+3. Commit and push to the existing branch
+4. The system will automatically re-queue a review to QA
+""",
+            context={
+                **{k: v for k, v in task.context.items() if not k.startswith("review_")},
+                "pr_url": pr_url,
+                "pr_number": pr_number,
+                "source_task_id": task.id,
+                "source_agent": self.config.id,
+                "_review_cycle_count": cycle_count,
+            },
+        )
+
+    def _escalate_review_to_architect(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> None:
+        """Escalate to architect after too many failed review cycles."""
+        from datetime import datetime
+
+        jira_key = task.context.get("jira_key", "UNKNOWN")
+
+        escalation_task = Task(
+            id=f"review-escalation-{task.id[:12]}",
+            type=TaskType.ESCALATION,
+            status=TaskStatus.PENDING,
+            priority=max(1, task.priority - 1),  # Lower number = higher priority
+            created_by=self.config.id,
+            assigned_to="architect",
+            created_at=datetime.utcnow(),
+            title=f"Review escalation ({cycle_count} cycles) - [{jira_key}]",
+            description=f"""QA and Engineer failed to resolve review issues after {cycle_count} cycles.
+
+## Last Review Findings
+{outcome.findings_summary}
+
+## Action Required
+- Replan the implementation approach
+- Consider breaking the task into smaller pieces
+- Provide more detailed architectural guidance
+""",
+            context={
+                **task.context,
+                "source_task_id": task.id,
+                "source_agent": self.config.id,
+                "_review_cycle_count": cycle_count,
+                "escalation_reason": f"Review loop exceeded {MAX_REVIEW_CYCLES} cycles",
+            },
+        )
+
+        try:
+            self.queue.push(escalation_task, "architect")
+            self.logger.warning(
+                f"⚠️  Review escalated to architect after {cycle_count} cycles"
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to escalate review to architect: {e}")
 
     # -- Workflow chain enforcement --
 

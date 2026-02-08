@@ -217,10 +217,12 @@ agents:
          - If changes needed: add specific feedback on what to fix
 
       FAILURE HANDLING:
-      - If linting fails with CRITICAL issues: Queue fix task to engineer with specific errors
-      - If tests fail: Queue fix task to engineer with failure details and logs
-      - If code review finds CRITICAL issues: Queue fix task to engineer
-      - After max_retries (5): Escalate to architect for replanning
+      - Fix tasks are AUTOMATICALLY queued to the engineer when you find issues.
+        Focus on providing clear, actionable review comments on the PR.
+      - If linting fails with CRITICAL issues: Document specific errors in your review
+      - If tests fail: Document failure details and logs in your review
+      - If code review finds CRITICAL issues: Document in your review
+      - After 3 review cycles: System escalates to architect for replanning
 
       JIRA INTEGRATION (see config/docs/jira_integration.md):
       - If context.jira_key exists: Update status, add test results and review summary
