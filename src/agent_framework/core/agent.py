@@ -233,6 +233,9 @@ class Agent:
             last_updated=datetime.utcnow()
         ))
 
+        # Drain stale review-chain tasks left over from before the cycle-count guard
+        self._purge_orphaned_review_tasks()
+
         while self._running:
             # Write heartbeat every iteration
             self._write_heartbeat()
@@ -1780,6 +1783,59 @@ IMPORTANT:
                 "_review_cycle_count": task.context.get("_review_cycle_count", 0),
             },
         )
+
+    def _purge_orphaned_review_tasks(self) -> None:
+        """Remove REVIEW/FIX tasks for PRs that already have an ESCALATION.
+
+        On restart, stale review-chain tasks from before the cycle-count guard
+        may still be queued.  If an escalation already exists for a PR, every
+        REVIEW/FIX task for that PR is orphaned — processing them would restart
+        a parallel chain the architect already owns.
+        """
+        queue_dir = self.queue.queue_dir
+        completed_dir = self.queue.completed_dir
+
+        # Step 1: collect PR URLs that have been escalated
+        escalated_prs: set[str] = set()
+        for search_dir in (queue_dir / "architect", completed_dir):
+            if not search_dir.is_dir():
+                continue
+            for f in search_dir.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if data.get("type") == TaskType.ESCALATION.value:
+                    pr_url = data.get("context", {}).get("pr_url")
+                    if pr_url:
+                        escalated_prs.add(pr_url)
+
+        if not escalated_prs:
+            return
+
+        # Step 2: remove REVIEW/FIX tasks whose pr_url matches an escalated PR
+        purged = 0
+        for sub in queue_dir.iterdir():
+            if not sub.is_dir():
+                continue
+            for f in sub.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text())
+                except (json.JSONDecodeError, OSError):
+                    continue
+                task_type = data.get("type")
+                if task_type not in (TaskType.REVIEW.value, TaskType.FIX.value):
+                    continue
+                pr_url = data.get("context", {}).get("pr_url")
+                if pr_url in escalated_prs:
+                    f.unlink()
+                    purged += 1
+
+        if purged:
+            self.logger.info(
+                f"Purged {purged} orphaned review-chain task(s) for "
+                f"{len(escalated_prs)} escalated PR(s)"
+            )
 
     def _queue_code_review_if_needed(self, task: Task, response) -> None:
         """

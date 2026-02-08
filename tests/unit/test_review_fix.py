@@ -562,3 +562,96 @@ class TestCodeReviewDedup:
         engineer_agent._queue_code_review_if_needed(task, response)
 
         queue.push.assert_not_called()
+
+
+# -- Startup purge of orphaned review-chain tasks --
+
+class TestPurgeOrphanedReviewTasks:
+    """_purge_orphaned_review_tasks removes REVIEW/FIX tasks for escalated PRs."""
+
+    @staticmethod
+    def _write_task(path, task_type, pr_url):
+        """Write a minimal task JSON file."""
+        import json
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "type": task_type,
+            "context": {"pr_url": pr_url},
+        }))
+
+    @pytest.fixture
+    def purge_agent(self, tmp_path):
+        """Agent wired to a real tmp directory structure."""
+        q = MagicMock()
+        q.queue_dir = tmp_path / "queues"
+        q.queue_dir.mkdir()
+        q.completed_dir = tmp_path / "completed"
+        q.completed_dir.mkdir()
+
+        config = AgentConfig(
+            id="engineer",
+            name="Engineer",
+            queue="engineer",
+            prompt="You are an engineer.",
+        )
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.queue = q
+        a.logger = MagicMock()
+        return a
+
+    def test_purges_review_task_for_escalated_pr(self, purge_agent):
+        pr = "https://github.com/org/repo/pull/99"
+        # Escalation in architect queue
+        self._write_task(
+            purge_agent.queue.queue_dir / "architect" / "esc-1.json",
+            "escalation", pr,
+        )
+        # Orphaned REVIEW in qa queue
+        review_file = purge_agent.queue.queue_dir / "qa" / "review-1.json"
+        self._write_task(review_file, "review", pr)
+
+        purge_agent._purge_orphaned_review_tasks()
+
+        assert not review_file.exists()
+
+    def test_purges_fix_task_for_escalated_pr(self, purge_agent):
+        pr = "https://github.com/org/repo/pull/99"
+        # Escalation in completed dir
+        self._write_task(
+            purge_agent.queue.completed_dir / "esc-2.json",
+            "escalation", pr,
+        )
+        # Orphaned FIX in engineer queue
+        fix_file = purge_agent.queue.queue_dir / "engineer" / "fix-1.json"
+        self._write_task(fix_file, "fix", pr)
+
+        purge_agent._purge_orphaned_review_tasks()
+
+        assert not fix_file.exists()
+
+    def test_keeps_tasks_for_non_escalated_pr(self, purge_agent):
+        escalated_pr = "https://github.com/org/repo/pull/99"
+        other_pr = "https://github.com/org/repo/pull/100"
+        # Escalation only for PR 99
+        self._write_task(
+            purge_agent.queue.queue_dir / "architect" / "esc-1.json",
+            "escalation", escalated_pr,
+        )
+        # REVIEW for a different PR — should survive
+        review_file = purge_agent.queue.queue_dir / "qa" / "review-other.json"
+        self._write_task(review_file, "review", other_pr)
+
+        purge_agent._purge_orphaned_review_tasks()
+
+        assert review_file.exists()
+
+    def test_noop_when_no_escalations(self, purge_agent):
+        # REVIEW task with no matching escalation — untouched
+        review_file = purge_agent.queue.queue_dir / "qa" / "review-1.json"
+        self._write_task(review_file, "review", "https://github.com/org/repo/pull/99")
+
+        purge_agent._purge_orphaned_review_tasks()
+
+        assert review_file.exists()
+        purge_agent.logger.info.assert_not_called()
