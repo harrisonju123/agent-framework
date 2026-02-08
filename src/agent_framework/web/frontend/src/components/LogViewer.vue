@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { ref, computed, watch, onUnmounted } from 'vue'
 import type { LogEntry } from '../types'
 
 const props = defineProps<{
@@ -8,19 +8,21 @@ const props = defineProps<{
 }>()
 
 const filter = ref<string>('all')
-const sourceFilter = ref<string>('all')  // 'all', 'agent', 'claude-cli'
+const sourceFilter = ref<string>('all')
 const logEl = ref<HTMLElement | null>(null)
 const autoScroll = ref(true)
+
+// Track how many logs existed when user paused scrolling
+const pausedAtCount = ref(0)
+let scrollRAFId = 0
 
 const filteredLogs = computed(() => {
   let logs = props.logs
 
-  // Filter by source type
   if (sourceFilter.value !== 'all') {
     logs = logs.filter(log => (log.source || 'agent') === sourceFilter.value)
   }
 
-  // Filter by agent
   if (filter.value !== 'all') {
     logs = logs.filter(log => log.agent === filter.value)
   }
@@ -28,7 +30,14 @@ const filteredLogs = computed(() => {
   return logs
 })
 
-// Agent colors for visual distinction
+// Only render the tail — keeps DOM node count bounded
+const visibleLogs = computed(() => filteredLogs.value.slice(-100))
+
+const newLogsSincePause = computed(() => {
+  if (autoScroll.value) return 0
+  return Math.max(0, filteredLogs.value.length - pausedAtCount.value)
+})
+
 const agentColors: Record<string, string> = {
   'architect': 'text-purple-400',
   'engineer': 'text-sky-400',
@@ -68,37 +77,53 @@ function getLevelClass(level: string | null): string {
   }
 }
 
-// Auto-scroll to bottom when new logs arrive
-watch(
-  () => props.logs.length,
-  async () => {
+// Coalesce scroll updates to one per frame instead of one per log message
+function scheduleScroll() {
+  if (scrollRAFId) return
+  scrollRAFId = requestAnimationFrame(() => {
+    scrollRAFId = 0
     if (autoScroll.value && logEl.value) {
-      await nextTick()
       logEl.value.scrollTop = logEl.value.scrollHeight
+    }
+  })
+}
+
+watch(
+  () => filteredLogs.value.length,
+  () => {
+    if (autoScroll.value) {
+      scheduleScroll()
     }
   }
 )
 
-// Detect manual scroll to disable auto-scroll
 function handleScroll() {
   if (!logEl.value) return
   const { scrollTop, scrollHeight, clientHeight } = logEl.value
-  // If user scrolled up more than 50px from bottom, disable auto-scroll
+  const wasAutoScroll = autoScroll.value
   autoScroll.value = scrollHeight - scrollTop - clientHeight < 50
+
+  // Capture count when user first scrolls away from bottom
+  if (wasAutoScroll && !autoScroll.value) {
+    pausedAtCount.value = filteredLogs.value.length
+  }
 }
 
-// Re-enable auto-scroll when clicking the cursor
 function scrollToBottom() {
   autoScroll.value = true
+  pausedAtCount.value = 0
   if (logEl.value) {
     logEl.value.scrollTop = logEl.value.scrollHeight
   }
 }
 
-// Get unique agents from logs
 const uniqueAgents = computed(() => {
   const agents = new Set(props.logs.map(log => log.agent))
   return Array.from(agents).sort()
+})
+
+onUnmounted(() => {
+  if (scrollRAFId) cancelAnimationFrame(scrollRAFId)
 })
 </script>
 
@@ -141,24 +166,12 @@ const uniqueAgents = computed(() => {
       >
         {{ agent }}
       </span>
-      <span class="flex-1"></span>
-      <span
-        v-if="!autoScroll"
-        @click="scrollToBottom"
-        class="text-yellow-500 cursor-pointer hover:text-yellow-400"
-      >
-        scroll locked - click to unlock
-      </span>
     </div>
 
     <!-- Log output -->
-    <div
-      ref="logEl"
-      @scroll="handleScroll"
-      class="flex-1 overflow-y-auto px-2 py-1"
-    >
+    <div class="flex-1 overflow-y-auto px-2 py-1 relative" ref="logEl" @scroll="handleScroll">
       <div
-        v-for="log in filteredLogs"
+        v-for="log in visibleLogs"
         :key="log.id ?? log.timestamp + log.agent"
         class="leading-tight whitespace-pre-wrap break-all"
         :class="{ 'italic': log.source === 'claude-cli' }"
@@ -181,12 +194,18 @@ const uniqueAgents = computed(() => {
       >
         _
       </div>
+
+      <!-- Floating jump-to-latest badge -->
+      <div v-if="!autoScroll" class="jump-badge-anchor">
+        <div @click="scrollToBottom" class="jump-badge">
+          Jump to latest<span v-if="newLogsSincePause > 0"> ({{ newLogsSincePause }} new)</span>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* Ensure proper scrolling behavior */
 .overflow-y-auto {
   scrollbar-width: thin;
   scrollbar-color: #374151 #000;
@@ -203,5 +222,31 @@ const uniqueAgents = computed(() => {
 .overflow-y-auto::-webkit-scrollbar-thumb {
   background: #374151;
   border-radius: 3px;
+}
+
+.jump-badge-anchor {
+  position: sticky;
+  bottom: 8px;
+  display: flex;
+  justify-content: flex-end;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.jump-badge {
+  pointer-events: auto;
+  padding: 4px 12px;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  color: #000;
+  background: #facc15;
+  border-radius: 9999px;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  transition: background 0.15s;
+}
+
+.jump-badge:hover {
+  background: #fbbf24;
 }
 </style>

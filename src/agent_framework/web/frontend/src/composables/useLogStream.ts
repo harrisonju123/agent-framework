@@ -3,11 +3,11 @@ import type { LogEntry } from '../types'
 
 export interface LogStreamOptions {
   maxLines?: number
-  autoScroll?: boolean
+  flushInterval?: number
 }
 
 export function useLogStream(options: LogStreamOptions = {}) {
-  const { maxLines = 500 } = options
+  const { maxLines = 200, flushInterval = 200 } = options
 
   const logs = ref<LogEntry[]>([])
   const connected = ref(false)
@@ -17,8 +17,23 @@ export function useLogStream(options: LogStreamOptions = {}) {
   let reconnectAttempts = 0
   const maxReconnectAttempts = 10
 
-  // Generate unique IDs for log entries
   let logIdCounter = 0
+
+  // Non-reactive buffer collects messages between flushes
+  let pendingBuffer: LogEntry[] = []
+  let flushTimer: ReturnType<typeof setInterval> | null = null
+
+  function flush() {
+    if (pendingBuffer.length === 0) return
+
+    const incoming = pendingBuffer
+    pendingBuffer = []
+
+    const merged = logs.value.concat(incoming)
+    logs.value = merged.length > maxLines
+      ? merged.slice(-maxLines)
+      : merged
+  }
 
   function connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -31,23 +46,15 @@ export function useLogStream(options: LogStreamOptions = {}) {
         connected.value = true
         error.value = null
         reconnectAttempts = 0
+        flushTimer = setInterval(flush, flushInterval)
         console.log('Log stream WebSocket connected')
       }
 
       ws.onmessage = (event) => {
         try {
           const entry = JSON.parse(event.data) as LogEntry
-          // Add unique ID for Vue key binding
-          const entryWithId = {
-            ...entry,
-            id: logIdCounter++,
-          }
-          logs.value.push(entryWithId as LogEntry)
-
-          // Trim logs to maxLines
-          if (logs.value.length > maxLines) {
-            logs.value = logs.value.slice(-maxLines)
-          }
+          entry.id = logIdCounter++
+          pendingBuffer.push(entry)
         } catch (e) {
           console.error('Failed to parse log message:', e)
         }
@@ -55,9 +62,11 @@ export function useLogStream(options: LogStreamOptions = {}) {
 
       ws.onclose = () => {
         connected.value = false
+        stopFlushTimer()
+        // Flush any remaining buffered messages so they aren't lost
+        flush()
         console.log('Log stream WebSocket disconnected')
 
-        // Auto-reconnect
         if (reconnectAttempts < maxReconnectAttempts) {
           const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000)
           reconnectAttempts++
@@ -78,7 +87,16 @@ export function useLogStream(options: LogStreamOptions = {}) {
     }
   }
 
+  function stopFlushTimer() {
+    if (flushTimer) {
+      clearInterval(flushTimer)
+      flushTimer = null
+    }
+  }
+
   function disconnect() {
+    stopFlushTimer()
+    flush()
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout)
       reconnectTimeout = null
@@ -91,6 +109,7 @@ export function useLogStream(options: LogStreamOptions = {}) {
 
   function clear() {
     logs.value = []
+    pendingBuffer = []
   }
 
   onMounted(() => {
