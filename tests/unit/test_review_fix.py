@@ -502,3 +502,63 @@ class TestEscalationGuard:
         architect_agent._queue_code_review_if_needed(task, response)
 
         architect_agent.queue.push.assert_not_called()
+
+    def test_fix_task_at_max_cycles_skips_review(self, engineer_agent):
+        """FIX task that already hit the escalation cap must not spawn another review."""
+        task = _make_task(
+            task_type=TaskType.FIX,
+            assigned_to="engineer",
+            _review_cycle_count=MAX_REVIEW_CYCLES,
+        )
+        response = _make_response(
+            "Fixed. Created PR: https://github.com/org/repo/pull/99"
+        )
+
+        engineer_agent._queue_code_review_if_needed(task, response)
+
+        engineer_agent.queue.push.assert_not_called()
+
+    def test_fix_task_below_max_cycles_queues_review(self, engineer_agent, queue):
+        """FIX task below the cap should still get its review queued."""
+        task = _make_task(
+            task_type=TaskType.FIX,
+            assigned_to="engineer",
+            _review_cycle_count=1,
+        )
+        response = _make_response(
+            "Fixed. Created PR: https://github.com/org/repo/pull/99"
+        )
+
+        engineer_agent._queue_code_review_if_needed(task, response)
+
+        queue.push.assert_called_once()
+        review_task = queue.push.call_args[0][0]
+        assert queue.push.call_args[0][1] == "qa"
+        assert review_task.type == TaskType.REVIEW
+
+
+# -- Dedup guard in _queue_code_review_if_needed --
+
+class TestCodeReviewDedup:
+    """Duplicate review tasks must not be queued."""
+
+    def test_duplicate_review_task_not_queued(self, engineer_agent, queue):
+        """Pre-existing review task file prevents a second push."""
+        task = _make_task(
+            task_type=TaskType.FIX,
+            assigned_to="engineer",
+            _review_cycle_count=1,
+        )
+        response = _make_response(
+            "Fixed. Created PR: https://github.com/org/repo/pull/99"
+        )
+
+        # Pre-create the review task file so the dedup check fires
+        review_id = f"review-{task.id}-99"
+        qa_dir = queue.queue_dir / "qa"
+        qa_dir.mkdir(exist_ok=True)
+        (qa_dir / f"{review_id}.json").write_text("{}")
+
+        engineer_agent._queue_code_review_if_needed(task, response)
+
+        queue.push.assert_not_called()

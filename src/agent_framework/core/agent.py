@@ -1796,6 +1796,16 @@ IMPORTANT:
         if task.type in (TaskType.REVIEW, TaskType.ESCALATION):
             return
 
+        # Skip if this task already hit the escalation threshold — the review
+        # loop escalated to the architect, so spawning another review would
+        # restart a parallel chain (fork bomb).
+        if task.context.get("_review_cycle_count", 0) >= MAX_REVIEW_CYCLES:
+            self.logger.debug(
+                f"Skipping review for {task.id}: cycle count "
+                f"{task.context['_review_cycle_count']} >= {MAX_REVIEW_CYCLES} (already escalated)"
+            )
+            return
+
         # Get PR information
         pr_info = self._get_pr_info(task, response)
         if not pr_info:
@@ -1805,6 +1815,12 @@ IMPORTANT:
         # Build and queue review task
         review_task = self._build_review_task(task, pr_info)
         pr_number = pr_info["pr_number"]
+
+        # Deduplicate: skip if this exact review task is already queued
+        review_path = self.queue.queue_dir / "qa" / f"{review_task.id}.json"
+        if review_path.exists():
+            self.logger.debug(f"Review task {review_task.id} already queued, skipping")
+            return
 
         try:
             self.queue.push(review_task, "qa")
