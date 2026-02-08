@@ -1792,8 +1792,8 @@ IMPORTANT:
         if self.config.base_id == "qa":
             return
 
-        # Skip if task type is already a review
-        if task.type == TaskType.REVIEW:
+        # Skip if task type is already a review or escalation
+        if task.type in (TaskType.REVIEW, TaskType.ESCALATION):
             return
 
         # Get PR information
@@ -1868,8 +1868,18 @@ IMPORTANT:
                 findings_summary="",
             )
 
+        # Negation words that invalidate a match (e.g. "No test failures")
+        _NEGATIONS = ('no ', 'zero ', '0 ', 'without ', 'not ')
+
         def _matches(key: str) -> bool:
-            return any(re.search(p, content, re.IGNORECASE) for p in REVIEW_OUTCOME_PATTERNS[key])
+            for p in REVIEW_OUTCOME_PATTERNS[key]:
+                m = re.search(p, content, re.IGNORECASE)
+                if m:
+                    prefix = content[max(0, m.start() - 20):m.start()].lower()
+                    if any(neg in prefix for neg in _NEGATIONS):
+                        continue
+                    return True
+            return False
 
         approved = _matches("approve")
         has_critical = _matches("critical_issues")
@@ -1936,10 +1946,11 @@ IMPORTANT:
 - **Changes requested**: {outcome.has_change_requests}
 
 ## Instructions
-1. Address all findings listed above
-2. Fix any failing tests
-3. Commit and push to the existing branch
-4. The system will automatically re-queue a review to QA
+1. Fetch and read ALL review comments on the PR using github_get_pr_comments
+2. Address every review comment and all findings listed above
+3. Fix any failing tests
+4. Commit and push to the existing branch
+5. The system will automatically re-queue a review to QA
 """,
             context={
                 **{k: v for k, v in task.context.items() if not k.startswith("review_")},

@@ -424,3 +424,81 @@ class TestQaReplicaAgent:
 
         # qa-2 should be treated as QA and not queue a review to itself
         queue.push.assert_not_called()
+
+
+# -- Negation-aware pattern matching --
+
+class TestNegatedPatterns:
+    """Negated phrases like 'No test failures' must not trigger needs_fix."""
+
+    @pytest.mark.parametrize("phrase", [
+        "No test failures found.",
+        "All tests passed, no test failures.",
+        "0 test failures detected.",
+        "Completed without test failures.",
+        "There are not test failures in this run.",
+        "Zero test failures.",
+    ])
+    def test_negated_test_failures_do_not_trigger(self, qa_agent, phrase):
+        outcome = qa_agent._parse_review_outcome(f"APPROVE\n{phrase}")
+        assert outcome.has_test_failures is False, f"False positive for: {phrase}"
+        assert outcome.needs_fix is False
+
+    @pytest.mark.parametrize("phrase", [
+        "3 tests failed",
+        "test failure in auth module",
+        "Tests fail on CI",
+    ])
+    def test_real_test_failures_still_trigger(self, qa_agent, phrase):
+        outcome = qa_agent._parse_review_outcome(phrase)
+        assert outcome.has_test_failures is True, f"Missed real failure: {phrase}"
+
+    @pytest.mark.parametrize("phrase", [
+        "No CRITICAL issues found.",
+        "Zero CRITICAL: problems detected.",
+    ])
+    def test_negated_critical_issues_do_not_trigger(self, qa_agent, phrase):
+        outcome = qa_agent._parse_review_outcome(f"APPROVE\n{phrase}")
+        assert outcome.has_critical_issues is False, f"False positive for: {phrase}"
+
+
+# -- ESCALATION guard in _queue_code_review_if_needed --
+
+class TestEscalationGuard:
+    """Architect completing an ESCALATION task must not trigger a new QA review."""
+
+    @pytest.fixture
+    def architect_agent(self, queue):
+        config = AgentConfig(
+            id="architect",
+            name="Architect",
+            queue="architect",
+            prompt="You are the architect.",
+        )
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.queue = queue
+        a.logger = MagicMock()
+        return a
+
+    def test_escalation_task_skips_code_review_queue(self, architect_agent):
+        task = _make_task(
+            task_type=TaskType.ESCALATION,
+            assigned_to="architect",
+        )
+        response = _make_response(
+            "Replanned implementation. Created PR: https://github.com/org/repo/pull/100"
+        )
+
+        architect_agent._queue_code_review_if_needed(task, response)
+
+        architect_agent.queue.push.assert_not_called()
+
+    def test_review_task_still_skips_code_review_queue(self, architect_agent):
+        """Existing REVIEW guard still works alongside ESCALATION guard."""
+        task = _make_task(task_type=TaskType.REVIEW, assigned_to="architect")
+        response = _make_response("APPROVE")
+
+        architect_agent._queue_code_review_if_needed(task, response)
+
+        architect_agent.queue.push.assert_not_called()
