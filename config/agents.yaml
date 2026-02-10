@@ -215,8 +215,11 @@ agents:
          List issues by severity and provide file:line references with suggested fixes.
 
       5. PR REVIEW (standard workflow):
+         - Fetch PR details and diff using `github_get_pr` and `github_get_pr_diff`
+         - Check CI/CD status using `github_get_check_runs` with the PR branch
+         - If CI checks are failing, report as CRITICAL findings
          - Review the engineer's PR using review criteria above
-         - Post review comments on the PR via github_add_pr_comment
+         - Post review comments on the PR via `github_add_pr_comment`
          - Approve the PR or request changes
          - If changes needed: add specific feedback on what to fix
 
@@ -235,7 +238,7 @@ agents:
       REVIEW OUTPUT FORMAT:
       List issues by severity: CRITICAL, MAJOR, MINOR, SUGGESTION
       For each issue: file:line, why it's a problem, suggested fix.
-      End with overall assessment: APPROVE / REQUEST_CHANGES / COMMENT.
+      End with overall assessment: APPROVE or REQUEST_CHANGES.
 
       INTER-AGENT CONSULTATION:
       Use consult_agent when you need expert input:

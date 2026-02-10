@@ -14,6 +14,10 @@ import {
   createPR,
   addPRComment,
   getPRByBranch,
+  getPR,
+  getPRComments,
+  getPRDiff,
+  getCheckRuns,
   linkPRToJira,
   cloneRepo,
   commitChanges,
@@ -267,6 +271,94 @@ const TOOLS: Tool[] = [
       required: ["owner", "repo", "prNumber"],
     },
   },
+  {
+    name: "github_get_pr",
+    description: "Fetch pull request details including changed files with patches",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: {
+          type: "string",
+          description: "Repository owner",
+        },
+        repo: {
+          type: "string",
+          description: "Repository name",
+        },
+        prNumber: {
+          type: "number",
+          description: "Pull request number",
+        },
+      },
+      required: ["owner", "repo", "prNumber"],
+    },
+  },
+  {
+    name: "github_get_pr_comments",
+    description: "Fetch all issue comments and inline review comments on a pull request",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: {
+          type: "string",
+          description: "Repository owner",
+        },
+        repo: {
+          type: "string",
+          description: "Repository name",
+        },
+        prNumber: {
+          type: "number",
+          description: "Pull request number",
+        },
+      },
+      required: ["owner", "repo", "prNumber"],
+    },
+  },
+  {
+    name: "github_get_pr_diff",
+    description: "Fetch the raw diff for a pull request",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: {
+          type: "string",
+          description: "Repository owner",
+        },
+        repo: {
+          type: "string",
+          description: "Repository name",
+        },
+        prNumber: {
+          type: "number",
+          description: "Pull request number",
+        },
+      },
+      required: ["owner", "repo", "prNumber"],
+    },
+  },
+  {
+    name: "github_get_check_runs",
+    description: "Fetch CI/CD check run status for a git ref (branch, tag, or SHA)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: {
+          type: "string",
+          description: "Repository owner",
+        },
+        repo: {
+          type: "string",
+          description: "Repository name",
+        },
+        ref: {
+          type: "string",
+          description: "Git ref to check (branch name, tag, or commit SHA)",
+        },
+      },
+      required: ["owner", "repo", "ref"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -320,6 +412,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case "github_update_pr":
         result = await updatePR(octokit, args as any);
+        break;
+      case "github_get_pr":
+        result = await getPR(octokit, args as any);
+        break;
+      case "github_get_pr_comments":
+        result = await getPRComments(octokit, args as any);
+        break;
+      case "github_get_pr_diff":
+        result = await getPRDiff(octokit, args as any);
+        break;
+      case "github_get_check_runs":
+        result = await getCheckRuns(octokit, args as any);
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

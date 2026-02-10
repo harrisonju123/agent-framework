@@ -8,7 +8,7 @@ import re
 import subprocess
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -72,9 +72,16 @@ MAX_REVIEW_CYCLES = 3
 REVIEW_OUTCOME_PATTERNS = {
     "request_changes": [r'\bREQUEST_CHANGES\b', r'\bCHANGES REQUESTED\b'],
     "critical_issues": [r'\bCRITICAL\b.*?:', r'severity:\s*CRITICAL'],
+    "major_issues": [r'\bMAJOR\b.*?:', r'\bHIGH\b.*?:'],
     "test_failures": [r'tests?\s+fail', r'[1-9]\d*\s+failed'],
     "approve": [r'\bAPPROVE[D]?\b', r'\bLGTM\b'],
 }
+
+# Severity patterns matched case-sensitively — uppercase tags only, avoids prose false positives
+_CASE_SENSITIVE_KEYS = frozenset({"critical_issues", "major_issues"})
+
+# Line-anchored severity tags for default-deny detection
+_SEVERITY_TAG_RE = re.compile(r'^(CRITICAL|HIGH|MAJOR|MEDIUM|MINOR|LOW|SUGGESTION)\b', re.MULTILINE)
 
 
 @dataclass
@@ -85,10 +92,11 @@ class ReviewOutcome:
     has_test_failures: bool
     has_change_requests: bool
     findings_summary: str
+    has_major_issues: bool = False
 
     @property
     def needs_fix(self) -> bool:
-        return self.has_critical_issues or self.has_test_failures or self.has_change_requests
+        return self.has_critical_issues or self.has_test_failures or self.has_change_requests or self.has_major_issues
 
 
 @dataclass
@@ -1807,16 +1815,18 @@ IMPORTANT:
 - **Created by**: {self.config.id} agent
 
 ## Review Instructions
-1. Fetch PR details using `github_get_pr` MCP tool
-2. Review the diff against standard review criteria:
+1. Fetch PR details and diff using `github_get_pr` and `github_get_pr_diff` MCP tools
+2. Check CI status using `github_get_check_runs` with the PR branch
+3. Review the diff against standard review criteria:
    - Correctness: Logic errors, edge cases, error handling
    - Security: Vulnerabilities, input validation, secrets
    - Performance: Inefficient patterns, N+1 queries
    - Readability: Code clarity, naming, documentation
    - Best Practices: Language conventions, test coverage
-3. Post review comments on PR
-4. Update JIRA with review summary
-5. Transition JIRA status if appropriate (Approved/Changes Requested)
+4. If CI checks are failing, include CI failures in your findings as CRITICAL
+5. Post review comments on PR
+6. Update JIRA with review summary
+7. Transition JIRA status if appropriate (Approved/Changes Requested)
 """,
             context={
                 "jira_key": jira_key,
@@ -1956,10 +1966,17 @@ IMPORTANT:
             return
 
         outcome = self._parse_review_outcome(response.content)
-        if not outcome.needs_fix:
-            # QA approved — transition JIRA to "Approved"
+        if outcome.approved and not outcome.needs_fix:
             self._sync_jira_status(task, "Approved", comment=f"QA approved by {self.config.id}")
             return
+        # Ambiguous (neither approved nor flagged) → treat as needs_fix
+        if not outcome.needs_fix and not outcome.approved:
+            self.logger.info("Ambiguous QA verdict (no APPROVE/issues) — treating as needs_fix")
+            outcome = replace(
+                outcome,
+                has_major_issues=True,
+                findings_summary=outcome.findings_summary or response.content[:500],
+            )
 
         cycle_count = task.context.get("_review_cycle_count", 0) + 1
 
@@ -2000,12 +2017,12 @@ IMPORTANT:
                 findings_summary="",
             )
 
-        # Negation words that invalidate a match (e.g. "No test failures")
         _NEGATIONS = ('no ', 'zero ', '0 ', 'without ', 'not ')
 
         def _matches(key: str) -> bool:
+            flags = 0 if key in _CASE_SENSITIVE_KEYS else re.IGNORECASE
             for p in REVIEW_OUTCOME_PATTERNS[key]:
-                m = re.search(p, content, re.IGNORECASE)
+                m = re.search(p, content, flags)
                 if m:
                     prefix = content[max(0, m.start() - 20):m.start()].lower()
                     if any(neg in prefix for neg in _NEGATIONS):
@@ -2015,12 +2032,19 @@ IMPORTANT:
 
         approved = _matches("approve")
         has_critical = _matches("critical_issues")
+        has_major = _matches("major_issues")
         has_test_fail = _matches("test_failures")
         has_changes = _matches("request_changes")
 
-        # Approval is overridden if issues are also present
-        if has_critical or has_test_fail or has_changes:
+        # CRITICAL/MAJOR/HIGH override explicit APPROVE
+        if has_critical or has_major or has_test_fail or has_changes:
             approved = False
+
+        # Default-deny: severity-tagged findings without explicit APPROVE → needs fix.
+        # Only exact APPROVE/LGTM keywords count as approval.
+        if not approved and not (has_critical or has_major or has_test_fail or has_changes):
+            if _SEVERITY_TAG_RE.search(content):
+                has_major = True
 
         findings = self._extract_review_findings(content)
 
@@ -2029,6 +2053,7 @@ IMPORTANT:
             has_critical_issues=has_critical,
             has_test_failures=has_test_fail,
             has_change_requests=has_changes,
+            has_major_issues=has_major,
             findings_summary=findings,
         )
 
@@ -2074,15 +2099,17 @@ IMPORTANT:
 - **JIRA**: {jira_key}
 - **Review cycle**: {cycle_count}/{MAX_REVIEW_CYCLES}
 - **Critical issues**: {outcome.has_critical_issues}
+- **Major issues**: {outcome.has_major_issues}
 - **Test failures**: {outcome.has_test_failures}
 - **Changes requested**: {outcome.has_change_requests}
 
 ## Instructions
-1. Fetch and read ALL review comments on the PR using github_get_pr_comments
-2. Address every review comment and all findings listed above
-3. Fix any failing tests
-4. Commit and push to the existing branch
-5. The system will automatically re-queue a review to QA
+1. Fetch and read ALL review comments on the PR using `github_get_pr_comments`
+2. Check CI status using `github_get_check_runs` — fix any CI failures
+3. Address every review comment and all findings listed above
+4. Fix any failing tests
+5. Commit and push to the existing branch
+6. The system will automatically re-queue a review to QA
 """,
             context={
                 **{k: v for k, v in task.context.items() if not k.startswith("review_")},

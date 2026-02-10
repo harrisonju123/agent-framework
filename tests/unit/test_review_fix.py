@@ -134,6 +134,15 @@ class TestReviewOutcome:
         )
         assert o.needs_fix is False
 
+    def test_needs_fix_when_major_issues(self):
+        o = ReviewOutcome(
+            approved=False, has_critical_issues=False,
+            has_test_failures=False, has_change_requests=False,
+            findings_summary="MAJOR: missing input validation",
+            has_major_issues=True,
+        )
+        assert o.needs_fix is True
+
 
 # -- _parse_review_outcome --
 
@@ -180,6 +189,65 @@ class TestParseReviewOutcome:
         outcome = qa_agent._parse_review_outcome("")
         assert outcome.approved is False
         assert outcome.needs_fix is False
+
+    def test_detects_major_issues(self, qa_agent):
+        """Uppercase MAJOR: triggers has_major_issues."""
+        outcome = qa_agent._parse_review_outcome("MAJOR: missing input validation on /api/users")
+        assert outcome.has_major_issues is True
+        assert outcome.needs_fix is True
+
+    def test_detects_high_severity(self, qa_agent):
+        """Uppercase HIGH: triggers has_major_issues."""
+        outcome = qa_agent._parse_review_outcome("HIGH: race condition in payment handler")
+        assert outcome.has_major_issues is True
+        assert outcome.needs_fix is True
+
+    def test_lowercase_major_does_not_trigger(self, qa_agent):
+        """Prose like 'not a major concern:' should NOT trigger major_issues."""
+        outcome = qa_agent._parse_review_outcome("APPROVE\nThis is not a major concern: just cosmetic")
+        assert outcome.has_major_issues is False
+        assert outcome.approved is True
+
+    def test_severity_tags_without_approve_trigger_fix(self, qa_agent):
+        """Severity-tagged findings without explicit APPROVE → needs_fix."""
+        outcome = qa_agent._parse_review_outcome(
+            "MINOR: unused import\nSUGGESTION: rename variable for clarity"
+        )
+        assert outcome.approved is False
+        assert outcome.has_major_issues is True
+        assert outcome.needs_fix is True
+
+    def test_minor_suggestions_with_approve_pass(self, qa_agent):
+        """MINOR/SUGGESTION + explicit APPROVE → approved, no fix needed."""
+        outcome = qa_agent._parse_review_outcome(
+            "APPROVE\nMINOR: unused import\nSUGGESTION: rename variable"
+        )
+        assert outcome.approved is True
+        assert outcome.needs_fix is False
+
+    def test_ambiguous_response_with_findings_triggers_fix(self, qa_agent):
+        """No verdict keyword but severity tags present → needs_fix."""
+        outcome = qa_agent._parse_review_outcome(
+            "Found some issues:\nMAJOR: SQL injection in login\nMINOR: typo in docs"
+        )
+        assert outcome.approved is False
+        assert outcome.needs_fix is True
+
+    def test_soft_approval_without_keyword_does_not_approve(self, qa_agent):
+        """'looks good, no issues' without APPROVE/LGTM → no severity tags, ambiguous at parse level."""
+        outcome = qa_agent._parse_review_outcome("looks good, no issues found")
+        assert outcome.approved is False
+        # No severity tags → parse returns needs_fix=False; queue guard catches the ambiguity
+        assert outcome.needs_fix is False
+
+    def test_major_overrides_approve(self, qa_agent):
+        """MAJOR findings override explicit APPROVE (same as CRITICAL)."""
+        outcome = qa_agent._parse_review_outcome(
+            "APPROVE with reservations\nMAJOR: missing rate limiting"
+        )
+        assert outcome.approved is False
+        assert outcome.has_major_issues is True
+        assert outcome.needs_fix is True
 
 
 # -- _extract_review_findings --
@@ -232,6 +300,24 @@ class TestQueueReviewFixGuards:
         response = _make_response("APPROVE - all good")
         qa_agent._queue_review_fix_if_needed(task, response)
         qa_agent.queue.push.assert_not_called()
+
+    def test_ambiguous_response_queues_fix(self, qa_agent, queue):
+        """Ambiguous response (no approve, no issues) → treated as needs_fix."""
+        task = _make_task()
+        response = _make_response("I found some concerns but overall okay")
+        qa_agent._queue_review_fix_if_needed(task, response)
+        queue.push.assert_called_once()
+        fix_task = queue.push.call_args[0][0]
+        assert fix_task.type == TaskType.FIX
+
+    def test_no_severity_no_approve_queues_fix(self, qa_agent, queue):
+        """'12 passed, 0 failed' with no APPROVE → ambiguous guard queues fix."""
+        task = _make_task()
+        response = _make_response("Results: 12 passed, 0 failed")
+        qa_agent._queue_review_fix_if_needed(task, response)
+        queue.push.assert_called_once()
+        fix_task = queue.push.call_args[0][0]
+        assert fix_task.type == TaskType.FIX
 
 
 # -- Happy path --
@@ -462,6 +548,14 @@ class TestNegatedPatterns:
     def test_negated_critical_issues_do_not_trigger(self, qa_agent, phrase):
         outcome = qa_agent._parse_review_outcome(f"APPROVE\n{phrase}")
         assert outcome.has_critical_issues is False, f"False positive for: {phrase}"
+
+    @pytest.mark.parametrize("phrase", [
+        "No MAJOR issues found.",
+        "Zero HIGH: problems detected.",
+    ])
+    def test_negated_major_issues_do_not_trigger(self, qa_agent, phrase):
+        outcome = qa_agent._parse_review_outcome(f"APPROVE\n{phrase}")
+        assert outcome.has_major_issues is False, f"False positive for: {phrase}"
 
 
 # -- ESCALATION guard in _queue_code_review_if_needed --
