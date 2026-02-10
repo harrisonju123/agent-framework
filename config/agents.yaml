@@ -85,6 +85,8 @@ agents:
       - "In Progress"
       - "Code Review"
       - "Done"
+    jira_on_start: "In Progress"
+    jira_on_complete: "Code Review"
     can_commit: true
     can_create_pr: true
 
@@ -149,6 +151,8 @@ agents:
       - "In Progress"
       - "Code Review"
       - "Done"
+    jira_on_start: "In Progress"
+    jira_on_complete: "Code Review"
     can_commit: true
     can_create_pr: true
 

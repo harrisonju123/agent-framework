@@ -267,6 +267,8 @@ class AgentDefinition(BaseModel):
     jira_can_create_tickets: bool = False
     jira_can_update_status: bool = False
     jira_allowed_transitions: List[str] = Field(default_factory=list)
+    jira_on_start: Optional[str] = None
+    jira_on_complete: Optional[str] = None
 
     # Permissions
     can_commit: bool = False

@@ -350,6 +350,10 @@ class Agent:
             timestamp=datetime.utcnow()
         ))
 
+        # Deterministic JIRA transition on task start
+        if self._agent_definition and self._agent_definition.jira_on_start:
+            self._sync_jira_status(task, self._agent_definition.jira_on_start)
+
     async def _handle_successful_response(self, task: Task, response, task_start_time) -> None:
         """Handle successful LLM response including tests, workflow, and completion."""
         from datetime import datetime, timezone
@@ -385,6 +389,14 @@ class Agent:
         task.mark_completed(self.config.id)
         self.queue.mark_completed(task)
         self.logger.info(f"✅ Task {task.id} moved to completed")
+
+        # Deterministic JIRA transition on task completion
+        if self._agent_definition and self._agent_definition.jira_on_complete:
+            comment = f"Task completed by {self.config.id}"
+            pr_url = task.context.get("pr_url")
+            if pr_url:
+                comment += f"\nPR: {pr_url}"
+            self._sync_jira_status(task, self._agent_definition.jira_on_complete, comment=comment)
 
         # Transition to COMPLETING status
         try:
@@ -715,6 +727,17 @@ class Agent:
             )
             task.mark_failed(self.config.id)
             self.queue.mark_failed(task)
+
+            # Notify JIRA about permanent failure (no status change, just a comment)
+            jira_key = task.context.get("jira_key")
+            if jira_key and self.jira_client:
+                try:
+                    self.jira_client.add_comment(
+                        jira_key,
+                        f"Agent {self.config.id} failed after {task.retry_count} retries: {task.last_error}",
+                    )
+                except Exception:
+                    pass
 
             # CRITICAL: Prevent infinite loop - escalations should NOT create more escalations
             if self.retry_handler.can_create_escalation(task):
@@ -1571,6 +1594,33 @@ IMPORTANT:
         except Exception as e:
             self.logger.exception(f"Error in post-LLM workflow: {e}")
 
+    def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
+        """Transition a JIRA ticket to target_status if all preconditions are met.
+
+        Deterministic framework-level JIRA updates — agents don't reliably call
+        MCP tools, so the framework ensures tickets reflect actual progress.
+        """
+        jira_key = task.context.get("jira_key")
+        if not jira_key:
+            return
+        if not self.jira_client:
+            return
+        if not self._agent_definition or not self._agent_definition.jira_can_update_status:
+            return
+        if target_status not in (self._agent_definition.jira_allowed_transitions or []):
+            self.logger.warning(
+                f"Transition '{target_status}' not in allowed transitions for {self.config.id}, skipping"
+            )
+            return
+
+        try:
+            self.jira_client.transition_ticket(jira_key, target_status)
+            self.logger.info(f"JIRA {jira_key} → {target_status}")
+            if comment:
+                self.jira_client.add_comment(jira_key, comment)
+        except Exception as e:
+            self.logger.warning(f"Failed to transition JIRA {jira_key} to '{target_status}': {e}")
+
     def _write_heartbeat(self) -> None:
         """Write current Unix timestamp to heartbeat file."""
         self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1907,12 +1957,18 @@ IMPORTANT:
 
         outcome = self._parse_review_outcome(response.content)
         if not outcome.needs_fix:
+            # QA approved — transition JIRA to "Approved"
+            self._sync_jira_status(task, "Approved", comment=f"QA approved by {self.config.id}")
             return
 
         cycle_count = task.context.get("_review_cycle_count", 0) + 1
 
         if cycle_count > MAX_REVIEW_CYCLES:
             self._escalate_review_to_architect(task, outcome, cycle_count)
+            self._sync_jira_status(
+                task, "Changes Requested",
+                comment=f"Escalated to architect after {cycle_count} review cycles",
+            )
             return
 
         fix_task = self._build_review_fix_task(task, outcome, cycle_count)
@@ -1927,6 +1983,10 @@ IMPORTANT:
             self.queue.push(fix_task, "engineer")
             self.logger.info(
                 f"🔧 Queued review fix (cycle {cycle_count}/{MAX_REVIEW_CYCLES}) -> engineer"
+            )
+            self._sync_jira_status(
+                task, "Changes Requested",
+                comment=f"Review cycle {cycle_count}: {outcome.findings_summary[:200]}",
             )
         except Exception as e:
             self.logger.error(f"Failed to queue review fix task: {e}")

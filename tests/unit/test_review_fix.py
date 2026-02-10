@@ -78,6 +78,8 @@ def qa_agent(queue):
     a.config = config
     a.queue = queue
     a.logger = MagicMock()
+    a.jira_client = None
+    a._agent_definition = None
     return a
 
 
