@@ -111,6 +111,9 @@ def main():
             mcp_config_path = None
             if framework_config.llm.use_mcp and framework_config.llm.mcp_config_path:
                 mcp_path = Path(framework_config.llm.mcp_config_path)
+                # Resolve relative paths relative to workspace
+                if not mcp_path.is_absolute():
+                    mcp_path = workspace / mcp_path
                 if not mcp_path.exists():
                     logger.error(f"MCP config file not found: {mcp_path}")
                     raise FileNotFoundError(f"MCP config file not found: {mcp_path}")
