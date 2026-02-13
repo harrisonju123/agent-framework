@@ -172,7 +172,7 @@ class TaskActionResponse(BaseModel):
 
 class WorkRequest(BaseModel):
     """Request to create new work (like CLI `agent work`)."""
-    goal: str = Field(..., min_length=10, max_length=2000)
+    goal: str = Field(..., min_length=1, max_length=2000)
     repository: str = Field(..., pattern=r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$')
     workflow: str = Field(default="default")
 

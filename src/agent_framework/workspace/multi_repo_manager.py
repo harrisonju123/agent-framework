@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import stat as stat_mod
 import subprocess
 import time
 from pathlib import Path
@@ -41,15 +42,20 @@ class MultiRepoManager:
         self.token = github_token
         self.workspace_root.mkdir(parents=True, exist_ok=True)
 
+        # Reusable GitHub client instance
+        from github import Github
+        self._gh = Github(self.token)
+
+        # Cache for default branch per repo (doesn't change during a session)
+        self._default_branch_cache: Dict[str, str] = {}
+
         # Verify token and get authenticated user
         self._verify_authentication()
 
     def _verify_authentication(self):
         """Verify GitHub token is valid."""
         try:
-            from github import Github
-            gh = Github(self.token)
-            self.gh_user = gh.get_user().login
+            self.gh_user = self._gh.get_user().login
             logger.info(f"Authenticated as GitHub user: {self.gh_user}")
         except Exception as e:
             raise ValueError(f"GitHub authentication failed: {e}")
@@ -151,9 +157,7 @@ class MultiRepoManager:
             True if access is available
         """
         try:
-            from github import Github
-            gh = Github(self.token)
-            repo = gh.get_repo(owner_repo)
+            repo = self._gh.get_repo(owner_repo)
             # If we can get repo metadata, we have at least read access
             _ = repo.name
             return True
@@ -251,16 +255,17 @@ class MultiRepoManager:
                 logger.error(f"Path traversal attempt: {file_path}")
                 continue
 
-            if not full_path.exists():
+            try:
+                st = full_path.stat()
+            except FileNotFoundError:
                 logger.warning(f"File not found: {file_path} in {owner_repo}")
                 continue
 
-            if not full_path.is_file():
+            if not stat_mod.S_ISREG(st.st_mode):
                 logger.warning(f"Not a file: {file_path} in {owner_repo}")
                 continue
 
-            # Check file size
-            if full_path.stat().st_size > MAX_FILE_SIZE:
+            if st.st_size > MAX_FILE_SIZE:
                 logger.error(f"File too large (>10MB): {file_path}")
                 continue
 
@@ -289,8 +294,13 @@ class MultiRepoManager:
         Returns:
             Default branch name
         """
+        cache_key = str(self.get_path(owner_repo))
+        if cache_key in self._default_branch_cache:
+            return self._default_branch_cache[cache_key]
+
         repo_path = self.get_path(owner_repo)
 
+        branch = "main"  # last resort default
         try:
             # Get default branch from remote
             result = subprocess.run(
@@ -303,7 +313,6 @@ class MultiRepoManager:
             )
             # Output is like "refs/remotes/origin/main"
             branch = result.stdout.strip().split('/')[-1]
-            return branch
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             # Fallback to common names
             for branch_name in ["main", "master", "develop"]:
@@ -314,10 +323,11 @@ class MultiRepoManager:
                     timeout=10,
                 )
                 if result.returncode == 0:
-                    return branch_name
+                    branch = branch_name
+                    break
 
-            # Last resort
-            return "main"
+        self._default_branch_cache[cache_key] = branch
+        return branch
 
     def create_branch(
         self,

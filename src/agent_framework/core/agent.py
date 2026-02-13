@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from .task import Task, TaskStatus, TaskType
 from .task_validator import validate_task, ValidationResult
 from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase, ToolActivity
+from .routing import read_routing_signal, validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
 from .team_composer import compose_default_team, compose_team
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
@@ -224,6 +225,18 @@ class Agent:
 
         # Pause state tracking
         self._paused = False
+
+        # Caches for prompt guidance (rebuilt identically per task)
+        self._error_handling_guidance: Optional[str] = None
+        self._guidance_cache: Dict[str, str] = {}
+
+        # Cache for team composition (fixed per agent lifetime / workflow)
+        self._default_team_cache: Optional[dict] = None
+        self._workflow_team_cache: Dict[str, Optional[dict]] = {}
+
+        # Pause signal cache (avoid 2x exists() calls every 2s)
+        self._pause_signal_cache: Optional[bool] = None
+        self._pause_signal_cache_time: float = 0.0
 
         # Sandbox for isolated test execution
         self._test_runner = None
@@ -437,19 +450,19 @@ class Agent:
         except asyncio.CancelledError:
             pass
 
-        # Code review runs first: if a PR is found, it writes pr_url into
-        # task.context, which chain enforcement then sees and correctly skips.
+        routing_signal = read_routing_signal(self.workspace, task.id)
+        if routing_signal:
+            self.logger.info(
+                f"Routing signal: target={routing_signal.target_agent}, "
+                f"reason={routing_signal.reason}"
+            )
+
+        # Code review runs first — writes pr_url into task.context,
+        # which chain enforcement sees and correctly skips.
         self.logger.debug(f"Checking if code review needed for {task.id}")
         self._queue_code_review_if_needed(task, response)
-
-        # QA review feedback: deterministically queue fix task to engineer
-        # when QA finds issues, mirroring the hard-coded code review above
         self._queue_review_fix_if_needed(task, response)
-
-        # Enforce workflow chain: queue next agent if no PR was created
-        self._enforce_workflow_chain(task, response)
-
-        # Log metrics and events
+        self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
         self._log_task_completion_metrics(task, response, task_start_time)
 
     def _log_task_completion_metrics(self, task: Task, response, task_start_time) -> None:
@@ -634,22 +647,25 @@ class Agent:
             if self._team_mode_enabled and team_override is not False:
                 team_agents = {}
 
-                # Layer 1: agent's configured teammates (peer-engineer, test-runner, etc.)
+                # Layer 1: agent's configured teammates (cached - fixed per agent lifetime)
                 if self._agent_definition and self._agent_definition.teammates:
-                    configured = compose_default_team(
-                        self._agent_definition,
-                        default_model=self._team_mode_default_model,
-                    )
-                    if configured:
-                        team_agents.update(configured)
+                    if self._default_team_cache is None:
+                        self._default_team_cache = compose_default_team(
+                            self._agent_definition,
+                            default_model=self._team_mode_default_model,
+                        ) or {}
+                    if self._default_team_cache:
+                        team_agents.update(self._default_team_cache)
 
-                # Layer 2: workflow-required agents (engineer+QA for default workflow)
+                # Layer 2: workflow-required agents (cached per workflow type)
                 workflow = task.context.get("workflow", "default")
-                workflow_teammates = compose_team(
-                    task.context, workflow, self._agents_config,
-                    default_model=self._team_mode_default_model,
-                    caller_agent_id=self.config.id,
-                )
+                if workflow not in self._workflow_team_cache:
+                    self._workflow_team_cache[workflow] = compose_team(
+                        task.context, workflow, self._agents_config,
+                        default_model=self._team_mode_default_model,
+                        caller_agent_id=self.config.id,
+                    )
+                workflow_teammates = self._workflow_team_cache[workflow]
                 if workflow_teammates:
                     collisions = sorted(set(team_agents) & set(workflow_teammates))
                     if collisions:
@@ -1217,9 +1233,13 @@ Fix the failing tests and ensure all tests pass.
 
     def _build_jira_guidance(self, jira_key: str, jira_project: str) -> str:
         """Build JIRA integration guidance for MCP."""
+        cache_key = f"jira:{jira_key}:{jira_project}"
+        if cache_key in self._guidance_cache:
+            return self._guidance_cache[cache_key]
+
         jira_server = self.jira_config.server if self.jira_config else "jira.example.com"
 
-        return f"""
+        result = f"""
 JIRA INTEGRATION (via MCP):
 You have access to JIRA via MCP tools:
 - Search issues: jira_search_issues(jql="project = {jira_project or 'PROJ'}")
@@ -1236,9 +1256,15 @@ Current context:
 - Project: {jira_project or 'N/A'}
 
 """
+        self._guidance_cache[cache_key] = result
+        return result
 
     def _build_github_guidance(self, github_repo: str, jira_key: str) -> str:
         """Build GitHub integration guidance for MCP."""
+        cache_key = f"github:{github_repo}:{jira_key}"
+        if cache_key in self._guidance_cache:
+            return self._guidance_cache[cache_key]
+
         owner, repo = github_repo.split("/")
 
         # Get formatting patterns from config
@@ -1248,7 +1274,7 @@ Current context:
             branch_pattern = self.github_config.branch_pattern
             pr_title_pattern = self.github_config.pr_title_pattern
 
-        return f"""
+        result = f"""
 GITHUB INTEGRATION (via MCP):
 Repository: {github_repo}
 Branch naming: Use pattern "{branch_pattern}"
@@ -1274,10 +1300,14 @@ Workflow coordination:
 5. Update JIRA using jira_transition_issue and jira_add_comment
 
 """
+        self._guidance_cache[cache_key] = result
+        return result
 
     def _build_error_handling_guidance(self) -> str:
         """Build error handling guidance for MCP tools."""
-        return """
+        if self._error_handling_guidance is not None:
+            return self._error_handling_guidance
+        self._error_handling_guidance = """
 ERROR HANDLING:
 If a tool call fails:
 1. Read the error message carefully
@@ -1290,6 +1320,7 @@ If a tool call fails:
    - Do NOT try to undo successful operations
 
 """
+        return self._error_handling_guidance
 
     def _build_prompt_legacy(self, task: Task) -> str:
         """Build prompt using legacy format (original implementation)."""
@@ -1669,10 +1700,19 @@ IMPORTANT:
         Checks for two pause signals:
         1. PAUSE_SIGNAL_FILE - manual pause by user
         2. PAUSE_INTAKE - automatic pause by orchestrator due to health issues
+
+        Result is cached for 5 seconds to reduce filesystem I/O.
         """
+        now = time.time()
+        if self._pause_signal_cache is not None and (now - self._pause_signal_cache_time) < 5.0:
+            return self._pause_signal_cache
+
         pause_file = self.workspace / PAUSE_SIGNAL_FILE
         health_pause_file = self.workspace / ".agent-communication" / "PAUSE_INTAKE"
-        return pause_file.exists() or health_pause_file.exists()
+        result = pause_file.exists() or health_pause_file.exists()
+        self._pause_signal_cache = result
+        self._pause_signal_cache_time = now
+        return result
 
     @property
     def is_paused(self) -> bool:
@@ -2420,32 +2460,64 @@ IMPORTANT:
 
     # -- Workflow chain enforcement --
 
-    def _enforce_workflow_chain(self, task: Task, response) -> None:
-        """Queue next agent in the workflow chain when no PR was created.
-
-        Complements _queue_code_review_if_needed: if a PR exists, review
-        gets queued (existing path) and the chain stops. If no PR, this
-        method forwards the task to the next agent in the configured chain.
-        """
+    def _enforce_workflow_chain(self, task: Task, response, routing_signal=None) -> None:
+        """Queue next agent in chain, or use routing signal override if valid."""
         workflow_name = task.context.get("workflow")
         if not workflow_name or workflow_name not in self._workflows_config:
+            if routing_signal:
+                validated = validate_routing_signal(
+                    routing_signal, self.config.base_id, get_type_str(task.type), self._agents_config,
+                )
+                if validated and validated != WORKFLOW_COMPLETE:
+                    self._route_to_agent(task, validated, routing_signal.reason)
+                log_routing_decision(
+                    self.workspace, task.id, self.config.id,
+                    routing_signal, validated, used_fallback=False,
+                )
             return
 
         workflow = self._workflows_config[workflow_name]
         agents = workflow.agents
         if len(agents) <= 1:
+            if routing_signal:
+                self.logger.debug("Routing signal discarded: single-agent workflow")
             return
 
-        # Skip when team mode already handled this workflow
         if self._team_mode_handled_workflow(task):
+            if routing_signal:
+                self.logger.debug("Routing signal discarded: team mode handled workflow")
             return
 
-        # Skip if a PR was created — workflow reached its natural endpoint
         pr_info = self._get_pr_info(task, response)
         if pr_info:
             return
 
-        # Find current agent position, determine next
+        if routing_signal:
+            validated = validate_routing_signal(
+                routing_signal, self.config.base_id, get_type_str(task.type), self._agents_config,
+            )
+            if validated == WORKFLOW_COMPLETE:
+                # Safe: _get_pr_info already returned early above if a PR existed
+                self.logger.info(
+                    f"Workflow marked complete by routing signal: {routing_signal.reason}"
+                )
+                log_routing_decision(
+                    self.workspace, task.id, self.config.id,
+                    routing_signal, validated, used_fallback=False,
+                )
+                return
+            if validated:
+                self._route_to_agent(task, validated, routing_signal.reason)
+                log_routing_decision(
+                    self.workspace, task.id, self.config.id,
+                    routing_signal, validated, used_fallback=False,
+                )
+                return
+            self.logger.debug(
+                f"Routing signal for {routing_signal.target_agent} rejected, "
+                f"falling back to default chain"
+            )
+
         current = self.config.base_id
         try:
             idx = agents.index(current)
@@ -2456,23 +2528,34 @@ IMPORTANT:
 
         next_agent = agents[idx + 1]
 
-        # O(1) duplicate check via deterministic task ID
-        if self._is_chain_task_already_queued(next_agent, task.id):
-            self.logger.debug(
-                f"Chain task for {next_agent} already queued from {task.id}"
+        if routing_signal:
+            log_routing_decision(
+                self.workspace, task.id, self.config.id,
+                routing_signal, next_agent, used_fallback=True,
             )
+
+        if self._is_chain_task_already_queued(next_agent, task.id):
+            self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
 
         chain_task = self._build_chain_task(task, next_agent)
         try:
             self.queue.push(chain_task, next_agent)
-            self.logger.info(
-                f"🔗 Workflow chain: queued {next_agent} for task {task.id}"
-            )
+            self.logger.info(f"🔗 Workflow chain: queued {next_agent} for task {task.id}")
         except Exception as e:
-            self.logger.error(
-                f"Failed to queue chain task for {next_agent}: {e}"
-            )
+            self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
+
+    def _route_to_agent(self, task: Task, target_agent: str, reason: str) -> None:
+        if self._is_chain_task_already_queued(target_agent, task.id):
+            self.logger.debug(f"Chain task for {target_agent} already queued from {task.id}")
+            return
+
+        chain_task = self._build_chain_task(task, target_agent)
+        try:
+            self.queue.push(chain_task, target_agent)
+            self.logger.info(f"🔗 Routed to {target_agent} (signal): {reason}")
+        except Exception as e:
+            self.logger.error(f"Failed to route task to {target_agent}: {e}")
 
     def _team_mode_handled_workflow(self, task: Task) -> bool:
         """Return True if team mode already handled this workflow's agents.

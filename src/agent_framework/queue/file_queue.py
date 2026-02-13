@@ -44,6 +44,13 @@ class FileQueue:
         self.backoff_multiplier = backoff_multiplier
         self.malformed_dir = self.comm_dir / "malformed"
 
+        # Cache of task files confirmed non-pending (avoids re-deserializing)
+        self._non_pending_files: dict[str, set[str]] = {}
+        self._queue_dir_mtime: dict[str, float] = {}
+
+        # Cache of completed dependency lookups with 60s TTL
+        self._completed_cache: dict[str, tuple[bool, float]] = {}
+
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -82,6 +89,17 @@ class FileQueue:
         if not queue_path.exists():
             return None
 
+        # Invalidate non-pending cache when directory changes (new file added/removed)
+        try:
+            current_mtime = queue_path.stat().st_mtime
+        except OSError:
+            return None
+        if current_mtime != self._queue_dir_mtime.get(queue_id, 0):
+            self._non_pending_files.pop(queue_id, None)
+            self._queue_dir_mtime[queue_id] = current_mtime
+
+        non_pending = self._non_pending_files.setdefault(queue_id, set())
+
         # Sort by filename (chronological order)
         task_files = sorted(queue_path.glob("*.json"))
 
@@ -89,11 +107,16 @@ class FileQueue:
             if not task_file.exists():
                 continue
 
+            # Skip files we already know are non-pending
+            if task_file.name in non_pending:
+                continue
+
             try:
                 task = self._load_task(task_file)
 
                 # Only process pending tasks
                 if task.status != TaskStatus.PENDING:
+                    non_pending.add(task_file.name)
                     continue
 
                 # Check exponential backoff
@@ -146,6 +169,11 @@ class FileQueue:
             return
 
         atomic_write_model(task_file, task)
+
+        # Invalidate non-pending cache entry — status may have changed back to PENDING
+        non_pending = self._non_pending_files.get(task.assigned_to)
+        if non_pending:
+            non_pending.discard(task_file.name)
 
     def mark_completed(self, task: Task) -> None:
         """Move task to completed storage."""
@@ -219,20 +247,34 @@ class FileQueue:
 
     def _dependencies_met(self, task: Task) -> bool:
         """Check if all dependencies are completed successfully."""
+        now = time.time()
         for dep_id in task.depends_on:
             if not dep_id:
                 continue
 
+            # Check cache first (60s TTL)
+            cached = self._completed_cache.get(dep_id)
+            if cached is not None:
+                is_completed, cached_at = cached
+                if now - cached_at < 60:
+                    if not is_completed:
+                        return False
+                    continue
+
             dep_file = self.completed_dir / f"{dep_id}.json"
             if not dep_file.exists():
+                self._completed_cache[dep_id] = (False, now)
                 return False
 
             # Verify task actually completed successfully (not just exists)
             try:
                 dep_task = self._load_task(dep_file)
-                if dep_task.status != TaskStatus.COMPLETED:
+                completed = dep_task.status == TaskStatus.COMPLETED
+                self._completed_cache[dep_id] = (completed, now)
+                if not completed:
                     return False
             except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                self._completed_cache[dep_id] = (False, now)
                 return False
 
         return True

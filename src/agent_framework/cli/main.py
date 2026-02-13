@@ -344,8 +344,8 @@ def work(ctx, no_dashboard, epic, parallel):
     console.print("[bold]What would you like to work on?[/]")
     goal = click.prompt("", type=str)
 
-    if not goal or len(goal.strip()) < 10:
-        console.print("[red]Please provide a more detailed description (at least 10 chars)[/]")
+    if not goal or not goal.strip():
+        console.print("[red]Please provide a goal description[/]")
         return
 
     # Step 2: Select repository

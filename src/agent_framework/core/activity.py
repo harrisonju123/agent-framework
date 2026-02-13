@@ -118,6 +118,13 @@ class ActivityManager:
         self.stream_file = self.workspace / ".agent-communication" / "activity-stream.jsonl"
         self.activity_dir.mkdir(parents=True, exist_ok=True)
         self.max_stream_events = 100
+        # Seed from existing file so trim threshold is accurate after restart
+        self._appends_since_trim = 0
+        try:
+            with open(self.stream_file, 'r') as f:
+                self._appends_since_trim = sum(1 for line in f if line.strip())
+        except FileNotFoundError:
+            pass
 
     def update_activity(self, activity: AgentActivity) -> None:
         """Update agent's activity state atomically."""
@@ -159,27 +166,34 @@ class ActivityManager:
         return activities
 
     def append_event(self, event: ActivityEvent) -> None:
-        """Append event to activity stream with atomic write to prevent race conditions."""
-        # Use file locking to serialize access, then atomic write (temp + rename)
+        """Append event to activity stream.
+
+        Uses append-mode write for the common case. Only does a full
+        read-trim-write when appends since last trim reach max_stream_events
+        (i.e., file could be ~2x capacity).
+        """
         lock_file = self.stream_file.with_suffix(".lock")
         lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        event_line = event.model_dump_json() + '\n'
 
         with open(lock_file, 'w') as lock_fd:
             if HAS_FCNTL:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
-                # Read existing events
-                events = self._read_stream()
-                events.append(event)
-
-                # Trim to max size
-                if len(events) > self.max_stream_events:
+                if self._appends_since_trim >= self.max_stream_events:
+                    # Trim: read all, keep last max_stream_events, atomic write
+                    events = self._read_stream()
+                    events.append(event)
                     events = events[-self.max_stream_events:]
-
-                # Atomic write: write to temp file, then rename
-                tmp_file = self.stream_file.with_suffix(".tmp")
-                tmp_file.write_text('\n'.join(e.model_dump_json() for e in events) + '\n')
-                tmp_file.rename(self.stream_file)
+                    tmp_file = self.stream_file.with_suffix(".tmp")
+                    tmp_file.write_text('\n'.join(e.model_dump_json() for e in events) + '\n')
+                    tmp_file.rename(self.stream_file)
+                    self._appends_since_trim = 0
+                else:
+                    with open(self.stream_file, 'a') as f:
+                        f.write(event_line)
+                    self._appends_since_trim += 1
             finally:
                 if HAS_FCNTL:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -187,11 +201,6 @@ class ActivityManager:
     def _parse_events(self, content: str) -> List[ActivityEvent]:
         """Parse events from stream file content."""
         return parse_jsonl_to_models(content, ActivityEvent, strict=False)
-
-    def get_recent_events(self, limit: int = 10) -> List[ActivityEvent]:
-        """Get recent activity events."""
-        events = self._read_stream()
-        return events[-limit:][::-1]  # Return last N in reverse order
 
     def _read_stream(self) -> List[ActivityEvent]:
         """Read all events from stream file."""

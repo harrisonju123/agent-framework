@@ -8,6 +8,7 @@ import pytest
 
 from agent_framework.core.agent import Agent, AgentConfig
 from agent_framework.core.config import WorkflowDefinition
+from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
 
@@ -63,7 +64,7 @@ def queue(tmp_path):
 
 
 @pytest.fixture
-def agent(queue):
+def agent(queue, tmp_path):
     config = AgentConfig(
         id="engineer",
         name="Engineer",
@@ -73,7 +74,13 @@ def agent(queue):
     a = Agent.__new__(Agent)
     a.config = config
     a.queue = queue
+    a.workspace = tmp_path
     a._workflows_config = {"default": DEFAULT_WORKFLOW, "analysis": ANALYSIS_WORKFLOW}
+    a._agents_config = [
+        SimpleNamespace(id="architect"),
+        SimpleNamespace(id="engineer"),
+        SimpleNamespace(id="qa"),
+    ]
     a._team_mode_enabled = False
     a.logger = MagicMock()
     return a
@@ -283,3 +290,92 @@ class TestNormalizeWorkflow:
         task.context = None
         agent._normalize_workflow(task)
         assert task.context is None
+
+
+# -- Routing signal integration --
+
+def _make_signal(target="qa", reason="PR ready for review"):
+    return RoutingSignal(
+        target_agent=target,
+        reason=reason,
+        timestamp="2026-02-13T16:30:00Z",
+        source_agent="engineer",
+    )
+
+
+class TestRoutingSignalChain:
+    def test_signal_overrides_default_chain(self, agent, queue):
+        task = _make_task(workflow="default")
+        response = _make_response()
+        signal = _make_signal(target="architect")
+
+        agent._enforce_workflow_chain(task, response, routing_signal=signal)
+
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "architect"
+        assert chain_task.assigned_to == "architect"
+
+    def test_signal_fallback_on_self_route(self, agent, queue):
+        task = _make_task(workflow="default")
+        response = _make_response()
+        signal = _make_signal(target="engineer")
+
+        agent._enforce_workflow_chain(task, response, routing_signal=signal)
+
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"
+
+    def test_workflow_complete_skips_chain(self, agent, queue):
+        task = _make_task(workflow="default")
+        response = _make_response()
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        agent._enforce_workflow_chain(task, response, routing_signal=signal)
+
+        queue.push.assert_not_called()
+
+    def test_workflow_complete_ignored_when_pr_exists(self, agent, queue):
+        task = _make_task(workflow="default")
+        response = _make_response(pr_url="https://github.com/org/repo/pull/99")
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        agent._enforce_workflow_chain(task, response, routing_signal=signal)
+
+        queue.push.assert_not_called()
+
+    def test_no_signal_uses_default_chain(self, agent, queue):
+        task = _make_task(workflow="default")
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response, routing_signal=None)
+
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"
+
+    def test_signal_without_workflow_routes_directly(self, agent, queue):
+        task = _make_task(workflow="default")
+        del task.context["workflow"]
+        response = _make_response()
+        signal = _make_signal(target="qa")
+
+        agent._enforce_workflow_chain(task, response, routing_signal=signal)
+
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"
+
+    def test_escalation_task_rejects_signal(self, agent, queue):
+        task = _make_task(workflow="default")
+        task.type = TaskType.ESCALATION
+        response = _make_response()
+        signal = _make_signal(target="qa")
+
+        agent._enforce_workflow_chain(task, response, routing_signal=signal)
+
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"

@@ -396,8 +396,8 @@ def register_routes(app: FastAPI):
                 from ..core.config import load_config
                 fw_config = load_config(config_dir / "agent-framework.yaml")
                 repo_count = len(fw_config.repositories)
-            except Exception:
-                pass
+            except (FileNotFoundError, ValueError) as e:
+                logger.debug(f"Could not load framework config for setup status: {e}")
 
         initialized = framework_config_exists and env_exists
         ready_to_start = initialized and jira_configured and github_configured and repo_count > 0

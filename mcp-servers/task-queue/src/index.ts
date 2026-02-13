@@ -14,6 +14,7 @@ import {
   listPendingTasks,
   getTaskDetails,
   getEpicProgress,
+  writeRoutingSignal,
 } from "./queue-tools.js";
 import { consultAgent } from "./consultation.js";
 import { shareKnowledge, getKnowledge } from "./knowledge.js";
@@ -270,6 +271,66 @@ const TOOLS: Tool[] = [
       required: ["topic"],
     },
   },
+  {
+    name: "transfer_to_engineer",
+    description:
+      "Signal that this task's work should continue with the engineer agent. Use when implementation or a code fix is needed next. The framework validates and routes accordingly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Why the task should go to engineer (e.g., 'Architecture plan ready, needs implementation')",
+        },
+      },
+      required: ["reason"],
+    },
+  },
+  {
+    name: "transfer_to_qa",
+    description:
+      "Signal that this task's work should continue with the QA agent. Use when the work needs review or verification next. The framework validates and routes accordingly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Why the task should go to QA (e.g., 'PR created with passing tests, ready for code review')",
+        },
+      },
+      required: ["reason"],
+    },
+  },
+  {
+    name: "transfer_to_architect",
+    description:
+      "Signal that this task's work should continue with the architect agent. Use when work needs re-planning, escalation, or architectural review. The framework validates and routes accordingly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Why the task should go to architect (e.g., 'Requirements unclear, need architectural guidance')",
+        },
+      },
+      required: ["reason"],
+    },
+  },
+  {
+    name: "mark_workflow_complete",
+    description:
+      "Signal that no further agent work is needed for this task. Use when the task is fully done and no handoff to another agent is required. The framework validates this (e.g., won't honor if a PR still needs review).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description: "Why the workflow is complete (e.g., 'Documentation updated, no code changes needed')",
+        },
+      },
+      required: ["reason"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -357,6 +418,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           typeof getKey === "string" ? getKey : undefined,
           typeof max_age_hours === "number" ? max_age_hours : undefined,
         );
+        break;
+      }
+      case "transfer_to_engineer":
+      case "transfer_to_qa":
+      case "transfer_to_architect":
+      case "mark_workflow_complete": {
+        const reason = (args as { reason: string }).reason;
+        if (typeof reason !== "string" || !reason.trim()) {
+          throw new Error(`${name} requires a non-empty reason string`);
+        }
+        // Must match WORKFLOW_COMPLETE in core/routing.py
+        const targetMap: Record<string, string> = {
+          transfer_to_engineer: "engineer",
+          transfer_to_qa: "qa",
+          transfer_to_architect: "architect",
+          mark_workflow_complete: "__complete__",
+        };
+        const targetAgent = targetMap[name];
+        const taskId = process.env.AGENT_TASK_ID;
+        const sourceAgent = process.env.AGENT_ID || "unknown";
+        if (!taskId) {
+          throw new Error(`${name}: AGENT_TASK_ID not set in environment`);
+        }
+        result = writeRoutingSignal(workspace, taskId, targetAgent, reason, sourceAgent);
         break;
       }
       default:

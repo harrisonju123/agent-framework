@@ -20,6 +20,8 @@ class JIRAClient:
             server=config.server,
             basic_auth=(config.email, config.api_token),
         )
+        # Cache index of the JQL pattern that worked for get_epic_issues
+        self._working_jql_index: Optional[int] = None
 
     def pull_unassigned_tickets(self, max_results: int = 10) -> List[Issue]:
         """Pull unassigned tickets from backlog using JQL filter."""
@@ -164,8 +166,10 @@ class JIRAClient:
             f'"Parent Link" = {epic_key}',
         ]
 
-        for jql in jql_queries:
+        # Try cached pattern first to avoid unnecessary API calls
+        if self._working_jql_index is not None:
             try:
+                jql = jql_queries[self._working_jql_index]
                 issues = self.jira.search_issues(
                     jql_str=jql,
                     maxResults=100,
@@ -174,9 +178,21 @@ class JIRAClient:
                 if issues:
                     return list(issues)
             except Exception:
+                self._working_jql_index = None
+
+        for idx, jql in enumerate(jql_queries):
+            try:
+                issues = self.jira.search_issues(
+                    jql_str=jql,
+                    maxResults=100,
+                    fields="summary,description,issuetype,status,created,priority",
+                )
+                if issues:
+                    self._working_jql_index = idx
+                    return list(issues)
+            except Exception:
                 continue
 
-        # If no linked issues found, return empty list
         return []
 
     def get_epic_with_subtasks(self, epic_key: str) -> dict:

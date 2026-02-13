@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -86,6 +87,8 @@ class WorktreeManager:
         self.config = config
         self.token = github_token
         self._registry: Dict[str, WorktreeInfo] = {}
+        self._registry_dirty = False
+        self._last_registry_save: float = 0.0
 
         # Ensure worktree root exists
         self.config.root.mkdir(parents=True, exist_ok=True)
@@ -148,6 +151,8 @@ class WorktreeManager:
                         f,
                         indent=2,
                     )
+            self._registry_dirty = False
+            self._last_registry_save = time.time()
         except OSError as e:
             logger.error(f"Failed to save worktree registry: {e}")
 
@@ -498,9 +503,24 @@ class WorktreeManager:
         self._save_registry()
 
     def _update_last_accessed(self, key: str) -> None:
-        """Update last_accessed timestamp for a worktree."""
+        """Update last_accessed timestamp for a worktree.
+
+        Debounces saves — only writes to disk if 30s elapsed since last save.
+        Structural changes (create/remove) still save immediately via _save_registry().
+        """
         if key in self._registry:
             self._registry[key].last_accessed = datetime.now(timezone.utc).isoformat()
+            self._registry_dirty = True
+            self._maybe_flush_registry()
+
+    def _maybe_flush_registry(self) -> None:
+        """Save registry if dirty and 30s since last save."""
+        if self._registry_dirty and (time.time() - self._last_registry_save > 30):
+            self._save_registry()
+
+    def flush(self) -> None:
+        """Explicitly save registry if dirty."""
+        if self._registry_dirty:
             self._save_registry()
 
     def _branch_exists(self, repo_path: Path, branch_name: str) -> bool:

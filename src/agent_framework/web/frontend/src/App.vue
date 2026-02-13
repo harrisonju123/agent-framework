@@ -114,15 +114,12 @@ const queueSummary = computed(() => {
 const repoPattern = /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/
 
 const workFormValid = computed(() => {
-  return workForm.value.goal.length >= 10 &&
+  return workForm.value.goal.trim().length > 0 &&
     repoPattern.test(workForm.value.repository)
 })
 
 const workFormErrors = computed(() => {
   const errors: string[] = []
-  if (workForm.value.goal && workForm.value.goal.length < 10) {
-    errors.push('Goal must be at least 10 characters')
-  }
   if (workForm.value.repository && !repoPattern.test(workForm.value.repository)) {
     errors.push('Repository must be in owner/repo format')
   }
@@ -583,18 +580,14 @@ onMounted(() => {
     <Modal :open="activeModal === 'work'" title="New Work" @close="activeModal = null">
       <form @submit.prevent="submitWork" class="space-y-4">
         <div>
-          <label class="block text-xs text-gray-500 mb-1" for="work-goal">Goal (min 10 characters)</label>
+          <label class="block text-xs text-gray-500 mb-1" for="work-goal">Goal</label>
           <textarea
             id="work-goal"
             v-model="workForm.goal"
             rows="3"
-            class="w-full bg-black border px-2 py-1 text-sm focus:outline-none rounded"
-            :class="workForm.goal && workForm.goal.length < 10 ? 'border-red-500' : 'border-gray-700 focus:border-cyan-500'"
+            class="w-full bg-black border px-2 py-1 text-sm focus:outline-none rounded border-gray-700 focus:border-cyan-500"
             placeholder="Describe what you want to build..."
           ></textarea>
-          <span v-if="workForm.goal && workForm.goal.length < 10" class="text-xs text-red-400">
-            {{ workForm.goal.length }}/10 characters minimum
-          </span>
         </div>
         <div>
           <label class="block text-xs text-gray-500 mb-1" for="work-repo">Repository (owner/repo)</label>

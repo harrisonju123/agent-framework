@@ -321,24 +321,41 @@ class FrameworkConfig(BaseSettings):
         extra = "allow"
 
 
-def load_config(config_path: Path = Path("agent-framework.yaml")) -> FrameworkConfig:
-    """Load framework configuration from YAML file."""
-    if not config_path.exists():
-        logger.warning(
-            f"Config file not found: {config_path}. Using default configuration. "
-            "To customize settings, create a config file at this path."
-        )
-        return FrameworkConfig()
+# Module-level mtime-based config cache: path -> (parsed_config, file_mtime)
+_config_cache: Dict[str, tuple] = {}
 
+
+def _get_cached_or_load(resolved_path: Path, loader):
+    """Return cached config if file mtime unchanged, else reload.
+
+    Works for any config loader that takes a Path and returns a parsed object.
+    """
+    key = str(resolved_path)
+    try:
+        current_mtime = resolved_path.stat().st_mtime
+    except FileNotFoundError:
+        _config_cache.pop(key, None)
+        return None
+
+    cached = _config_cache.get(key)
+    if cached is not None:
+        cached_result, cached_mtime = cached
+        if cached_mtime == current_mtime:
+            return cached_result
+
+    result = loader(resolved_path)
+    _config_cache[key] = (result, current_mtime)
+    return result
+
+
+def _load_config_from_file(config_path: Path) -> FrameworkConfig:
+    """Internal loader for framework config (no caching)."""
     with open(config_path) as f:
         data = yaml.safe_load(f) or {}
 
-    # Expand environment variables
     data = _expand_env_vars(data)
-
     config = FrameworkConfig(**data)
 
-    # Validate MCP requirements
     if config.llm.use_mcp and config.llm.mode != "claude_cli":
         raise ValueError(
             "MCP integration requires Claude CLI mode. "
@@ -348,46 +365,82 @@ def load_config(config_path: Path = Path("agent-framework.yaml")) -> FrameworkCo
     return config
 
 
-def load_agents(agents_path: Path = Path("config/agents.yaml")) -> List[AgentDefinition]:
-    """Load agent definitions from YAML file."""
-    if not agents_path.exists():
-        raise FileNotFoundError(f"Agents config not found: {agents_path}")
+def load_config(config_path: Path = Path("agent-framework.yaml")) -> FrameworkConfig:
+    """Load framework configuration from YAML file.
 
+    Uses mtime-based caching — returns cached config if the file hasn't changed.
+    """
+    if not config_path.exists():
+        logger.warning(
+            f"Config file not found: {config_path}. Using default configuration. "
+            "To customize settings, create a config file at this path."
+        )
+        return FrameworkConfig()
+
+    resolved = config_path.resolve()
+    result = _get_cached_or_load(resolved, _load_config_from_file)
+    return result if result is not None else FrameworkConfig()
+
+
+def _load_agents_from_file(agents_path: Path) -> List[AgentDefinition]:
+    """Internal loader for agent definitions (no caching)."""
     with open(agents_path) as f:
         data = yaml.safe_load(f) or {}
-
     agents_data = data.get("agents", [])
     return [AgentDefinition(**agent) for agent in agents_data]
 
 
-def load_jira_config(jira_path: Path = Path("config/jira.yaml")) -> Optional[JIRAConfig]:
-    """Load JIRA configuration from YAML file."""
-    if not jira_path.exists():
-        return None
+def load_agents(agents_path: Path = Path("config/agents.yaml")) -> List[AgentDefinition]:
+    """Load agent definitions from YAML file.
 
+    Uses mtime-based caching — returns cached agents if the file hasn't changed.
+    """
+    if not agents_path.exists():
+        raise FileNotFoundError(f"Agents config not found: {agents_path}")
+
+    resolved = agents_path.resolve()
+    result = _get_cached_or_load(resolved, _load_agents_from_file)
+    if result is None:
+        raise FileNotFoundError(f"Agents config not found: {agents_path}")
+    return result
+
+
+def _load_jira_config_from_file(jira_path: Path) -> Optional[JIRAConfig]:
+    """Internal loader for JIRA config (no caching)."""
     with open(jira_path) as f:
         data = yaml.safe_load(f) or {}
-
-    # Expand environment variables
     data = _expand_env_vars(data)
-
     jira_data = data.get("jira", {})
     return JIRAConfig(**jira_data)
 
 
-def load_github_config(github_path: Path = Path("config/github.yaml")) -> Optional[GitHubConfig]:
-    """Load GitHub configuration from YAML file."""
-    if not github_path.exists():
-        return None
+def load_jira_config(jira_path: Path = Path("config/jira.yaml")) -> Optional[JIRAConfig]:
+    """Load JIRA configuration from YAML file.
 
+    Uses mtime-based caching — returns cached config if the file hasn't changed.
+    """
+    if not jira_path.exists():
+        return None
+    return _get_cached_or_load(jira_path.resolve(), _load_jira_config_from_file)
+
+
+def _load_github_config_from_file(github_path: Path) -> Optional[GitHubConfig]:
+    """Internal loader for GitHub config (no caching)."""
     with open(github_path) as f:
         data = yaml.safe_load(f) or {}
-
-    # Expand environment variables
     data = _expand_env_vars(data)
-
     github_data = data.get("github", {})
     return GitHubConfig(**github_data)
+
+
+def load_github_config(github_path: Path = Path("config/github.yaml")) -> Optional[GitHubConfig]:
+    """Load GitHub configuration from YAML file.
+
+    Uses mtime-based caching — returns cached config if the file hasn't changed.
+    """
+    if not github_path.exists():
+        return None
+    return _get_cached_or_load(github_path.resolve(), _load_github_config_from_file)
 
 
 def _expand_env_vars(data: Any, _path: str = "") -> Any:

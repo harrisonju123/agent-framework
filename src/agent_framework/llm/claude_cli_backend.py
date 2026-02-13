@@ -270,6 +270,8 @@ class ClaudeCLIBackend(LLMBackend):
             env = os.environ.copy()
             env.pop('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', None)
             env.update(self.proxy_env)
+            if task_id:
+                env['AGENT_TASK_ID'] = task_id
 
             # Determine working directory for subprocess
             # Use working_dir from request if provided, otherwise inherit current directory

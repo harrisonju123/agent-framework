@@ -3,7 +3,7 @@
  * Interacts with the file-based queue system in .agent-communication/queues/
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync } from "fs";
 import { join } from "path";
 import type {
   Task,
@@ -167,6 +167,41 @@ export function getTaskDetails(workspace: string, taskId: string): Task | null {
   }
 
   return null;
+}
+
+export function writeRoutingSignal(
+  workspace: string,
+  taskId: string,
+  targetAgent: string,
+  reason: string,
+  sourceAgent: string
+): { success: boolean; signal_file: string; message: string; overwritten: boolean } {
+  const signalDir = join(workspace, ".agent-communication", "routing-signals");
+  ensureDirectory(signalDir);
+
+  const signalFile = join(signalDir, `${taskId}.json`);
+  const overwritten = existsSync(signalFile);
+
+  const signal = {
+    target_agent: targetAgent,
+    reason,
+    timestamp: new Date().toISOString(),
+    source_agent: sourceAgent,
+  };
+
+  const tmpFile = `${signalFile}.tmp`;
+  writeFileSync(tmpFile, JSON.stringify(signal, null, 2));
+
+  renameSync(tmpFile, signalFile);
+
+  return {
+    success: true,
+    signal_file: signalFile,
+    message: overwritten
+      ? `Routing signal overwritten: ${targetAgent} (reason: ${reason})`
+      : `Routing signal written: ${targetAgent} (reason: ${reason})`,
+    overwritten,
+  };
 }
 
 export function getEpicProgress(workspace: string, epicKey: string): EpicProgress {

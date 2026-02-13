@@ -7,10 +7,14 @@ import subprocess
 import time
 from pathlib import Path
 
+import logging
+
 import click
+import yaml
 from rich.console import Console
 from rich.table import Table
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 
@@ -72,8 +76,8 @@ def _launch_team_session(
         from ..core.config import load_config
         try:
             framework_config = load_config(workspace / "config" / "agent-framework.yaml")
-        except Exception:
-            pass
+        except (FileNotFoundError, ValueError, yaml.YAMLError) as e:
+            logger.debug(f"Could not load framework config: {e}")
     if framework_config:
         env.update(framework_config.llm.get_proxy_env())
 
@@ -199,8 +203,8 @@ def start(ctx, template, repo, epic):
     framework_config = None
     try:
         framework_config = load_config(workspace / "config" / "agent-framework.yaml")
-    except Exception:
-        pass
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as e:
+        logger.debug(f"Could not load framework config: {e}")
 
     # Generate team name upfront so worktree branch includes it
     team_name = f"{tmpl.team_name_prefix}-{int(time.time())}"
@@ -368,8 +372,8 @@ def escalate(ctx, task_id, template):
     framework_config = None
     try:
         framework_config = load_config(workspace / "config" / "agent-framework.yaml")
-    except Exception:
-        pass
+    except (FileNotFoundError, ValueError, yaml.YAMLError) as e:
+        logger.debug(f"Could not load framework config: {e}")
 
     # Resolve repo if available, then create isolated worktree
     repo_info = None

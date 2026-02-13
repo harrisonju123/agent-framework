@@ -141,9 +141,13 @@ def test_activity_stream_rotation():
             )
             manager.append_event(event)
 
-        # Should only keep last 5
+        # With append-only optimization, file is trimmed when appends reach
+        # max_stream_events, so file may have up to 2x max between trims.
+        # After 10 events with max=5: trim at event 5 (→5), then 4 appends = 9.
         recent = manager.get_recent_events(limit=100)
-        assert len(recent) <= 5
+        assert len(recent) <= manager.max_stream_events * 2
+        # Most recent event should always be the last one appended
+        assert recent[0].task_id == "task-9"
 
 
 def test_dashboard_render():
