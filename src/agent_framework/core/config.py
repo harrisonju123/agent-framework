@@ -205,7 +205,6 @@ class WorktreeConfig(BaseModel):
 class TeamModeConfig(BaseModel):
     """Team mode configuration for Claude Agent Teams."""
     enabled: bool = True
-    min_workflow: Literal["simple", "standard", "full"] = "simple"
 
 
 class WorkflowDefinition(BaseModel):

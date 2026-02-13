@@ -88,13 +88,13 @@ class TeamBridge:
         return session_file
 
     def handoff_to_autonomous(
-        self, tasks: list[dict], workflow: str = "simple"
+        self, tasks: list[dict], workflow: str = "default"
     ) -> list[str]:
         """Convert team output into framework Tasks and push to queue.
 
         Args:
             tasks: List of task dicts with at minimum 'title' and 'description'
-            workflow: Workflow complexity for routing
+            workflow: Workflow name for routing
 
         Returns:
             List of queued task IDs
@@ -105,13 +105,7 @@ class TeamBridge:
         for task_data in tasks:
             task_id = f"team-handoff-{time.time_ns()}-{len(queued_ids)}"
 
-            # Route based on workflow
-            if workflow == "full":
-                assigned_to = "architect"
-            elif workflow == "standard":
-                assigned_to = "engineer"
-            else:
-                assigned_to = "engineer"
+            assigned_to = "architect"
 
             task = Task(
                 id=task_id,

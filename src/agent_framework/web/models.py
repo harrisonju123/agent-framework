@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional, List, Dict, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AgentStatusEnum(str, Enum):
@@ -174,7 +174,14 @@ class WorkRequest(BaseModel):
     """Request to create new work (like CLI `agent work`)."""
     goal: str = Field(..., min_length=10, max_length=2000)
     repository: str = Field(..., pattern=r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$')
-    workflow: str = Field(default="simple", pattern=r'^(simple|standard|full)$')
+    workflow: str = Field(default="default")
+
+    @field_validator("workflow")
+    @classmethod
+    def normalize_workflow(cls, v: str) -> str:
+        if v in ("simple", "standard", "full"):
+            return "default"
+        return v
 
 
 class AnalyzeRequest(BaseModel):

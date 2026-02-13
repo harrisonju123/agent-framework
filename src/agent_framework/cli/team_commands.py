@@ -478,14 +478,8 @@ def team_status(ctx):
 
 @team.command()
 @click.argument("team_name")
-@click.option(
-    "--workflow", "-w",
-    type=click.Choice(["simple", "standard", "full"]),
-    default="simple",
-    help="Workflow for queued tasks",
-)
 @click.pass_context
-def handoff(ctx, team_name, workflow):
+def handoff(ctx, team_name):
     """Queue a team's completed work to the autonomous pipeline.
 
     Reads task output from the team session and pushes it to the
@@ -493,7 +487,6 @@ def handoff(ctx, team_name, workflow):
 
     Examples:
         agent team handoff impl-1234567890
-        agent team handoff impl-1234567890 --workflow standard
     """
     workspace = ctx.obj["workspace"]
 
@@ -539,7 +532,7 @@ def handoff(ctx, team_name, workflow):
         console.print("[yellow]Cancelled[/]")
         return
 
-    queued_ids = bridge.handoff_to_autonomous(tasks_to_handoff, workflow=workflow)
+    queued_ids = bridge.handoff_to_autonomous(tasks_to_handoff, workflow="default")
 
     console.print(f"\n[green]Queued {len(queued_ids)} tasks[/]")
     for task_id in queued_ids:

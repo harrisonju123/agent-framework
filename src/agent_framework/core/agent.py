@@ -165,7 +165,6 @@ class Agent:
         worktree_manager: Optional[WorktreeManager] = None,
         agents_config: Optional["List[AgentDefinition]"] = None,
         team_mode_enabled: bool = False,
-        team_mode_min_workflow: str = "standard",
         team_mode_default_model: str = "sonnet",
         agent_definition: Optional["AgentDefinition"] = None,
         workflows_config: Optional[Dict[str, "WorkflowDefinition"]] = None,
@@ -189,7 +188,6 @@ class Agent:
         self._agents_config = agents_config or []
         self._agent_definition = agent_definition
         self._team_mode_enabled = team_mode_enabled
-        self._team_mode_min_workflow = team_mode_min_workflow
         self._team_mode_default_model = team_mode_default_model
 
         # Workflow chain definitions for automatic next-agent queuing
@@ -554,9 +552,25 @@ class Agent:
         while self._running and not self._check_pause_signal():
             await asyncio.sleep(2)
 
+    @staticmethod
+    def _normalize_workflow(task: Task) -> None:
+        """Map legacy workflow names to 'default'.
+
+        Old tasks in queues may have 'simple', 'standard', or 'full'.
+        Normalize them so the rest of the pipeline only sees 'default'.
+        """
+        if not task.context:
+            return
+        workflow = task.context.get("workflow")
+        if workflow in ("simple", "standard", "full"):
+            task.context["workflow"] = "default"
+
     async def _handle_task(self, task: Task) -> None:
         """Handle task execution with retry/escalation logic."""
         from datetime import datetime
+
+        # Normalize legacy workflow names before anything reads them
+        self._normalize_workflow(task)
 
         # Set task context for logging
         jira_key = task.context.get("jira_key")
@@ -629,11 +643,10 @@ class Agent:
                     if configured:
                         team_agents.update(configured)
 
-                # Layer 2: workflow-required agents (QA for standard, engineer+QA for full)
-                workflow = task.context.get("workflow", "full")
+                # Layer 2: workflow-required agents (engineer+QA for default workflow)
+                workflow = task.context.get("workflow", "default")
                 workflow_teammates = compose_team(
                     task.context, workflow, self._agents_config,
-                    min_workflow=self._team_mode_min_workflow,
                     default_model=self._team_mode_default_model,
                     caller_agent_id=self.config.id,
                 )
@@ -1851,7 +1864,7 @@ IMPORTANT:
                 "pr_url": pr_info["pr_url"],
                 "github_repo": pr_info["github_repo"],
                 "branch_name": task.context.get("branch_name"),
-                "workflow": task.context.get("workflow", "standard"),
+                "workflow": task.context.get("workflow", "default"),
                 "review_mode": True,
                 "source_task_id": task.id,
                 "source_agent": self.config.id,
@@ -2465,9 +2478,10 @@ IMPORTANT:
         """Return True if team mode already handled this workflow's agents.
 
         Mirrors the check in _handle_task (and compose_team): team_override=True
-        forces teams on regardless of rank, team_override=False skips teams.
+        forces teams on, team_override=False skips teams. Team mode applies
+        to any workflow that has teammates defined in WORKFLOW_TEAMMATES.
         """
-        from .team_composer import WORKFLOW_RANK
+        from .team_composer import WORKFLOW_TEAMMATES
 
         if not self._team_mode_enabled:
             return False
@@ -2476,14 +2490,11 @@ IMPORTANT:
         if team_override is False:
             return False
 
-        # team_override=True forces team mode regardless of workflow rank
         if team_override is True:
             return True
 
-        workflow = task.context.get("workflow", "full")
-        workflow_rank = WORKFLOW_RANK.get(workflow, 0)
-        min_rank = WORKFLOW_RANK.get(self._team_mode_min_workflow, 1)
-        return workflow_rank >= min_rank
+        workflow = task.context.get("workflow", "default")
+        return workflow in WORKFLOW_TEAMMATES
 
     def _is_chain_task_already_queued(self, next_agent: str, source_task_id: str) -> bool:
         """O(1) file existence check using deterministic chain task ID.

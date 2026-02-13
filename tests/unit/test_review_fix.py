@@ -29,7 +29,7 @@ def _make_task(
         "pr_url": "https://github.com/org/repo/pull/99",
         "pr_number": 99,
         "github_repo": "org/repo",
-        "workflow": "standard",
+        "workflow": "default",
         **ctx_overrides,
     }
     return Task(

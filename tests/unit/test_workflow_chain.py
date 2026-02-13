@@ -13,7 +13,7 @@ from agent_framework.core.task import Task, TaskStatus, TaskType
 
 # -- Fixtures --
 
-def _make_task(workflow="standard", task_id="task-abc123def456", **ctx_overrides):
+def _make_task(workflow="default", task_id="task-abc123def456", **ctx_overrides):
     context = {"workflow": workflow, **ctx_overrides}
     return Task(
         id=task_id,
@@ -42,14 +42,9 @@ def _make_response(content="Done.", pr_url=None):
     )
 
 
-STANDARD_WORKFLOW = WorkflowDefinition(
-    description="Standard workflow",
+DEFAULT_WORKFLOW = WorkflowDefinition(
+    description="Default workflow",
     agents=["architect", "engineer", "qa"],
-)
-
-SIMPLE_WORKFLOW = WorkflowDefinition(
-    description="Simple workflow",
-    agents=["engineer"],
 )
 
 ANALYSIS_WORKFLOW = WorkflowDefinition(
@@ -78,9 +73,8 @@ def agent(queue):
     a = Agent.__new__(Agent)
     a.config = config
     a.queue = queue
-    a._workflows_config = {"standard": STANDARD_WORKFLOW, "simple": SIMPLE_WORKFLOW, "analysis": ANALYSIS_WORKFLOW}
+    a._workflows_config = {"default": DEFAULT_WORKFLOW, "analysis": ANALYSIS_WORKFLOW}
     a._team_mode_enabled = False
-    a._team_mode_min_workflow = "standard"
     a.logger = MagicMock()
     return a
 
@@ -111,7 +105,7 @@ class TestBaseId:
 class TestEnforceWorkflowChain:
     def test_queues_next_agent_no_pr(self, agent, queue):
         """When no PR is created, chain task is queued to the next agent."""
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
@@ -127,7 +121,7 @@ class TestEnforceWorkflowChain:
 
     def test_skips_when_pr_created(self, agent, queue):
         """If a PR was created, chain enforcement is skipped."""
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         task.context["pr_url"] = "https://github.com/org/repo/pull/42"
         response = _make_response()
 
@@ -138,7 +132,7 @@ class TestEnforceWorkflowChain:
     def test_skips_when_team_mode_handled(self, agent, queue):
         """When team mode handles the workflow, chain is skipped."""
         agent._team_mode_enabled = True
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
@@ -148,18 +142,17 @@ class TestEnforceWorkflowChain:
     def test_fires_when_team_override_false(self, agent, queue):
         """When team_override=False, team mode is skipped so chain must fire."""
         agent._team_mode_enabled = True
-        task = _make_task(workflow="standard", team_override=False)
+        task = _make_task(workflow="default", team_override=False)
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
 
         queue.push.assert_called_once()
 
-    def test_skips_when_team_override_true_low_rank(self, agent, queue):
-        """team_override=True forces teams on even below min_workflow rank."""
+    def test_skips_when_team_override_true(self, agent, queue):
+        """team_override=True forces teams on."""
         agent._team_mode_enabled = True
-        agent._team_mode_min_workflow = "full"
-        task = _make_task(workflow="standard", team_override=True)
+        task = _make_task(workflow="default", team_override=True)
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
@@ -168,7 +161,7 @@ class TestEnforceWorkflowChain:
 
     def test_skips_duplicate_chain_task(self, agent, queue):
         """If the chain task file already exists, don't queue again."""
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         response = _make_response()
 
         # Pre-create the chain task file
@@ -184,7 +177,7 @@ class TestEnforceWorkflowChain:
     def test_skips_last_agent_in_chain(self, agent, queue):
         """Last agent in the chain has nobody to forward to."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
@@ -213,7 +206,7 @@ class TestEnforceWorkflowChain:
         """Engineer tasks get IMPLEMENTATION type."""
         # architect -> engineer chain
         agent.config = AgentConfig(id="architect", name="A", queue="architect", prompt="p")
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
@@ -223,7 +216,7 @@ class TestEnforceWorkflowChain:
 
     def test_chain_task_type_qa(self, agent, queue):
         """QA tasks get QA_VERIFICATION type."""
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
@@ -233,7 +226,7 @@ class TestEnforceWorkflowChain:
 
     def test_skips_no_workflow_in_context(self, agent, queue):
         """Tasks without a workflow context key are ignored."""
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         del task.context["workflow"]
         response = _make_response()
 
@@ -243,10 +236,50 @@ class TestEnforceWorkflowChain:
 
     def test_queue_error_is_caught(self, agent, queue):
         """Push failures are logged but don't raise."""
-        task = _make_task(workflow="standard")
+        task = _make_task(workflow="default")
         response = _make_response()
         queue.push.side_effect = OSError("disk full")
 
         agent._enforce_workflow_chain(task, response)
 
         agent.logger.error.assert_called_once()
+
+
+# -- _normalize_workflow --
+
+class TestNormalizeWorkflow:
+    def test_normalize_workflow_maps_old_names(self, agent):
+        """Old workflow names get normalized to 'default'."""
+        for old_name in ["simple", "standard", "full"]:
+            task = _make_task(workflow=old_name)
+            agent._normalize_workflow(task)
+            assert task.context["workflow"] == "default"
+
+    def test_normalize_workflow_preserves_default(self, agent):
+        task = _make_task(workflow="default")
+        agent._normalize_workflow(task)
+        assert task.context["workflow"] == "default"
+
+    def test_normalize_workflow_preserves_analysis(self, agent):
+        task = _make_task(workflow="analysis")
+        agent._normalize_workflow(task)
+        assert task.context["workflow"] == "analysis"
+
+    def test_normalize_workflow_preserves_unknown(self, agent):
+        task = _make_task(workflow="custom")
+        agent._normalize_workflow(task)
+        assert task.context["workflow"] == "custom"
+
+    def test_normalize_workflow_no_workflow_key(self, agent):
+        """Tasks without a workflow key in context are left untouched."""
+        task = _make_task(workflow="default")
+        del task.context["workflow"]
+        agent._normalize_workflow(task)
+        assert "workflow" not in task.context
+
+    def test_normalize_workflow_none_context(self, agent):
+        """Handles task with None context without raising."""
+        task = _make_task(workflow="default")
+        task.context = None
+        agent._normalize_workflow(task)
+        assert task.context is None

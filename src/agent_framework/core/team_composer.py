@@ -1,6 +1,6 @@
 """Dynamic team composition for Claude Agent Teams.
 
-Selects teammates based on workflow complexity. The calling agent
+Selects teammates based on workflow. The calling agent
 is the lead — teammates returned here become --agents subagents.
 """
 
@@ -14,16 +14,7 @@ logger = logging.getLogger(__name__)
 # Workflow → teammate roles (lead is the caller, not listed here).
 # Keep in sync with the workflows section in config/agent-framework.yaml.
 WORKFLOW_TEAMMATES: Dict[str, List[str]] = {
-    "simple": [],
-    "standard": [],
-    "full": ["engineer", "qa"],
-}
-
-# Minimum workflow rank for ordering comparisons
-WORKFLOW_RANK = {
-    "simple": 0,
-    "standard": 1,
-    "full": 2,
+    "default": ["engineer", "qa"],
 }
 
 
@@ -54,11 +45,10 @@ def compose_team(
     task_context: dict,
     workflow: str,
     agents_config: List[AgentDefinition],
-    min_workflow: str = "standard",
     default_model: str = "sonnet",
     caller_agent_id: Optional[str] = None,
 ) -> Optional[dict]:
-    """Pick teammates based on workflow complexity.
+    """Pick teammates for the given workflow.
 
     Returns None for single-agent execution, or a dict suitable
     for the --agents CLI flag when team mode applies.
@@ -68,9 +58,8 @@ def compose_team(
 
     Args:
         task_context: Task context dict, checked for team_override
-        workflow: Workflow name (simple/standard/full)
+        workflow: Workflow name ("default" or "analysis")
         agents_config: Agent definitions from agents.yaml
-        min_workflow: Minimum workflow complexity to trigger teams
         default_model: Model name for teammates (from framework config)
         caller_agent_id: ID of the lead agent, excluded from teammates
     """
@@ -80,14 +69,7 @@ def compose_team(
         if not override:
             logger.debug("Team mode skipped via task team_override=False")
             return None
-        # override=True means force team mode even below min_workflow
-
-    # Check workflow meets minimum threshold (unless overridden)
-    if override is None:
-        workflow_rank = WORKFLOW_RANK.get(workflow, 0)
-        min_rank = WORKFLOW_RANK.get(min_workflow, 1)
-        if workflow_rank < min_rank:
-            return None
+        # override=True means force team mode
 
     teammate_roles = WORKFLOW_TEAMMATES.get(workflow, [])
     if not teammate_roles:

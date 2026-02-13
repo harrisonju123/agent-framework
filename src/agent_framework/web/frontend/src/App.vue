@@ -72,7 +72,7 @@ const logsExpanded = ref(false)
 const workForm = ref({
   goal: '',
   repository: '',
-  workflow: 'simple' as 'simple' | 'standard' | 'full',
+  workflow: 'default' as string,
 })
 
 const analyzeForm = ref({
@@ -271,7 +271,7 @@ async function submitWork() {
 
   if (result?.success) {
     activeModal.value = null
-    workForm.value = { goal: '', repository: '', workflow: 'simple' }
+    workForm.value = { goal: '', repository: '', workflow: 'default' }
     showToast(result.message, 'success')
   } else if (apiError.value) {
     showToast(apiError.value, 'error')
@@ -609,18 +609,6 @@ onMounted(() => {
           <span v-if="workForm.repository && !repoPattern.test(workForm.repository)" class="text-xs text-red-400">
             Invalid format. Use owner/repo (e.g., justworkshr/pto)
           </span>
-        </div>
-        <div>
-          <label class="block text-xs text-gray-500 mb-1" for="work-workflow">Workflow</label>
-          <select
-            id="work-workflow"
-            v-model="workForm.workflow"
-            class="w-full bg-black border border-gray-700 px-2 py-1 text-sm focus:outline-none focus:border-cyan-500 rounded"
-          >
-            <option value="simple">simple - Engineer only</option>
-            <option value="standard">standard - Engineer + QA</option>
-            <option value="full">full - Architect + Engineer + QA</option>
-          </select>
         </div>
         <div class="flex justify-end gap-2 pt-2">
           <button

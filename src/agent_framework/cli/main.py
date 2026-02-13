@@ -310,16 +310,10 @@ def pull(ctx, project, max):
 
 @cli.command()
 @click.option("--no-dashboard", is_flag=True, help="Skip live dashboard")
-@click.option(
-    "--workflow", "-w",
-    type=click.Choice(["simple", "standard", "full"]),
-    default=None,
-    help="Workflow complexity: simple (Engineer only), standard (Engineer→QA), full (Architect→Engineer→QA)"
-)
 @click.option("--epic", "-e", help="JIRA epic key to process (e.g., PROJ-100)")
 @click.option("--parallel", "-p", is_flag=True, help="Process epic tickets in parallel (requires worktrees)")
 @click.pass_context
-def work(ctx, no_dashboard, workflow, epic, parallel):
+def work(ctx, no_dashboard, epic, parallel):
     """Interactive mode: describe what to build, delegate to Architect agent.
 
     With --epic: Process all tickets in an existing JIRA epic.
@@ -337,7 +331,7 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
 
     # Handle epic processing mode
     if epic:
-        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, workflow, parallel)
+        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel)
         return
 
     # Check if repos are registered
@@ -372,24 +366,9 @@ def work(ctx, no_dashboard, workflow, epic, parallel):
         console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/]")
         console.print("[dim]No JIRA project configured - using local task tracking[/]")
 
-    # Step 3: Select workflow complexity
-    if workflow is None:
-        console.print("\n[bold]Workflow complexity?[/]")
-        console.print("  1. [cyan]simple[/]   - Engineer only (bug fixes, small changes)")
-        console.print("  2. [cyan]standard[/] - Engineer → QA (features needing verification)")
-        console.print("  3. [cyan]full[/]     - Architect → Engineer → QA (complex work)")
+    workflow = "default"
 
-        workflow_idx = click.prompt(
-            "Select workflow",
-            type=click.IntRange(1, 3),
-            default=1
-        )
-        workflow_modes = ["simple", "standard", "full"]
-        workflow = workflow_modes[workflow_idx - 1]
-
-    console.print(f"\n[green]✓[/] Workflow: [bold]{workflow}[/]")
-
-    # Step 4: Create planning task for Architect
+    # Step 3: Create planning task for Architect
     from ..core.task_builder import build_planning_task
 
     task = build_planning_task(
@@ -1488,7 +1467,7 @@ This PR implements the same pattern/functionality as the reference implementatio
         traceback.print_exc()
 
 
-def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, workflow: str, parallel: bool = False):
+def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False):
     """Handle --epic mode: process tickets in a JIRA epic.
 
     Args:
@@ -1497,7 +1476,6 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         framework_config: Framework configuration
         epic_key: JIRA epic key (e.g., PROJ-100)
         no_dashboard: Skip dashboard if True
-        workflow: Workflow complexity
         parallel: If True, process tickets in parallel (no dependencies)
     """
     from datetime import datetime
@@ -1558,9 +1536,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             console.print("[yellow]Cancelled[/]")
             return
 
-        # Determine workflow (default to standard for epics)
-        if workflow is None:
-            workflow = "standard"
+        workflow = "default"
 
         # Determine target repository from epic or config
         github_repo = None
@@ -1609,13 +1585,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             return
 
         for i, issue in enumerate(pending_issues):
-            # Determine agent based on issue type and workflow
-            if workflow == "simple":
-                assigned_to = "engineer"
-            elif workflow == "standard":
-                assigned_to = "engineer"
-            else:  # full
-                assigned_to = "architect"
+            assigned_to = "architect"
 
             # Override based on issue type
             issue_type = issue.fields.issuetype.name.lower()

@@ -18,7 +18,7 @@ def build_planning_task(
 
     Args:
         goal: The user's goal/request
-        workflow: Workflow mode (simple/standard/full)
+        workflow: Workflow name ("default" or "analysis")
         github_repo: GitHub repository in owner/repo format
         repository_name: Human-readable repository name
         jira_project: JIRA project key (None if not configured)
@@ -133,8 +133,8 @@ Instructions for Architect Agent:
 1. Clone/update repository (use MultiRepoManager)
 2. Explore the codebase to understand structure
 3. Validate the goal is feasible
-4. Check context.workflow ('{workflow}') and route accordingly
-5. Create appropriate JIRA ticket and queue tasks per workflow mode"""
+4. Create detailed implementation plan and queue to engineer
+5. Create appropriate JIRA ticket and queue tasks"""
     else:
         return f"""User Goal: {goal}
 
@@ -142,9 +142,9 @@ Instructions for Architect Agent:
 1. Clone/update repository (use MultiRepoManager)
 2. Explore the codebase to understand structure
 3. Validate the goal is feasible
-4. Check context.workflow ('{workflow}') and route accordingly
+4. Create detailed implementation plan and queue to engineer
 5. No JIRA project configured - write tasks directly to local queues
-6. Generate local task IDs: local-{{workflow}}-{{timestamp}}
+6. Generate local task IDs: local-{{timestamp}}
 7. Write task JSON to: .agent-communication/queues/{{agent}}/{{task_id}}.json"""
 
 

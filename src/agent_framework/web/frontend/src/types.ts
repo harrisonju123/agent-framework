@@ -105,7 +105,7 @@ export interface TaskActionResponse {
 export interface WorkRequest {
   goal: string
   repository: string
-  workflow?: 'simple' | 'standard' | 'full'
+  workflow?: string
 }
 
 export interface AnalyzeRequest {

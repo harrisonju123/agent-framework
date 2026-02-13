@@ -55,9 +55,7 @@ class ConfigGenerator:
                 for r in repos
             ],
             "workflows": {
-                "simple": ["engineer"],
-                "standard": ["engineer", "qa"],
-                "full": ["architect", "engineer", "qa"]
+                "default": ["architect", "engineer", "qa"]
             }
         }
 

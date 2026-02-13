@@ -128,13 +128,13 @@ def test_handoff_to_autonomous(workspace):
         {"title": "Add tests", "description": "Cover the auth flow"},
     ]
 
-    queued_ids = bridge.handoff_to_autonomous(task_data, workflow="simple")
+    queued_ids = bridge.handoff_to_autonomous(task_data, workflow="default")
 
     assert len(queued_ids) == 2
     assert all(qid.startswith("team-handoff-") for qid in queued_ids)
 
-    # Verify tasks were written to the queue
-    queue_dir = workspace / ".agent-communication" / "queues" / "engineer"
+    # Verify tasks were written to the queue (default routes to architect)
+    queue_dir = workspace / ".agent-communication" / "queues" / "architect"
     task_files = list(queue_dir.glob("*.json"))
     assert len(task_files) == 2
 
