@@ -1165,7 +1165,7 @@ def approve(ctx, task_id, message):
     """
     import json
     import os
-    from datetime import datetime
+    from datetime import UTC, datetime
     from ..core.task import Task, TaskStatus
 
     workspace = ctx.obj["workspace"]
@@ -1240,7 +1240,7 @@ def approve(ctx, task_id, message):
     if message:
         task.notes.append(f"Checkpoint approved: {message}")
     else:
-        task.notes.append(f"Checkpoint approved at {datetime.utcnow().isoformat()}")
+        task.notes.append(f"Checkpoint approved at {datetime.now(UTC).isoformat()}")
 
     # Re-queue then remove checkpoint file — only delete after successful push
     queue = FileQueue(workspace)

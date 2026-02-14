@@ -5,6 +5,16 @@ from typing import Any, Dict, List, Optional
 from enum import Enum
 
 
+@dataclass
+class CheckpointConfig:
+    """Configuration for a workflow checkpoint (human approval gate).
+
+    Checkpoints pause workflow execution until a human approves continuation.
+    """
+    message: str  # Displayed when checkpoint is reached
+    reason: Optional[str] = None  # Audit trail context for why approval is needed
+
+
 class EdgeConditionType(str, Enum):
     """Types of conditions for workflow edges."""
     ALWAYS = "always"  # Unconditional transition (default for backward compatibility)
@@ -51,7 +61,7 @@ class WorkflowStep:
     next: List[WorkflowEdge] = field(default_factory=list)
     task_type_override: Optional[str] = None  # Override default task type for this agent
     metadata: Dict[str, Any] = field(default_factory=dict)
-    checkpoint: Optional[Dict[str, str]] = None
+    checkpoint: Optional[CheckpointConfig] = None
 
     def __post_init__(self):
         """Sort edges by priority (highest first)."""

@@ -1,6 +1,6 @@
 """Task model preserving the JSON schema from the Bash system."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Optional
 from pydantic import BaseModel, Field
@@ -156,9 +156,12 @@ class Task(BaseModel):
         self.status = TaskStatus.AWAITING_APPROVAL
         self.checkpoint_reached = checkpoint_id
         self.checkpoint_message = message
+        # Reset prior approval so each checkpoint requires fresh approval
+        self.approved_at = None
+        self.approved_by = None
 
     def approve_checkpoint(self, approved_by: str) -> None:
         """Approve a checkpoint and allow workflow to continue."""
-        self.approved_at = datetime.utcnow()
+        self.approved_at = datetime.now(UTC)
         self.approved_by = approved_by
         self.status = TaskStatus.IN_PROGRESS
