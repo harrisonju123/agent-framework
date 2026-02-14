@@ -62,7 +62,14 @@ class WorkflowExecutor:
         Evaluates edge conditions and routes the task to the next appropriate agent(s).
 
         Returns:
-            True if task was routed, False if workflow is complete.
+            True if task was routed to the next step.
+            False if workflow is complete, terminal, or paused at a checkpoint.
+
+        Note:
+            Routing signal overrides are evaluated before checkpoints, so a
+            routing signal (e.g. QA sending back to engineer) can bypass a
+            checkpoint. This is intentional — programmatic re-routing reflects
+            an agent decision, not a human-reviewable transition.
         """
         current_step = self._find_current_step(workflow, task, current_agent_id)
         if not current_step:
@@ -95,6 +102,25 @@ class WorkflowExecutor:
             if target_step and target_step.agent != current_agent_id:
                 self._route_to_step(task, target_step, workflow, current_agent_id, routing_signal)
                 return True
+
+        # Checkpoint gate — pause for human approval before routing to next step.
+        # Compare checkpoint_id so each checkpoint requires its own approval;
+        # a prior approval at a different step won't bypass this one.
+        if current_step.checkpoint:
+            checkpoint_id = f"{workflow.name}-{current_step.id}"
+            already_approved = (
+                task.approved_at is not None
+                and task.checkpoint_reached == checkpoint_id
+            )
+            if not already_approved:
+                message = current_step.checkpoint.message
+                task.mark_awaiting_approval(checkpoint_id, message)
+                self._save_task_checkpoint(task)
+                self.logger.info(
+                    f"Task {task.id} paused at checkpoint '{checkpoint_id}': {message}"
+                )
+                self.logger.info(f"   Run 'agent approve {task.id}' to continue workflow")
+                return False
 
         next_edges = workflow.get_next_steps(current_step.id)
         if not next_edges:
@@ -277,6 +303,17 @@ class WorkflowExecutor:
                 "workflow_step": target_step.id,
             },
         )
+
+    def _save_task_checkpoint(self, task: "Task") -> None:
+        """Save task to checkpoint queue for human approval."""
+        from ..utils.atomic_io import atomic_write_model
+
+        checkpoint_queue_dir = self.queue_dir / "checkpoints"
+        checkpoint_queue_dir.mkdir(exist_ok=True, parents=True)
+
+        checkpoint_file = checkpoint_queue_dir / f"{task.id}.json"
+        atomic_write_model(checkpoint_file, task)
+        self.logger.debug(f"Saved checkpoint state for task {task.id}")
 
     def get_execution_state(self, task: "Task", current_step: str) -> WorkflowExecutionState:
         """Get current execution state for a task."""

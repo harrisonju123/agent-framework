@@ -2999,13 +2999,39 @@ IMPORTANT:
         except Exception as e:
             self.logger.error(f"Workflow execution failed for task {task.id}: {e}")
 
+    def _get_changed_files(self) -> List[str]:
+        """Get list of changed files from git diff (staged and unstaged)."""
+        from ..utils.subprocess_utils import run_git_command, SubprocessError
+
+        try:
+            result = run_git_command(
+                ["diff", "--name-only", "HEAD"],
+                cwd=self.workspace,
+                check=False,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                self.logger.debug(f"git diff failed: {result.stderr}")
+                return []
+            return [f.strip() for f in result.stdout.split("\n") if f.strip()]
+        except SubprocessError:
+            self.logger.warning("git diff timed out")
+            return []
+        except Exception as e:
+            self.logger.debug(f"Failed to get changed files: {e}")
+            return []
+
     def _build_workflow_context(self, task: Task) -> Dict[str, Any]:
         """Build context dict for workflow condition evaluation."""
         context = {}
 
-        # Add changed files if available
+        # Prefer task context, fallback to git diff
         if task.context and "changed_files" in task.context:
             context["changed_files"] = task.context["changed_files"]
+        else:
+            changed_files = self._get_changed_files()
+            if changed_files:
+                context["changed_files"] = changed_files
 
         # Add test results if available
         if task.context and "test_result" in task.context:

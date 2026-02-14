@@ -1,6 +1,6 @@
 """Task model preserving the JSON schema from the Bash system."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Optional
 from pydantic import BaseModel, Field
@@ -23,6 +23,7 @@ class TaskStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     TESTING = "testing"  # Running tests in sandbox
     AWAITING_REVIEW = "awaiting_review"  # Tests passed, awaiting optional review
+    AWAITING_APPROVAL = "awaiting_approval"  # At checkpoint, needs human approval
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -93,6 +94,12 @@ class Task(BaseModel):
     failed_task_id: Optional[str] = None
     needs_human_review: bool = False
 
+    # Checkpoint tracking
+    checkpoint_reached: Optional[str] = None
+    checkpoint_message: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
+
     # Estimation
     estimated_effort: Optional[str] = None
 
@@ -143,3 +150,18 @@ class Task(BaseModel):
         self.started_by = None
         self.retry_count += 1
         self.last_failed_at = datetime.utcnow()
+
+    def mark_awaiting_approval(self, checkpoint_id: str, message: str) -> None:
+        """Mark task as awaiting approval at a checkpoint."""
+        self.status = TaskStatus.AWAITING_APPROVAL
+        self.checkpoint_reached = checkpoint_id
+        self.checkpoint_message = message
+        # Reset prior approval so each checkpoint requires fresh approval
+        self.approved_at = None
+        self.approved_by = None
+
+    def approve_checkpoint(self, approved_by: str) -> None:
+        """Approve a checkpoint and allow workflow to continue."""
+        self.approved_at = datetime.now(UTC)
+        self.approved_by = approved_by
+        self.status = TaskStatus.IN_PROGRESS
