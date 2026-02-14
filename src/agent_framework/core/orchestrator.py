@@ -109,6 +109,9 @@ class Orchestrator:
         Returns:
             Dict mapping agent_id to Popen object
         """
+        # Clean up stale locks and orphaned tasks from crashed agents
+        self._cleanup(remove_pid_file=False)
+
         if config_path is None:
             config_path = self.workspace / "config" / "agents.yaml"
 
@@ -396,18 +399,25 @@ class Orchestrator:
             if self.pid_file.exists():
                 self.pid_file.unlink()
 
-    def _cleanup(self) -> None:
-        """Clean up after shutdown."""
-        # Remove lock files
+    def _cleanup(self, remove_pid_file: bool = True) -> None:
+        """Clean up after shutdown.
+
+        Args:
+            remove_pid_file: Whether to remove the PID file (skip during pre-start cleanup)
+        """
+        # Remove lock files (each lock is a directory with a pid file inside)
         if self.lock_dir.exists():
             for lock_dir in self.lock_dir.glob("*.lock"):
-                if lock_dir.is_dir():
-                    for f in lock_dir.iterdir():
-                        f.unlink()
-                    lock_dir.rmdir()
+                try:
+                    if lock_dir.is_dir():
+                        for f in lock_dir.iterdir():
+                            f.unlink()
+                        lock_dir.rmdir()
+                except OSError as e:
+                    logger.warning(f"Failed to remove lock {lock_dir.name}: {e}")
 
         # Remove PID file
-        if self.pid_file.exists():
+        if remove_pid_file and self.pid_file.exists():
             self.pid_file.unlink()
 
         # Reset in_progress tasks to pending

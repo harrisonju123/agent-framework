@@ -467,6 +467,9 @@ class Agent:
         self.logger.debug(f"Running post-LLM workflow for {task.id}")
         await self._handle_success(task, response)
 
+        # Push and create PR if the agent produced unpushed commits
+        self._push_and_create_pr_if_needed(task)
+
         # Mark completed
         self.logger.debug(f"Marking task {task.id} as completed")
         task.mark_completed(self.config.id)
@@ -2047,6 +2050,90 @@ IMPORTANT:
             self.logger.error(f"Git operation failed: {e.stderr.decode() if e.stderr else str(e)}")
         except Exception as e:
             self.logger.exception(f"Error in post-LLM workflow: {e}")
+
+    def _push_and_create_pr_if_needed(self, task: Task) -> None:
+        """Push branch and create PR if the agent produced unpushed commits.
+
+        Runs after the LLM finishes but before the task is marked completed,
+        so the PR URL is available in task.context for downstream chain steps.
+        Only acts when working in a worktree with actual unpushed commits.
+        """
+        # Already has a PR (created by the LLM via MCP or _handle_success)
+        if task.context.get("pr_url"):
+            return
+
+        # Only act if we have an active worktree with changes
+        if not self._active_worktree or not self.worktree_manager:
+            return
+
+        if not self.worktree_manager.has_unpushed_commits(self._active_worktree):
+            return
+
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            return
+
+        try:
+            worktree = self._active_worktree
+
+            # Get the current branch name
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree, capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                self.logger.warning("Could not determine branch name, skipping PR creation")
+                return
+            branch = result.stdout.strip()
+
+            # Don't create PRs from main/master
+            if branch in ("main", "master"):
+                return
+
+            # Push the branch
+            self.logger.info(f"Pushing branch {branch} to origin")
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", branch],
+                cwd=worktree, capture_output=True, text=True, timeout=60,
+            )
+            if push_result.returncode != 0:
+                self.logger.error(f"Failed to push branch: {push_result.stderr}")
+                return
+
+            # Create PR using gh CLI
+            pr_title = task.title
+            # Strip [chain] prefixes for cleaner PR titles
+            while pr_title.startswith("[chain] "):
+                pr_title = pr_title[8:]
+            pr_title = pr_title[:70]
+
+            pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
+
+            self.logger.info(f"Creating PR for {github_repo}")
+            pr_result = subprocess.run(
+                ["gh", "pr", "create",
+                 "--repo", github_repo,
+                 "--title", pr_title,
+                 "--body", pr_body,
+                 "--head", branch],
+                cwd=worktree, capture_output=True, text=True, timeout=30,
+            )
+
+            if pr_result.returncode == 0:
+                pr_url = pr_result.stdout.strip()
+                task.context["pr_url"] = pr_url
+                self.logger.info(f"🔀 Created PR: {pr_url}")
+            else:
+                # gh returns non-zero if PR already exists — check for that
+                if "already exists" in pr_result.stderr:
+                    self.logger.info("PR already exists for this branch")
+                else:
+                    self.logger.error(f"Failed to create PR: {pr_result.stderr}")
+
+        except subprocess.TimeoutExpired:
+            self.logger.error("Timed out pushing branch or creating PR")
+        except Exception as e:
+            self.logger.error(f"Error creating PR: {e}")
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
         """Transition a JIRA ticket to target_status if all preconditions are met.
