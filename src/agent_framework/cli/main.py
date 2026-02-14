@@ -814,6 +814,97 @@ def summary(ctx, epic):
 
 
 @cli.command()
+@click.argument("task_id")
+@click.option("--hint", "-h", required=True, help="Human guidance hint to inject for retry")
+@click.pass_context
+def guide(ctx, task_id, hint):
+    """Inject human guidance into a failed task and retry.
+
+    This command allows you to provide specific guidance to help the agent
+    overcome a failure. The hint will be injected into the task context and
+    the task will be retried with this additional information.
+
+    Examples:
+        agent guide task-123 --hint "The API endpoint changed to /v2/users"
+        agent guide escalation-456 --hint "Use authentication header X-API-Key instead of Bearer"
+    """
+    workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
+
+    # Try to find the task (could be in failed, escalation, or completed)
+    task = queue.get_failed_task(task_id)
+
+    if not task:
+        # Check if it's an escalation task
+        escalations_dir = workspace / ".agent-communication" / "escalations"
+        if escalations_dir.exists():
+            escalation_file = escalations_dir / f"{task_id}.json"
+            if escalation_file.exists():
+                import json
+                from ..core.task import Task
+                with open(escalation_file, 'r') as f:
+                    task_data = json.load(f)
+                task = Task(**task_data)
+
+    if not task:
+        console.print(f"[red]Error: Task {task_id} not found[/]")
+        console.print("[dim]Task must be in FAILED status or logged as escalation[/]")
+        return
+
+    # Show current status
+    console.print(f"[bold]Task: {task.title}[/]")
+    console.print(f"Status: {task.status}")
+    console.print(f"Retry count: {task.retry_count}")
+    console.print()
+
+    # Show escalation report if available
+    if task.escalation_report:
+        console.print(f"[bold cyan]Escalation Report:[/]")
+        console.print(f"Pattern: {task.escalation_report.failure_pattern}")
+        console.print(f"Hypothesis: {task.escalation_report.root_cause_hypothesis}")
+        console.print()
+
+    console.print(f"[yellow]Human Guidance:[/] {hint}")
+    console.print()
+
+    if not click.confirm("Inject this guidance and retry task?"):
+        console.print("[yellow]Cancelled[/]")
+        return
+
+    # Inject human guidance
+    if task.escalation_report:
+        task.escalation_report.human_guidance = hint
+    else:
+        # Create basic escalation report with guidance
+        from ..core.task import EscalationReport
+        task.escalation_report = EscalationReport(
+            task_id=task.id,
+            original_title=task.title,
+            total_attempts=task.retry_count,
+            attempt_history=task.retry_attempts,
+            root_cause_hypothesis="Human guidance provided",
+            suggested_interventions=[hint],
+            human_guidance=hint,
+        )
+
+    # Add to context for agent visibility
+    task.context["human_guidance"] = hint
+    task.context["guided_retry"] = True
+
+    # Reset retry count to give it fresh attempts with guidance
+    task.retry_count = 0
+    task.status = TaskStatus.PENDING
+    task.notes.append(f"Human guidance injected: {hint}")
+
+    # Re-queue the task
+    queue.requeue_task(task)
+
+    console.print(f"[green]✓ Guidance injected and task re-queued to {task.assigned_to}[/]")
+    console.print(f"[dim]The agent will receive your guidance on next attempt[/]")
+    console.print(f"[dim]Monitor with: agent status --watch[/]")
+
+
+@cli.command()
 @click.argument("identifier", required=False)
 @click.option("--reset-retries", is_flag=True, help="Reset retry count to 0")
 @click.option("--all", "retry_all", is_flag=True, help="Retry all failed tasks")

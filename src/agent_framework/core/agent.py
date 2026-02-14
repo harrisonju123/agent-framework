@@ -390,8 +390,9 @@ class Agent:
 
         if not validation.is_valid:
             self.logger.error(f"Task {task.id} rejected due to validation errors")
-            task.last_error = f"Task validation failed: {'; '.join(validation.errors)}"
-            task.mark_failed(self.config.id)
+            error_msg = f"Task validation failed: {'; '.join(validation.errors)}"
+            task.last_error = error_msg
+            task.mark_failed(self.config.id, error_message=error_msg, error_type="validation")
             self.queue.mark_failed(task)
             return False
 
@@ -886,7 +887,8 @@ class Agent:
                 f"Task {task.id} has failed {task.retry_count} times "
                 f"(max: {self.retry_handler.max_retries})"
             )
-            task.mark_failed(self.config.id)
+            error_type = self._categorize_error(task.last_error or "")
+            task.mark_failed(self.config.id, error_message=task.last_error, error_type=error_type)
             self.queue.mark_failed(task)
 
             # Notify JIRA about permanent failure (no status change, just a comment)
@@ -1445,6 +1447,68 @@ Previous attempts failed. Use this revised approach:
 
         return prompt + replan_section
 
+    def _categorize_error(self, error_message: str) -> Optional[str]:
+        """Categorize error message for better diagnostics."""
+        if not error_message:
+            return None
+
+        error_lower = error_message.lower()
+        patterns = {
+            "network": ["connection", "timeout", "unreachable", "dns", "resolve host"],
+            "authentication": ["unauthorized", "authentication", "credential", "permission denied", "403", "401"],
+            "validation": ["validation", "invalid", "schema", "type error", "missing required"],
+            "resource": ["out of memory", "disk full", "too many", "resource exhausted"],
+            "logic": ["null reference", "index out of range", "assertion", "unexpected state"],
+        }
+
+        for category, keywords in patterns.items():
+            if any(keyword in error_lower for keyword in keywords):
+                return category
+
+        return "unknown"
+
+    def _inject_human_guidance(self, prompt: str, task: Task) -> str:
+        """Inject human guidance from escalation report if available."""
+        # Check for human guidance in escalation report
+        if task.escalation_report and task.escalation_report.human_guidance:
+            guidance = task.escalation_report.human_guidance
+            guidance_section = f"""
+
+## CRITICAL: Human Guidance Provided
+
+A human expert has reviewed this task and provided the following guidance to help you succeed:
+
+{guidance}
+
+Please carefully consider this guidance when approaching the task. This information may help you avoid the previous failures.
+
+## Previous Failure Context
+
+{task.escalation_report.root_cause_hypothesis}
+
+Suggested interventions:
+"""
+            for i, intervention in enumerate(task.escalation_report.suggested_interventions, 1):
+                guidance_section += f"{i}. {intervention}\n"
+
+            return prompt + guidance_section
+
+        # Fall back to context-based guidance (legacy support)
+        context_guidance = task.context.get("human_guidance")
+        if context_guidance:
+            return prompt + f"""
+
+## CRITICAL: Human Guidance Provided
+
+A human expert has provided guidance for this task:
+
+{context_guidance}
+
+Please carefully consider this guidance when approaching the task.
+"""
+
+        return prompt
+
     def _handle_shadow_mode_comparison(self, task: Task) -> str:
         """Generate and compare both prompts in shadow mode, return legacy prompt."""
         legacy_prompt = self._build_prompt_legacy(task)
@@ -1527,6 +1591,9 @@ Fix the failing tests and ensure all tests pass.
 
         # Inject replan history if retrying with revised approach
         prompt = self._inject_replan_context(prompt, task)
+
+        # Inject human guidance if provided via `agent guide` command
+        prompt = self._inject_human_guidance(prompt, task)
 
         # Session log: capture what was sent to the LLM
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:12]
