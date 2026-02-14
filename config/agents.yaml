@@ -141,6 +141,33 @@ agents:
       - If tests fail, fix and re-run
       - Once all checks pass, commit and push your changes
 
+      STRUCTURED FINDINGS:
+      When your fix task contains structured_findings in context:
+      1. Parse the JSON to get the numbered list of issues
+      2. Address each issue systematically (file:line references provided)
+      3. Check off each finding as you resolve it
+      4. Include "Fixed findings: #1, #2, #3" in commit message
+
+      The task description will contain a numbered checklist. Work through each item:
+      - Review the file:line location
+      - Understand the issue description
+      - Apply the suggested fix (or equivalent solution)
+      - Run tests to verify
+
+      Example workflow:
+      ```python
+      # Access structured findings from task context
+      if "structured_findings" in task.context:
+          findings = task.context["structured_findings"]
+          for finding in findings["findings"]:
+              file = finding.get("file")
+              line = finding.get("line")
+              severity = finding["severity"]
+              description = finding["description"]
+              suggested_fix = finding.get("suggested_fix")
+              # Fix the issue at file:line...
+      ```
+
       INTER-AGENT CONSULTATION:
       Use consult_agent when you need expert input:
       - Unsure about architecture? → consult_agent(target_agent="architect", question="...")
@@ -213,6 +240,49 @@ agents:
 
          Use your security-reviewer and performance-reviewer teammates for deep analysis.
          List issues by severity and provide file:line references with suggested fixes.
+
+      5. STRUCTURED FINDINGS OUTPUT:
+         When you find issues during code review, output them in this JSON format within a code fence:
+
+         ```json
+         {
+           "findings": [
+             {
+               "id": "finding-1",
+               "severity": "CRITICAL",
+               "category": "security",
+               "file": "src/handlers/auth.py",
+               "line": 42,
+               "description": "SQL injection vulnerability in login handler",
+               "suggested_fix": "Use parameterized queries: cursor.execute('SELECT * FROM users WHERE email = ?', (email,))",
+               "resolved": false
+             },
+             {
+               "id": "finding-2",
+               "severity": "HIGH",
+               "category": "performance",
+               "file": "src/api/users.py",
+               "line": 87,
+               "description": "N+1 query in user list endpoint",
+               "suggested_fix": "Use select_related() to fetch related profiles in single query",
+               "resolved": false
+             }
+           ],
+           "summary": "Found 1 critical security issue and 1 high-priority performance issue",
+           "total_count": 2,
+           "critical_count": 1,
+           "high_count": 1,
+           "major_count": 0
+         }
+         ```
+
+         **Severity Levels**: CRITICAL | HIGH | MAJOR | MEDIUM | MINOR | LOW | SUGGESTION
+         **Categories**: security | performance | correctness | style | testing
+
+         End your review with:
+         - **APPROVE** (if no blocking issues) or **REQUEST_CHANGES** (if issues found)
+         - Include the JSON findings block above
+         - Provide file:line references when possible
 
       5. PR REVIEW (standard workflow):
          - Fetch PR details and diff using `github_get_pr` and `github_get_pr_diff`
