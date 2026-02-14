@@ -83,6 +83,11 @@ def agent(queue, tmp_path):
     ]
     a._team_mode_enabled = False
     a.logger = MagicMock()
+
+    # Initialize workflow executor (required by new DAG implementation)
+    from agent_framework.workflow.executor import WorkflowExecutor
+    a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
+
     return a
 
 

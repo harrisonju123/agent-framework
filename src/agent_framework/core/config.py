@@ -207,14 +207,124 @@ class TeamModeConfig(BaseModel):
     enabled: bool = True
 
 
+class WorkflowStepDefinition(BaseModel):
+    """Defines a single step in a DAG workflow."""
+    agent: str
+    next: Optional[List[Dict[str, Any]]] = None  # List of edge definitions
+    task_type: Optional[str] = None  # Override default task type
+
+
 class WorkflowDefinition(BaseModel):
-    """Defines a workflow's agent chain and behaviour."""
+    """Defines a workflow's agent chain and behaviour.
+
+    Supports both legacy linear format (agents list) and new DAG format (steps dict).
+    """
     description: str = ""
-    agents: List[str] = Field(default_factory=list)
+
+    # Legacy format (backward compatible)
+    agents: Optional[List[str]] = None
+
+    # DAG format
+    steps: Optional[Dict[str, WorkflowStepDefinition]] = None
+    start_step: Optional[str] = None
+
+    # Common metadata
     pr_creator: Optional[str] = None
     auto_review: bool = True
     require_tests: bool = True
     output: Optional[str] = None
+
+    @model_validator(mode='after')
+    def validate_workflow(self) -> 'WorkflowDefinition':
+        """Validate that either agents or steps is provided, but not both."""
+        if self.agents is None and self.steps is None:
+            raise ValueError("Workflow must have either 'agents' (legacy) or 'steps' (DAG)")
+
+        if self.agents is not None and self.steps is not None:
+            raise ValueError("Workflow cannot have both 'agents' and 'steps' (choose one format)")
+
+        if self.steps is not None and self.start_step is None:
+            raise ValueError("DAG workflow must specify 'start_step'")
+
+        if self.steps is not None and self.start_step not in self.steps:
+            raise ValueError(f"start_step '{self.start_step}' not found in steps")
+
+        return self
+
+    @property
+    def is_legacy_format(self) -> bool:
+        """Check if this is a legacy linear workflow."""
+        return self.agents is not None
+
+    def to_dag(self, name: str):
+        """Convert to WorkflowDAG instance.
+
+        For legacy format, creates a linear DAG.
+        For DAG format, builds the full DAG from step definitions.
+        """
+        from ..workflow.dag import (
+            WorkflowDAG,
+            WorkflowStep,
+            WorkflowEdge,
+            EdgeCondition,
+            EdgeConditionType,
+        )
+
+        if self.is_legacy_format:
+            # Convert legacy linear format to DAG
+            return WorkflowDAG.from_linear_chain(name, self.agents, self.description)
+
+        # Build DAG from step definitions
+        dag_steps = {}
+        for step_id, step_def in self.steps.items():
+            edges = []
+            if step_def.next:
+                for edge_def in step_def.next:
+                    # Parse edge definition
+                    if isinstance(edge_def, str):
+                        # Simple string target (unconditional)
+                        edges.append(WorkflowEdge(
+                            target=edge_def,
+                            condition=EdgeCondition(EdgeConditionType.ALWAYS)
+                        ))
+                    elif isinstance(edge_def, dict):
+                        # Complex edge with condition
+                        target = edge_def.get("target")
+                        condition_type = edge_def.get("condition", "always")
+                        condition_params = edge_def.get("params", {})
+                        priority = edge_def.get("priority", 0)
+
+                        if not target:
+                            raise ValueError(f"Edge in step '{step_id}' missing 'target'")
+
+                        edges.append(WorkflowEdge(
+                            target=target,
+                            condition=EdgeCondition(
+                                EdgeConditionType(condition_type),
+                                condition_params
+                            ),
+                            priority=priority
+                        ))
+
+            dag_steps[step_id] = WorkflowStep(
+                id=step_id,
+                agent=step_def.agent,
+                next=edges,
+                task_type_override=step_def.task_type
+            )
+
+        return WorkflowDAG(
+            name=name,
+            description=self.description,
+            steps=dag_steps,
+            start_step=self.start_step,
+            metadata={
+                "pr_creator": self.pr_creator,
+                "auto_review": self.auto_review,
+                "require_tests": self.require_tests,
+                "output": self.output,
+            }
+        )
 
 
 class MultiRepoConfig(BaseModel):
