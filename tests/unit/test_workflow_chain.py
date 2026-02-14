@@ -89,6 +89,12 @@ def agent(queue, tmp_path):
     ]
     a._team_mode_enabled = False
     a.logger = MagicMock()
+    a._session_logger = MagicMock()
+
+    # Initialize workflow executor (required by new DAG implementation)
+    from agent_framework.workflow.executor import WorkflowExecutor
+    a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
+
     return a
 
 
@@ -131,6 +137,7 @@ class TestEnforceWorkflowChain:
         assert chain_task.assigned_to == "qa"
         assert chain_task.context["source_task_id"] == task.id
         assert chain_task.context["chain_step"] is True
+        assert chain_task.context["workflow_step"] == "qa"
 
     def test_skips_when_pr_created(self, agent, queue):
         """If a PR was created, chain enforcement is skipped."""
@@ -252,14 +259,15 @@ class TestEnforceWorkflowChain:
         queue.push.assert_not_called()
 
     def test_queue_error_is_caught(self, agent, queue):
-        """Push failures are logged but don't raise."""
+        """Push failures are logged by executor but don't raise."""
         task = _make_task(workflow="default")
         response = _make_response()
         queue.push.side_effect = OSError("disk full")
+        agent._workflow_executor.logger = MagicMock()
 
         agent._enforce_workflow_chain(task, response)
 
-        agent.logger.error.assert_called_once()
+        agent._workflow_executor.logger.error.assert_called_once()
 
 
 # -- _normalize_workflow --

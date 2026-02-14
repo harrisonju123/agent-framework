@@ -201,6 +201,10 @@ class Agent:
         # Workflow chain definitions for automatic next-agent queuing
         self._workflows_config = workflows_config or {}
 
+        # Workflow DAG executor for smart routing
+        from ..workflow.executor import WorkflowExecutor
+        self._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
+
         # Setup rich logging (log_level passed from CLI via environment)
         import os
         log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO")
@@ -2843,9 +2847,13 @@ IMPORTANT:
     # -- Workflow chain enforcement --
 
     def _enforce_workflow_chain(self, task: Task, response, routing_signal=None) -> None:
-        """Queue next agent in chain, or use routing signal override if valid."""
+        """Queue next agent in workflow using DAG executor.
+
+        Supports both legacy linear workflows and new DAG workflows with conditions.
+        """
         workflow_name = task.context.get("workflow")
         if not workflow_name or workflow_name not in self._workflows_config:
+            # No workflow defined - handle routing signal if present
             if routing_signal:
                 validated = validate_routing_signal(
                     routing_signal, self.config.base_id, get_type_str(task.type), self._agents_config,
@@ -2858,78 +2866,61 @@ IMPORTANT:
                 )
             return
 
-        workflow = self._workflows_config[workflow_name]
-        agents = workflow.agents
-        if len(agents) <= 1:
+        # Get workflow definition and convert to DAG
+        workflow_def = self._workflows_config[workflow_name]
+        try:
+            workflow_dag = workflow_def.to_dag(workflow_name)
+        except Exception as e:
+            self.logger.error(f"Failed to build workflow DAG for {workflow_name}: {e}")
+            return
+
+        # Single-agent workflows don't need routing
+        if len(workflow_dag.get_all_agents()) <= 1:
             if routing_signal:
                 self.logger.debug("Routing signal discarded: single-agent workflow")
             return
 
-        pr_info = self._get_pr_info(task, response)
-        if pr_info:
-            return
-
-        if routing_signal:
-            validated = validate_routing_signal(
-                routing_signal, self.config.base_id, get_type_str(task.type), self._agents_config,
+        # Execute workflow step using DAG executor
+        try:
+            routed = self._workflow_executor.execute_step(
+                workflow=workflow_dag,
+                task=task,
+                response=response,
+                current_agent_id=self.config.base_id,
+                routing_signal=routing_signal,
+                context=self._build_workflow_context(task),
             )
-            if validated == WORKFLOW_COMPLETE:
-                # Safe: _get_pr_info already returned early above if a PR existed
-                self.logger.info(
-                    f"Workflow marked complete by routing signal: {routing_signal.reason}"
-                )
+
+            # Log routing decision
+            if routing_signal:
                 log_routing_decision(
                     self.workspace, task.id, self.config.id,
-                    routing_signal, validated, used_fallback=False,
+                    routing_signal, None, used_fallback=not routed,
                 )
-                return
-            if validated:
-                self._route_to_agent(task, validated, routing_signal.reason)
-                log_routing_decision(
-                    self.workspace, task.id, self.config.id,
-                    routing_signal, validated, used_fallback=False,
+
+            # Session logging
+            if routed:
+                self._session_logger.log(
+                    "workflow_routing",
+                    workflow=workflow_name,
+                    signal=routing_signal.target_agent if routing_signal else None,
                 )
-                return
-            self.logger.debug(
-                f"Routing signal for {routing_signal.target_agent} rejected, "
-                f"falling back to default chain"
-            )
-
-        current = self.config.base_id
-        try:
-            idx = agents.index(current)
-        except ValueError:
-            return
-        if idx >= len(agents) - 1:
-            self._queue_pr_creation_if_needed(task, workflow)
-            return
-
-        if task.context.get("pr_creation_step"):
-            return
-
-        next_agent = agents[idx + 1]
-
-        if routing_signal:
-            log_routing_decision(
-                self.workspace, task.id, self.config.id,
-                routing_signal, next_agent, used_fallback=True,
-            )
-
-        if self._is_chain_task_already_queued(next_agent, task.id):
-            self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
-            return
-
-        chain_task = self._build_chain_task(task, next_agent)
-        try:
-            self.queue.push(chain_task, next_agent)
-            self.logger.info(f"🔗 Workflow chain: queued {next_agent} for task {task.id}")
-            self._session_logger.log(
-                "workflow_chain",
-                next_agent=next_agent,
-                reason="default chain",
-            )
         except Exception as e:
-            self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
+            self.logger.error(f"Workflow execution failed for task {task.id}: {e}")
+
+    def _build_workflow_context(self, task: Task) -> Dict[str, Any]:
+        """Build context dict for workflow condition evaluation."""
+        context = {}
+
+        # Add changed files if available
+        if task.context and "changed_files" in task.context:
+            context["changed_files"] = task.context["changed_files"]
+
+        # Add test results if available
+        if task.context and "test_result" in task.context:
+            context["test_result"] = task.context["test_result"]
+
+        return context
 
     def _route_to_agent(self, task: Task, target_agent: str, reason: str) -> None:
         if self._is_chain_task_already_queued(target_agent, task.id):
