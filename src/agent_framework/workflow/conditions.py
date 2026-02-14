@@ -1,9 +1,7 @@
 """Condition evaluators for workflow edge transitions."""
 
-import fnmatch
 import logging
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,18 +25,7 @@ class ConditionEvaluator(ABC):
         routing_signal: Optional["RoutingSignal"] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Evaluate whether the condition is met.
-
-        Args:
-            condition: The condition to evaluate
-            task: The current task
-            response: The LLM response
-            routing_signal: Optional routing signal from agent
-            context: Additional evaluation context
-
-        Returns:
-            True if condition is met, False otherwise
-        """
+        """Evaluate whether the condition is met."""
         pass
 
 
@@ -53,22 +40,14 @@ class PRCreatedCondition(ConditionEvaluator):
     """True if a PR was created in this task."""
 
     def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
-        # Check task context for pr_url
-        if task.context and "pr_url" in task.context:
-            return True
+        import re
+        pr_pattern = re.compile(r'https://github\.com/[^/]+/[^/]+/pull/\d+')
 
-        # Check response content for PR URL patterns
+        if task.context and "pr_url" in task.context:
+            return bool(pr_pattern.search(task.context["pr_url"]))
+
         if hasattr(response, "content") and response.content:
-            content = str(response.content)
-            # Common PR URL patterns
-            pr_patterns = [
-                "github.com/",
-                "/pull/",
-                "Created PR:",
-                "Pull Request:",
-            ]
-            if any(pattern in content for pattern in pr_patterns):
-                return True
+            return bool(pr_pattern.search(str(response.content)))
 
         return False
 
@@ -82,12 +61,31 @@ class NoPRCondition(ConditionEvaluator):
 
 
 class ApprovedCondition(ConditionEvaluator):
-    """True if QA approved the changes."""
+    """True if QA approved the changes.
+
+    Prefers structured verdict from task context (set by _parse_review_outcome)
+    to avoid fragile keyword matching on free-text responses.
+    """
 
     def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
-        # Check for approval indicators in response
+        # Prefer structured verdict from task context or evaluation context
+        verdict = None
+        if context and "verdict" in context:
+            verdict = context["verdict"]
+        elif task.context and "verdict" in task.context:
+            verdict = task.context["verdict"]
+
+        if verdict is not None:
+            return str(verdict).lower() in ("approved", "approve", "lgtm")
+
+        # Fall back to keyword heuristic on response content
         if hasattr(response, "content") and response.content:
             content = str(response.content).lower()
+            rejection_keywords = [
+                "needs fix",
+                "issues found",
+                "problems detected",
+            ]
             approval_keywords = [
                 "approved",
                 "looks good",
@@ -95,29 +93,34 @@ class ApprovedCondition(ConditionEvaluator):
                 "ready for merge",
                 "passes all checks",
             ]
-            rejection_keywords = [
-                "needs fix",
-                "failed",
-                "issues found",
-                "problems detected",
-            ]
 
-            # Reject if rejection keywords found
+            # Check rejection first — a response mentioning past failures
+            # alongside approval should be treated carefully
             if any(keyword in content for keyword in rejection_keywords):
                 return False
-
-            # Approve if approval keywords found
             if any(keyword in content for keyword in approval_keywords):
                 return True
 
-        # Default to False (require explicit approval)
         return False
 
 
 class NeedsFixCondition(ConditionEvaluator):
-    """True if QA found issues that need fixing (inverse of ApprovedCondition)."""
+    """True if QA found issues that need fixing.
+
+    Mirrors ApprovedCondition: prefers structured verdict, falls back to keywords.
+    """
 
     def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
+        # Prefer structured verdict
+        verdict = None
+        if context and "verdict" in context:
+            verdict = context["verdict"]
+        elif task.context and "verdict" in task.context:
+            verdict = task.context["verdict"]
+
+        if verdict is not None:
+            return str(verdict).lower() in ("needs_fix", "needs fix", "rejected", "changes_requested")
+
         approved_condition = ApprovedCondition()
         return not approved_condition.evaluate(condition, task, response, routing_signal, context)
 
@@ -126,11 +129,9 @@ class TestPassedCondition(ConditionEvaluator):
     """True if tests passed."""
 
     def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
-        # Check context for test results
         if context and "test_result" in context:
             return context["test_result"] == "passed"
 
-        # Check response content for test pass indicators
         if hasattr(response, "content") and response.content:
             content = str(response.content).lower()
             if "tests passed" in content or "all tests pass" in content:
@@ -151,15 +152,20 @@ class TestFailedCondition(ConditionEvaluator):
 
 
 class FilesMatchCondition(ConditionEvaluator):
-    """True if changed files match a glob pattern."""
+    """True if any changed file matches a glob pattern.
+
+    Uses PurePath.match() to handle paths with directory separators
+    (e.g., 'docs/README.md' matches '**/*.md').
+    """
 
     def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
+        from pathlib import PurePath
+
         pattern = condition.params.get("pattern", "")
         if not pattern:
             logger.warning("files_match condition missing 'pattern' parameter")
             return False
 
-        # Get changed files from context
         changed_files = []
         if context and "changed_files" in context:
             changed_files = context["changed_files"]
@@ -167,12 +173,10 @@ class FilesMatchCondition(ConditionEvaluator):
             changed_files = task.context["changed_files"]
 
         if not changed_files:
-            # No files to check, default to False
             return False
 
-        # Check if any file matches the pattern
         for file_path in changed_files:
-            if fnmatch.fnmatch(str(file_path), pattern):
+            if PurePath(file_path).match(pattern):
                 return True
 
         return False
@@ -187,7 +191,6 @@ class PRSizeUnderCondition(ConditionEvaluator):
             logger.warning("pr_size_under condition has invalid 'max_files' parameter")
             return False
 
-        # Get changed files count
         changed_files = []
         if context and "changed_files" in context:
             changed_files = context["changed_files"]
@@ -209,14 +212,13 @@ class SignalTargetCondition(ConditionEvaluator):
             logger.warning("signal_target condition missing 'target' parameter")
             return False
 
-        # Check if routing signal targets this specific agent
         return routing_signal.target_agent == target
 
 
-class ConditionRegistry:
-    """Registry mapping condition types to evaluators."""
-
-    _evaluators: Dict[EdgeConditionType, ConditionEvaluator] = {
+def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
+    """Build a fresh evaluator map so ConditionRegistry.register() in tests
+    doesn't pollute global state."""
+    return {
         EdgeConditionType.ALWAYS: AlwaysCondition(),
         EdgeConditionType.PR_CREATED: PRCreatedCondition(),
         EdgeConditionType.NO_PR: NoPRCondition(),
@@ -229,6 +231,12 @@ class ConditionRegistry:
         EdgeConditionType.SIGNAL_TARGET: SignalTargetCondition(),
     }
 
+
+class ConditionRegistry:
+    """Registry mapping condition types to evaluators."""
+
+    _evaluators: Dict[EdgeConditionType, ConditionEvaluator] = _default_evaluators()
+
     @classmethod
     def evaluate(
         cls,
@@ -238,18 +246,7 @@ class ConditionRegistry:
         routing_signal: Optional["RoutingSignal"] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Evaluate a condition using the appropriate evaluator.
-
-        Args:
-            condition: The condition to evaluate
-            task: The current task
-            response: The LLM response
-            routing_signal: Optional routing signal from agent
-            context: Additional evaluation context
-
-        Returns:
-            True if condition is met, False otherwise
-        """
+        """Evaluate a condition using the appropriate evaluator."""
         evaluator = cls._evaluators.get(condition.type)
         if not evaluator:
             logger.error(f"No evaluator found for condition type: {condition.type}")
@@ -265,3 +262,8 @@ class ConditionRegistry:
     def register(cls, condition_type: EdgeConditionType, evaluator: ConditionEvaluator):
         """Register a custom condition evaluator."""
         cls._evaluators[condition_type] = evaluator
+
+    @classmethod
+    def reset(cls):
+        """Restore default evaluators (useful in tests)."""
+        cls._evaluators = _default_evaluators()

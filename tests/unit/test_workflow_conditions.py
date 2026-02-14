@@ -66,7 +66,7 @@ class TestAlwaysCondition:
 
 class TestPRCreatedCondition:
     def test_pr_in_context(self):
-        """PR URL in task context."""
+        """PR URL in task context (valid GitHub PR URL)."""
         condition = EdgeCondition(EdgeConditionType.PR_CREATED)
         task = _make_task(pr_url="https://github.com/org/repo/pull/42")
         response = _make_response()
@@ -75,7 +75,7 @@ class TestPRCreatedCondition:
         assert evaluator.evaluate(condition, task, response) is True
 
     def test_pr_in_response(self):
-        """PR URL in response content."""
+        """PR URL in response content (valid GitHub PR URL)."""
         condition = EdgeCondition(EdgeConditionType.PR_CREATED)
         task = _make_task()
         response = _make_response("Created PR: https://github.com/org/repo/pull/99")
@@ -88,6 +88,15 @@ class TestPRCreatedCondition:
         condition = EdgeCondition(EdgeConditionType.PR_CREATED)
         task = _make_task()
         response = _make_response("Implemented feature X")
+
+        evaluator = PRCreatedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_mention_without_pr_url(self):
+        """Merely mentioning github.com without a valid PR URL is not a PR."""
+        condition = EdgeCondition(EdgeConditionType.PR_CREATED)
+        task = _make_task()
+        response = _make_response("Check github.com/org/repo for details")
 
         evaluator = PRCreatedCondition()
         assert evaluator.evaluate(condition, task, response) is False
@@ -114,8 +123,36 @@ class TestNoPRCondition:
 
 
 class TestApprovedCondition:
+    def test_structured_verdict_approved(self):
+        """Structured verdict in context takes priority."""
+        condition = EdgeCondition(EdgeConditionType.APPROVED)
+        task = _make_task(verdict="approved")
+        response = _make_response("issues found, needs fix")
+
+        evaluator = ApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is True
+
+    def test_structured_verdict_rejected(self):
+        """Structured rejection verdict overrides keywords."""
+        condition = EdgeCondition(EdgeConditionType.APPROVED)
+        task = _make_task(verdict="needs_fix")
+        response = _make_response("approved, looks good")
+
+        evaluator = ApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_context_verdict_takes_priority(self):
+        """Verdict from evaluation context overrides task context."""
+        condition = EdgeCondition(EdgeConditionType.APPROVED)
+        task = _make_task(verdict="needs_fix")
+        response = _make_response()
+        context = {"verdict": "approved"}
+
+        evaluator = ApprovedCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is True
+
     def test_approved_keywords(self):
-        """Detect approval keywords in response."""
+        """Detect approval keywords in response (fallback)."""
         condition = EdgeCondition(EdgeConditionType.APPROVED)
         task = _make_task()
 
@@ -174,6 +211,24 @@ class TestNeedsFixCondition:
         condition = EdgeCondition(EdgeConditionType.NEEDS_FIX)
         task = _make_task()
         response = _make_response("All good, approved")
+
+        evaluator = NeedsFixCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_structured_verdict_needs_fix(self):
+        """Structured verdict for needs_fix."""
+        condition = EdgeCondition(EdgeConditionType.NEEDS_FIX)
+        task = _make_task(verdict="needs_fix")
+        response = _make_response("approved")
+
+        evaluator = NeedsFixCondition()
+        assert evaluator.evaluate(condition, task, response) is True
+
+    def test_structured_verdict_approved_means_no_fix(self):
+        """Structured verdict approved means not needs_fix."""
+        condition = EdgeCondition(EdgeConditionType.NEEDS_FIX)
+        task = _make_task(verdict="approved")
+        response = _make_response("issues found")
 
         evaluator = NeedsFixCondition()
         assert evaluator.evaluate(condition, task, response) is False
@@ -254,6 +309,19 @@ class TestFilesMatchCondition:
 
         evaluator = FilesMatchCondition()
         assert evaluator.evaluate(condition, task, response, context=context) is False
+
+    def test_pattern_matches_nested_paths(self):
+        """PurePath.match handles nested paths correctly with ** patterns."""
+        condition = EdgeCondition(
+            EdgeConditionType.FILES_MATCH,
+            params={"pattern": "**/*.md"}
+        )
+        task = _make_task()
+        response = _make_response()
+        context = {"changed_files": ["docs/guide/README.md"]}
+
+        evaluator = FilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is True
 
     def test_changed_files_in_task_context(self):
         """Get changed files from task context."""
@@ -388,17 +456,12 @@ class TestConditionRegistry:
         ]
 
         for cond_type in condition_types:
-            if cond_type in [EdgeConditionType.FILES_MATCH, EdgeConditionType.PR_SIZE_UNDER, EdgeConditionType.SIGNAL_TARGET]:
-                continue  # Skip conditions that require parameters
-
             condition = EdgeCondition(cond_type)
-            # Should not raise exception
             result = ConditionRegistry.evaluate(condition, task, response)
             assert isinstance(result, bool)
 
     def test_unknown_condition_type(self):
         """Unknown condition type returns False."""
-        # Create a mock condition with invalid type (bypass validation)
         condition = EdgeCondition.__new__(EdgeCondition)
         condition.type = "INVALID_CONDITION"
         condition.params = {}

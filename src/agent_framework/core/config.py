@@ -256,12 +256,22 @@ class WorkflowDefinition(BaseModel):
         """Check if this is a legacy linear workflow."""
         return self.agents is not None
 
+    @property
+    def agent_list(self) -> List[str]:
+        """Safe accessor — returns agents list or empty list for DAG workflows."""
+        return self.agents or []
+
     def to_dag(self, name: str):
-        """Convert to WorkflowDAG instance.
+        """Convert to WorkflowDAG instance (cached after first call).
 
         For legacy format, creates a linear DAG.
         For DAG format, builds the full DAG from step definitions.
         """
+        # Return cached DAG if available
+        cached = getattr(self, "_cached_dag", None)
+        if cached is not None:
+            return cached
+
         from ..workflow.dag import (
             WorkflowDAG,
             WorkflowStep,
@@ -271,8 +281,9 @@ class WorkflowDefinition(BaseModel):
         )
 
         if self.is_legacy_format:
-            # Convert legacy linear format to DAG
-            return WorkflowDAG.from_linear_chain(name, self.agents, self.description)
+            dag = WorkflowDAG.from_linear_chain(name, self.agents, self.description)
+            object.__setattr__(self, "_cached_dag", dag)
+            return dag
 
         # Build DAG from step definitions
         dag_steps = {}
@@ -280,15 +291,12 @@ class WorkflowDefinition(BaseModel):
             edges = []
             if step_def.next:
                 for edge_def in step_def.next:
-                    # Parse edge definition
                     if isinstance(edge_def, str):
-                        # Simple string target (unconditional)
                         edges.append(WorkflowEdge(
                             target=edge_def,
                             condition=EdgeCondition(EdgeConditionType.ALWAYS)
                         ))
                     elif isinstance(edge_def, dict):
-                        # Complex edge with condition
                         target = edge_def.get("target")
                         condition_type = edge_def.get("condition", "always")
                         condition_params = edge_def.get("params", {})
@@ -313,7 +321,7 @@ class WorkflowDefinition(BaseModel):
                 task_type_override=step_def.task_type
             )
 
-        return WorkflowDAG(
+        dag = WorkflowDAG(
             name=name,
             description=self.description,
             steps=dag_steps,
@@ -325,6 +333,8 @@ class WorkflowDefinition(BaseModel):
                 "output": self.output,
             }
         )
+        object.__setattr__(self, "_cached_dag", dag)
+        return dag
 
 
 class MultiRepoConfig(BaseModel):
