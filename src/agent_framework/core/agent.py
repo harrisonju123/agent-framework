@@ -2060,17 +2060,27 @@ IMPORTANT:
         """
         # Already has a PR (created by the LLM via MCP or _handle_success)
         if task.context.get("pr_url"):
+            self.logger.debug(f"PR already exists for {task.id}: {task.context['pr_url']}")
             return
 
         # Only act if we have an active worktree with changes
         if not self._active_worktree or not self.worktree_manager:
+            self.logger.debug(f"No active worktree for {task.id}, skipping PR creation")
             return
 
-        if not self.worktree_manager.has_unpushed_commits(self._active_worktree):
-            return
+        has_unpushed = self.worktree_manager.has_unpushed_commits(self._active_worktree)
+        branch_already_pushed = False
+        if not has_unpushed:
+            # LLM may have pushed the branch itself — check if it exists on the remote
+            branch_already_pushed = self._remote_branch_exists(self._active_worktree)
+            if not branch_already_pushed:
+                self.logger.debug(f"No unpushed commits and no remote branch for {task.id}")
+                return
+            self.logger.debug(f"Branch already pushed to remote for {task.id}, will create PR only")
 
         github_repo = task.context.get("github_repo")
         if not github_repo:
+            self.logger.debug(f"No github_repo in task context for {task.id}, skipping PR creation")
             return
 
         try:
@@ -2088,17 +2098,19 @@ IMPORTANT:
 
             # Don't create PRs from main/master
             if branch in ("main", "master"):
+                self.logger.debug(f"On {branch} branch for {task.id}, skipping PR creation")
                 return
 
-            # Push the branch
-            self.logger.info(f"Pushing branch {branch} to origin")
-            push_result = subprocess.run(
-                ["git", "push", "-u", "origin", branch],
-                cwd=worktree, capture_output=True, text=True, timeout=60,
-            )
-            if push_result.returncode != 0:
-                self.logger.error(f"Failed to push branch: {push_result.stderr}")
-                return
+            # Push the branch (skip if LLM already pushed it)
+            if not branch_already_pushed:
+                self.logger.info(f"Pushing branch {branch} to origin")
+                push_result = subprocess.run(
+                    ["git", "push", "-u", "origin", branch],
+                    cwd=worktree, capture_output=True, text=True, timeout=60,
+                )
+                if push_result.returncode != 0:
+                    self.logger.error(f"Failed to push branch: {push_result.stderr}")
+                    return
 
             # Create PR using gh CLI
             pr_title = task.title
@@ -2134,6 +2146,26 @@ IMPORTANT:
             self.logger.error("Timed out pushing branch or creating PR")
         except Exception as e:
             self.logger.error(f"Error creating PR: {e}")
+
+    def _remote_branch_exists(self, worktree_path) -> bool:
+        """Check if current branch exists on the remote (origin)."""
+        try:
+            branch_result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree_path, capture_output=True, text=True, timeout=10,
+            )
+            if branch_result.returncode != 0:
+                return False
+            branch = branch_result.stdout.strip()
+            if branch in ("main", "master", "HEAD"):
+                return False
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin", branch],
+                cwd=worktree_path, capture_output=True, text=True, timeout=10,
+            )
+            return bool(result.stdout.strip())
+        except Exception:
+            return False
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
         """Transition a JIRA ticket to target_status if all preconditions are met.
