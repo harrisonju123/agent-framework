@@ -48,6 +48,12 @@ DEFAULT_WORKFLOW = WorkflowDefinition(
     agents=["architect", "engineer", "qa"],
 )
 
+PR_WORKFLOW = WorkflowDefinition(
+    description="Workflow with PR creator",
+    agents=["architect", "engineer", "qa"],
+    pr_creator="architect",
+)
+
 ANALYSIS_WORKFLOW = WorkflowDefinition(
     description="Analysis only",
     agents=["architect"],
@@ -383,3 +389,94 @@ class TestRoutingSignalChain:
         queue.push.assert_called_once()
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "qa"
+
+
+# -- PR creation from last agent --
+
+class TestPRCreation:
+    """Tests for _queue_pr_creation_if_needed triggered by last agent in chain."""
+
+    @pytest.fixture
+    def pr_agent(self, queue, tmp_path):
+        """QA agent with a workflow that has pr_creator set."""
+        config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.queue = queue
+        a.workspace = tmp_path
+        a._workflows_config = {
+            "default": DEFAULT_WORKFLOW,
+            "pr_workflow": PR_WORKFLOW,
+            "analysis": ANALYSIS_WORKFLOW,
+        }
+        a._agents_config = [
+            SimpleNamespace(id="architect"),
+            SimpleNamespace(id="engineer"),
+            SimpleNamespace(id="qa"),
+        ]
+        a._team_mode_enabled = False
+        a.logger = MagicMock()
+        a._session_logger = MagicMock()
+        return a
+
+    def test_last_agent_queues_pr_creation(self, pr_agent, queue):
+        """QA (last agent) completes → PR_REQUEST queued to architect."""
+        task = _make_task(workflow="pr_workflow")
+        response = _make_response()
+
+        pr_agent._enforce_workflow_chain(task, response)
+
+        queue.push.assert_called_once()
+        pr_task = queue.push.call_args[0][0]
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "architect"
+        assert pr_task.type == TaskType.PR_REQUEST
+        assert pr_task.context["pr_creation_step"] is True
+        assert pr_task.title.startswith("[pr]")
+        assert pr_task.id == f"chain-{task.id[:12]}-architect-pr"
+
+    def test_last_agent_no_pr_creator_configured(self, pr_agent, queue):
+        """No pr_creator on workflow → no task queued (DEFAULT_WORKFLOW)."""
+        task = _make_task(workflow="default")
+        response = _make_response()
+
+        pr_agent._enforce_workflow_chain(task, response)
+
+        queue.push.assert_not_called()
+
+    def test_pr_creation_task_does_not_chain(self, pr_agent, queue):
+        """PR creation task landing on architect doesn't chain to engineer."""
+        pr_agent.config = AgentConfig(
+            id="architect", name="Architect", queue="architect", prompt="p",
+        )
+        task = _make_task(workflow="pr_workflow", pr_creation_step=True)
+        response = _make_response()
+
+        pr_agent._enforce_workflow_chain(task, response)
+
+        queue.push.assert_not_called()
+
+    def test_pr_creation_dedup(self, pr_agent, queue):
+        """Duplicate PR creation tasks are not queued."""
+        task = _make_task(workflow="pr_workflow")
+        response = _make_response()
+
+        # Pre-create the PR task file
+        pr_task_id = f"chain-{task.id[:12]}-architect-pr"
+        architect_dir = queue.queue_dir / "architect"
+        architect_dir.mkdir()
+        (architect_dir / f"{pr_task_id}.json").write_text("{}")
+
+        pr_agent._enforce_workflow_chain(task, response)
+
+        queue.push.assert_not_called()
+
+    def test_pr_creation_skipped_when_pr_exists(self, pr_agent, queue):
+        """PR already exists in task context → chain returns early before PR creation."""
+        task = _make_task(workflow="pr_workflow")
+        task.context["pr_url"] = "https://github.com/org/repo/pull/42"
+        response = _make_response()
+
+        pr_agent._enforce_workflow_chain(task, response)
+
+        queue.push.assert_not_called()

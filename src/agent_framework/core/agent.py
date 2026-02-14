@@ -2901,6 +2901,10 @@ IMPORTANT:
         except ValueError:
             return
         if idx >= len(agents) - 1:
+            self._queue_pr_creation_if_needed(task, workflow)
+            return
+
+        if task.context.get("pr_creation_step"):
             return
 
         next_agent = agents[idx + 1]
@@ -2979,3 +2983,54 @@ IMPORTANT:
                 "chain_step": True,
             },
         )
+
+    def _queue_pr_creation_if_needed(self, task: Task, workflow) -> None:
+        """Queue a PR creation task when the last agent in the chain completes.
+
+        The workflow's pr_creator field designates which agent should open the PR.
+        Without this, the chain ends silently after the last agent finishes.
+        """
+        pr_creator = getattr(workflow, "pr_creator", None)
+        if not pr_creator:
+            return
+
+        if task.context.get("pr_creation_step"):
+            return
+
+        # Deterministic ID with -pr suffix to avoid collision with normal chain tasks
+        pr_task_id = f"chain-{task.id[:12]}-{pr_creator}-pr"
+        queue_path = self.queue.queue_dir / pr_creator / f"{pr_task_id}.json"
+        if queue_path.exists():
+            self.logger.debug(f"PR creation task {pr_task_id} already queued, skipping")
+            return
+
+        from datetime import datetime
+
+        pr_task = Task(
+            id=pr_task_id,
+            type=TaskType.PR_REQUEST,
+            status=TaskStatus.PENDING,
+            priority=task.priority,
+            created_by=self.config.id,
+            assigned_to=pr_creator,
+            created_at=datetime.utcnow(),
+            title=f"[pr] {task.title}",
+            description=task.description,
+            context={
+                **task.context,
+                "source_task_id": task.id,
+                "source_agent": self.config.id,
+                "pr_creation_step": True,
+            },
+        )
+
+        try:
+            self.queue.push(pr_task, pr_creator)
+            self.logger.info(f"📦 Queued PR creation for {pr_creator} from task {task.id}")
+            self._session_logger.log(
+                "pr_creation_queued",
+                pr_creator=pr_creator,
+                source_task=task.id,
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to queue PR creation task for {pr_creator}: {e}")
