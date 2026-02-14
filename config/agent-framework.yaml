@@ -177,8 +177,10 @@ repositories:
     jira_project: AF
     display_name: Agent Framework
 # Workflow Configuration
-# Every task runs the same agent chain: Architect → Engineer → QA → Architect creates PR
+# Supports both legacy linear format and new DAG format with conditional branches
+
 workflows:
+  # Legacy format (backward compatible): linear agent chain
   default:
     description: "Architect plans, Engineer implements, QA reviews, Architect creates PR"
     agents: [architect, engineer, qa]
@@ -192,6 +194,74 @@ workflows:
     output: jira_epic
     auto_review: false
     require_tests: false
+
+  # DAG format example: conditional branches and parallel paths
+  # Uncomment to use DAG workflow instead of default linear chain
+  # default:
+  #   description: "Smart workflow with conditional branches"
+  #   start_step: plan
+  #   pr_creator: architect
+  #   auto_review: true
+  #   require_tests: true
+  #   steps:
+  #     plan:
+  #       agent: architect
+  #       next:
+  #         - target: implement
+  #     implement:
+  #       agent: engineer
+  #       next:
+  #         - target: qa_review
+  #     qa_review:
+  #       agent: qa
+  #       next:
+  #         # Conditional branches based on QA result
+  #         - target: create_pr
+  #           condition: approved
+  #           priority: 10
+  #         - target: implement
+  #           condition: needs_fix
+  #           priority: 5
+  #     create_pr:
+  #       agent: architect
+  #       # Terminal step (no next)
+  #
+  # Advanced DAG example with file-based skip paths:
+  # smart_workflow:
+  #   description: "Skip QA for docs-only changes"
+  #   start_step: plan
+  #   steps:
+  #     plan:
+  #       agent: architect
+  #       next:
+  #         - target: implement
+  #     implement:
+  #       agent: engineer
+  #       next:
+  #         # Skip QA if only docs changed
+  #         - target: create_pr
+  #           condition: files_match
+  #           params:
+  #             pattern: "*.md"
+  #           priority: 10
+  #         # Skip QA for small changes
+  #         - target: create_pr
+  #           condition: pr_size_under
+  #           params:
+  #             max_files: 3
+  #           priority: 5
+  #         # Default: go to QA
+  #         - target: qa_review
+  #           condition: always
+  #     qa_review:
+  #       agent: qa
+  #       next:
+  #         - target: create_pr
+  #           condition: approved
+  #         - target: implement
+  #           condition: needs_fix
+  #     create_pr:
+  #       agent: architect
 
 # Circuit Breaker Configuration
 # Orchestrator-level health checks to prevent cascading failures
