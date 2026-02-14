@@ -10,6 +10,7 @@ from agent_framework.core.agent import (
     Agent,
     AgentConfig,
     MAX_REVIEW_CYCLES,
+    QAFinding,
     ReviewOutcome,
 )
 from agent_framework.core.task import Task, TaskStatus, TaskType
@@ -256,9 +257,10 @@ class TestExtractFindingsCaseSensitivity:
     def test_ignores_lowercase_severity_tags(self, qa_agent):
         """Severity tags must be uppercase to be captured."""
         content = "suggestion: maybe rename this variable"
-        findings = qa_agent._extract_review_findings(content)
+        findings_summary, structured_findings = qa_agent._extract_review_findings(content)
         # Falls back to truncated content since no uppercase tags found
-        assert findings == content[:500]
+        assert findings_summary == content[:500]
+        assert structured_findings == []
 
 class TestExtractReviewFindings:
     def test_extracts_severity_lines(self, qa_agent):
@@ -269,15 +271,16 @@ HIGH: Missing rate limiting on /api/users
 MINOR: Unused import in utils.py
 
 Overall: REQUEST_CHANGES"""
-        findings = qa_agent._extract_review_findings(content)
-        assert "CRITICAL: SQL injection" in findings
-        assert "HIGH: Missing rate limiting" in findings
-        assert "MINOR: Unused import" in findings
+        findings_summary, structured_findings = qa_agent._extract_review_findings(content)
+        assert "CRITICAL: SQL injection" in findings_summary
+        assert "HIGH: Missing rate limiting" in findings_summary
+        assert "MINOR: Unused import" in findings_summary
 
     def test_falls_back_to_truncated_content(self, qa_agent):
         content = "No tagged lines here, just general feedback about the code."
-        findings = qa_agent._extract_review_findings(content)
-        assert findings == content[:500]
+        findings_summary, structured_findings = qa_agent._extract_review_findings(content)
+        assert findings_summary == content[:500]
+        assert structured_findings == []
 
 
 # -- Guard conditions --
@@ -751,3 +754,258 @@ class TestPurgeOrphanedReviewTasks:
 
         assert review_file.exists()
         purge_agent.logger.info.assert_not_called()
+
+
+# -- Structured JSON findings --
+
+class TestStructuredJsonFindings:
+    """Test JSON parsing of structured QA findings."""
+
+    def test_parse_structured_json_findings(self, qa_agent):
+        """Parse JSON block with valid structured findings."""
+        content = """REQUEST_CHANGES
+
+```json
+[
+  {
+    "file": "src/api/auth.ts",
+    "line_number": 45,
+    "severity": "CRITICAL",
+    "description": "SQL injection vulnerability in login handler",
+    "suggested_fix": "Use parameterized queries with prepared statements",
+    "category": "security"
+  },
+  {
+    "file": "src/db/query.ts",
+    "line_number": 89,
+    "severity": "HIGH",
+    "description": "N+1 query detected in user data fetch",
+    "suggested_fix": "Add eager loading or batch query",
+    "category": "performance"
+  }
+]
+```"""
+        outcome = qa_agent._parse_review_outcome(content)
+
+        assert outcome.has_change_requests is True
+        assert outcome.needs_fix is True
+        assert len(outcome.structured_findings) == 2
+
+        # Check first finding
+        finding1 = outcome.structured_findings[0]
+        assert finding1.file == "src/api/auth.ts"
+        assert finding1.line_number == 45
+        assert finding1.severity == "CRITICAL"
+        assert finding1.description == "SQL injection vulnerability in login handler"
+        assert finding1.suggested_fix == "Use parameterized queries with prepared statements"
+        assert finding1.category == "security"
+
+        # Check second finding
+        finding2 = outcome.structured_findings[1]
+        assert finding2.file == "src/db/query.ts"
+        assert finding2.line_number == 89
+        assert finding2.severity == "HIGH"
+        assert finding2.category == "performance"
+
+    def test_json_parsing_fallback_to_regex(self, qa_agent):
+        """When JSON parsing fails, fall back to regex extraction."""
+        content = """REQUEST_CHANGES
+
+CRITICAL: SQL injection in src/api/auth.ts:45
+HIGH: N+1 query in src/db/query.ts:89
+"""
+        outcome = qa_agent._parse_review_outcome(content)
+
+        assert outcome.has_critical_issues is True
+        assert outcome.needs_fix is True
+        # Regex fallback doesn't produce structured findings
+        assert len(outcome.structured_findings) == 0
+        # But findings_summary should have text
+        assert "CRITICAL: SQL injection" in outcome.findings_summary
+        assert "HIGH: N+1 query" in outcome.findings_summary
+
+    def test_json_with_optional_fields_missing(self, qa_agent):
+        """Handle JSON findings with optional fields (line_number, suggested_fix) missing."""
+        content = """REQUEST_CHANGES
+
+```json
+[
+  {
+    "file": "src/utils.py",
+    "severity": "MINOR",
+    "description": "Unused import",
+    "category": "readability"
+  }
+]
+```"""
+        outcome = qa_agent._parse_review_outcome(content)
+
+        assert len(outcome.structured_findings) == 1
+        finding = outcome.structured_findings[0]
+        assert finding.file == "src/utils.py"
+        assert finding.line_number is None
+        assert finding.suggested_fix is None
+        assert finding.severity == "MINOR"
+
+    def test_malformed_json_does_not_crash(self, qa_agent):
+        """Malformed JSON should be caught and fallback to regex."""
+        content = """REQUEST_CHANGES
+
+```json
+{
+  "invalid": "not an array"
+}
+```
+
+CRITICAL: Some issue
+"""
+        outcome = qa_agent._parse_review_outcome(content)
+
+        # Should not crash, falls back to regex
+        assert outcome.has_critical_issues is True
+        assert outcome.needs_fix is True
+        # No structured findings because JSON was invalid
+        assert len(outcome.structured_findings) == 0
+
+    def test_empty_json_array(self, qa_agent):
+        """Empty JSON array with APPROVE should pass."""
+        content = """APPROVE
+
+```json
+[]
+```"""
+        outcome = qa_agent._parse_review_outcome(content)
+
+        assert outcome.approved is True
+        assert outcome.needs_fix is False
+        assert len(outcome.structured_findings) == 0
+
+
+# -- Numbered checklist generation --
+
+class TestNumberedChecklistFormatting:
+    """Test numbered checklist generation in fix task description."""
+
+    def test_numbered_checklist_formatting(self, qa_agent):
+        """Fix task should format structured findings as numbered checklist."""
+        task = _make_task()
+        findings = [
+            QAFinding(
+                file="src/api/auth.ts",
+                line_number=45,
+                severity="CRITICAL",
+                description="SQL injection vulnerability in login handler",
+                suggested_fix="Use parameterized queries with prepared statements",
+                category="security"
+            ),
+            QAFinding(
+                file="src/db/query.ts",
+                line_number=89,
+                severity="HIGH",
+                description="N+1 query detected in user data fetch",
+                suggested_fix="Add eager loading or batch query",
+                category="performance"
+            ),
+        ]
+        outcome = ReviewOutcome(
+            approved=False, has_critical_issues=True,
+            has_test_failures=False, has_change_requests=True,
+            findings_summary="See structured findings",
+            structured_findings=findings,
+        )
+
+        fix_task = qa_agent._build_review_fix_task(task, outcome, cycle_count=1)
+
+        # Check numbered checklist format
+        assert "1. [ ] **CRITICAL** (security): src/api/auth.ts:45" in fix_task.description
+        assert "    Issue: SQL injection vulnerability in login handler" in fix_task.description
+        assert "    Fix: Use parameterized queries with prepared statements" in fix_task.description
+
+        assert "2. [ ] **HIGH** (performance): src/db/query.ts:89" in fix_task.description
+        assert "    Issue: N+1 query detected in user data fetch" in fix_task.description
+        assert "    Fix: Add eager loading or batch query" in fix_task.description
+
+    def test_checklist_with_optional_fields(self, qa_agent):
+        """Checklist should handle optional fields gracefully."""
+        task = _make_task()
+        findings = [
+            QAFinding(
+                file="src/utils.py",
+                line_number=None,  # No line number
+                severity="MINOR",
+                description="Unused import",
+                suggested_fix=None,  # No suggested fix
+                category="readability"
+            ),
+        ]
+        outcome = ReviewOutcome(
+            approved=False, has_critical_issues=False,
+            has_test_failures=False, has_change_requests=True,
+            findings_summary="See structured findings",
+            structured_findings=findings,
+        )
+
+        fix_task = qa_agent._build_review_fix_task(task, outcome, cycle_count=1)
+
+        # Check format without line number
+        assert "1. [ ] **MINOR** (readability): src/utils.py" in fix_task.description
+        assert "    Issue: Unused import" in fix_task.description
+        # Should not have Fix: line since suggested_fix is None
+        assert "    Fix:" not in fix_task.description
+
+    def test_backward_compatibility_regex_only(self, qa_agent):
+        """When no structured findings, fall back to legacy text format."""
+        task = _make_task()
+        outcome = ReviewOutcome(
+            approved=False, has_critical_issues=True,
+            has_test_failures=False, has_change_requests=False,
+            findings_summary="CRITICAL: SQL injection in src/api/auth.ts:45\nHIGH: N+1 query",
+            structured_findings=[],  # Empty structured findings
+        )
+
+        fix_task = qa_agent._build_review_fix_task(task, outcome, cycle_count=1)
+
+        # Should use legacy findings_summary
+        assert "CRITICAL: SQL injection in src/api/auth.ts:45" in fix_task.description
+        assert "HIGH: N+1 query" in fix_task.description
+        # Should NOT have numbered checklist format
+        assert "1. [ ]" not in fix_task.description
+
+
+# -- QAFinding dataclass --
+
+class TestQAFindingDataclass:
+    """Test QAFinding dataclass structure."""
+
+    def test_create_qa_finding_with_all_fields(self):
+        """Create QAFinding with all fields populated."""
+        finding = QAFinding(
+            file="src/api/auth.ts",
+            line_number=45,
+            severity="CRITICAL",
+            description="SQL injection vulnerability",
+            suggested_fix="Use parameterized queries",
+            category="security"
+        )
+
+        assert finding.file == "src/api/auth.ts"
+        assert finding.line_number == 45
+        assert finding.severity == "CRITICAL"
+        assert finding.description == "SQL injection vulnerability"
+        assert finding.suggested_fix == "Use parameterized queries"
+        assert finding.category == "security"
+
+    def test_create_qa_finding_with_optional_fields_none(self):
+        """Create QAFinding with optional fields as None."""
+        finding = QAFinding(
+            file="src/utils.py",
+            line_number=None,
+            severity="MINOR",
+            description="Unused import",
+            suggested_fix=None,
+            category="readability"
+        )
+
+        assert finding.file == "src/utils.py"
+        assert finding.line_number is None
+        assert finding.suggested_fix is None

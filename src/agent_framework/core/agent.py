@@ -85,6 +85,17 @@ _SEVERITY_TAG_RE = re.compile(r'^(CRITICAL|HIGH|MAJOR|MEDIUM|MINOR|LOW|SUGGESTIO
 
 
 @dataclass
+class QAFinding:
+    """Structured QA finding with file location, severity, and details."""
+    file: str
+    line_number: Optional[int]
+    severity: str  # CRITICAL|HIGH|MAJOR|MEDIUM|LOW|MINOR|SUGGESTION
+    description: str
+    suggested_fix: Optional[str]
+    category: str  # security|performance|correctness|readability|testing|best_practices
+
+
+@dataclass
 class ReviewOutcome:
     """Parsed result of a QA review."""
     approved: bool
@@ -93,6 +104,11 @@ class ReviewOutcome:
     has_change_requests: bool
     findings_summary: str
     has_major_issues: bool = False
+    structured_findings: List['QAFinding'] = None
+
+    def __post_init__(self):
+        if self.structured_findings is None:
+            self.structured_findings = []
 
     @property
     def needs_fix(self) -> bool:
@@ -2046,7 +2062,7 @@ IMPORTANT:
             if _SEVERITY_TAG_RE.search(content):
                 has_major = True
 
-        findings = self._extract_review_findings(content)
+        findings_summary, structured_findings = self._extract_review_findings(content)
 
         return ReviewOutcome(
             approved=approved,
@@ -2054,23 +2070,177 @@ IMPORTANT:
             has_test_failures=has_test_fail,
             has_change_requests=has_changes,
             has_major_issues=has_major,
-            findings_summary=findings,
+            findings_summary=findings_summary,
+            structured_findings=structured_findings,
         )
 
-    def _extract_review_findings(self, content: str) -> str:
-        """Extract severity-tagged lines from QA review output."""
-        findings = []
+    def _extract_review_findings(self, content: str) -> tuple[str, List[QAFinding]]:
+        """Extract findings from QA review output.
+
+        Returns:
+            tuple: (findings_summary: str, structured_findings: List[QAFinding])
+            Tries new structured parser first, falls back to legacy regex extraction.
+        """
+        # Try new structured parsing first (handles code fences and inline JSON)
+        structured_findings = self._parse_structured_findings(content)
+
+        # If new parser didn't find anything, try legacy JSON block parsing
+        if not structured_findings:
+            structured_findings = []
+            json_pattern = r'```json\s*\n(.*?)\n```'
+            json_matches = re.findall(json_pattern, content, re.DOTALL)
+
+            for json_block in json_matches:
+                try:
+                    findings_data = json.loads(json_block)
+                    if isinstance(findings_data, list):
+                        for item in findings_data:
+                            if isinstance(item, dict):
+                                # Create QAFinding from JSON object
+                                finding = QAFinding(
+                                    file=item.get('file', ''),
+                                    line_number=item.get('line_number'),
+                                    severity=item.get('severity', 'UNKNOWN'),
+                                    description=item.get('description', ''),
+                                    suggested_fix=item.get('suggested_fix'),
+                                    category=item.get('category', 'general')
+                                )
+                                structured_findings.append(finding)
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    self.logger.debug(f"Failed to parse JSON finding: {e}")
+                    continue
+
+        # Extract severity-tagged lines for text summary
+        findings_text = []
         for line in content.splitlines():
             stripped = line.strip()
             # Case-sensitive: we want structured output tags (CRITICAL, HIGH, …),
             # not prose that happens to contain the word. _parse_review_outcome
             # uses IGNORECASE for leniency; here we want precision.
             if re.match(r'^(CRITICAL|HIGH|MAJOR|MEDIUM|MINOR|LOW|SUGGESTION)\b', stripped):
-                findings.append(stripped)
-        # Fall back to first 500 chars if no tagged lines found
-        if not findings:
-            return content[:500]
-        return "\n".join(findings)
+                findings_text.append(stripped)
+
+        # If we have structured findings, build summary from them
+        if structured_findings:
+            summary_lines = []
+            for finding in structured_findings:
+                location = f"{finding.file}"
+                if finding.line_number:
+                    location += f":{finding.line_number}"
+                summary_lines.append(f"{finding.severity}: {finding.description} ({location})")
+            findings_summary = "\n".join(summary_lines)
+        elif findings_text:
+            findings_summary = "\n".join(findings_text)
+        else:
+            # Fall back to first 500 chars if no tagged lines found
+            findings_summary = content[:500]
+
+        return findings_summary, structured_findings
+
+    def _parse_structured_findings(self, content: str) -> Optional[List[QAFinding]]:
+        """Extract structured JSON findings from QA response.
+
+        Looks for JSON blocks in code fences (```json...```) or inline.
+        Supports both array format and object format with 'findings' key.
+        Falls back to None if no structured findings found.
+        """
+        import json
+        import re
+
+        # Try to find JSON block in code fence first
+        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', content, re.DOTALL)
+        if json_match:
+            try:
+                findings_data = json.loads(json_match.group(1))
+
+                # Handle object wrapper with 'findings' array
+                if isinstance(findings_data, dict) and 'findings' in findings_data:
+                    findings_list = findings_data['findings']
+                # Handle direct array format
+                elif isinstance(findings_data, list):
+                    findings_list = findings_data
+                else:
+                    self.logger.debug("JSON block doesn't contain findings array")
+                    return None
+
+                # Convert to QAFinding objects
+                parsed_findings = []
+                for item in findings_list:
+                    if isinstance(item, dict):
+                        finding = QAFinding(
+                            file=item.get('file', ''),
+                            line_number=item.get('line_number') or item.get('line'),
+                            severity=item.get('severity', 'UNKNOWN'),
+                            description=item.get('description', ''),
+                            suggested_fix=item.get('suggested_fix'),
+                            category=item.get('category', 'general')
+                        )
+                        parsed_findings.append(finding)
+
+                return parsed_findings if parsed_findings else None
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                self.logger.warning(f"Failed to parse code fence JSON findings: {e}")
+
+        # Try to find inline JSON object with "findings" key
+        try:
+            # Look for complete JSON object with findings array
+            json_pattern = r'\{[^{}]*"findings"\s*:\s*\[[^\]]*\][^{}]*\}'
+            json_match = re.search(json_pattern, content, re.DOTALL)
+            if json_match:
+                findings_data = json.loads(json_match.group(0))
+                if 'findings' in findings_data:
+                    findings_list = findings_data['findings']
+                    parsed_findings = []
+                    for item in findings_list:
+                        if isinstance(item, dict):
+                            finding = QAFinding(
+                                file=item.get('file', ''),
+                                line_number=item.get('line_number') or item.get('line'),
+                                severity=item.get('severity', 'UNKNOWN'),
+                                description=item.get('description', ''),
+                                suggested_fix=item.get('suggested_fix'),
+                                category=item.get('category', 'general')
+                            )
+                            parsed_findings.append(finding)
+                    return parsed_findings if parsed_findings else None
+        except Exception as e:
+            self.logger.debug(f"Inline JSON parse failed: {e}")
+
+        return None  # No structured findings found
+
+    def _format_findings_checklist(self, findings: List[QAFinding]) -> str:
+        """Format structured findings as numbered checklist."""
+        lines = []
+
+        for i, finding in enumerate(findings, 1):
+            # Format location
+            location = ""
+            if finding.file and finding.line_number:
+                location = f" ({finding.file}:{finding.line_number})"
+            elif finding.file:
+                location = f" ({finding.file})"
+
+            # Format severity with emoji
+            severity_emoji = {
+                "CRITICAL": "🔴",
+                "HIGH": "🟠",
+                "MAJOR": "🟡",
+                "MEDIUM": "🔵",
+                "MINOR": "⚪",
+                "LOW": "⚪",
+                "SUGGESTION": "💡",
+            }
+            emoji = severity_emoji.get(finding.severity, "")
+
+            lines.append(f"### {i}. {emoji} {finding.severity}: {finding.category.title()}{location}")
+            lines.append(f"**Issue**: {finding.description}")
+
+            if finding.suggested_fix:
+                lines.append(f"**Suggested Fix**: {finding.suggested_fix}")
+
+            lines.append("")  # blank line
+
+        return "\n".join(lines)
 
     def _build_review_fix_task(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> Task:
         """Build a fix task for the engineer with QA review findings."""
@@ -2079,6 +2249,27 @@ IMPORTANT:
         jira_key = task.context.get("jira_key", "UNKNOWN")
         pr_url = task.context.get("pr_url", "")
         pr_number = task.context.get("pr_number", "")
+
+        # Build numbered checklist from structured findings
+        checklist_items = []
+        if outcome.structured_findings:
+            for idx, finding in enumerate(outcome.structured_findings, 1):
+                # Format: [ ] **SEVERITY** (category): file:line
+                location = finding.file
+                if finding.line_number:
+                    location += f":{finding.line_number}"
+
+                item_lines = [f"{idx}. [ ] **{finding.severity}** ({finding.category}): {location}"]
+                item_lines.append(f"    Issue: {finding.description}")
+                if finding.suggested_fix:
+                    item_lines.append(f"    Fix: {finding.suggested_fix}")
+
+                checklist_items.append("\n".join(item_lines))
+
+            checklist = "\n\n".join(checklist_items)
+        else:
+            # Fallback to legacy text format if no structured findings
+            checklist = outcome.findings_summary
 
         return Task(
             id=f"review-fix-{task.id[:12]}-c{cycle_count}",
@@ -2092,7 +2283,8 @@ IMPORTANT:
             description=f"""QA review found issues that need fixing.
 
 ## Review Findings
-{outcome.findings_summary}
+
+{checklist}
 
 ## Context
 - **PR**: {pr_url}

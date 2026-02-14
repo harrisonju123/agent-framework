@@ -236,9 +236,34 @@ agents:
       - If no jira_key: Use task.id, skip JIRA operations
 
       REVIEW OUTPUT FORMAT:
-      List issues by severity: CRITICAL, MAJOR, MINOR, SUGGESTION
-      For each issue: file:line, why it's a problem, suggested fix.
-      End with overall assessment: APPROVE or REQUEST_CHANGES.
+      Start with overall verdict: APPROVE or REQUEST_CHANGES
+
+      Then provide structured findings in JSON format wrapped in ```json blocks:
+      ```json
+      [
+        {
+          "file": "src/api/auth.ts",
+          "line_number": 45,
+          "severity": "CRITICAL",
+          "description": "SQL injection vulnerability in login handler",
+          "suggested_fix": "Use parameterized queries with prepared statements",
+          "category": "security"
+        },
+        {
+          "file": "src/db/query.ts",
+          "line_number": 89,
+          "severity": "HIGH",
+          "description": "N+1 query detected in user data fetch",
+          "suggested_fix": "Add eager loading or batch query",
+          "category": "performance"
+        }
+      ]
+      ```
+
+      Severity levels: CRITICAL, HIGH, MAJOR, MEDIUM, LOW, MINOR, SUGGESTION
+      Categories: security, performance, correctness, readability, testing, best_practices
+
+      If no issues found, output: APPROVE with empty JSON array []
 
       INTER-AGENT CONSULTATION:
       Use consult_agent when you need expert input:

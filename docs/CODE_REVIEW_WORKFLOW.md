@@ -218,13 +218,24 @@ The code reviewer analyzes the PR against these criteria:
 
 **If Changes Requested**:
 - Post detailed review comments on GitHub
-- Create fix task for engineer queue:
+- Create fix task for engineer queue with structured findings:
   ```typescript
   queue_task_for_agent({
     agent_id: "engineer",
     task_type: "fix",
     title: "Address code review feedback for PROJ-123",
-    description: "Fix issues identified in review:\n- Issue 1\n- Issue 2",
+    description: `Fix issues identified in review:
+
+## Review Findings
+
+1. [ ] **CRITICAL** (security): src/api/auth.ts:45
+    Issue: SQL injection vulnerability in login handler
+    Fix: Use parameterized queries with prepared statements
+
+2. [ ] **HIGH** (performance): src/db/query.ts:89
+    Issue: N+1 query detected in user data fetch
+    Fix: Add eager loading or batch query
+`,
     context: {
       jira_key: "PROJ-123",
       pr_number: 456,
@@ -684,6 +695,63 @@ The pull-based model provides:
 
 For most use cases, having the engineer/QA agent queue the review task (as part of their workflow) is sufficient and maintains clear workflow boundaries.
 
+## Structured QA Findings
+
+The QA → Engineer feedback mechanism uses structured JSON findings for clear, actionable feedback.
+
+### QA Output Format
+
+QA agents output findings in JSON format wrapped in code blocks:
+
+```json
+[
+  {
+    "file": "src/api/auth.ts",
+    "line_number": 45,
+    "severity": "CRITICAL",
+    "description": "SQL injection vulnerability in login handler",
+    "suggested_fix": "Use parameterized queries with prepared statements",
+    "category": "security"
+  }
+]
+```
+
+**Severity Levels**: CRITICAL, HIGH, MAJOR, MEDIUM, LOW, MINOR, SUGGESTION
+**Categories**: security, performance, correctness, readability, testing, best_practices
+
+### Engineer Checklist Format
+
+Engineers receive a numbered checklist in fix tasks:
+
+```markdown
+## Review Findings
+
+1. [ ] **CRITICAL** (security): src/api/auth.ts:45
+    Issue: SQL injection vulnerability in login handler
+    Fix: Use parameterized queries with prepared statements
+
+2. [ ] **HIGH** (performance): src/db/query.ts:89
+    Issue: N+1 query detected in user data fetch
+    Fix: Add eager loading or batch query
+```
+
+### Backward Compatibility
+
+The system maintains backward compatibility with legacy text-based findings:
+- If JSON parsing fails, falls back to regex extraction
+- Existing review tasks continue to work
+- Engineers receive text summary if no structured findings available
+
+### Implementation
+
+**Location**: `src/agent_framework/core/agent.py`
+
+Key components:
+- `QAFinding` dataclass: Structured finding with file, line, severity, description, fix, category
+- `ReviewOutcome.structured_findings`: List of parsed QAFinding objects
+- `_extract_review_findings()`: Parses JSON blocks and creates QAFinding objects
+- `_build_review_fix_task()`: Generates numbered checklist from structured findings
+
 ## Summary
 
 The code review workflow is a pull-based system where:
@@ -693,5 +761,6 @@ The code review workflow is a pull-based system where:
 3. **File-based locking** enables safe parallel processing
 4. **MCP tools** provide real-time GitHub/JIRA access during review
 5. **Multiple replicas** can be deployed for scalability
+6. **Structured findings** provide clear, actionable feedback with JSON + numbered checklists
 
 This design prioritizes explicit control and workflow transparency over automatic triggering.
