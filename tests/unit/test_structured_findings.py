@@ -1,10 +1,13 @@
 """Tests for structured findings parsing and formatting."""
 
+import json
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.core.agent import Agent, AgentConfig, QAFinding
+from agent_framework.core.agent import Agent, AgentConfig, QAFinding, ReviewOutcome
+from agent_framework.core.task import Task, TaskStatus, TaskType
 
 
 @pytest.fixture
@@ -324,3 +327,244 @@ HIGH: Memory leak in cache.py:100"""
         summary, findings = agent._extract_review_findings(content)
         assert len(findings) == 1
         assert "CRITICAL: SQL injection (auth.py:42)" in summary
+
+
+def _make_task(
+    task_type=TaskType.REVIEW,
+    assigned_to="qa",
+    task_id="review-task-abc123",
+    **ctx_overrides,
+):
+    """Helper to create test tasks."""
+    context = {
+        "jira_key": "PROJ-42",
+        "pr_url": "https://github.com/org/repo/pull/99",
+        "pr_number": 99,
+        "github_repo": "org/repo",
+        "workflow": "standard",
+        **ctx_overrides,
+    }
+    return Task(
+        id=task_id,
+        type=task_type,
+        status=TaskStatus.COMPLETED,
+        priority=1,
+        created_by="engineer",
+        assigned_to=assigned_to,
+        created_at=datetime.utcnow(),
+        title="Review PR #99",
+        description="Review the PR.",
+        context=context,
+    )
+
+
+class TestBuildReviewFixTask:
+    """Tests for _build_review_fix_task() with structured findings."""
+
+    def test_structured_findings_in_context(self, agent):
+        """Structured findings are stored in fix task context."""
+        task = _make_task()
+
+        # Simulate structured findings JSON in outcome
+        findings_json = json.dumps({
+            "findings": [
+                {
+                    "id": "f1",
+                    "severity": "CRITICAL",
+                    "category": "security",
+                    "file": "auth.py",
+                    "line": 42,
+                    "description": "SQL injection",
+                    "suggested_fix": "Use parameterized queries",
+                    "resolved": False,
+                }
+            ],
+            "summary": "Found 1 critical issue",
+            "total_count": 1,
+            "critical_count": 1,
+            "high_count": 0,
+            "major_count": 0,
+        })
+
+        # Create structured findings for outcome
+        structured_findings = [
+            QAFinding(
+                file="auth.py",
+                line_number=42,
+                severity="CRITICAL",
+                category="security",
+                description="SQL injection",
+                suggested_fix="Use parameterized queries",
+            )
+        ]
+
+        outcome = ReviewOutcome(
+            approved=False,
+            has_critical_issues=True,
+            has_test_failures=False,
+            has_change_requests=False,
+            findings_summary=findings_json,
+            structured_findings=structured_findings,
+        )
+
+        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=1)
+
+        # Verify structured_findings in context
+        assert "structured_findings" in fix_task.context
+        assert fix_task.context["structured_findings"]["total_count"] == 1
+        assert len(fix_task.context["structured_findings"]["findings"]) == 1
+
+        # Verify description has checklist
+        assert "### 1. 🔴 CRITICAL" in fix_task.description
+        assert "auth.py:42" in fix_task.description
+        assert "SQL injection" in fix_task.description
+
+        # Verify acceptance criteria
+        assert "All 1 issues addressed" in fix_task.acceptance_criteria[0]
+
+    def test_legacy_format_still_works(self, agent):
+        """Legacy text format works when no JSON present."""
+        task = _make_task()
+
+        outcome = ReviewOutcome(
+            approved=False,
+            has_critical_issues=True,
+            has_test_failures=False,
+            has_change_requests=False,
+            findings_summary="CRITICAL: SQL injection in auth.py:42",
+        )
+
+        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=1)
+
+        # No structured_findings in context
+        assert "structured_findings" not in fix_task.context
+
+        # Legacy description format
+        assert "## Review Findings" in fix_task.description
+        assert "CRITICAL: SQL injection" in fix_task.description
+
+        # Generic acceptance criteria
+        assert "All identified issues addressed" in fix_task.acceptance_criteria[0]
+
+    def test_multiple_findings_with_counts(self, agent):
+        """Multiple findings with correct counts and checklist."""
+        task = _make_task()
+
+        findings_json = json.dumps({
+            "findings": [
+                {
+                    "id": "f1",
+                    "severity": "CRITICAL",
+                    "category": "security",
+                    "file": "auth.py",
+                    "line": 42,
+                    "description": "SQL injection",
+                    "suggested_fix": "Use parameterized queries",
+                    "resolved": False,
+                },
+                {
+                    "id": "f2",
+                    "severity": "HIGH",
+                    "category": "performance",
+                    "file": "api.py",
+                    "line": 10,
+                    "description": "N+1 query",
+                    "suggested_fix": "Use select_related",
+                    "resolved": False,
+                },
+                {
+                    "id": "f3",
+                    "severity": "MAJOR",
+                    "category": "correctness",
+                    "file": "utils.py",
+                    "line": 5,
+                    "description": "Off-by-one error",
+                    "suggested_fix": "Use <= instead of <",
+                    "resolved": False,
+                },
+            ],
+            "summary": "Found 3 issues",
+            "total_count": 3,
+            "critical_count": 1,
+            "high_count": 1,
+            "major_count": 1,
+        })
+
+        structured_findings = [
+            QAFinding(
+                file="auth.py",
+                line_number=42,
+                severity="CRITICAL",
+                category="security",
+                description="SQL injection",
+                suggested_fix="Use parameterized queries",
+            ),
+            QAFinding(
+                file="api.py",
+                line_number=10,
+                severity="HIGH",
+                category="performance",
+                description="N+1 query",
+                suggested_fix="Use select_related",
+            ),
+            QAFinding(
+                file="utils.py",
+                line_number=5,
+                severity="MAJOR",
+                category="correctness",
+                description="Off-by-one error",
+                suggested_fix="Use <= instead of <",
+            ),
+        ]
+
+        outcome = ReviewOutcome(
+            approved=False,
+            has_critical_issues=True,
+            has_test_failures=False,
+            has_change_requests=False,
+            has_major_issues=True,
+            findings_summary=findings_json,
+            structured_findings=structured_findings,
+        )
+
+        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=1)
+
+        # Verify count in description and acceptance criteria
+        assert "QA review found 3 issue(s)" in fix_task.description
+        assert "All 3 issues addressed" in fix_task.acceptance_criteria[0]
+
+        # Verify all findings in checklist
+        assert "### 1. 🔴 CRITICAL" in fix_task.description
+        assert "### 2. 🟠 HIGH" in fix_task.description
+        assert "### 3. 🟡 MAJOR" in fix_task.description
+
+    def test_context_preserves_essential_fields(self, agent):
+        """Fix task context preserves essential fields and strips review_* keys."""
+        task = _make_task(
+            review_started_at="2024-01-01",
+            custom_field="should_keep",
+        )
+
+        outcome = ReviewOutcome(
+            approved=False,
+            has_critical_issues=False,
+            has_test_failures=True,
+            has_change_requests=False,
+            findings_summary="Tests failed",
+        )
+
+        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=2)
+
+        # Essential fields preserved
+        assert fix_task.context["pr_url"] == "https://github.com/org/repo/pull/99"
+        assert fix_task.context["pr_number"] == 99
+        assert fix_task.context["jira_key"] == "PROJ-42"
+        assert fix_task.context["github_repo"] == "org/repo"
+        assert fix_task.context["workflow"] == "standard"
+        assert fix_task.context["_review_cycle_count"] == 2
+
+        # Custom field preserved
+        assert fix_task.context["custom_field"] == "should_keep"
+
+        # review_* fields stripped
+        assert "review_started_at" not in fix_task.context

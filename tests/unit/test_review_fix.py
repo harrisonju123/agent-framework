@@ -916,14 +916,14 @@ class TestNumberedChecklistFormatting:
 
         fix_task = qa_agent._build_review_fix_task(task, outcome, cycle_count=1)
 
-        # Check numbered checklist format
-        assert "1. [ ] **CRITICAL** (security): src/api/auth.ts:45" in fix_task.description
-        assert "    Issue: SQL injection vulnerability in login handler" in fix_task.description
-        assert "    Fix: Use parameterized queries with prepared statements" in fix_task.description
+        # Check numbered checklist format (using new formatter with emoji/markdown)
+        assert "### 1. 🔴 CRITICAL: Security (src/api/auth.ts:45)" in fix_task.description
+        assert "**Issue**: SQL injection vulnerability in login handler" in fix_task.description
+        assert "**Suggested Fix**: Use parameterized queries with prepared statements" in fix_task.description
 
-        assert "2. [ ] **HIGH** (performance): src/db/query.ts:89" in fix_task.description
-        assert "    Issue: N+1 query detected in user data fetch" in fix_task.description
-        assert "    Fix: Add eager loading or batch query" in fix_task.description
+        assert "### 2. 🟠 HIGH: Performance (src/db/query.ts:89)" in fix_task.description
+        assert "**Issue**: N+1 query detected in user data fetch" in fix_task.description
+        assert "**Suggested Fix**: Add eager loading or batch query" in fix_task.description
 
     def test_checklist_with_optional_fields(self, qa_agent):
         """Checklist should handle optional fields gracefully."""
@@ -947,11 +947,11 @@ class TestNumberedChecklistFormatting:
 
         fix_task = qa_agent._build_review_fix_task(task, outcome, cycle_count=1)
 
-        # Check format without line number
-        assert "1. [ ] **MINOR** (readability): src/utils.py" in fix_task.description
-        assert "    Issue: Unused import" in fix_task.description
-        # Should not have Fix: line since suggested_fix is None
-        assert "    Fix:" not in fix_task.description
+        # Check format without line number (using new formatter)
+        assert "### 1. ⚪ MINOR: Readability (src/utils.py)" in fix_task.description
+        assert "**Issue**: Unused import" in fix_task.description
+        # Should not have Suggested Fix: line since suggested_fix is None
+        assert "**Suggested Fix**:" not in fix_task.description
 
     def test_backward_compatibility_regex_only(self, qa_agent):
         """When no structured findings, fall back to legacy text format."""
@@ -968,8 +968,9 @@ class TestNumberedChecklistFormatting:
         # Should use legacy findings_summary
         assert "CRITICAL: SQL injection in src/api/auth.ts:45" in fix_task.description
         assert "HIGH: N+1 query" in fix_task.description
-        # Should NOT have numbered checklist format
-        assert "1. [ ]" not in fix_task.description
+        # Should NOT have numbered checklist format (no emoji headers)
+        assert "###" not in fix_task.description
+        assert "🔴" not in fix_task.description
 
 
 # -- QAFinding dataclass --

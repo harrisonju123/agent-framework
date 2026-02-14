@@ -2243,33 +2243,111 @@ IMPORTANT:
         return "\n".join(lines)
 
     def _build_review_fix_task(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> Task:
-        """Build a fix task for the engineer with QA review findings."""
+        """Build fix task with structured checklist."""
         from datetime import datetime
 
         jira_key = task.context.get("jira_key", "UNKNOWN")
         pr_url = task.context.get("pr_url", "")
         pr_number = task.context.get("pr_number", "")
 
-        # Build numbered checklist from structured findings
-        checklist_items = []
-        if outcome.structured_findings:
-            for idx, finding in enumerate(outcome.structured_findings, 1):
-                # Format: [ ] **SEVERITY** (category): file:line
-                location = finding.file
-                if finding.line_number:
-                    location += f":{finding.line_number}"
+        # Check if we have structured findings
+        has_structured_findings = outcome.structured_findings and len(outcome.structured_findings) > 0
 
-                item_lines = [f"{idx}. [ ] **{finding.severity}** ({finding.category}): {location}"]
-                item_lines.append(f"    Issue: {finding.description}")
-                if finding.suggested_fix:
-                    item_lines.append(f"    Fix: {finding.suggested_fix}")
+        # Build description with numbered checklist or legacy format
+        if has_structured_findings:
+            # Generate checklist using existing formatter
+            checklist = self._format_findings_checklist(outcome.structured_findings)
+            total_count = len(outcome.structured_findings)
 
-                checklist_items.append("\n".join(item_lines))
+            description = f"""QA review found {total_count} issue(s) that need fixing.
 
-            checklist = "\n\n".join(checklist_items)
+## Summary
+{outcome.findings_summary}
+
+## Issues to Address
+
+{checklist}
+
+## Instructions
+1. Review each finding above
+2. Fix the issues in the specified files/lines
+3. Run tests to verify fixes: `pytest tests/`
+4. Run linting: `pylint src/` or appropriate linter
+5. Commit and push your changes
+6. The review will be automatically re-queued
+
+## Context
+- **PR**: {pr_url}
+- **JIRA**: {jira_key}
+- **Review Cycle**: {cycle_count} of {MAX_REVIEW_CYCLES}
+"""
         else:
-            # Fallback to legacy text format if no structured findings
-            checklist = outcome.findings_summary
+            # Legacy format (backward compatible)
+            description = f"""QA review found issues that need fixing.
+
+## Review Findings
+{outcome.findings_summary}
+
+## Instructions
+1. Review the findings above
+2. Fix the identified issues
+3. Run tests to verify fixes
+4. Commit and push your changes
+
+## Context
+- **PR**: {pr_url}
+- **JIRA**: {jira_key}
+- **Review Cycle**: {cycle_count} of {MAX_REVIEW_CYCLES}
+"""
+
+        # Build context (strip review_* keys, preserve essential context)
+        fix_context = {
+            k: v for k, v in task.context.items()
+            if not k.startswith("review_")
+        }
+        fix_context["_review_cycle_count"] = cycle_count
+        fix_context["pr_url"] = pr_url
+        fix_context["pr_number"] = pr_number
+        fix_context["github_repo"] = task.context.get("github_repo")
+        fix_context["jira_key"] = jira_key
+        fix_context["workflow"] = task.context.get("workflow", "full")
+
+        # Store structured findings in context for programmatic access
+        if has_structured_findings:
+            # Serialize findings to dict for context storage
+            findings_dicts = []
+            for finding in outcome.structured_findings:
+                findings_dicts.append({
+                    "file": finding.file,
+                    "line_number": finding.line_number,
+                    "severity": finding.severity,
+                    "category": finding.category,
+                    "description": finding.description,
+                    "suggested_fix": finding.suggested_fix,
+                })
+
+            fix_context["structured_findings"] = {
+                "findings": findings_dicts,
+                "summary": outcome.findings_summary,
+                "total_count": len(outcome.structured_findings),
+                "critical_count": sum(1 for f in outcome.structured_findings if f.severity == "CRITICAL"),
+                "high_count": sum(1 for f in outcome.structured_findings if f.severity == "HIGH"),
+                "major_count": sum(1 for f in outcome.structured_findings if f.severity == "MAJOR"),
+            }
+
+        # Build acceptance criteria
+        if has_structured_findings:
+            total_count = len(outcome.structured_findings)
+            acceptance_criteria = [
+                f"All {total_count} issues addressed",
+                "Tests pass",
+                "Linting passes",
+            ]
+        else:
+            acceptance_criteria = [
+                "All identified issues addressed",
+                "Tests pass",
+            ]
 
         return Task(
             id=f"review-fix-{task.id[:12]}-c{cycle_count}",
@@ -2280,37 +2358,9 @@ IMPORTANT:
             assigned_to="engineer",
             created_at=datetime.utcnow(),
             title=f"Fix review issues (cycle {cycle_count}) - [{jira_key}]",
-            description=f"""QA review found issues that need fixing.
-
-## Review Findings
-
-{checklist}
-
-## Context
-- **PR**: {pr_url}
-- **JIRA**: {jira_key}
-- **Review cycle**: {cycle_count}/{MAX_REVIEW_CYCLES}
-- **Critical issues**: {outcome.has_critical_issues}
-- **Major issues**: {outcome.has_major_issues}
-- **Test failures**: {outcome.has_test_failures}
-- **Changes requested**: {outcome.has_change_requests}
-
-## Instructions
-1. Fetch and read ALL review comments on the PR using `github_get_pr_comments`
-2. Check CI status using `github_get_check_runs` — fix any CI failures
-3. Address every review comment and all findings listed above
-4. Fix any failing tests
-5. Commit and push to the existing branch
-6. The system will automatically re-queue a review to QA
-""",
-            context={
-                **{k: v for k, v in task.context.items() if not k.startswith("review_")},
-                "pr_url": pr_url,
-                "pr_number": pr_number,
-                "source_task_id": task.id,
-                "source_agent": self.config.id,
-                "_review_cycle_count": cycle_count,
-            },
+            description=description,
+            context=fix_context,
+            acceptance_criteria=acceptance_criteria,
         )
 
     def _escalate_review_to_architect(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> None:
