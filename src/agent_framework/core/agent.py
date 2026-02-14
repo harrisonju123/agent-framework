@@ -201,10 +201,6 @@ class Agent:
         # Workflow chain definitions for automatic next-agent queuing
         self._workflows_config = workflows_config or {}
 
-        # Workflow DAG executor for smart routing
-        from ..workflow.executor import WorkflowExecutor
-        self._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
-
         # Setup rich logging (log_level passed from CLI via environment)
         import os
         log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO")
@@ -215,6 +211,10 @@ class Agent:
             use_file=True,
             use_json=False,
         )
+
+        # Workflow DAG executor — uses agent's logger so routing shows in agent logs
+        from ..workflow.executor import WorkflowExecutor
+        self._workflow_executor = WorkflowExecutor(queue, queue.queue_dir, agent_logger=self.logger)
 
         # Optimization configuration (sanitize then make immutable for thread safety)
         sanitized_config = self._sanitize_optimization_config(optimization_config or {})
@@ -2853,6 +2853,10 @@ IMPORTANT:
         """
         workflow_name = task.context.get("workflow")
         if not workflow_name or workflow_name not in self._workflows_config:
+            self.logger.debug(
+                f"No workflow chain for {task.id}: "
+                f"workflow={workflow_name!r}, available={list(self._workflows_config.keys())}"
+            )
             # No workflow defined - handle routing signal if present
             if routing_signal:
                 validated = validate_routing_signal(

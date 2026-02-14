@@ -114,6 +114,22 @@ class FileQueue:
             try:
                 task = self._load_task(task_file)
 
+                # Recover orphaned in_progress tasks (agent crashed/restarted)
+                if task.status == TaskStatus.IN_PROGRESS:
+                    if self._is_orphaned(task):
+                        logger.warning(
+                            f"Recovering orphaned task {task.id} "
+                            f"(was in_progress by {task.started_by})"
+                        )
+                        task.status = TaskStatus.PENDING
+                        task.started_at = None
+                        task.started_by = None
+                        atomic_write_model(task_file, task)
+                        # Fall through to pending processing below
+                    else:
+                        non_pending.add(task_file.name)
+                        continue
+
                 # Only process pending tasks
                 if task.status != TaskStatus.PENDING:
                     non_pending.add(task_file.name)
@@ -138,6 +154,27 @@ class FileQueue:
                 continue
 
         return None
+
+    def _is_orphaned(self, task: Task) -> bool:
+        """Check if an in_progress task is orphaned (no agent heartbeat).
+
+        A task is orphaned when the agent that started it is no longer alive.
+        We detect this by checking if the agent's heartbeat file is stale.
+        """
+        if not task.started_by:
+            return True
+
+        heartbeat_file = self.heartbeat_dir / f"{task.started_by}.json"
+        if not heartbeat_file.exists():
+            return True
+
+        try:
+            stat = heartbeat_file.stat()
+            age_seconds = time.time() - stat.st_mtime
+            # Stale if no heartbeat for 2 minutes (agents write every poll cycle)
+            return age_seconds > 120
+        except OSError:
+            return True
 
     def _quarantine_malformed_task(self, task_file: Path, error: Exception) -> None:
         """Move malformed task file to malformed directory for investigation."""

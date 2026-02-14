@@ -1,5 +1,5 @@
 # Agent Framework Configuration
-# Copy this file to agent-framework.yaml and customize as needed
+# Copy this file to agent-framework.yaml and customize for your setup
 
 workspace: "."
 communication_dir: ".agent-communication"
@@ -9,37 +9,211 @@ llm:
   # Mode: "claude_cli" (Claude Code subprocess) or "litellm" (API calls)
   mode: claude_cli
 
+  # Proxy: route Claude CLI API calls through LiteLLM proxy for billing/routing
+  # Only applies when mode: claude_cli
+  # proxy_url: ${LITELLM_PROXY_URL}
+  # proxy_auth_token: ${LITELLM_AUTH_TOKEN}
+
   # Claude CLI settings (used when mode=claude_cli)
   claude_cli_executable: claude
   claude_cli_max_turns: 999
-  claude_cli_cheap_model: haiku
-  claude_cli_default_model: sonnet
-  claude_cli_premium_model: opus
+  claude_cli_timeout: 3600  # Default fallback timeout (1 hour)
 
-  # LiteLLM settings (used when mode=litellm)
-  # litellm_api_key: ${ANTHROPIC_API_KEY}
+  # Task-type-specific timeouts (prevents vague tasks from running too long)
+  # Large: IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, ESCALATION, ENHANCEMENT
+  # Bounded: TESTING, VERIFICATION, FIX, BUGFIX, REVIEW, PR_REQUEST
+  # Simple: DOCUMENTATION, COORDINATION, STATUS_REPORT
+  claude_cli_timeout_large: 3600   # 1 hour
+  claude_cli_timeout_bounded: 1800 # 30 minutes
+  claude_cli_timeout_simple: 900   # 15 minutes
+
+  claude_cli_cheap_model: claude-haiku-4-5-20251001
+  claude_cli_default_model: claude-sonnet-4-5-20250929
+  claude_cli_premium_model: claude-sonnet-4-5-20250929
+
+  # LiteLLM direct settings (used when mode=litellm)
+  # pip install 'agent-framework[litellm]' required
+  # litellm_api_key: ${LITELLM_API_KEY}
+  # litellm_api_base: ${LITELLM_API_BASE}
   # litellm_cheap_model: claude-haiku-4-5-20251001
   # litellm_default_model: claude-sonnet-4-5-20250929
-  # litellm_premium_model: claude-opus-4-5-20251101
+  # litellm_premium_model: claude-sonnet-4-5-20250929
+
+  # MCP (Model Context Protocol) settings
+  # Enables real-time JIRA/GitHub access during agent execution
+  # Requires mode: claude_cli
+  use_mcp: true
+  mcp_config_path: config/mcp-config.json
 
 # Task Processing Configuration
 task:
   poll_interval: 30          # Queue polling interval (seconds)
-  timeout: 1800              # Task timeout (seconds, default: 30 min)
+  timeout: 3600              # Task timeout (seconds, default: 1 hour)
   max_retries: 5             # Max retry attempts before escalation
   backoff_initial: 30        # Initial backoff delay (seconds)
   backoff_max: 240           # Max backoff delay (seconds)
   backoff_multiplier: 2      # Backoff multiplier (exponential)
+
+  # Task validation (prevents vague/underspecified tasks from processing)
+  validate_tasks: true
+  validation_mode: warn      # "warn" logs warning, "reject" fails the task
 
 # Safeguards Configuration
 safeguards:
   max_queue_size: 100        # Max tasks per agent queue
   max_escalations: 50        # Max total escalations
   max_task_age_days: 7       # Archive tasks older than N days
-  heartbeat_timeout: 90      # Agent considered dead after N seconds
+  heartbeat_timeout: 600     # Agent considered dead after N seconds (10 min for long MCP tasks)
   watchdog_interval: 60      # Watchdog check interval (seconds)
 
+# Optimization Configuration
+optimization:
+  enable_minimal_prompts: false
+  enable_compact_json: false
+  enable_context_deduplication: false
+  enable_token_tracking: false
+  enable_token_budget_warnings: false
+  enable_result_summarization: false
+  enable_error_truncation: false
+  canary_percentage: 0
+  shadow_mode: false
+  budget_warning_threshold: 1.3
+
+# Session Logging: structured per-task logs for post-hoc analysis
+session_logging:
+  enabled: true
+  log_prompts: true
+  log_tool_inputs: true
+  retention_days: 30
+
+# Agent Memory: persistent cross-task learning
+memory:
+  enabled: true
+  max_memories_per_store: 200
+  max_prompt_chars: 3000
+  recency_half_life_days: 7
+
+# Self-Evaluation: agents review their own output before marking done
+self_evaluation:
+  enabled: true
+  max_retries: 2
+  model: haiku
+
+# Dynamic Replanning: generate revised plans on retry 2+
+replanning:
+  enabled: true
+  min_retry_for_replan: 2
+  model: haiku
+
+# Team mode: use Claude Agent Teams for multi-agent workflows
+team_mode:
+  enabled: true
+
 # Multi-Repository Configuration
-# Used by the 'agent apply-pattern' command
 multi_repo:
-  workspace_root: "~/.agent-workspaces"  # Where to clone repos for multi-repo operations
+  workspace_root: "~/.agent-workspaces"
+
+  # Git worktree configuration for isolated agent workspaces
+  worktree:
+    enabled: true
+    root: "~/.agent-workspaces/worktrees"
+    cleanup_on_complete: true
+    cleanup_on_failure: false
+    max_age_hours: 24
+    max_worktrees: 50
+
+# Repository Registry
+# Add your repositories here. Repos are cloned to multi_repo.workspace_root.
+# jira_project is optional — omit it for local-only task tracking.
+repositories:
+  - github_repo: your-org/your-repo
+    jira_project: PROJ          # optional: omit for local-only
+    display_name: Your Service
+
+  # Local-only repo (no JIRA integration)
+  # - github_repo: your-org/another-repo
+  #   display_name: Another Service
+
+# Workflow Configuration
+# Supports both legacy linear format and new DAG format with conditional branches
+workflows:
+  default:
+    description: "Architect plans, Engineer implements, QA reviews"
+    agents: [architect, engineer, qa]
+    pr_creator: architect
+    auto_review: true
+    require_tests: true
+
+  analysis:
+    description: "Repository analysis workflow"
+    agents: [architect]
+    output: jira_epic
+    auto_review: false
+    require_tests: false
+
+  # DAG format example: conditional branches and parallel paths
+  # smart_workflow:
+  #   description: "Skip QA for docs-only changes"
+  #   start_step: plan
+  #   steps:
+  #     plan:
+  #       agent: architect
+  #       next:
+  #         - target: implement
+  #     implement:
+  #       agent: engineer
+  #       next:
+  #         - target: create_pr
+  #           condition: files_match
+  #           params:
+  #             pattern: "*.md"
+  #           priority: 10
+  #         - target: qa_review
+  #           condition: always
+  #     qa_review:
+  #       agent: qa
+  #       next:
+  #         - target: create_pr
+  #           condition: approved
+  #         - target: implement
+  #           condition: needs_fix
+  #     create_pr:
+  #       agent: architect
+
+# Circuit Breaker Configuration
+circuit_breaker:
+  enabled: true
+  check_interval_seconds: 300
+  thresholds:
+    max_failure_rate: 0.30
+    max_stuck_tasks: 10
+    max_escalations: 50
+  actions:
+    on_degraded: reduce_replicas
+    on_critical: pause_intake
+
+# Analytics Configuration
+analytics:
+  enabled: true
+  performance_metrics:
+    enabled: true
+    report_interval_hours: 24
+    retention_days: 30
+  failure_detection:
+    enabled: true
+    pattern_threshold: 3
+    analysis_interval_hours: 168
+  shadow_mode_analysis:
+    enabled: true
+    min_samples: 10
+    safety_threshold: 0.02
+  dynamic_budgets:
+    enabled: false
+    adjustment_interval_days: 7
+    percentile: 90
+    min_samples: 20
+  quality_trends:
+    enabled: true
+    track_test_coverage: true
+    track_static_analysis: true
+    track_pr_revisions: true

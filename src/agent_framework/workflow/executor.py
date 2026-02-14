@@ -43,10 +43,10 @@ _PR_URL_PATTERN = re.compile(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)')
 class WorkflowExecutor:
     """Executes workflow DAGs and routes tasks between agents."""
 
-    def __init__(self, queue: "FileQueue", queue_dir: Path):
+    def __init__(self, queue: "FileQueue", queue_dir: Path, agent_logger=None):
         self.queue = queue
         self.queue_dir = queue_dir
-        self.logger = logger
+        self.logger = agent_logger or logger
 
     def execute_step(
         self,
