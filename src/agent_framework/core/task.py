@@ -107,6 +107,10 @@ class Task(BaseModel):
     # Structured planning (PARA-inspired)
     plan: Optional[PlanDocument] = None
 
+    # Replan history for dynamic replanning on failure
+    # Each entry: {"attempt": N, "error": "...", "revised_plan": "..."}
+    replan_history: list[dict[str, Any]] = Field(default_factory=list)
+
     class Config:
         """Pydantic config."""
         use_enum_values = True

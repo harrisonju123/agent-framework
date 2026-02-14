@@ -186,6 +186,27 @@ def main():
         # Extract optimization config from framework config
         optimization_config = framework_config.optimization.model_dump() if framework_config.optimization else {}
 
+        # Extract agentic flow configs (Sprint 1: memory, self-eval, replanning)
+        memory_config = getattr(framework_config, "memory", None)
+        if isinstance(memory_config, dict):
+            pass  # already a dict from extra="allow"
+        elif memory_config is not None:
+            memory_config = memory_config if isinstance(memory_config, dict) else {}
+        else:
+            memory_config = {}
+
+        self_eval_config = getattr(framework_config, "self_evaluation", None)
+        if not isinstance(self_eval_config, dict):
+            self_eval_config = {}
+
+        replan_config = getattr(framework_config, "replanning", None)
+        if not isinstance(replan_config, dict):
+            replan_config = {}
+
+        session_logging_config = getattr(framework_config, "session_logging", None)
+        if not isinstance(session_logging_config, dict):
+            session_logging_config = {}
+
         # Create and run agent
         agent = Agent(
             agent_config,
@@ -203,6 +224,10 @@ def main():
             team_mode_default_model=framework_config.llm.claude_cli_default_model,
             agent_definition=agent_def,
             workflows_config=framework_config.workflows,
+            memory_config=memory_config,
+            self_eval_config=self_eval_config,
+            replan_config=replan_config,
+            session_logging_config=session_logging_config,
         )
 
         # Let SIGTERM trigger a clean exit through the polling loop

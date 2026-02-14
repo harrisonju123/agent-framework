@@ -29,6 +29,9 @@ from ..safeguards.escalation import EscalationHandler
 from ..workspace.worktree_manager import WorktreeManager, WorktreeConfig
 from ..utils.rich_logging import ContextLogger, setup_rich_logging
 from ..utils.type_helpers import get_type_str
+from ..memory.memory_store import MemoryStore
+from ..memory.memory_retriever import MemoryRetriever
+from .session_logger import SessionLogger, noop_logger
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -169,6 +172,10 @@ class Agent:
         team_mode_default_model: str = "sonnet",
         agent_definition: Optional["AgentDefinition"] = None,
         workflows_config: Optional[Dict[str, "WorkflowDefinition"]] = None,
+        memory_config: Optional[dict] = None,
+        self_eval_config: Optional[dict] = None,
+        replan_config: Optional[dict] = None,
+        session_logging_config: Optional[dict] = None,
     ):
         self.config = config
         self.llm = llm
@@ -237,6 +244,37 @@ class Agent:
         # Pause signal cache (avoid 2x exists() calls every 2s)
         self._pause_signal_cache: Optional[bool] = None
         self._pause_signal_cache_time: float = 0.0
+
+        # Agent Memory System: persistent cross-task learning
+        mem_cfg = memory_config or {}
+        self._memory_enabled = mem_cfg.get("enabled", False)
+        self._memory_store = MemoryStore(workspace, enabled=self._memory_enabled)
+        self._memory_retriever = MemoryRetriever(self._memory_store)
+
+        # Self-Evaluation Loop: review own output before marking done
+        eval_cfg = self_eval_config or {}
+        self._self_eval_enabled = eval_cfg.get("enabled", False)
+        self._self_eval_max_retries = eval_cfg.get("max_retries", 2)
+        self._self_eval_model = eval_cfg.get("model", "haiku")
+
+        # Dynamic Replanning: generate revised plans on failure retry 2+
+        replan_cfg = replan_config or {}
+        self._replan_enabled = replan_cfg.get("enabled", False)
+        self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
+        self._replan_model = replan_cfg.get("model", "haiku")
+
+        # Session logging: structured per-task JSONL for post-hoc analysis
+        sl_cfg = session_logging_config or {}
+        self._session_logging_enabled = sl_cfg.get("enabled", False)
+        self._session_log_prompts = sl_cfg.get("log_prompts", True)
+        self._session_log_tool_inputs = sl_cfg.get("log_tool_inputs", True)
+        self._session_logs_dir = self.workspace / "logs"
+        self._session_logger: SessionLogger = noop_logger()
+
+        # Cleanup old session logs on startup
+        retention_days = sl_cfg.get("retention_days", 30)
+        if self._session_logging_enabled and retention_days > 0:
+            SessionLogger.cleanup_old_sessions(self._session_logs_dir, retention_days)
 
         # Sandbox for isolated test execution
         self._test_runner = None
@@ -415,6 +453,12 @@ class Agent:
                 await self._handle_failure(task)
                 return
 
+        # Self-evaluation: catch obvious issues before propagating downstream
+        if self._self_eval_enabled:
+            passed = await self._self_evaluate(task, response)
+            if not passed:
+                return  # Task was reset for self-eval retry
+
         # Handle post-LLM workflow
         self.logger.debug(f"Running post-LLM workflow for {task.id}")
         await self._handle_success(task, response)
@@ -463,6 +507,7 @@ class Agent:
         self._queue_code_review_if_needed(task, response)
         self._queue_review_fix_if_needed(task, response)
         self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
+        self._extract_and_store_memories(task, response)
         self._log_task_completion_metrics(task, response, task_start_time)
 
     def _log_task_completion_metrics(self, task: Task, response, task_start_time) -> None:
@@ -510,6 +555,12 @@ class Agent:
             cost=cost
         ))
 
+        self._session_logger.log(
+            "task_complete",
+            status="completed",
+            duration_ms=duration_ms,
+        )
+
     async def _handle_failed_response(self, task: Task, response) -> None:
         """Handle failed LLM response."""
         from datetime import datetime
@@ -526,6 +577,14 @@ class Agent:
             f"  Finish reason: {response.finish_reason}"
         )
         self.logger.task_failed(task.last_error, task.retry_count)
+
+        self._session_logger.log(
+            "task_failed",
+            error=task.last_error,
+            retry=task.retry_count,
+            model=response.model_used,
+            finish_reason=response.finish_reason,
+        )
 
         self.activity_manager.append_event(ActivityEvent(
             type="fail",
@@ -602,6 +661,22 @@ class Agent:
         self._current_task_id = task.id
         task_start_time = datetime.utcnow()
 
+        # Session logger: structured JSONL for post-hoc analysis
+        self._session_logger = SessionLogger(
+            logs_dir=self._session_logs_dir,
+            task_id=task.id,
+            enabled=self._session_logging_enabled,
+            log_prompts=self._session_log_prompts,
+            log_tool_inputs=self._session_log_tool_inputs,
+        )
+        self._session_logger.log(
+            "task_start",
+            agent=self.config.id,
+            title=task.title,
+            retry=task.retry_count,
+            task_type=get_type_str(task.type),
+        )
+
         try:
             # Initialize task execution
             self._initialize_task_execution(task, task_start_time)
@@ -618,6 +693,12 @@ class Agent:
             self.logger.phase_change("executing_llm")
             self.logger.info(
                 f"🤖 Calling LLM (model: {task.type}, attempt: {task.retry_count + 1})"
+            )
+
+            self._session_logger.log(
+                "llm_start",
+                task_type=get_type_str(task.type),
+                retry=task.retry_count,
             )
 
             # Throttled callback so tool activity writes hit disk at most once/sec
@@ -693,6 +774,7 @@ class Agent:
                 ),
                 task_id=task.id,
                 on_tool_activity=_on_tool_activity,
+                on_session_tool_call=self._session_logger.log_tool_call,
             )
             llm_task = asyncio.create_task(llm_coro)
             watcher_task = asyncio.create_task(self._watch_for_interruption())
@@ -735,6 +817,17 @@ class Agent:
                     pass
                 response = llm_task.result()
 
+            # Log LLM completion to session log
+            self._session_logger.log(
+                "llm_complete",
+                success=response.success,
+                model=response.model_used,
+                tokens_in=response.input_tokens,
+                tokens_out=response.output_tokens,
+                cost=response.reported_cost_usd,
+                duration_ms=response.latency_ms,
+            )
+
             # Clear tool activity after LLM completes
             try:
                 self.activity_manager.update_tool_activity(self.config.id, None)
@@ -751,6 +844,12 @@ class Agent:
             task.last_error = str(e)
             self.logger.exception(f"Error processing task {task.id}: {e}")
 
+            self._session_logger.log(
+                "task_failed",
+                error=str(e),
+                retry=task.retry_count,
+            )
+
             self.activity_manager.append_event(ActivityEvent(
                 type="fail",
                 agent=self.config.id,
@@ -764,6 +863,8 @@ class Agent:
             await self._handle_failure(task)
 
         finally:
+            self._session_logger.close()
+            self._session_logger = noop_logger()
             self._cleanup_task_execution(task, lock)
 
     async def _handle_failure(self, task: Task) -> None:
@@ -810,6 +911,10 @@ class Agent:
                 )
                 self._log_failed_escalation(task)
         else:
+            # Dynamic replanning: generate revised approach on retry 2+
+            if self._replan_enabled and task.retry_count >= self._replan_min_retry:
+                await self._request_replan(task)
+
             # Reset task to pending so it can be retried
             self.logger.warning(
                 f"Resetting task {task.id} to pending status "
@@ -1074,6 +1179,265 @@ class Agent:
         # Guaranteed fallback
         return extracted[0] if extracted else f"Task {get_type_str(task.type)} completed"
 
+    # -- Agent Memory Integration --
+
+    def _get_repo_slug(self, task: Task) -> Optional[str]:
+        """Extract repo slug from task context."""
+        return task.context.get("github_repo")
+
+    def _inject_memories(self, prompt: str, task: Task) -> str:
+        """Append relevant memories from previous tasks to the prompt."""
+        if not self._memory_enabled:
+            return prompt
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return prompt
+
+        # Build tag hints from task context
+        task_tags = []
+        if task.type:
+            task_tags.append(get_type_str(task.type))
+        jira_project = task.context.get("jira_project")
+        if jira_project:
+            task_tags.append(jira_project)
+
+        memory_section = self._memory_retriever.format_for_prompt(
+            repo_slug=repo_slug,
+            agent_type=self.config.base_id,
+            task_tags=task_tags,
+        )
+
+        if memory_section:
+            self.logger.debug(f"Injected {len(memory_section)} chars of memory context")
+            self._session_logger.log(
+                "memory_recall",
+                repo=repo_slug,
+                chars_injected=len(memory_section),
+                categories=task_tags,
+            )
+            return prompt + "\n" + memory_section
+
+        return prompt
+
+    def _extract_and_store_memories(self, task: Task, response) -> None:
+        """Extract learnings from successful response and store as memories."""
+        if not self._memory_enabled:
+            return
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return
+
+        count = self._memory_retriever.extract_memories_from_response(
+            response_content=response.content,
+            repo_slug=repo_slug,
+            agent_type=self.config.base_id,
+            task_id=task.id,
+        )
+        if count > 0:
+            self.logger.info(f"Extracted {count} memories from task {task.id}")
+            self._session_logger.log(
+                "memory_store",
+                repo=repo_slug,
+                count=count,
+            )
+
+    # -- Self-Evaluation Loop --
+
+    async def _self_evaluate(self, task: Task, response) -> bool:
+        """Review agent's own output against acceptance criteria.
+
+        Uses a cheap model to check for obvious gaps. If gaps found,
+        resets task with critique context for retry — without consuming
+        a queue-level retry.
+
+        Returns True if evaluation passed (or disabled/skipped).
+        Returns False if task was reset for retry.
+        """
+        eval_retries = task.context.get("_self_eval_count", 0)
+        if eval_retries >= self._self_eval_max_retries:
+            self.logger.debug(
+                f"Self-eval retry limit reached ({eval_retries}), proceeding"
+            )
+            return True
+
+        # Build evaluation prompt from acceptance criteria
+        criteria = task.acceptance_criteria
+        if not criteria:
+            return True
+
+        criteria_text = "\n".join(f"- {c}" for c in criteria)
+        response_preview = response.content[:4000] if response.content else ""
+
+        eval_prompt = f"""Review this agent's output against the acceptance criteria.
+Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
+
+## Acceptance Criteria
+{criteria_text}
+
+## Agent Output (preview)
+{response_preview}
+
+Verdict:"""
+
+        try:
+            eval_response = await self.llm.complete(LLMRequest(
+                prompt=eval_prompt,
+                model=self._self_eval_model,
+            ))
+
+            if not eval_response.success or not eval_response.content:
+                self.logger.warning("Self-eval LLM call failed, proceeding without eval")
+                return True
+
+            verdict = eval_response.content.strip()
+            passed = verdict.upper().startswith("PASS")
+
+            self._session_logger.log(
+                "self_eval",
+                verdict="PASS" if passed else "FAIL",
+                model=self._self_eval_model,
+                criteria_count=len(criteria),
+                eval_attempt=eval_retries + 1,
+            )
+
+            if passed:
+                self.logger.info(f"Self-evaluation PASSED for task {task.id}")
+                return True
+
+            # Failed self-eval — reset for retry with critique
+            self.logger.warning(
+                f"Self-evaluation FAILED for task {task.id} "
+                f"(attempt {eval_retries + 1}/{self._self_eval_max_retries}): "
+                f"{verdict[:200]}"
+            )
+
+            task.context["_self_eval_count"] = eval_retries + 1
+            task.context["_self_eval_critique"] = verdict[:1000]
+            task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:200]}")
+
+            # Reset without consuming queue retry
+            task.status = TaskStatus.PENDING
+            task.started_at = None
+            task.started_by = None
+            self.queue.update(task)
+
+            return False
+
+        except Exception as e:
+            self.logger.warning(f"Self-evaluation error (non-fatal): {e}")
+            return True
+
+    # -- Dynamic Replanning --
+
+    async def _request_replan(self, task: Task) -> None:
+        """Generate a revised approach based on what failed.
+
+        Called on retry 2+ to avoid repeating the same failing approach.
+        Stores the revised plan in task.replan_history and task.context
+        so the next prompt attempt sees what was tried and the new approach.
+        """
+        error = task.last_error or "Unknown error"
+        previous_attempts = task.replan_history or []
+
+        attempts_text = ""
+        if previous_attempts:
+            for attempt in previous_attempts:
+                attempts_text += (
+                    f"\n- Attempt {attempt.get('attempt', '?')}: "
+                    f"{attempt.get('error', 'no error recorded')}"
+                )
+
+        replan_prompt = f"""A task has failed {task.retry_count} times. Generate a REVISED approach.
+
+## Task
+{task.title}: {task.description[:1000]}
+
+## Latest Error
+{error[:500]}
+
+## Previous Attempts{attempts_text if attempts_text else ' (first replan)'}
+
+## Instructions
+Provide a revised approach in 3-5 bullet points. Focus on what to do DIFFERENTLY.
+Do NOT repeat the same approach. Consider: different implementation strategy,
+breaking the task into smaller steps, or working around the root cause."""
+
+        try:
+            replan_response = await self.llm.complete(LLMRequest(
+                prompt=replan_prompt,
+                model=self._replan_model,
+            ))
+
+            if replan_response.success and replan_response.content:
+                revised_plan = replan_response.content.strip()[:2000]
+
+                # Store in replan history
+                history_entry = {
+                    "attempt": task.retry_count,
+                    "error": error[:500],
+                    "revised_plan": revised_plan,
+                }
+                task.replan_history.append(history_entry)
+
+                # Store in context for prompt injection
+                task.context["_revised_plan"] = revised_plan
+                task.context["_replan_attempt"] = task.retry_count
+
+                self._session_logger.log(
+                    "replan",
+                    retry=task.retry_count,
+                    previous_error=error[:500],
+                    revised_plan=revised_plan,
+                    model=self._replan_model,
+                )
+
+                self.logger.info(
+                    f"Generated revised plan for task {task.id} "
+                    f"(retry {task.retry_count}): {revised_plan[:100]}..."
+                )
+            else:
+                self.logger.warning(
+                    f"Replan LLM call failed for task {task.id}: "
+                    f"{replan_response.error}"
+                )
+
+        except Exception as e:
+            self.logger.warning(f"Replanning error (non-fatal): {e}")
+
+    def _inject_replan_context(self, prompt: str, task: Task) -> str:
+        """Append revised plan and attempt history to prompt if available."""
+        revised_plan = task.context.get("_revised_plan")
+        if not revised_plan:
+            return prompt
+
+        self_eval_critique = task.context.get("_self_eval_critique", "")
+
+        replan_section = f"""
+
+## REVISED APPROACH (retry {task.retry_count})
+
+Previous attempts failed. Use this revised approach:
+
+{revised_plan}
+"""
+        if self_eval_critique:
+            replan_section += f"""
+## Self-Evaluation Feedback
+{self_eval_critique}
+"""
+
+        if task.replan_history:
+            replan_section += "\n## Previous Attempt History\n"
+            for entry in task.replan_history[:-1]:  # Skip current, already shown above
+                replan_section += (
+                    f"- Attempt {entry.get('attempt', '?')}: "
+                    f"Failed with: {entry.get('error', 'unknown')[:100]}\n"
+                )
+
+        return prompt + replan_section
+
     def _handle_shadow_mode_comparison(self, task: Task) -> str:
         """Generate and compare both prompts in shadow mode, return legacy prompt."""
         legacy_prompt = self._build_prompt_legacy(task)
@@ -1150,6 +1514,24 @@ Fix the failing tests and ensure all tests pass.
 
         # Append test failure context if present
         prompt = self._append_test_failure_context(prompt, task)
+
+        # Inject relevant memories from previous tasks
+        prompt = self._inject_memories(prompt, task)
+
+        # Inject replan history if retrying with revised approach
+        prompt = self._inject_replan_context(prompt, task)
+
+        # Session log: capture what was sent to the LLM
+        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:12]
+        has_replan = "_revised_plan" in task.context
+        self._session_logger.log(
+            "prompt_built",
+            prompt_length=len(prompt),
+            prompt_hash=prompt_hash,
+            replan_injected=has_replan,
+            retry=task.retry_count,
+        )
+        self._session_logger.log_prompt(prompt)
 
         return prompt
 
@@ -2542,6 +2924,11 @@ IMPORTANT:
         try:
             self.queue.push(chain_task, next_agent)
             self.logger.info(f"🔗 Workflow chain: queued {next_agent} for task {task.id}")
+            self._session_logger.log(
+                "workflow_chain",
+                next_agent=next_agent,
+                reason="default chain",
+            )
         except Exception as e:
             self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
 
@@ -2554,6 +2941,11 @@ IMPORTANT:
         try:
             self.queue.push(chain_task, target_agent)
             self.logger.info(f"🔗 Routed to {target_agent} (signal): {reason}")
+            self._session_logger.log(
+                "workflow_chain",
+                next_agent=target_agent,
+                reason=reason,
+            )
         except Exception as e:
             self.logger.error(f"Failed to route task to {target_agent}: {e}")
 

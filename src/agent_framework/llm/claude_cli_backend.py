@@ -57,6 +57,7 @@ def _process_stream_line(
     usage_result: dict,
     log_file=None,
     on_tool_activity: Optional[Callable] = None,
+    on_session_tool_call: Optional[Callable] = None,
 ):
     """Parse a single JSON line from --output-format stream-json.
 
@@ -69,6 +70,8 @@ def _process_stream_line(
         usage_result: Dict to populate with usage data from result event
         log_file: Optional file handle for real-time log output
         on_tool_activity: Optional callback invoked with (tool_name, tool_input_summary)
+        on_session_tool_call: Optional callback invoked with (tool_name, tool_input_dict)
+            for structured session logging
     """
     line = line.strip()
     if not line:
@@ -115,10 +118,12 @@ def _process_stream_line(
                 if log_file:
                     log_file.write(marker)
                     log_file.flush()
+                tool_input = block.get("input", {})
                 if on_tool_activity:
-                    tool_input = block.get("input", {})
                     summary = _summarize_tool_input(tool_name, tool_input)
                     on_tool_activity(tool_name, summary)
+                if on_session_tool_call:
+                    on_session_tool_call(tool_name, tool_input)
 
     elif event_type == "result":
         # Final event — authoritative usage overwrites per-turn accumulation
@@ -195,6 +200,7 @@ class ClaudeCLIBackend(LLMBackend):
         request: LLMRequest,
         task_id: Optional[str] = None,
         on_tool_activity: Optional[Callable] = None,
+        on_session_tool_call: Optional[Callable] = None,
     ) -> LLMResponse:
         """
         Send a completion request via Claude CLI subprocess.
@@ -318,6 +324,7 @@ class ClaudeCLIBackend(LLMBackend):
                                     buffer.decode(errors='replace'),
                                     text_chunks, usage_result, log_file,
                                     on_tool_activity,
+                                    on_session_tool_call,
                                 )
                             break
                         buffer += chunk
@@ -328,6 +335,7 @@ class ClaudeCLIBackend(LLMBackend):
                                 line_bytes.decode(errors='replace'),
                                 text_chunks, usage_result, log_file,
                                 on_tool_activity,
+                                on_session_tool_call,
                             )
                 except asyncio.TimeoutError:
                     pass

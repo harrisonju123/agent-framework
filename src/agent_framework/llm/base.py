@@ -45,6 +45,7 @@ class LLMBackend(ABC):
         request: LLMRequest,
         task_id: Optional[str] = None,
         on_tool_activity: Optional[Callable] = None,
+        on_session_tool_call: Optional[Callable] = None,
     ) -> LLMResponse:
         """
         Send a completion request to the LLM.
@@ -54,6 +55,8 @@ class LLMBackend(ABC):
             task_id: Optional task identifier for logging/streaming output.
             on_tool_activity: Optional callback invoked with (tool_name, summary)
                 when a tool_use event is parsed from the stream.
+            on_session_tool_call: Optional callback invoked with (tool_name, tool_input)
+                for structured session logging of tool calls.
         """
         pass
 

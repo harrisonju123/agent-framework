@@ -99,6 +99,34 @@ optimization:
   #   escalation: 80000
   #   review: 25000
 
+# Session Logging: structured per-task logs for post-hoc analysis
+# Captures prompt content, tool calls, memory ops, self-eval, replanning, etc.
+# Output: logs/sessions/{task_id}.jsonl
+session_logging:
+  enabled: true
+  log_prompts: true          # Include full prompt text (can be large)
+  log_tool_inputs: true      # Include tool call parameters
+  retention_days: 30         # Auto-cleanup old session logs
+
+# Agent Memory: persistent cross-task learning
+memory:
+  enabled: true
+  max_memories_per_store: 200     # Max entries per (repo, agent_type) pair
+  max_prompt_chars: 3000          # Max chars of memory injected into prompts
+  recency_half_life_days: 7       # Memories lose half relevance after N days
+
+# Self-Evaluation: agents review their own output before marking done
+self_evaluation:
+  enabled: true
+  max_retries: 2                  # Max self-eval retry loops before proceeding
+  model: haiku                    # Cheap model for evaluation (haiku/sonnet)
+
+# Dynamic Replanning: generate revised plans on retry 2+
+replanning:
+  enabled: true
+  min_retry_for_replan: 2         # Start replanning at this retry count
+  model: haiku                    # Cheap model for replanning
+
 # Team mode: use Claude Agent Teams for multi-agent workflows
 team_mode:
   enabled: true
