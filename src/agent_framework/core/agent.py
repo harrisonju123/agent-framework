@@ -2865,11 +2865,6 @@ IMPORTANT:
                 self.logger.debug("Routing signal discarded: single-agent workflow")
             return
 
-        if self._team_mode_handled_workflow(task):
-            if routing_signal:
-                self.logger.debug("Routing signal discarded: team mode handled workflow")
-            return
-
         pr_info = self._get_pr_info(task, response)
         if pr_info:
             return
@@ -2948,28 +2943,6 @@ IMPORTANT:
             )
         except Exception as e:
             self.logger.error(f"Failed to route task to {target_agent}: {e}")
-
-    def _team_mode_handled_workflow(self, task: Task) -> bool:
-        """Return True if team mode already handled this workflow's agents.
-
-        Mirrors the check in _handle_task (and compose_team): team_override=True
-        forces teams on, team_override=False skips teams. Team mode applies
-        to any workflow that has teammates defined in WORKFLOW_TEAMMATES.
-        """
-        from .team_composer import WORKFLOW_TEAMMATES
-
-        if not self._team_mode_enabled:
-            return False
-
-        team_override = task.context.get("team_override")
-        if team_override is False:
-            return False
-
-        if team_override is True:
-            return True
-
-        workflow = task.context.get("workflow", "default")
-        return workflow in WORKFLOW_TEAMMATES
 
     def _is_chain_task_already_queued(self, next_agent: str, source_task_id: str) -> bool:
         """O(1) file existence check using deterministic chain task ID.

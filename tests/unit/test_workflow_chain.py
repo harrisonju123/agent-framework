@@ -136,18 +136,20 @@ class TestEnforceWorkflowChain:
 
         queue.push.assert_not_called()
 
-    def test_skips_when_team_mode_handled(self, agent, queue):
-        """When team mode handles the workflow, chain is skipped."""
+    def test_chains_even_with_team_mode(self, agent, queue):
+        """Team mode provides advisory subagents but doesn't suppress chain routing."""
         agent._team_mode_enabled = True
         task = _make_task(workflow="default")
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
 
-        queue.push.assert_not_called()
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"
 
-    def test_fires_when_team_override_false(self, agent, queue):
-        """When team_override=False, team mode is skipped so chain must fire."""
+    def test_chains_with_team_override_false(self, agent, queue):
+        """team_override=False still chains to next agent."""
         agent._team_mode_enabled = True
         task = _make_task(workflow="default", team_override=False)
         response = _make_response()
@@ -156,15 +158,17 @@ class TestEnforceWorkflowChain:
 
         queue.push.assert_called_once()
 
-    def test_skips_when_team_override_true(self, agent, queue):
-        """team_override=True forces teams on."""
+    def test_chains_with_team_override_true(self, agent, queue):
+        """team_override=True still chains to next agent."""
         agent._team_mode_enabled = True
         task = _make_task(workflow="default", team_override=True)
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
 
-        queue.push.assert_not_called()
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"
 
     def test_skips_duplicate_chain_task(self, agent, queue):
         """If the chain task file already exists, don't queue again."""
