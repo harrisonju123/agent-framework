@@ -29,8 +29,8 @@ def build_planning_task(
     """
     import time
 
-    # Use jira_project or repository name for task ID
-    project_id = jira_project or repository_name
+    # Use jira_project or repo slug for task ID (must be filesystem-safe)
+    project_id = jira_project or github_repo.replace("/", "-")
     task_id = f"planning-{project_id}-{int(time.time())}"
 
     # Build task context - only include jira_project if configured

@@ -226,7 +226,7 @@ class MultiRepoConfig(BaseModel):
 class RepositoryConfig(BaseModel):
     """Configuration for a registered repository."""
     github_repo: str  # owner/repo format (e.g., "justworkshr/pto")
-    jira_project: str  # JIRA project key (e.g., "PTO")
+    jira_project: Optional[str] = None  # JIRA project key (e.g., "PTO"), None for local-only
     display_name: Optional[str] = None  # Display name (defaults to repo name)
 
     @property
