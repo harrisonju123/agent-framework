@@ -96,6 +96,18 @@ class WorkflowExecutor:
                 self._route_to_step(task, target_step, workflow, current_agent_id, routing_signal)
                 return True
 
+        # Checkpoint gate — pause for human approval before routing to next step
+        if current_step.checkpoint and not task.approved_at:
+            checkpoint_id = f"{workflow.name}-{current_step.id}"
+            message = current_step.checkpoint.get("message", f"Checkpoint at {current_step.id}")
+            task.mark_awaiting_approval(checkpoint_id, message)
+            self._save_task_checkpoint(task)
+            self.logger.info(
+                f"Task {task.id} paused at checkpoint '{checkpoint_id}': {message}"
+            )
+            self.logger.info(f"   Run 'agent approve {task.id}' to continue workflow")
+            return False
+
         next_edges = workflow.get_next_steps(current_step.id)
         if not next_edges:
             self.logger.info(f"Terminal step reached for task {task.id}")
@@ -277,6 +289,18 @@ class WorkflowExecutor:
                 "workflow_step": target_step.id,
             },
         )
+
+    def _save_task_checkpoint(self, task: "Task") -> None:
+        """Save task to checkpoint queue for human approval."""
+        from ..utils.atomic_io import atomic_write_json
+
+        checkpoint_queue_dir = self.queue_dir / "checkpoints"
+        checkpoint_queue_dir.mkdir(exist_ok=True, parents=True)
+
+        checkpoint_file = checkpoint_queue_dir / f"{task.id}.json"
+        task_json = task.model_dump_json(indent=2)
+        atomic_write_json(checkpoint_file, task_json)
+        self.logger.debug(f"Saved checkpoint state for task {task.id}")
 
     def get_execution_state(self, task: "Task", current_step: str) -> WorkflowExecutionState:
         """Get current execution state for a task."""

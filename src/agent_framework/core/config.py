@@ -212,6 +212,7 @@ class WorkflowStepDefinition(BaseModel):
     agent: str
     next: Optional[List[Dict[str, Any]]] = None  # List of edge definitions
     task_type: Optional[str] = None  # Override default task type
+    checkpoint: Optional[Dict[str, str]] = None
 
 
 class WorkflowDefinition(BaseModel):
@@ -318,7 +319,8 @@ class WorkflowDefinition(BaseModel):
                 id=step_id,
                 agent=step_def.agent,
                 next=edges,
-                task_type_override=step_def.task_type
+                task_type_override=step_def.task_type,
+                checkpoint=step_def.checkpoint
             )
 
         dag = WorkflowDAG(

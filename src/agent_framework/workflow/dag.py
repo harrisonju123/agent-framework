@@ -51,6 +51,7 @@ class WorkflowStep:
     next: List[WorkflowEdge] = field(default_factory=list)
     task_type_override: Optional[str] = None  # Override default task type for this agent
     metadata: Dict[str, Any] = field(default_factory=dict)
+    checkpoint: Optional[Dict[str, str]] = None
 
     def __post_init__(self):
         """Sort edges by priority (highest first)."""

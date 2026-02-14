@@ -1152,6 +1152,112 @@ def resume(ctx):
 
 
 @cli.command()
+@click.argument("task_id", required=False)
+@click.option("--message", "-m", help="Optional approval message")
+@click.pass_context
+def approve(ctx, task_id, message):
+    """Approve a task waiting at a checkpoint.
+
+    Example:
+        agent approve                        # List all checkpoints
+        agent approve chain-abc123-engineer  # Approve specific checkpoint
+        agent approve chain-abc123-engineer -m "Reviewed and looks good"
+    """
+    import json
+    import os
+    from datetime import datetime
+    from ..core.task import Task, TaskStatus
+
+    workspace = ctx.obj["workspace"]
+    queue_dir = workspace / ".agent-communication" / "queues"
+    checkpoint_dir = queue_dir / "checkpoints"
+
+    if not task_id:
+        if not checkpoint_dir.exists() or not any(checkpoint_dir.glob("*.json")):
+            console.print("[green]No tasks awaiting approval at checkpoints[/]")
+            return
+
+        console.print("[bold]Tasks Awaiting Checkpoint Approval:[/]")
+        console.print()
+
+        table = Table()
+        table.add_column("Task ID")
+        table.add_column("Title")
+        table.add_column("Checkpoint")
+        table.add_column("Message")
+
+        for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
+            with open(checkpoint_file, 'r') as f:
+                task_data = json.load(f)
+            task = Task(**task_data)
+
+            title = task.title[:40] + "..." if len(task.title) > 40 else task.title
+            cp_msg = task.checkpoint_message or "N/A"
+            if len(cp_msg) > 50:
+                cp_msg = cp_msg[:50] + "..."
+
+            table.add_row(
+                task.id,
+                title,
+                task.checkpoint_reached or "N/A",
+                cp_msg,
+            )
+
+        console.print(table)
+        console.print()
+        console.print("[dim]Use 'agent approve <task_id>' to approve a specific checkpoint[/]")
+        return
+
+    checkpoint_file = checkpoint_dir / f"{task_id}.json"
+    if not checkpoint_file.exists():
+        console.print(f"[red]Error: No task found at checkpoint with ID '{task_id}'[/]")
+        console.print("[dim]Use 'agent approve' to see all checkpoints[/]")
+        return
+
+    with open(checkpoint_file, 'r') as f:
+        task_data = json.load(f)
+
+    task = Task(**task_data)
+
+    if task.status != TaskStatus.AWAITING_APPROVAL:
+        console.print(f"[yellow]Warning: Task {task_id} is not awaiting approval[/]")
+        console.print(f"[dim]Current status: {task.status}[/]")
+        return
+
+    console.print(f"[bold]Checkpoint Details:[/]")
+    console.print(f"  Task: {task.title}")
+    console.print(f"  Checkpoint: {task.checkpoint_reached}")
+    console.print(f"  Message: {task.checkpoint_message}")
+    console.print()
+
+    if not click.confirm("Approve this checkpoint and continue workflow?"):
+        console.print("[yellow]Approval cancelled[/]")
+        return
+
+    approver = os.getenv("USER", "user")
+    task.approve_checkpoint(approver)
+
+    if message:
+        task.notes.append(f"Checkpoint approved: {message}")
+    else:
+        task.notes.append(f"Checkpoint approved at {datetime.utcnow().isoformat()}")
+
+    # Re-queue then remove checkpoint file — only delete after successful push
+    queue = FileQueue(workspace)
+    try:
+        queue.push(task, task.assigned_to)
+        checkpoint_file.unlink()
+    except Exception as e:
+        console.print(f"[red]Error re-queuing task: {e}[/]")
+        console.print("[dim]Checkpoint file preserved — task not lost[/]")
+        return
+
+    console.print(f"[green]Checkpoint approved for task {task_id}[/]")
+    console.print(f"[dim]Task re-queued to {task.assigned_to} for continuation[/]")
+    console.print(f"[dim]Monitor with: agent status --watch[/]")
+
+
+@cli.command()
 @click.option("--fix", is_flag=True, help="Auto-fix detected issues")
 @click.pass_context
 def check(ctx, fix):

@@ -129,6 +129,33 @@ QA finds issues → Engineer fixes → QA re-verifies
 After 5 retries → escalate to Architect for replanning
 ```
 
+## Workflow Checkpoints
+
+Add configurable pause points for human approval at high-stakes workflow steps:
+
+```yaml
+workflows:
+  production-deploy:
+    steps:
+      engineer:
+        agent: engineer
+        checkpoint:
+          message: "Review implementation before production deployment"
+          reason: "High-risk production changes require approval"
+        next:
+          - target: qa
+```
+
+```bash
+# List tasks awaiting approval
+agent approve
+
+# Approve a checkpoint to continue workflow
+agent approve chain-abc123-engineer -m "Reviewed, looks good"
+```
+
+See [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md) for full documentation.
+
 ## CLI Reference
 
 ### Core
@@ -140,6 +167,8 @@ After 5 retries → escalate to Architect for replanning
 | `agent work --epic PROJ-100 --parallel` | Process epic tickets in parallel worktrees |
 | `agent run PROJ-123` | Work on a single JIRA ticket |
 | `agent pull --project PROJ` | Pull unassigned tickets from JIRA backlog |
+| `agent approve` | List tasks awaiting checkpoint approval |
+| `agent approve <task-id>` | Approve a checkpoint to continue workflow |
 
 ### Operations
 
