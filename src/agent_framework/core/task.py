@@ -98,6 +98,12 @@ class Task(BaseModel):
     # Optional fields with defaults
     depends_on: list[str] = Field(default_factory=list)
     blocks: list[str] = Field(default_factory=list)
+
+    # Parent-child hierarchy for task decomposition
+    parent_task_id: Optional[str] = None
+    subtask_ids: list[str] = Field(default_factory=list)
+    decomposition_strategy: Optional[str] = None  # by_feature, by_layer, by_refactor_feature
+
     acceptance_criteria: list[str] = Field(default_factory=list)
     deliverables: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
