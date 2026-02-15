@@ -1,201 +1,182 @@
-# Multi-Perspective Debate
+# Multi-Perspective Debate System
 
-## When to Use
+## Overview
 
-- Architectural decisions with significant trade-offs
-- Technology/library choices
-- Design pattern selection
-- Risk assessment for major changes
-- Any decision where both options have legitimate merits
+The `debate_topic` MCP tool enables agents to reason through complex decisions using structured adversarial perspectives. Instead of a single consultation, it spawns three perspectives in sequence:
 
-## When NOT to Use
+1. **Advocate** — argues in favor of an approach, focusing on benefits and opportunities
+2. **Critic** — argues against the approach, focusing on risks and downsides
+3. **Arbiter** — synthesizes both arguments into a final recommendation with trade-offs
 
-- Routine implementation decisions
-- Questions with a clear best answer
-- Quick factual questions (use consult_agent instead)
+## When to Use Debates
 
-## How It Works
+Use `debate_topic` for complex decisions with significant trade-offs:
 
-1. You provide a topic and optional context
-2. An Advocate argues FOR the proposed approach
-3. A Critic argues AGAINST and proposes alternatives
-4. An Arbiter synthesizes both arguments into a recommendation
+- **Architectural choices**: "Should we use Redis or in-memory caching for session storage?"
+- **Approach decisions**: "Should we refactor this now or defer until after the feature ships?"
+- **Technology selection**: "Should we adopt GraphQL or stick with REST for this new API?"
+- **Risk evaluation**: "Is it worth migrating to the new library version now?"
 
-## Cost
+**Don't use debates for:**
+- Simple yes/no questions with clear answers
+- Decisions already made or constrained by requirements
+- Questions better suited to a single expert consultation
+- Time-sensitive decisions where speed matters more than deliberation
 
-Each debate uses 2 consultation slots (out of 5 per session).
+## Cost and Rate Limiting
 
-## Example
+Debates consume **2 consultation slots** (out of the default 5 per session):
+- Each consultation costs 1 slot
+- Each debate costs 2 slots (advocate + critic + arbiter synthesis)
 
-```typescript
-debate_topic(
-  topic="Should we add Redis caching for the user API?",
-  context="Current response times are 200ms, target is <100ms. 500 requests/sec. PostgreSQL backend."
-)
-```
+This prevents overuse while still allowing 1-2 debates per agent session when needed.
 
-Returns structured result with:
-- `advocate_argument`: Why caching helps
-- `critic_argument`: Risks, alternatives (query optimization, connection pooling)
-- `synthesis`: Arbiter's recommendation
-- `confidence`: high/medium/low
-- `trade_offs`: Key points both sides agreed matter
+## Usage
 
-## Decision Framework
-
-Use debate_topic when:
-- **Multiple valid solutions exist** with different strengths/weaknesses
-- **Irreversible or costly to change** after implementation
-- **Team alignment matters** and you want structured analysis
-
-Skip debate_topic when:
-- **One solution is clearly superior** (ask consult_agent instead)
-- **Low stakes** decision that can be easily changed later
-- **Consultation budget is tight** (debate costs 2 slots vs consult's 1)
-
-## Best Practices
-
-### Framing the Topic
-
-**Good**: Specific, actionable questions with clear alternatives
-- "Should we use gRPC or REST for the inter-service communication API?"
-- "Is adding an index on user_id worth the write overhead?"
-
-**Bad**: Vague or overly broad questions
-- "How do we improve performance?" (no specific approach to debate)
-- "What's the best database?" (too open-ended, no context)
-
-### Providing Context
-
-Include just enough context for informed debate:
-- Current state and constraints
-- Performance/scale requirements
-- Team expertise or existing patterns
-
-Avoid:
-- Overly detailed implementation specs (>1000 chars get truncated)
-- Bias-inducing phrasing (let debaters form their own views)
-
-### Custom Positions
-
-Use `advocate_position` and `critic_position` to override defaults:
+### Basic Debate
 
 ```typescript
-debate_topic(
-  topic="Migrate from MySQL to PostgreSQL?",
-  advocate_position="in favor of PostgreSQL for JSON support and performance",
-  critic_position="against migration due to operational risk and team learning curve"
-)
+debate_topic({
+  topic: "Should we implement server-side rendering for this dashboard?",
+  context: "Dashboard has 10+ charts, used by 500+ users daily, currently client-side only"
+})
 ```
 
-Useful when you want to test a specific angle or constraint.
+### Custom Perspectives
 
-## Output Interpretation
+For nuanced decisions, you can specify custom perspectives instead of the default advocate/critic:
 
-### Confidence Levels
+```typescript
+debate_topic({
+  topic: "How should we structure our microservices deployment?",
+  context: "Team of 8 engineers, 3 services currently, expecting to grow to 12 services",
+  custom_perspectives: {
+    advocate: "Argue for Kubernetes with full orchestration",
+    critic: "Argue for simpler Docker Compose setup"
+  }
+})
+```
 
-- **High**: Clear winner, both perspectives agree on direction
-- **Medium**: Trade-offs are balanced, context-dependent choice
-- **Low**: Insufficient information, or arbiter couldn't synthesize
+## Output Structure
 
-If confidence is low, consider:
-- Adding more context and re-running debate
-- Consulting a subject matter expert (consult_agent with architect/engineer)
-- Prototyping both approaches before committing
+The debate returns a structured result:
 
-### Trade-offs
-
-The `trade_offs` array highlights key considerations that apply regardless of which option you choose:
-
-```json
+```typescript
 {
-  "trade_offs": [
-    "Adding caching increases system complexity",
-    "Cache invalidation must be carefully managed",
-    "Redis adds operational overhead but significantly improves read performance"
-  ]
+  success: true,
+  topic: "...",
+  advocate: {
+    perspective: "Advocate - argue in favor...",
+    argument: "Server-side rendering would improve initial load time...",
+    success: true
+  },
+  critic: {
+    perspective: "Critic - argue against...",
+    argument: "SSR adds complexity and increases server costs...",
+    success: true
+  },
+  synthesis: {
+    recommendation: "Implement SSR for the dashboard landing page only...",
+    confidence: "medium",
+    trade_offs: [
+      "Improved perceived performance vs increased server load",
+      "Better SEO vs higher infrastructure costs",
+      "Faster initial paint vs more complex deployment"
+    ],
+    reasoning: "Partial SSR balances the benefits of faster initial load..."
+  },
+  debate_id: "debate-1234567890-abc123",
+  consultations_used: 2,
+  consultations_remaining: 3
 }
 ```
 
-Use these to:
-- Plan for risks in your implementation
-- Document decision rationale in ADRs or JIRA tickets
-- Set expectations with stakeholders
+## Confidence Levels
 
-### Recommendation
+The Arbiter assigns a confidence level to its recommendation:
 
-The arbiter's `recommendation` is a one-sentence verdict:
-- "Proceed with Redis caching for the user API"
-- "Optimize PostgreSQL queries before adding caching layer"
-- "Prototype both approaches to measure real-world impact"
+- **high**: Clear winner, trade-offs are manageable, strong consensus possible
+- **medium**: Both approaches have merit, decision depends on priorities
+- **low**: Significant unknowns, close call, or requires additional information
 
-Treat it as a strong suggestion, not gospel. Your domain knowledge and project constraints should inform the final call.
+Use the confidence level to decide how much weight to give the recommendation.
 
-## Example Workflows
+## Graceful Degradation
 
-### Architect Planning Phase
+The debate system handles failures gracefully:
+
+- **One perspective fails**: Arbiter synthesizes using the successful perspective plus fallback reasoning
+- **Both perspectives fail**: Returns a low-confidence recommendation to proceed with best judgment
+- **Arbiter fails**: Returns both arguments with a generic synthesis
+- **Rate limit reached**: Returns immediately without spawning perspectives
+
+Even in failure modes, you get actionable output.
+
+## Best Practices
+
+1. **Frame topics clearly**: State the decision as a question or choice
+2. **Provide context**: Include constraints, requirements, team size, scale
+3. **Use sparingly**: Reserve debates for genuinely complex decisions
+4. **Consider the recommendation**: Don't blindly follow it—use it to inform your decision
+5. **Review trade-offs**: The trade-offs list often reveals considerations you missed
+
+## Integration with Consultations
+
+Both `consult_agent` and `debate_topic` share the same rate limit pool:
+- Starting consultations: 5
+- After 1 consultation: 4 remaining
+- After 1 debate: 2 remaining
+- After 2 consultations and 1 debate: 0 remaining
+
+Plan your consultations and debates accordingly. If you expect to need multiple expert opinions, consider whether a debate is worth the cost.
+
+## Examples
+
+### Architectural Decision
 
 ```typescript
-// Before breaking down a large feature
-const result = await debate_topic(
-  topic="Should we implement real-time notifications with WebSockets or SSE?",
-  context="Browser-only clients, need bidirectional for future chat feature, 10k concurrent users expected"
-);
+debate_topic({
+  topic: "Should we use WebSockets or Server-Sent Events for real-time notifications?",
+  context: "Browser-based app, 1000+ concurrent users, notifications are one-way (server to client)"
+})
 
-// Use result.recommendation to inform plan.approach
-// Include result.trade_offs in plan.risks
+// Advocate: Argues for WebSockets (full-duplex, battle-tested, libraries available)
+// Critic: Argues for SSE (simpler, HTTP-based, automatic reconnection)
+// Arbiter: Recommends SSE due to one-way requirement, lower complexity, and automatic reconnection
 ```
 
-### Engineer Implementation Dilemma
+### Refactoring Decision
 
 ```typescript
-// Stuck on performance vs readability trade-off
-const result = await debate_topic(
-  topic="Should we inline this hot-path function or keep it abstracted?",
-  context="Function called 1M times/sec, current abstraction adds 10% overhead"
-);
+debate_topic({
+  topic: "Should we refactor the authentication module now or after the Q2 feature launch?",
+  context: "Auth code is working but hard to extend, Q2 feature needs auth changes, 2 weeks until launch"
+})
 
-// If confidence is "high", proceed with recommendation
-// If "medium" or "low", consult architect for guidance
+// Advocate: Refactor now (cleaner foundation, easier feature implementation)
+// Critic: Defer refactoring (launch risk, feature is priority, can refactor after)
+// Arbiter: Recommends minimal refactoring of only the extension points needed for Q2, full refactor after launch
 ```
 
-### QA Severity Assessment
+### Technology Selection
 
 ```typescript
-// Unsure if a finding blocks the PR
-const result = await debate_topic(
-  topic="Is this SQL query performance issue CRITICAL or HIGH severity?",
-  context="Query takes 500ms on 10k rows, worst-case 100k rows. User-facing API endpoint."
-);
-
-// Use result.confidence and result.recommendation to assign severity
+debate_topic({
+  topic: "Should we adopt Zod for runtime validation or continue with custom validators?",
+  context: "Currently have 50+ custom validators, TypeScript codebase, team is familiar with custom approach",
+  custom_perspectives: {
+    advocate: "Argue for migrating to Zod incrementally",
+    critic: "Argue for keeping custom validators and improving them"
+  }
+})
 ```
 
-## Troubleshooting
+## Logging and Debugging
 
-### "Debate limit reached"
+All debates are logged to `.agent-communication/debates/` with full arguments and synthesis:
 
-You've exhausted your consultation budget (5 per session). Options:
-- Proceed with your best judgment
-- Consult shared knowledge base for prior decisions: `get_knowledge(topic="architectural-decisions")`
-- Document the decision and move forward (can revisit in review)
+```bash
+cat .agent-communication/debates/debate-1234567890-abc123.json
+```
 
-### Both perspectives failed
-
-Rare, but indicates Claude CLI issues or malformed prompts. Fall back to:
-1. `consult_agent` with a simpler question
-2. Documenting the decision rationale manually
-3. Escalating to human review if it's a critical decision
-
-### Arbiter returned low confidence
-
-The debate didn't surface a clear winner. Next steps:
-- Add more context (performance numbers, team constraints) and retry
-- Use `consult_agent(target_agent="architect")` for a single expert opinion
-- Build a quick prototype to validate assumptions
-
-## Related Tools
-
-- **consult_agent**: Single perspective, costs 1 slot, faster for straightforward questions
-- **share_knowledge / get_knowledge**: Document debate outcomes for future reference
-- **queue_task_for_agent**: If debate reveals need for prototyping, queue a spike task
+Use these logs to review past decisions and understand the reasoning.
