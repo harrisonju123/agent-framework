@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime, UTC
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from agent_framework.core.engineer_specialization import (
     detect_file_patterns,
@@ -11,6 +11,7 @@ from agent_framework.core.engineer_specialization import (
     apply_specialization_to_prompt,
     get_specialized_teammates,
     get_specialization_enabled,
+    get_auto_profile_config,
     _load_profiles,
     _get_profile_by_id,
     SpecializationProfile,
@@ -21,10 +22,12 @@ from agent_framework.core.engineer_specialization import (
     KNOWN_SOURCE_EXTENSIONS,
 )
 from agent_framework.core.config import (
+    AutoProfileConfig,
     SpecializationConfig,
     SpecializationProfileConfig,
     SpecializationTeammateConfig,
 )
+from agent_framework.core.profile_generator import GenerationResult
 from agent_framework.core.task import Task, TaskType, TaskStatus, PlanDocument
 
 
@@ -535,3 +538,156 @@ class TestGetProfileById:
     def test_returns_none_for_unknown(self):
         """Should return None for unknown id."""
         assert _get_profile_by_id("nonexistent") is None
+
+
+class TestGetAutoProfileConfig:
+    """Tests for get_auto_profile_config helper."""
+
+    @patch("agent_framework.core.config.load_specializations")
+    def test_returns_none_when_no_config(self, mock_load):
+        mock_load.return_value = None
+        assert get_auto_profile_config() is None
+
+    @patch("agent_framework.core.config.load_specializations")
+    def test_returns_config_when_present(self, mock_load):
+        mock_load.return_value = SpecializationConfig(
+            enabled=True,
+            auto_profile_generation=AutoProfileConfig(enabled=True, model="sonnet"),
+            profiles=[],
+        )
+        config = get_auto_profile_config()
+        assert config is not None
+        assert config.enabled is True
+        assert config.model == "sonnet"
+
+    @patch("agent_framework.core.config.load_specializations")
+    def test_default_disabled(self, mock_load):
+        mock_load.return_value = SpecializationConfig(enabled=True, profiles=[])
+        config = get_auto_profile_config()
+        assert config is not None
+        assert config.enabled is False
+
+    def test_invalid_model_rejected(self):
+        """AutoProfileConfig should reject unknown model names."""
+        with pytest.raises(Exception):
+            AutoProfileConfig(model="gpt-4")
+
+
+class TestAutoProfileFallback:
+    """Tests for the auto-profile fallback path in _detect_engineer_specialization.
+
+    The method uses local imports (from .engineer_specialization import ...),
+    so we patch at the source module level.
+    """
+
+    def _make_agent(self, workspace=None):
+        """Build a minimal agent mock with engineer base_id."""
+        from pathlib import Path
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent.config = MagicMock()
+        agent.config.base_id = "engineer"
+        agent._agent_definition = MagicMock()
+        agent._agent_definition.specialization_enabled = True
+        agent.workspace = workspace or Path("/tmp")
+        agent.logger = MagicMock()
+        # Bind the real method
+        agent._detect_engineer_specialization = (
+            Agent._detect_engineer_specialization.__get__(agent)
+        )
+        return agent
+
+    @patch("agent_framework.core.engineer_specialization.get_auto_profile_config")
+    @patch("agent_framework.core.engineer_specialization.detect_specialization", return_value=None)
+    @patch("agent_framework.core.engineer_specialization.get_specialization_enabled", return_value=True)
+    def test_skipped_when_disabled(self, _enabled, _detect, mock_auto_config):
+        """Auto-profile should not run when auto_profile_generation.enabled=False."""
+        mock_auto_config.return_value = AutoProfileConfig(enabled=False)
+
+        agent = self._make_agent()
+        task = create_test_task(files_in_plan=["service.proto"])
+
+        result = agent._detect_engineer_specialization(task)
+        assert result is None
+
+    @patch("agent_framework.core.profile_generator.ProfileGenerator.generate_profile")
+    @patch("agent_framework.core.profile_registry.ProfileRegistry.find_matching_profile", return_value=None)
+    @patch("agent_framework.core.profile_registry.ProfileRegistry.store_profile")
+    @patch("agent_framework.core.engineer_specialization._load_profiles", return_value=[])
+    @patch("agent_framework.core.engineer_specialization.detect_file_patterns", return_value=["service.proto"])
+    @patch("agent_framework.core.engineer_specialization.get_auto_profile_config")
+    @patch("agent_framework.core.engineer_specialization.detect_specialization", return_value=None)
+    @patch("agent_framework.core.engineer_specialization.get_specialization_enabled", return_value=True)
+    def test_generates_when_no_cache_hit(
+        self, _enabled, _detect, mock_auto_config, _files, _profiles,
+        mock_store, mock_find, mock_generate,
+    ):
+        """Should generate a new profile when registry has no match."""
+        mock_auto_config.return_value = AutoProfileConfig(enabled=True)
+
+        generated_profile = SpecializationProfile(
+            id="grpc",
+            name="gRPC Engineer",
+            description="test",
+            file_patterns=["**/*.proto"],
+            prompt_suffix="X" * 60,
+            teammates={},
+            tool_guidance="",
+        )
+        mock_generate.return_value = GenerationResult(
+            profile=generated_profile,
+            tags=["grpc"],
+            file_extensions=[".proto"],
+        )
+
+        agent = self._make_agent()
+        task = create_test_task(files_in_plan=["service.proto"])
+
+        result = agent._detect_engineer_specialization(task)
+        assert result is not None
+        assert result.id == "grpc"
+        mock_store.assert_called_once()
+
+    @patch("agent_framework.core.profile_registry.ProfileRegistry.find_matching_profile")
+    @patch("agent_framework.core.engineer_specialization.detect_file_patterns", return_value=["service.proto"])
+    @patch("agent_framework.core.engineer_specialization.get_auto_profile_config")
+    @patch("agent_framework.core.engineer_specialization.detect_specialization", return_value=None)
+    @patch("agent_framework.core.engineer_specialization.get_specialization_enabled", return_value=True)
+    def test_returns_cached_profile(
+        self, _enabled, _detect, mock_auto_config, _files, mock_find,
+    ):
+        """Should return cached profile without generating a new one."""
+        mock_auto_config.return_value = AutoProfileConfig(enabled=True)
+
+        cached_profile = SpecializationProfile(
+            id="grpc",
+            name="gRPC Engineer",
+            description="test",
+            file_patterns=["**/*.proto"],
+            prompt_suffix="X" * 60,
+            teammates={},
+            tool_guidance="",
+        )
+        mock_find.return_value = cached_profile
+
+        agent = self._make_agent()
+        task = create_test_task(files_in_plan=["service.proto"])
+
+        result = agent._detect_engineer_specialization(task)
+        assert result is not None
+        assert result.id == "grpc"
+
+    @patch("agent_framework.core.engineer_specialization.detect_file_patterns", return_value=[])
+    @patch("agent_framework.core.engineer_specialization.get_auto_profile_config")
+    @patch("agent_framework.core.engineer_specialization.detect_specialization", return_value=None)
+    @patch("agent_framework.core.engineer_specialization.get_specialization_enabled", return_value=True)
+    def test_skipped_when_no_files(self, _enabled, _detect, mock_auto_config, _files):
+        """Auto-profile should not run when no files are detected."""
+        mock_auto_config.return_value = AutoProfileConfig(enabled=True)
+
+        agent = self._make_agent()
+        task = create_test_task()
+
+        result = agent._detect_engineer_specialization(task)
+        assert result is None

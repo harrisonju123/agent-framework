@@ -4,6 +4,11 @@
 
 enabled: true
 
+auto_profile_generation:
+  enabled: true
+  max_cached_profiles: 50
+  staleness_days: 90
+
 profiles:
   - id: backend
     name: Backend Engineer

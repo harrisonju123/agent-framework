@@ -610,9 +610,28 @@ class SpecializationProfileConfig(BaseModel):
     teammates: Dict[str, SpecializationTeammateConfig] = Field(default_factory=dict)
 
 
+class AutoProfileConfig(BaseModel):
+    """Configuration for autonomous LLM-based profile generation."""
+    enabled: bool = False  # Opt-in: makes LLM calls from engineer agent
+    max_cached_profiles: int = 50
+    staleness_days: int = 90
+    model: str = "haiku"
+    min_match_score: float = 0.4
+
+    @field_validator('model')
+    @classmethod
+    def validate_model(cls, v: str) -> str:
+        if v not in ("haiku", "sonnet", "opus"):
+            raise ValueError(
+                f"model must be 'haiku', 'sonnet', or 'opus', got '{v}'"
+            )
+        return v
+
+
 class SpecializationConfig(BaseModel):
     """Top-level specialization configuration."""
     enabled: bool = True
+    auto_profile_generation: AutoProfileConfig = Field(default_factory=AutoProfileConfig)
     profiles: List[SpecializationProfileConfig] = Field(default_factory=list)
 
 

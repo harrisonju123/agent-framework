@@ -341,6 +341,19 @@ def get_specialization_enabled() -> bool:
     return config.enabled
 
 
+def get_auto_profile_config():
+    """Return AutoProfileConfig from specializations.yaml, or None if missing.
+
+    Callers should check .enabled before proceeding with generation.
+    """
+    from .config import load_specializations, SPECIALIZATIONS_CONFIG_PATH
+
+    config = load_specializations(SPECIALIZATIONS_CONFIG_PATH)
+    if config is None:
+        return None
+    return config.auto_profile_generation
+
+
 def _get_profile_by_id(
     profile_id: str,
     profiles: Optional[List[SpecializationProfile]] = None,
@@ -437,7 +450,10 @@ def match_patterns(files: List[str], patterns: List[str]) -> int:
     return matches
 
 
-def detect_specialization(task: Task) -> Optional[SpecializationProfile]:
+def detect_specialization(
+    task: Task,
+    files: Optional[List[str]] = None,
+) -> Optional[SpecializationProfile]:
     """Detect the appropriate engineer specialization based on task file patterns.
 
     Checks for a specialization_hint override first (for monorepo tasks), then
@@ -445,6 +461,7 @@ def detect_specialization(task: Task) -> Optional[SpecializationProfile]:
 
     Args:
         task: Task to analyze
+        files: Pre-extracted file list. Extracted from task if not provided.
 
     Returns:
         SpecializationProfile if a clear match is found, None for generic engineer
@@ -468,8 +485,9 @@ def detect_specialization(task: Task) -> Optional[SpecializationProfile]:
             hint,
         )
 
-    # Extract files from task
-    files = detect_file_patterns(task)
+    # Extract files from task (or use pre-extracted list)
+    if files is None:
+        files = detect_file_patterns(task)
 
     if not files:
         logger.debug("No files detected in task, skipping specialization")

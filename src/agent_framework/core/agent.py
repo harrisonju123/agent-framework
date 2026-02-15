@@ -1806,11 +1806,12 @@ Your previous implementation had test failures. Please fix the issues below:
 Fix the failing tests and ensure all tests pass.
 """
 
-    def _detect_engineer_specialization(self, task: Task):
+    def _detect_engineer_specialization(self, task: Task) -> Optional['SpecializationProfile']:
         """Detect engineer specialization profile for this task.
 
         Returns the profile if this is an engineer agent with a clear match, else None.
         Respects both per-agent and global enable/disable toggles.
+        Falls back to LLM-generated profiles when static detection returns None.
         """
         if self.config.base_id != "engineer":
             return None
@@ -1821,13 +1822,72 @@ Fix the failing tests and ensure all tests pass.
             return None
 
         # Global toggle from specializations.yaml
-        from .engineer_specialization import detect_specialization, get_specialization_enabled
+        from .engineer_specialization import (
+            detect_specialization,
+            get_specialization_enabled,
+            get_auto_profile_config,
+            detect_file_patterns,
+            _load_profiles,
+        )
 
         if not get_specialization_enabled():
             self.logger.debug("Specialization disabled globally via specializations.yaml")
             return None
 
-        return detect_specialization(task)
+        # Extract files once — reused for both static detection and auto-profile fallback
+        files = detect_file_patterns(task)
+
+        profile = detect_specialization(task, files=files)
+        if profile:
+            return profile
+
+        # Auto-profile fallback: check registry, then generate
+        auto_config = get_auto_profile_config()
+        if auto_config is None or not auto_config.enabled:
+            return None
+
+        if not files:
+            return None
+
+        import time
+        from .profile_registry import ProfileRegistry, GeneratedProfileEntry
+        from .profile_generator import ProfileGenerator
+
+        registry = ProfileRegistry(
+            self.workspace,
+            max_profiles=auto_config.max_cached_profiles,
+            staleness_days=auto_config.staleness_days,
+        )
+
+        # Try cache first
+        cached = registry.find_matching_profile(
+            files,
+            f"{task.title} {task.description}",
+            min_score=auto_config.min_match_score,
+        )
+        if cached:
+            self.logger.info("Matched cached generated profile '%s'", cached.id)
+            return cached
+
+        # Generate new profile
+        generator = ProfileGenerator(self.workspace, model=auto_config.model)
+        existing_ids = [p.id for p in _load_profiles()]
+        generated = generator.generate_profile(task, files, existing_ids)
+        if generated:
+            now = time.time()
+            registry.store_profile(GeneratedProfileEntry(
+                profile=generated.profile,
+                created_at=now,
+                last_matched_at=now,
+                match_count=1,
+                source_task_id=task.id,
+                tags=generated.tags,
+                file_extensions=generated.file_extensions,
+            ))
+            self.logger.info("Generated new profile '%s'", generated.profile.id)
+            return generated.profile
+
+        return None
 
     def _build_prompt(self, task: Task) -> str:
         """
