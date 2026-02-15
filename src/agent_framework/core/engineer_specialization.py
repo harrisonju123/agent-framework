@@ -393,8 +393,6 @@ def detect_file_patterns(task: Task) -> List[str]:
     description_text = f"{task.title} {task.description}"
     ext_pattern = "|".join(re.escape(e) for e in sorted(KNOWN_SOURCE_EXTENSIONS))
     file_pattern = rf'\b[\w\-\.]+/[\w\-\./]+\.({ext_pattern})\b'
-    matches = re.findall(file_pattern, description_text)
-    # re.findall with groups returns just the group — reconstruct full matches
     for match in re.finditer(file_pattern, description_text):
         files.append(match.group(0))
 
