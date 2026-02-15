@@ -757,15 +757,28 @@ class Agent:
             if self._team_mode_enabled and team_override is not False:
                 team_agents = {}
 
-                # Layer 1: agent's configured teammates (cached - fixed per agent lifetime)
+                # Layer 1: agent's configured teammates
+                # For engineer agents, teammates vary by task specialization (no cache)
+                # For other agents, teammates are fixed (use cache)
                 if self._agent_definition and self._agent_definition.teammates:
-                    if self._default_team_cache is None:
-                        self._default_team_cache = compose_default_team(
+                    if self.config.base_id == "engineer":
+                        # Engineer specialization: compose teammates per task
+                        default_team = compose_default_team(
                             self._agent_definition,
                             default_model=self._team_mode_default_model,
+                            task=task,  # Pass task for specialization detection
                         ) or {}
-                    if self._default_team_cache:
-                        team_agents.update(self._default_team_cache)
+                        if default_team:
+                            team_agents.update(default_team)
+                    else:
+                        # Other agents: use cached teammates
+                        if self._default_team_cache is None:
+                            self._default_team_cache = compose_default_team(
+                                self._agent_definition,
+                                default_model=self._team_mode_default_model,
+                            ) or {}
+                        if self._default_team_cache:
+                            team_agents.update(self._default_team_cache)
 
                 # Layer 2: workflow-required agents (cached per workflow type)
                 workflow = task.context.get("workflow", "default")
@@ -1600,6 +1613,31 @@ Your previous implementation had test failures. Please fix the issues below:
 Fix the failing tests and ensure all tests pass.
 """
 
+    def _apply_engineer_specialization(self, task: Task) -> str:
+        """Apply engineer specialization based on task file patterns.
+
+        Returns the appropriate prompt for the engineer based on detected files.
+        If this is not an engineer agent, returns the base prompt unchanged.
+        """
+        # Only apply specialization to engineer agents
+        if self.config.base_id != "engineer":
+            return self.config.prompt
+
+        # Import specialization module
+        from .engineer_specialization import detect_specialization, apply_specialization_to_prompt
+
+        # Detect specialization profile from task
+        profile = detect_specialization(task)
+
+        if profile:
+            self.logger.info(f"🎯 Engineer specialization detected: {profile.name}")
+            self.logger.debug(f"Specialization based on file patterns: {profile.file_patterns[:3]}...")
+        else:
+            self.logger.debug("No specialization detected, using generic engineer profile")
+
+        # Apply specialization to base prompt
+        return apply_specialization_to_prompt(self.config.prompt, profile)
+
     def _build_prompt(self, task: Task) -> str:
         """
         Build prompt from task.
@@ -1616,23 +1654,36 @@ Fix the failing tests and ensure all tests pass.
         shadow_mode = self._optimization_config.get("shadow_mode", False)
         use_optimizations = self._should_use_optimization(task)
 
-        # Determine which prompt to use
-        if shadow_mode:
-            prompt = self._handle_shadow_mode_comparison(task)
-        elif use_optimizations:
-            prompt = self._build_prompt_optimized(task)
-        else:
-            prompt = self._build_prompt_legacy(task)
+        # Apply engineer specialization (modifies self.config.prompt temporarily)
+        original_prompt = self.config.prompt
+        specialized_prompt = self._apply_engineer_specialization(task)
 
-        # Log prompt preview for debugging (sanitized)
-        if self.logger.isEnabledFor(logging.DEBUG):
-            prompt_preview = prompt[:500].replace(task.id, "TASK_ID")
-            if hasattr(task, 'context') and task.context.get('jira_key'):
-                prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
-            self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
+        # Temporarily update config prompt for this task
+        self.config = replace(self.config, prompt=specialized_prompt)
 
-        # Append test failure context if present
-        prompt = self._append_test_failure_context(prompt, task)
+        try:
+            # Determine which prompt to use
+            if shadow_mode:
+                prompt = self._handle_shadow_mode_comparison(task)
+            elif use_optimizations:
+                prompt = self._build_prompt_optimized(task)
+            else:
+                prompt = self._build_prompt_legacy(task)
+
+            # Log prompt preview for debugging (sanitized)
+            if self.logger.isEnabledFor(logging.DEBUG):
+                prompt_preview = prompt[:500].replace(task.id, "TASK_ID")
+                if hasattr(task, 'context') and task.context.get('jira_key'):
+                    prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
+                self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
+
+            # Append test failure context if present
+            prompt = self._append_test_failure_context(prompt, task)
+        finally:
+            # Restore original prompt
+            self.config = replace(self.config, prompt=original_prompt)
+
+        return prompt
 
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
