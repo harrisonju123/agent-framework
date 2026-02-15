@@ -1851,6 +1851,13 @@ Fix the failing tests and ensure all tests pass.
         self._current_specialization = profile
         prompt_text = apply_specialization_to_prompt(self.config.prompt, profile)
 
+        # Update activity with specialization (if detected)
+        if profile:
+            activity = self.activity_manager.get_activity(self.config.id)
+            if activity:
+                activity.specialization = profile.id
+                self.activity_manager.update_activity(activity)
+
         # Determine which prompt to use
         if shadow_mode:
             prompt = self._handle_shadow_mode_comparison(task, prompt_override=prompt_text)
