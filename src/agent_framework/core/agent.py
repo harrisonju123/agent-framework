@@ -245,6 +245,8 @@ class Agent:
         # Cache for team composition (fixed per agent lifetime / workflow)
         self._default_team_cache: Optional[dict] = None
         self._workflow_team_cache: Dict[str, Optional[dict]] = {}
+        # Set per-task by _build_prompt, consumed by team composition
+        self._current_specialization = None
 
         # Pause signal cache (avoid 2x exists() calls every 2s)
         self._pause_signal_cache: Optional[bool] = None
@@ -757,15 +759,26 @@ class Agent:
             if self._team_mode_enabled and team_override is not False:
                 team_agents = {}
 
-                # Layer 1: agent's configured teammates (cached - fixed per agent lifetime)
+                # Layer 1: agent's configured teammates
+                # For engineer agents, teammates vary by task specialization (no cache)
+                # For other agents, teammates are fixed (use cache)
                 if self._agent_definition and self._agent_definition.teammates:
-                    if self._default_team_cache is None:
-                        self._default_team_cache = compose_default_team(
+                    if self.config.base_id == "engineer":
+                        default_team = compose_default_team(
                             self._agent_definition,
                             default_model=self._team_mode_default_model,
+                            specialization_profile=self._current_specialization,
                         ) or {}
-                    if self._default_team_cache:
-                        team_agents.update(self._default_team_cache)
+                        if default_team:
+                            team_agents.update(default_team)
+                    else:
+                        if self._default_team_cache is None:
+                            self._default_team_cache = compose_default_team(
+                                self._agent_definition,
+                                default_model=self._team_mode_default_model,
+                            ) or {}
+                        if self._default_team_cache:
+                            team_agents.update(self._default_team_cache)
 
                 # Layer 2: workflow-required agents (cached per workflow type)
                 workflow = task.context.get("workflow", "default")
@@ -1553,10 +1566,10 @@ Please carefully consider this guidance when approaching the task.
 
         return prompt
 
-    def _handle_shadow_mode_comparison(self, task: Task) -> str:
+    def _handle_shadow_mode_comparison(self, task: Task, prompt_override: str = None) -> str:
         """Generate and compare both prompts in shadow mode, return legacy prompt."""
-        legacy_prompt = self._build_prompt_legacy(task)
-        optimized_prompt = self._build_prompt_optimized(task)
+        legacy_prompt = self._build_prompt_legacy(task, prompt_override=prompt_override)
+        optimized_prompt = self._build_prompt_optimized(task, prompt_override=prompt_override)
 
         # Log comparison
         legacy_len = len(legacy_prompt)
@@ -1596,6 +1609,25 @@ Your previous implementation had test failures. Please fix the issues below:
 Fix the failing tests and ensure all tests pass.
 """
 
+    def _detect_engineer_specialization(self, task: Task):
+        """Detect engineer specialization profile for this task.
+
+        Returns the profile if this is an engineer agent with a clear match, else None.
+        """
+        if self.config.base_id != "engineer":
+            return None
+
+        from .engineer_specialization import detect_specialization
+
+        profile = detect_specialization(task)
+
+        if profile:
+            self.logger.info(f"Engineer specialization detected: {profile.name}")
+        else:
+            self.logger.debug("No specialization detected, using generic engineer profile")
+
+        return profile
+
     def _build_prompt(self, task: Task) -> str:
         """
         Build prompt from task.
@@ -1612,13 +1644,19 @@ Fix the failing tests and ensure all tests pass.
         shadow_mode = self._optimization_config.get("shadow_mode", False)
         use_optimizations = self._should_use_optimization(task)
 
+        # Detect specialization once — reused for both prompt and team composition
+        from .engineer_specialization import apply_specialization_to_prompt
+        profile = self._detect_engineer_specialization(task)
+        self._current_specialization = profile
+        prompt_text = apply_specialization_to_prompt(self.config.prompt, profile)
+
         # Determine which prompt to use
         if shadow_mode:
-            prompt = self._handle_shadow_mode_comparison(task)
+            prompt = self._handle_shadow_mode_comparison(task, prompt_override=prompt_text)
         elif use_optimizations:
-            prompt = self._build_prompt_optimized(task)
+            prompt = self._build_prompt_optimized(task, prompt_override=prompt_text)
         else:
-            prompt = self._build_prompt_legacy(task)
+            prompt = self._build_prompt_legacy(task, prompt_override=prompt_text)
 
         # Log prompt preview for debugging (sanitized)
         if self.logger.isEnabledFor(logging.DEBUG):
@@ -1822,9 +1860,10 @@ If a tool call fails:
 """
         return self._error_handling_guidance
 
-    def _build_prompt_legacy(self, task: Task) -> str:
+    def _build_prompt_legacy(self, task: Task, prompt_override: str = None) -> str:
         """Build prompt using legacy format (original implementation)."""
         task_json = task.model_dump_json(indent=2)
+        agent_prompt = prompt_override or self.config.prompt
 
         # Extract integration context
         jira_key = task.context.get("jira_key")
@@ -1857,7 +1896,7 @@ TASK DETAILS:
 
 {mcp_guidance}
 YOUR RESPONSIBILITIES:
-{self.config.prompt}
+{agent_prompt}
 
 IMPORTANT:
 - Complete the task described above
@@ -1867,7 +1906,7 @@ IMPORTANT:
 - This task will be automatically marked as completed when you're done
 """
 
-    def _build_prompt_optimized(self, task: Task) -> str:
+    def _build_prompt_optimized(self, task: Task, prompt_override: str = None) -> str:
         """
         Build prompt using optimized format.
 
@@ -1917,13 +1956,14 @@ IMPORTANT:
             chain_note = "\nIMPORTANT: You are an intermediate step in the workflow chain.\nPush your commits but do NOT create a pull request.\n"
 
         # Build optimized prompt (shorter, focused on essentials)
+        agent_prompt = prompt_override or self.config.prompt
         return f"""You are {self.config.id} working on an asynchronous task.
 
 TASK:
 {task_json}
 
 {context_note}{dep_context}{chain_note}
-{self.config.prompt}
+{agent_prompt}
 
 IMPORTANT:
 - Complete the task described above
