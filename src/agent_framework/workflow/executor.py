@@ -78,12 +78,14 @@ class WorkflowExecutor:
             )
             return False
 
-        # PR creation terminates the workflow and stores info for downstream review queue
+        # PR detection only terminates at terminal steps (no outgoing edges).
+        # Intermediate agents (e.g. engineer) may have a pr_url from the safety
+        # net or LLM, but the chain must continue to QA/architect.
         pr_info = self._extract_pr_info(task, response)
-        if pr_info:
+        if pr_info and workflow.is_terminal_step(current_step.id):
             task.context["pr_url"] = pr_info["pr_url"]
             task.context["pr_number"] = pr_info["pr_number"]
-            self.logger.info(f"PR created for task {task.id}, workflow complete")
+            self.logger.info(f"PR created at terminal step for task {task.id}, workflow complete")
             return False
 
         # pr_creation_step tasks should not continue the chain

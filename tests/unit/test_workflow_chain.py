@@ -139,15 +139,17 @@ class TestEnforceWorkflowChain:
         assert chain_task.context["chain_step"] is True
         assert chain_task.context["workflow_step"] == "qa"
 
-    def test_skips_when_pr_created(self, agent, queue):
-        """If a PR was created, chain enforcement is skipped."""
+    def test_continues_chain_when_pr_created_at_non_terminal_step(self, agent, queue):
+        """PR on intermediate agent (engineer) doesn't kill the chain — QA still runs."""
         task = _make_task(workflow="default")
         task.context["pr_url"] = "https://github.com/org/repo/pull/42"
         response = _make_response()
 
         agent._enforce_workflow_chain(task, response)
 
-        queue.push.assert_not_called()
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"
 
     def test_chains_even_with_team_mode(self, agent, queue):
         """Team mode provides advisory subagents but doesn't suppress chain routing."""
@@ -355,7 +357,8 @@ class TestRoutingSignalChain:
 
         queue.push.assert_not_called()
 
-    def test_workflow_complete_ignored_when_pr_exists(self, agent, queue):
+    def test_workflow_complete_signal_stops_chain_even_with_pr(self, agent, queue):
+        """WORKFLOW_COMPLETE signal terminates chain regardless of pr_url."""
         task = _make_task(workflow="default")
         response = _make_response(pr_url="https://github.com/org/repo/pull/99")
         signal = _make_signal(target=WORKFLOW_COMPLETE)
@@ -425,6 +428,10 @@ class TestPRCreation:
         a._team_mode_enabled = False
         a.logger = MagicMock()
         a._session_logger = MagicMock()
+
+        from agent_framework.workflow.executor import WorkflowExecutor
+        a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
+
         return a
 
     def test_last_agent_queues_pr_creation(self, pr_agent, queue):

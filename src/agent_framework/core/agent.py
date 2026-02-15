@@ -467,9 +467,6 @@ class Agent:
         self.logger.debug(f"Running post-LLM workflow for {task.id}")
         await self._handle_success(task, response)
 
-        # Push and create PR if the agent produced unpushed commits
-        self._push_and_create_pr_if_needed(task)
-
         # Mark completed
         self.logger.debug(f"Marking task {task.id} as completed")
         task.mark_completed(self.config.id)
@@ -508,12 +505,15 @@ class Agent:
                 f"reason={routing_signal.reason}"
             )
 
-        # Code review runs first — writes pr_url into task.context,
-        # which chain enforcement sees and correctly skips.
         self.logger.debug(f"Checking if code review needed for {task.id}")
         self._queue_code_review_if_needed(task, response)
         self._queue_review_fix_if_needed(task, response)
         self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
+
+        # Safety net: create PR if LLM pushed but didn't create one.
+        # Runs AFTER workflow chain so pr_url doesn't short-circuit the executor.
+        self._push_and_create_pr_if_needed(task)
+
         self._extract_and_store_memories(task, response)
         self._log_task_completion_metrics(task, response, task_start_time)
 
@@ -3014,6 +3014,10 @@ IMPORTANT:
                 context=self._build_workflow_context(task),
             )
 
+            # Terminal step with no routing — check if pr_creator should take over
+            if not routed:
+                self._queue_pr_creation_if_needed(task, workflow_def)
+
             # Log routing decision
             if routing_signal:
                 log_routing_decision(
@@ -3135,6 +3139,9 @@ IMPORTANT:
             return
 
         if task.context.get("pr_creation_step"):
+            return
+
+        if task.context.get("pr_url"):
             return
 
         # Deterministic ID with -pr suffix to avoid collision with normal chain tasks

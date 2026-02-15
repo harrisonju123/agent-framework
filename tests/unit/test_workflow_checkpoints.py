@@ -248,9 +248,50 @@ def test_executor_blocks_stale_approval_from_different_checkpoint(tmp_path):
     assert task.checkpoint_reached == "test_workflow-engineer"
 
 
-def test_executor_pr_takes_precedence_over_checkpoint(tmp_path):
-    """PR creation terminates workflow even if checkpoint is configured."""
+def test_pr_at_terminal_step_terminates_workflow(tmp_path):
+    """PR at a terminal step (no outgoing edges) terminates the workflow."""
     workflow = _build_checkpoint_workflow()
+
+    mock_queue = Mock()
+    queue_dir = tmp_path / ".agent-communication" / "queues"
+    queue_dir.mkdir(parents=True)
+
+    executor = WorkflowExecutor(mock_queue, queue_dir)
+
+    task = create_test_task()
+    task.context["pr_url"] = "https://github.com/org/repo/pull/42"
+    response = Mock()
+
+    # QA is the terminal step (no outgoing edges) — PR should terminate here
+    result = executor.execute_step(
+        workflow=workflow,
+        task=task,
+        response=response,
+        current_agent_id="qa",
+        routing_signal=None,
+        context=None,
+    )
+
+    assert result is False
+    assert task.context["pr_number"] == 42
+
+
+def test_pr_at_non_terminal_step_continues_chain(tmp_path):
+    """PR at a non-terminal step (engineer) continues to next agent (QA)."""
+    # Use a simple workflow without checkpoints to isolate the PR behavior
+    workflow = WorkflowDAG(
+        name="simple",
+        description="engineer → qa (no checkpoints)",
+        steps={
+            "engineer": WorkflowStep(
+                id="engineer",
+                agent="engineer",
+                next=[WorkflowEdge(target="qa", condition=EdgeCondition(EdgeConditionType.ALWAYS))],
+            ),
+            "qa": WorkflowStep(id="qa", agent="qa", next=[]),
+        },
+        start_step="engineer",
+    )
 
     mock_queue = Mock()
     queue_dir = tmp_path / ".agent-communication" / "queues"
@@ -271,10 +312,9 @@ def test_executor_pr_takes_precedence_over_checkpoint(tmp_path):
         context=None,
     )
 
-    # PR creation should terminate workflow, not pause at checkpoint
-    assert result is False
-    assert task.status != TaskStatus.AWAITING_APPROVAL
-    assert task.context["pr_number"] == 42
+    # Engineer is non-terminal — chain should continue to QA
+    assert result is True
+    mock_queue.push.assert_called_once()
 
 
 # -- DAG model tests --
