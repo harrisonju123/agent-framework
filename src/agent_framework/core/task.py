@@ -2,8 +2,33 @@
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, List
 from pydantic import BaseModel, Field
+
+
+class RetryAttempt(BaseModel):
+    """Record of a single retry attempt."""
+
+    attempt_number: int
+    timestamp: datetime
+    error_message: str
+    agent_id: str
+    error_type: Optional[str] = None  # Categorized error type (network, validation, logic, etc.)
+    context_snapshot: dict[str, Any] = Field(default_factory=dict)  # Relevant context at time of failure
+
+
+class EscalationReport(BaseModel):
+    """Structured escalation report with diagnostic information."""
+
+    task_id: str
+    original_title: str
+    total_attempts: int
+    attempt_history: List[RetryAttempt]
+    root_cause_hypothesis: str  # AI-generated hypothesis about what went wrong
+    suggested_interventions: List[str]  # Concrete actions a human can take
+    failure_pattern: Optional[str] = None  # e.g., "intermittent", "consistent", "degrading"
+    related_tasks: List[str] = Field(default_factory=list)  # Other tasks that failed similarly
+    human_guidance: Optional[str] = None  # Human-provided guidance for retry
 
 
 class PlanDocument(BaseModel):
@@ -118,6 +143,10 @@ class Task(BaseModel):
     # Each entry: {"attempt": N, "error": "...", "revised_plan": "..."}
     replan_history: list[dict[str, Any]] = Field(default_factory=list)
 
+    # Escalation tracking
+    escalation_report: Optional[EscalationReport] = None
+    retry_attempts: List[RetryAttempt] = Field(default_factory=list)
+
     class Config:
         """Pydantic config."""
         use_enum_values = True
@@ -137,11 +166,28 @@ class Task(BaseModel):
         self.completed_at = datetime.utcnow()
         self.completed_by = agent_id
 
-    def mark_failed(self, agent_id: str) -> None:
-        """Mark task as failed."""
+    def mark_failed(self, agent_id: str, error_message: Optional[str] = None, error_type: Optional[str] = None) -> None:
+        """Mark task as failed and record attempt."""
         self.status = TaskStatus.FAILED
         self.failed_at = datetime.utcnow()
         self.failed_by = agent_id
+
+        # Record retry attempt
+        if error_message:
+            self.last_error = error_message
+            attempt = RetryAttempt(
+                attempt_number=self.retry_count + 1,
+                timestamp=datetime.utcnow(),
+                error_message=error_message,
+                agent_id=agent_id,
+                error_type=error_type,
+                context_snapshot={
+                    "task_type": self.type,
+                    "assigned_to": self.assigned_to,
+                    "has_dependencies": len(self.depends_on) > 0,
+                }
+            )
+            self.retry_attempts.append(attempt)
 
     def reset_to_pending(self) -> None:
         """Reset task to pending for retry with backoff."""
