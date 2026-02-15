@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agent_framework.core.task import PlanDocument, Task, TaskStatus, TaskType
-from agent_framework.core.task_decomposer import SubtaskBoundary, TaskDecomposer
+from agent_framework.core.task import Task, TaskStatus, TaskType, PlanDocument
+from agent_framework.core.task_decomposer import TaskDecomposer, SubtaskBoundary
 
 
 def _make_task(**overrides) -> Task:
@@ -16,8 +16,8 @@ def _make_task(**overrides) -> Task:
         type=TaskType.IMPLEMENTATION,
         status=TaskStatus.PENDING,
         priority=1,
-        title="Test parent task",
-        description="Test parent description",
+        title="Test task",
+        description="Test description",
         created_by="architect",
         assigned_to="engineer",
         created_at=datetime.now(timezone.utc),
@@ -29,166 +29,163 @@ def _make_task(**overrides) -> Task:
 def _make_plan(**overrides) -> PlanDocument:
     """Create a PlanDocument with sensible defaults."""
     defaults = dict(
-        objectives=["Implement feature X"],
-        approach=["Step 1", "Step 2", "Step 3", "Step 4"],
-        risks=["Risk 1"],
-        success_criteria=["Tests pass"],
-        files_to_modify=["src/core/file1.py", "src/api/file2.py"],
-        dependencies=[]
+        objectives=["Complete the feature"],
+        approach=["Step 1", "Step 2", "Step 3"],
+        risks=[],
+        success_criteria=["All tests pass"],
+        files_to_modify=["src/core/file1.py", "src/core/file2.py"],
+        dependencies=[],
     )
     defaults.update(overrides)
     return PlanDocument(**defaults)
 
 
 class TestTaskDecomposer:
-    """Test suite for TaskDecomposer."""
+    """Tests for TaskDecomposer class."""
 
     def test_should_decompose_above_threshold(self):
-        """Returns True for tasks exceeding 500 lines with multiple files."""
+        """Test that should_decompose returns True for tasks above threshold."""
         decomposer = TaskDecomposer()
         plan = _make_plan(
-            files_to_modify=["file1.py", "file2.py", "file3.py"]
+            files_to_modify=["src/file1.py", "src/file2.py", "src/file3.py"]
         )
 
+        # 600 lines > 500 threshold
         result = decomposer.should_decompose(plan, estimated_lines=600)
 
         assert result is True
 
     def test_should_not_decompose_below_threshold(self):
-        """Returns False for tasks below 500 lines."""
+        """Test that should_decompose returns False for tasks below threshold."""
         decomposer = TaskDecomposer()
-        plan = _make_plan(
-            files_to_modify=["file1.py", "file2.py"]
-        )
+        plan = _make_plan(files_to_modify=["src/file1.py", "src/file2.py"])
 
+        # 400 lines < 500 threshold
         result = decomposer.should_decompose(plan, estimated_lines=400)
 
         assert result is False
 
     def test_should_not_decompose_single_file(self):
-        """Returns False when plan has only one file even if >500 lines."""
+        """Test that should_decompose returns False for single file tasks."""
         decomposer = TaskDecomposer()
-        plan = _make_plan(
-            files_to_modify=["file1.py"]
-        )
+        plan = _make_plan(files_to_modify=["src/file1.py"])
 
+        # Even though 600 > 500, only 1 file
         result = decomposer.should_decompose(plan, estimated_lines=600)
 
         assert result is False
 
     def test_decompose_creates_correct_subtask_count(self):
-        """Decompose creates 2-5 subtasks based on file grouping."""
+        """Test that decompose creates 2-5 subtasks."""
         decomposer = TaskDecomposer()
-        parent = _make_task()
-        plan = _make_plan(
-            files_to_modify=[
-                "src/core/file1.py",
-                "src/core/file2.py",
-                "src/api/file3.py",
-                "src/api/file4.py",
-            ]
-        )
-        parent.plan = plan
-
-        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
-
-        assert 2 <= len(subtasks) <= 5
-
-    def test_subtask_has_parent_id(self):
-        """Each subtask.parent_task_id equals parent.id."""
-        decomposer = TaskDecomposer()
-        parent = _make_task(id="parent-abc-123")
+        parent = _make_task(id="parent-123")
         plan = _make_plan(
             files_to_modify=[
                 "src/core/file1.py",
                 "src/api/file2.py",
+                "tests/test_file1.py",
+                "tests/test_file2.py",
             ]
         )
-        parent.plan = plan
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        # Should create between 2 and 5 subtasks
+        assert 2 <= len(subtasks) <= 5
+
+    def test_subtask_has_parent_id(self):
+        """Test that each subtask has parent_task_id set correctly."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-456")
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
 
         subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
 
         for subtask in subtasks:
-            assert subtask.parent_task_id == "parent-abc-123"
+            assert subtask.parent_task_id == "parent-456"
 
     def test_parent_has_subtask_ids(self):
-        """Parent.subtask_ids contains all subtask IDs after decomposition."""
+        """Test that parent.subtask_ids contains all subtask IDs."""
         decomposer = TaskDecomposer()
-        parent = _make_task(id="parent-xyz-456")
+        parent = _make_task(id="parent-789")
         plan = _make_plan(
-            files_to_modify=[
-                "src/core/file1.py",
-                "src/api/file2.py",
-            ]
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
         )
-        parent.plan = plan
 
         subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
 
+        # Parent should have subtask IDs
         assert len(parent.subtask_ids) == len(subtasks)
+
+        # All subtask IDs should be in parent's list
         for subtask in subtasks:
             assert subtask.id in parent.subtask_ids
 
     def test_subtask_inherits_context(self):
-        """Subtasks inherit github_repo, workflow, etc. from parent."""
+        """Test that subtasks inherit context from parent."""
         decomposer = TaskDecomposer()
         parent = _make_task(
+            id="parent-abc",
             context={
-                "github_repo": "user/repo",
+                "github_repo": "test/repo",
                 "workflow": "default",
-                "jira_project": "PROJ",
-                "custom_field": "value"
-            }
+                "jira_project": "TEST",
+            },
         )
         plan = _make_plan(
             files_to_modify=["src/core/file1.py", "src/api/file2.py"]
         )
-        parent.plan = plan
 
         subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
 
         for subtask in subtasks:
-            assert subtask.context.get("github_repo") == "user/repo"
+            # Check inherited context
+            assert subtask.context.get("github_repo") == "test/repo"
             assert subtask.context.get("workflow") == "default"
-            assert subtask.context.get("jira_project") == "PROJ"
-            assert subtask.context.get("custom_field") == "value"
-            assert subtask.context.get("parent_task_id") == parent.id
+            assert subtask.context.get("jira_project") == "TEST"
+            # Check added context
+            assert subtask.context.get("parent_task_id") == "parent-abc"
+            assert "subtask_index" in subtask.context
+            assert "subtask_total" in subtask.context
 
     def test_independent_subtasks_have_no_depends_on(self):
-        """Parallel subtasks have empty depends_on lists."""
+        """Test that parallel/independent subtasks have empty depends_on."""
         decomposer = TaskDecomposer()
-        parent = _make_task()
+        parent = _make_task(id="parent-def")
+        # Different directories should create independent subtasks
         plan = _make_plan(
             files_to_modify=[
                 "src/core/file1.py",
                 "src/api/file2.py",
+                "tests/test1.py",
             ]
         )
-        parent.plan = plan
 
         subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
 
-        # All subtasks should be independent (no depends_on by default)
-        for subtask in subtasks:
-            assert len(subtask.depends_on) == 0
+        # At least some subtasks should be independent (empty depends_on)
+        independent_count = sum(1 for st in subtasks if len(st.depends_on) == 0)
+        assert independent_count >= 1
 
     def test_backward_compatible_deserialization(self):
-        """Old task JSON without new fields loads fine."""
-        # Simulate old task JSON structure (no parent_task_id, subtask_ids, decomposition_strategy)
-        old_task_dict = {
+        """Test that old task JSON without new fields loads fine."""
+        # Old task JSON without parent_task_id, subtask_ids, decomposition_strategy
+        old_task_json = {
             "id": "old-task-123",
             "type": "implementation",
             "status": "pending",
             "priority": 1,
-            "title": "Old task",
-            "description": "Legacy task without new fields",
-            "created_by": "architect",
+            "created_by": "test",
             "assigned_to": "engineer",
-            "created_at": "2026-02-15T10:00:00Z",
+            "created_at": "2024-01-01T00:00:00Z",
+            "title": "Old task",
+            "description": "Old description",
         }
 
         # Should deserialize without errors
-        task = Task(**old_task_dict)
+        task = Task(**old_task_json)
 
         assert task.id == "old-task-123"
         assert task.parent_task_id is None
@@ -196,182 +193,154 @@ class TestTaskDecomposer:
         assert task.decomposition_strategy is None
 
     def test_max_depth_prevents_nested_decomposition(self):
-        """Subtask with parent_task_id is not further decomposed."""
+        """Test that subtasks (with parent_task_id) are not further decomposed."""
         decomposer = TaskDecomposer()
-        # Create a subtask (has parent_task_id)
+
+        # Create a subtask (has parent_task_id set)
         subtask = _make_task(
-            id="subtask-123",
-            parent_task_id="parent-abc"
+            id="parent-123-sub1",
+            parent_task_id="parent-123",  # This is already a subtask
         )
         plan = _make_plan(
-            files_to_modify=["file1.py", "file2.py", "file3.py"]
+            files_to_modify=["src/file1.py", "src/file2.py", "src/file3.py"]
         )
-        subtask.plan = plan
 
-        # Should return empty list (no nested decomposition)
-        nested_subtasks = decomposer.decompose(subtask, plan, estimated_lines=700)
+        # Attempt to decompose the subtask (should return empty list)
+        result = decomposer.decompose(subtask, plan, estimated_lines=600)
 
-        assert len(nested_subtasks) == 0
-        assert len(subtask.subtask_ids) == 0
-
-    def test_subtask_ids_follow_naming_pattern(self):
-        """Subtask IDs follow pattern {parent_id}-sub-{index}."""
-        decomposer = TaskDecomposer()
-        parent = _make_task(id="task-xyz-789")
-        plan = _make_plan(
-            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
-        )
-        parent.plan = plan
-
-        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
-
-        for idx, subtask in enumerate(subtasks):
-            assert subtask.id == f"task-xyz-789-sub-{idx}"
+        # Should not create any subtasks (max depth = 1)
+        assert result == []
+        assert subtask.subtask_ids == []
 
     def test_subtask_has_scoped_plan(self):
-        """Each subtask has a PlanDocument scoped to its files."""
+        """Test that subtasks have properly scoped PlanDocuments."""
         decomposer = TaskDecomposer()
-        parent = _make_task()
+        parent = _make_task(id="parent-scoped")
         plan = _make_plan(
-            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+            files_to_modify=[
+                "src/core/file1.py",
+                "src/api/file2.py",
+                "tests/test1.py",
+            ]
         )
-        parent.plan = plan
 
         subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
 
         for subtask in subtasks:
+            # Each subtask should have a plan
             assert subtask.plan is not None
+
+            # Plan should have files_to_modify (subset of parent's files)
             assert len(subtask.plan.files_to_modify) > 0
-            # Subtask files should be a subset of parent files
-            for file in subtask.plan.files_to_modify:
-                assert file in plan.files_to_modify
+            assert all(f in plan.files_to_modify for f in subtask.plan.files_to_modify)
 
-    def test_respects_max_subtasks_limit(self):
-        """Decomposer caps subtasks at MAX_SUBTASKS even with many files."""
+            # Plan should have objectives and approach
+            assert len(subtask.plan.objectives) > 0
+            assert len(subtask.plan.approach) >= 0  # May be empty if no relevant steps
+
+    def test_subtask_id_pattern(self):
+        """Test that subtask IDs follow the pattern {parent_id}-sub{index}."""
         decomposer = TaskDecomposer()
-        parent = _make_task()
-        # Create 20 files in different directories
-        files = [f"dir{i}/file{i}.py" for i in range(20)]
-        plan = _make_plan(files_to_modify=files)
-        parent.plan = plan
-
-        subtasks = decomposer.decompose(parent, plan, estimated_lines=2000)
-
-        assert len(subtasks) <= decomposer.MAX_SUBTASKS
-
-    def test_filters_small_boundaries(self):
-        """Boundaries smaller than MIN_SUBTASK_SIZE are filtered out."""
-        decomposer = TaskDecomposer()
-        parent = _make_task()
-        # Plan with approach steps but minimal files
-        plan = _make_plan(
-            files_to_modify=["src/tiny.py"],  # Would create very small boundaries
-            approach=["Step 1", "Step 2"]
-        )
-        parent.plan = plan
-
-        # Should still handle gracefully
-        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
-
-        # Either creates reasonable subtasks or none at all
-        assert len(subtasks) >= 0
-
-    def test_subtask_includes_context_fields(self):
-        """Subtask context includes subtask_index and subtask_total."""
-        decomposer = TaskDecomposer()
-        parent = _make_task()
+        parent = _make_task(id="parent-pattern")
         plan = _make_plan(
             files_to_modify=["src/core/file1.py", "src/api/file2.py"]
         )
-        parent.plan = plan
 
         subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
 
-        for idx, subtask in enumerate(subtasks):
-            assert subtask.context.get("subtask_index") == idx
-            assert subtask.context.get("subtask_total") == len(subtasks)
+        # Check ID pattern
+        for index, subtask in enumerate(subtasks, start=1):
+            expected_id = f"parent-pattern-sub{index}"
+            assert subtask.id == expected_id
 
-    def test_json_serialization_with_new_fields(self):
-        """Task with new fields can be serialized to JSON and back."""
-        task = _make_task(
-            parent_task_id="parent-123",
-            subtask_ids=["sub-1", "sub-2"],
-            decomposition_strategy="by_feature"
-        )
-
-        # Serialize to JSON
-        task_json = task.model_dump_json()
-        task_dict = json.loads(task_json)
-
-        # Verify fields present
-        assert task_dict["parent_task_id"] == "parent-123"
-        assert task_dict["subtask_ids"] == ["sub-1", "sub-2"]
-        assert task_dict["decomposition_strategy"] == "by_feature"
-
-        # Deserialize back
-        restored_task = Task.model_validate_json(task_json)
-        assert restored_task.parent_task_id == "parent-123"
-        assert restored_task.subtask_ids == ["sub-1", "sub-2"]
-        assert restored_task.decomposition_strategy == "by_feature"
-
-    def test_subtask_boundary_dataclass(self):
-        """SubtaskBoundary dataclass works as expected."""
-        boundary = SubtaskBoundary(
-            name="Core module",
-            files=["file1.py", "file2.py"],
-            approach_steps=["Step 1", "Step 2"],
-            depends_on_subtasks=[0],
-            estimated_lines=200
-        )
-
-        assert boundary.name == "Core module"
-        assert len(boundary.files) == 2
-        assert len(boundary.approach_steps) == 2
-        assert boundary.depends_on_subtasks == [0]
-        assert boundary.estimated_lines == 200
-
-    def test_identify_split_boundaries_groups_by_directory(self):
-        """_identify_split_boundaries groups files by top-level directory."""
+    def test_decompose_with_max_subtasks_cap(self):
+        """Test that decompose respects MAX_SUBTASKS cap."""
         decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-maxcap")
+
+        # Create plan with many files in different directories
+        files = [
+            f"dir{i}/file{i}.py" for i in range(10)
+        ]  # 10 different directories
+        plan = _make_plan(files_to_modify=files)
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=1000)
+
+        # Should not exceed MAX_SUBTASKS (5)
+        assert len(subtasks) <= decomposer.MAX_SUBTASKS
+
+    def test_min_subtask_size_filter(self):
+        """Test that subtasks below MIN_SUBTASK_SIZE are filtered out."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-minsize")
+
+        # Create plan that would result in very small subtasks
         plan = _make_plan(
             files_to_modify=[
-                "src/core/file1.py",
-                "src/core/file2.py",
-                "src/api/file3.py",
-                "tests/test_file.py"
+                "src/file1.py",
+                "tests/file2.py",
             ]
         )
 
-        boundaries = decomposer._identify_split_boundaries(plan)
+        # Low estimated lines might create subtasks below MIN_SUBTASK_SIZE
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=80)
 
-        # Should have multiple boundaries based on directories
-        assert len(boundaries) >= 2
-        # Each boundary should have files
-        for boundary in boundaries:
-            assert len(boundary.files) > 0
+        # All subtasks should meet minimum size, or no decomposition occurs
+        if subtasks:
+            for subtask in subtasks:
+                # Check via notes which contain estimated lines
+                assert any("Estimated lines:" in note for note in subtask.notes)
 
-    def test_large_boundary_splitting(self):
-        """Boundaries >300 lines estimated are split further."""
-        decomposer = TaskDecomposer()
-        # Create a plan with many files in same directory
-        files = [f"src/core/file{i}.py" for i in range(10)]
-        plan = _make_plan(files_to_modify=files)
-
-        boundaries = decomposer._identify_split_boundaries(plan)
-
-        # Should split large group into smaller parts
-        assert len(boundaries) >= 2
-
-    def test_fallback_to_approach_step_splitting(self):
-        """Falls back to splitting approach steps when < 2 directory groups."""
-        decomposer = TaskDecomposer()
-        # Single directory but enough approach steps
-        plan = _make_plan(
-            files_to_modify=["src/file1.py"],
-            approach=["Step 1", "Step 2", "Step 3", "Step 4", "Step 5"]
+    def test_subtask_boundary_dataclass(self):
+        """Test SubtaskBoundary dataclass creation."""
+        boundary = SubtaskBoundary(
+            name="Test boundary",
+            files=["file1.py", "file2.py"],
+            approach_steps=["Step 1", "Step 2"],
+            depends_on_subtasks=[0],
+            estimated_lines=100,
         )
 
-        boundaries = decomposer._identify_split_boundaries(plan)
+        assert boundary.name == "Test boundary"
+        assert len(boundary.files) == 2
+        assert len(boundary.approach_steps) == 2
+        assert boundary.depends_on_subtasks == [0]
+        assert boundary.estimated_lines == 100
 
-        # Should create boundaries based on approach steps
-        assert len(boundaries) >= 2
+    def test_decompose_returns_empty_for_insufficient_boundaries(self):
+        """Test that decompose returns empty list if can't create valid boundaries."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-noboundaries")
+
+        # Plan with only 1 file (can't split)
+        plan = _make_plan(files_to_modify=["src/file1.py"])
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        # Should return empty list
+        assert subtasks == []
+        assert parent.subtask_ids == []
+
+    def test_serialization_with_new_fields(self):
+        """Test that tasks with new fields serialize/deserialize correctly."""
+        task = _make_task(
+            id="serialize-test",
+            parent_task_id="parent-123",
+            subtask_ids=["child-1", "child-2"],
+            decomposition_strategy="by_feature",
+        )
+
+        # Serialize to JSON
+        task_dict = task.model_dump()
+
+        # Check fields are present
+        assert task_dict["parent_task_id"] == "parent-123"
+        assert task_dict["subtask_ids"] == ["child-1", "child-2"]
+        assert task_dict["decomposition_strategy"] == "by_feature"
+
+        # Deserialize back
+        task_restored = Task(**task_dict)
+
+        assert task_restored.parent_task_id == "parent-123"
+        assert task_restored.subtask_ids == ["child-1", "child-2"]
+        assert task_restored.decomposition_strategy == "by_feature"

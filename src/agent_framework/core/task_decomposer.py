@@ -1,10 +1,11 @@
-"""Task decomposition logic for splitting large tasks into independent subtasks."""
+"""Task decomposition logic for splitting large plans into subtasks."""
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Optional
+from pathlib import Path
 
-from agent_framework.core.task import PlanDocument, Task, TaskStatus, TaskType
+from agent_framework.core.task import Task, PlanDocument, TaskType, TaskStatus
 
 
 @dataclass
@@ -19,57 +20,72 @@ class SubtaskBoundary:
 
 
 class TaskDecomposer:
-    """Splits large tasks into independent subtasks based on natural boundaries."""
+    """Decomposes large tasks into smaller, independent subtasks."""
 
-    # Configuration
+    # Configuration constants
     DECOMPOSE_THRESHOLD = 500  # Lines above which decomposition triggers
     TARGET_SUBTASK_SIZE = 250  # Target lines per subtask
     MIN_SUBTASK_SIZE = 50  # Don't create subtasks smaller than this
     MAX_SUBTASKS = 5  # Cap on number of subtasks
     MAX_DEPTH = 1  # Subtasks cannot themselves decompose
-    LARGE_BOUNDARY_THRESHOLD = 300  # Boundary size requiring further splitting
 
     def should_decompose(self, plan: PlanDocument, estimated_lines: int) -> bool:
-        """Determine if task should be decomposed based on size and structure.
-
-        Returns True if:
-        - Task exceeds DECOMPOSE_THRESHOLD lines
-        - Plan has multiple files to modify (allowing natural splits)
         """
+        Determine if a task should be decomposed into subtasks.
+
+        Args:
+            plan: The task's plan document
+            estimated_lines: Estimated total lines of code for the task
+
+        Returns:
+            True if task exceeds threshold and has enough files to split
+        """
+        # Check if we're above the threshold
         if estimated_lines < self.DECOMPOSE_THRESHOLD:
             return False
 
-        # Need at least 2 files to have a meaningful split
+        # Need at least 2 files to meaningfully split
         if len(plan.files_to_modify) < 2:
             return False
 
         return True
 
-    def decompose(self, parent_task: Task, plan: PlanDocument, estimated_lines: int) -> list[Task]:
-        """Split parent into independent subtasks.
-
-        Returns the created subtask list and updates parent_task.subtask_ids.
-        Respects MAX_DEPTH to prevent nested decomposition.
+    def decompose(
+        self, parent_task: Task, plan: PlanDocument, estimated_lines: int
+    ) -> list[Task]:
         """
-        # Prevent nested decomposition
+        Split parent task into independent subtasks.
+
+        Args:
+            parent_task: The task to decompose
+            plan: The task's plan document
+            estimated_lines: Estimated total lines of code
+
+        Returns:
+            List of created subtask objects
+
+        Side effects:
+            Updates parent_task.subtask_ids with the IDs of created subtasks
+        """
+        # Check if parent is already a subtask (max depth = 1)
         if parent_task.parent_task_id is not None:
             return []
 
         # Identify natural split boundaries
-        boundaries = self._identify_split_boundaries(plan)
+        boundaries = self._identify_split_boundaries(plan, estimated_lines)
 
         # Cap at MAX_SUBTASKS
         if len(boundaries) > self.MAX_SUBTASKS:
-            boundaries = boundaries[:self.MAX_SUBTASKS]
+            boundaries = boundaries[: self.MAX_SUBTASKS]
 
-        # Create subtasks
+        # Create subtasks from boundaries
         subtasks = []
-        for idx, boundary in enumerate(boundaries):
+        for index, boundary in enumerate(boundaries):
             subtask = self._create_subtask(
                 parent=parent_task,
                 boundary=boundary,
-                index=idx,
-                total=len(boundaries)
+                index=index + 1,
+                total=len(boundaries),
             )
             subtasks.append(subtask)
 
@@ -78,138 +94,197 @@ class TaskDecomposer:
 
         return subtasks
 
-    def _identify_split_boundaries(self, plan: PlanDocument) -> list[SubtaskBoundary]:
-        """Group files_to_modify into clusters that form natural subtasks.
-
-        Strategy:
-        1. Group files by top-level directory
-        2. If a group >300 lines estimated, split further
-        3. If total groups < 2, split approach steps into halves
+    def _identify_split_boundaries(
+        self, plan: PlanDocument, estimated_lines: int
+    ) -> list[SubtaskBoundary]:
         """
+        Group files_to_modify into clusters that form natural subtasks.
+
+        Uses directory-prefix grouping as the primary heuristic:
+        - Group files by their top-level directory (e.g., all src/core/ together)
+        - If a group is still >300 lines, split further by subdirectories
+        - If we end up with < 2 groups, fall back to splitting approach steps
+
+        Args:
+            plan: The task's plan document
+            estimated_lines: Total estimated lines for the task
+
+        Returns:
+            List of SubtaskBoundary objects representing natural splits
+        """
+        files = plan.files_to_modify
+        if not files:
+            return []
+
+        # Estimate lines per file (rough heuristic: total / file count)
+        lines_per_file = estimated_lines // len(files) if files else 0
+
         # Group files by top-level directory
         dir_groups: dict[str, list[str]] = {}
-        for file_path in plan.files_to_modify:
-            # Extract top-level directory (e.g., "src/core/" from "src/core/task.py")
-            parts = file_path.split('/')
-            if len(parts) > 1:
-                top_dir = f"{parts[0]}/{parts[1]}/" if len(parts) > 2 else f"{parts[0]}/"
-            else:
-                top_dir = "root/"
-
+        for file in files:
+            # Extract top-level directory (e.g., "src/core/task.py" -> "src")
+            parts = Path(file).parts
+            top_dir = parts[0] if parts else "root"
             if top_dir not in dir_groups:
                 dir_groups[top_dir] = []
-            dir_groups[top_dir].append(file_path)
+            dir_groups[top_dir].append(file)
 
-        # If only one group, try to split by file count
-        if len(dir_groups) == 1:
-            single_group = list(dir_groups.values())[0]
-            if len(single_group) >= 4:
-                # Split into two groups
-                mid = len(single_group) // 2
-                dir_groups = {
-                    "part_1/": single_group[:mid],
-                    "part_2/": single_group[mid:]
-                }
-
-        # Create boundaries from groups
+        # Create boundaries from directory groups
         boundaries = []
-        for dir_name, files in dir_groups.items():
-            # Estimate lines per file (simple heuristic: 100 lines per file)
-            estimated = len(files) * 100
+        for dir_name, group_files in dir_groups.items():
+            group_estimated = len(group_files) * lines_per_file
 
-            # If group is too large, split further
-            if estimated > self.LARGE_BOUNDARY_THRESHOLD and len(files) > 1:
-                mid = len(files) // 2
-                boundaries.append(SubtaskBoundary(
-                    name=f"{dir_name} (part 1)",
-                    files=files[:mid],
-                    approach_steps=self._partition_approach_steps(plan.approach, len(boundaries), len(dir_groups) * 2),
-                    depends_on_subtasks=[],
-                    estimated_lines=len(files[:mid]) * 100
-                ))
-                boundaries.append(SubtaskBoundary(
-                    name=f"{dir_name} (part 2)",
-                    files=files[mid:],
-                    approach_steps=self._partition_approach_steps(plan.approach, len(boundaries), len(dir_groups) * 2),
-                    depends_on_subtasks=[],
-                    estimated_lines=len(files[mid:]) * 100
-                ))
+            # If group is still too large, try to split by subdirectory
+            if group_estimated > 300 and len(group_files) > 2:
+                sub_boundaries = self._split_by_subdirectory(
+                    group_files, lines_per_file, dir_name
+                )
+                boundaries.extend(sub_boundaries)
             else:
-                boundaries.append(SubtaskBoundary(
-                    name=dir_name.rstrip('/'),
-                    files=files,
-                    approach_steps=self._partition_approach_steps(plan.approach, len(boundaries), len(dir_groups)),
-                    depends_on_subtasks=[],
-                    estimated_lines=estimated
-                ))
+                # Create single boundary for this directory group
+                boundary = SubtaskBoundary(
+                    name=f"Changes in {dir_name}",
+                    files=group_files,
+                    approach_steps=self._extract_relevant_steps(
+                        plan.approach, group_files
+                    ),
+                    depends_on_subtasks=[],  # Assume independent for now
+                    estimated_lines=group_estimated,
+                )
+                boundaries.append(boundary)
+
+        # If we still have < 2 boundaries, fall back to approach step splitting
+        if len(boundaries) < 2:
+            boundaries = self._split_by_approach_steps(plan, estimated_lines)
 
         # Filter out boundaries that are too small
         boundaries = [b for b in boundaries if b.estimated_lines >= self.MIN_SUBTASK_SIZE]
 
-        # If still < 2 boundaries, split approach steps
-        if len(boundaries) < 2 and len(plan.approach) >= 4:
-            mid = len(plan.approach) // 2
-            boundaries = [
-                SubtaskBoundary(
-                    name="Implementation phase 1",
-                    files=plan.files_to_modify[:len(plan.files_to_modify)//2] if plan.files_to_modify else [],
-                    approach_steps=plan.approach[:mid],
-                    depends_on_subtasks=[],
-                    estimated_lines=len(plan.files_to_modify) * 50
-                ),
-                SubtaskBoundary(
-                    name="Implementation phase 2",
-                    files=plan.files_to_modify[len(plan.files_to_modify)//2:] if plan.files_to_modify else [],
-                    approach_steps=plan.approach[mid:],
-                    depends_on_subtasks=[],
-                    estimated_lines=len(plan.files_to_modify) * 50
-                )
-            ]
+        # Ensure we have at least 2 boundaries
+        if len(boundaries) < 2:
+            return []
 
         return boundaries
 
-    def _partition_approach_steps(self, approach: list[str], current_idx: int, total_partitions: int) -> list[str]:
-        """Partition approach steps proportionally to boundaries."""
-        if not approach or total_partitions == 0:
+    def _split_by_subdirectory(
+        self, files: list[str], lines_per_file: int, parent_dir: str
+    ) -> list[SubtaskBoundary]:
+        """Split a large directory group by subdirectories."""
+        subdir_groups: dict[str, list[str]] = {}
+
+        for file in files:
+            parts = Path(file).parts
+            # Use first 2 levels (e.g., "src/core")
+            subdir = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
+            if subdir not in subdir_groups:
+                subdir_groups[subdir] = []
+            subdir_groups[subdir].append(file)
+
+        boundaries = []
+        for subdir_name, group_files in subdir_groups.items():
+            boundary = SubtaskBoundary(
+                name=f"Changes in {subdir_name}",
+                files=group_files,
+                approach_steps=[],  # Will be filled by caller
+                depends_on_subtasks=[],
+                estimated_lines=len(group_files) * lines_per_file,
+            )
+            boundaries.append(boundary)
+
+        return boundaries
+
+    def _split_by_approach_steps(
+        self, plan: PlanDocument, estimated_lines: int
+    ) -> list[SubtaskBoundary]:
+        """
+        Fall back to splitting by approach steps when directory grouping fails.
+
+        Divides approach steps and files roughly in half.
+        """
+        # If we have less than 2 files, can't meaningfully split
+        if len(plan.files_to_modify) < 2:
             return []
 
-        steps_per_partition = max(1, len(approach) // total_partitions)
-        start = current_idx * steps_per_partition
-        end = start + steps_per_partition if current_idx < total_partitions - 1 else len(approach)
+        mid_point = len(plan.approach) // 2
+        mid_files = len(plan.files_to_modify) // 2
 
-        return approach[start:end]
+        boundaries = [
+            SubtaskBoundary(
+                name="First phase implementation",
+                files=plan.files_to_modify[:mid_files],
+                approach_steps=plan.approach[:mid_point],
+                depends_on_subtasks=[],
+                estimated_lines=estimated_lines // 2,
+            ),
+            SubtaskBoundary(
+                name="Second phase implementation",
+                files=plan.files_to_modify[mid_files:],
+                approach_steps=plan.approach[mid_point:],
+                depends_on_subtasks=[0],  # Second phase depends on first
+                estimated_lines=estimated_lines // 2,
+            ),
+        ]
+
+        return boundaries
+
+    def _extract_relevant_steps(
+        self, approach_steps: list[str], files: list[str]
+    ) -> list[str]:
+        """
+        Extract approach steps that are relevant to the given files.
+
+        Simple heuristic: include steps that mention any of the file names.
+        """
+        relevant_steps = []
+        file_names = {Path(f).name for f in files}
+
+        for step in approach_steps:
+            # Check if step mentions any of the file names
+            if any(fname in step for fname in file_names):
+                relevant_steps.append(step)
+
+        # If no specific matches, include all steps (conservative approach)
+        if not relevant_steps:
+            relevant_steps = approach_steps
+
+        return relevant_steps
 
     def _create_subtask(
-        self,
-        parent: Task,
-        boundary: SubtaskBoundary,
-        index: int,
-        total: int
+        self, parent: Task, boundary: SubtaskBoundary, index: int, total: int
     ) -> Task:
-        """Build a child Task from a boundary.
-
-        - ID pattern: {parent.id}-sub-{index}
-        - Sets parent_task_id to parent.id
-        - Inherits parent's context
-        - Creates a PlanDocument scoped to boundary's files and approach_steps
-        - Sets depends_on based on boundary.depends_on_subtasks
         """
-        subtask_id = f"{parent.id}-sub-{index}"
+        Build a child Task from a boundary.
 
-        # Create scoped plan for subtask
+        Args:
+            parent: Parent task
+            boundary: SubtaskBoundary defining this subtask's scope
+            index: 1-based index (e.g., 1, 2, 3...)
+            total: Total number of subtasks
+
+        Returns:
+            A new Task configured as a subtask
+        """
+        subtask_id = f"{parent.id}-sub{index}"
+
+        # Create scoped plan for this subtask
         subtask_plan = PlanDocument(
-            objectives=[f"Subtask {index + 1}/{total}: {boundary.name}"],
+            objectives=[f"Complete {boundary.name} for parent task"],
             approach=boundary.approach_steps,
             risks=parent.plan.risks if parent.plan else [],
-            success_criteria=[f"Complete changes for: {', '.join(boundary.files[:3])}{'...' if len(boundary.files) > 3 else ''}"],
+            success_criteria=[
+                f"All changes in {len(boundary.files)} files are implemented and tested"
+            ],
             files_to_modify=boundary.files,
-            dependencies=parent.plan.dependencies if parent.plan else []
+            dependencies=parent.plan.dependencies if parent.plan else [],
         )
 
-        # Build depends_on from boundary
-        depends_on = [f"{parent.id}-sub-{dep_idx}" for dep_idx in boundary.depends_on_subtasks]
+        # Build depends_on from boundary dependencies
+        depends_on_task_ids = []
+        for dep_index in boundary.depends_on_subtasks:
+            dep_task_id = f"{parent.id}-sub{dep_index + 1}"
+            depends_on_task_ids.append(dep_task_id)
 
-        # Create subtask
+        # Create subtask with inherited context
         subtask = Task(
             id=subtask_id,
             type=parent.type,
@@ -219,16 +294,29 @@ class TaskDecomposer:
             assigned_to=parent.assigned_to,
             created_at=datetime.now(UTC),
             title=f"{parent.title} - {boundary.name}",
-            description=f"Subtask {index + 1}/{total} of parent task {parent.id}\n\n{boundary.name}",
-            depends_on=depends_on,
+            description=f"Subtask {index}/{total} of {parent.id}\n\n{boundary.name}\n\nFiles:\n"
+            + "\n".join(f"- {f}" for f in boundary.files),
+            depends_on=depends_on_task_ids,
+            blocks=[],
+            parent_task_id=parent.id,
+            subtask_ids=[],
+            decomposition_strategy=parent.decomposition_strategy,
+            acceptance_criteria=[
+                f"Complete implementation for {len(boundary.files)} files",
+                "All tests pass",
+            ],
+            deliverables=boundary.files,
+            notes=[
+                f"Auto-generated subtask from parent {parent.id}",
+                f"Estimated lines: {boundary.estimated_lines}",
+            ],
             context={
                 **parent.context,
                 "parent_task_id": parent.id,
                 "subtask_index": index,
                 "subtask_total": total,
             },
-            parent_task_id=parent.id,
-            plan=subtask_plan
+            plan=subtask_plan,
         )
 
         return subtask
