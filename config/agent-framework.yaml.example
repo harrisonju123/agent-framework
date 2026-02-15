@@ -20,8 +20,8 @@ llm:
   claude_cli_timeout: 3600  # Default fallback timeout (1 hour)
 
   # Task-type-specific timeouts (prevents vague tasks from running too long)
-  # Large: IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, ESCALATION, ENHANCEMENT
-  # Bounded: TESTING, VERIFICATION, FIX, BUGFIX, REVIEW, PR_REQUEST
+  # Large: IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, ESCALATION, ENHANCEMENT, REVIEW
+  # Bounded: TESTING, VERIFICATION, FIX, BUGFIX, PR_REQUEST
   # Simple: DOCUMENTATION, COORDINATION, STATUS_REPORT
   claude_cli_timeout_large: 3600   # 1 hour
   claude_cli_timeout_bounded: 1800 # 30 minutes
@@ -29,7 +29,7 @@ llm:
 
   claude_cli_cheap_model: claude-haiku-4-5-20251001
   claude_cli_default_model: claude-sonnet-4-5-20250929
-  claude_cli_premium_model: claude-sonnet-4-5-20250929
+  claude_cli_premium_model: claude-opus-4-6
 
   # LiteLLM direct settings (used when mode=litellm)
   # pip install 'agent-framework[litellm]' required
@@ -68,12 +68,12 @@ safeguards:
 
 # Optimization Configuration
 optimization:
-  enable_minimal_prompts: false
-  enable_compact_json: false
-  enable_context_deduplication: false
+  enable_minimal_prompts: true
+  enable_compact_json: true
+  enable_context_deduplication: true
   enable_token_tracking: false
   enable_token_budget_warnings: false
-  enable_result_summarization: false
+  enable_result_summarization: true
   enable_error_truncation: false
   canary_percentage: 0
   shadow_mode: false
@@ -137,12 +137,63 @@ repositories:
 # Workflow Configuration
 # Supports both legacy linear format and new DAG format with conditional branches
 workflows:
+  # DAG workflow with checkpoint: architect plans, user reviews, then engineer implements
   default:
-    description: "Architect plans, Engineer implements, QA reviews"
-    agents: [architect, engineer, qa]
+    description: "Architect plans, user reviews, Engineer implements, QA reviews"
+    start_step: plan
     pr_creator: architect
     auto_review: true
     require_tests: true
+    steps:
+      plan:
+        agent: architect
+        checkpoint:
+          message: "Review architect's plan before implementation begins"
+        next:
+          - target: implement
+      implement:
+        agent: engineer
+        next:
+          - target: qa_review
+      qa_review:
+        agent: qa
+        next:
+          - target: create_pr
+            condition: approved
+            priority: 10
+          - target: implement
+            condition: needs_fix
+            priority: 5
+      create_pr:
+        agent: architect
+
+  # Fully autonomous workflow (no checkpoint)
+  default_auto:
+    description: "Architect plans, Engineer implements, QA reviews (no checkpoint)"
+    start_step: plan
+    pr_creator: architect
+    auto_review: true
+    require_tests: true
+    steps:
+      plan:
+        agent: architect
+        next:
+          - target: implement
+      implement:
+        agent: engineer
+        next:
+          - target: qa_review
+      qa_review:
+        agent: qa
+        next:
+          - target: create_pr
+            condition: approved
+            priority: 10
+          - target: implement
+            condition: needs_fix
+            priority: 5
+      create_pr:
+        agent: architect
 
   analysis:
     description: "Repository analysis workflow"
@@ -150,35 +201,6 @@ workflows:
     output: jira_epic
     auto_review: false
     require_tests: false
-
-  # DAG format example: conditional branches and parallel paths
-  # smart_workflow:
-  #   description: "Skip QA for docs-only changes"
-  #   start_step: plan
-  #   steps:
-  #     plan:
-  #       agent: architect
-  #       next:
-  #         - target: implement
-  #     implement:
-  #       agent: engineer
-  #       next:
-  #         - target: create_pr
-  #           condition: files_match
-  #           params:
-  #             pattern: "*.md"
-  #           priority: 10
-  #         - target: qa_review
-  #           condition: always
-  #     qa_review:
-  #       agent: qa
-  #       next:
-  #         - target: create_pr
-  #           condition: approved
-  #         - target: implement
-  #           condition: needs_fix
-  #     create_pr:
-  #       agent: architect
 
 # Circuit Breaker Configuration
 circuit_breaker:

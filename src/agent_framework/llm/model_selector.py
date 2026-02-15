@@ -14,7 +14,7 @@ class ModelSelector:
         self,
         cheap_model: str = "claude-haiku-4-5-20251001",
         default_model: str = "claude-sonnet-4-5-20250929",
-        premium_model: str = "claude-sonnet-4-5-20250929",
+        premium_model: str = "opus",
         timeout_large: int = 3600,
         timeout_bounded: int = 1800,
         timeout_simple: int = 900,
@@ -40,8 +40,15 @@ class ModelSelector:
         if retry_count >= 3:
             return self.premium_model
 
-        # Check task type
-        if task_type == TaskType.ESCALATION:
+        # High-stakes tasks where quality matters most
+        premium_types = {
+            TaskType.ESCALATION,
+            TaskType.PLANNING,
+            TaskType.ARCHITECTURE,
+            TaskType.REVIEW,
+            TaskType.QA_VERIFICATION,
+        }
+        if task_type in premium_types:
             return self.premium_model
 
         # Cheap tasks
@@ -66,8 +73,8 @@ class ModelSelector:
         Select timeout based on task type scope.
 
         Timeout tiers:
-        - Large (1hr): IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, ESCALATION, ENHANCEMENT
-        - Bounded (30min): TESTING, VERIFICATION, FIX, BUGFIX, REVIEW, PR_REQUEST
+        - Large (1hr): IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, ESCALATION, ENHANCEMENT, REVIEW
+        - Bounded (30min): TESTING, VERIFICATION, FIX, BUGFIX, PR_REQUEST
         - Simple (15min): DOCUMENTATION, COORDINATION, STATUS_REPORT
         """
         simple_types = {
@@ -82,7 +89,6 @@ class ModelSelector:
             TaskType.FIX,
             TaskType.BUGFIX,
             TaskType.BUG_FIX,
-            TaskType.REVIEW,
             TaskType.PR_REQUEST,
         }
 

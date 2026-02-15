@@ -54,6 +54,14 @@ def atomic_write_json(file_path: Path, content: str, max_retries: int = 3) -> No
     raise last_error
 
 
+def atomic_write_text(file_path: Path, content: str) -> None:
+    """Semantic alias for atomic_write_json — for non-JSON text content.
+
+    Delegates to atomic_write_json which handles temp file + rename.
+    """
+    atomic_write_json(file_path, content)
+
+
 def atomic_write_model(file_path: Path, model: BaseModel, indent: int = 2) -> None:
     """
     Atomically write a Pydantic model to JSON file.

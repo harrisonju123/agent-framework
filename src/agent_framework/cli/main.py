@@ -312,14 +312,16 @@ def pull(ctx, project, max):
 @click.option("--no-dashboard", is_flag=True, help="Skip live dashboard")
 @click.option("--epic", "-e", help="JIRA epic key to process (e.g., PROJ-100)")
 @click.option("--parallel", "-p", is_flag=True, help="Process epic tickets in parallel (requires worktrees)")
+@click.option("--auto-approve", is_flag=True, help="Skip plan checkpoint, run fully autonomous")
 @click.pass_context
-def work(ctx, no_dashboard, epic, parallel):
+def work(ctx, no_dashboard, epic, parallel, auto_approve):
     """Interactive mode: describe what to build, delegate to Architect agent.
 
     With --epic: Process all tickets in an existing JIRA epic.
     Without --epic: Describe a new feature to implement.
 
     Use --parallel with --epic to process multiple tickets concurrently.
+    Use --auto-approve to skip the plan review checkpoint.
     """
     workspace = ctx.obj["workspace"]
 
@@ -331,7 +333,7 @@ def work(ctx, no_dashboard, epic, parallel):
 
     # Handle epic processing mode
     if epic:
-        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel)
+        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel, auto_approve)
         return
 
     # Check if repos are registered
@@ -366,7 +368,7 @@ def work(ctx, no_dashboard, epic, parallel):
         console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/]")
         console.print("[dim]No JIRA project configured - using local task tracking[/]")
 
-    workflow = "default"
+    workflow = "default_auto" if auto_approve else "default"
 
     # Step 3: Create planning task for Architect
     from ..core.task_builder import build_planning_task
@@ -385,6 +387,10 @@ def work(ctx, no_dashboard, epic, parallel):
     queue.push(task, "architect")
 
     console.print(f"\n[green]✓[/] Task queued: Analyze goal and create JIRA epic with breakdown")
+
+    if not auto_approve:
+        console.print("[dim]Workflow will pause after architect plans for your review.[/]")
+        console.print("[dim]Run 'agent approve <task-id>' to proceed to implementation.[/]")
 
     # Step 4: Ensure agents are running (don't block)
     orchestrator = Orchestrator(workspace)
@@ -1715,7 +1721,7 @@ This PR implements the same pattern/functionality as the reference implementatio
         traceback.print_exc()
 
 
-def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False):
+def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False, auto_approve: bool = False):
     """Handle --epic mode: process tickets in a JIRA epic.
 
     Args:
@@ -1725,6 +1731,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         epic_key: JIRA epic key (e.g., PROJ-100)
         no_dashboard: Skip dashboard if True
         parallel: If True, process tickets in parallel (no dependencies)
+        auto_approve: If True, skip plan checkpoint (use default_auto workflow)
     """
     from datetime import datetime
     import time
@@ -1784,7 +1791,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             console.print("[yellow]Cancelled[/]")
             return
 
-        workflow = "default"
+        workflow = "default_auto" if auto_approve else "default"
 
         # Determine target repository from epic or config
         github_repo = None

@@ -471,6 +471,10 @@ class Agent:
             if not passed:
                 return  # Task was reset for self-eval retry
 
+        # Save upstream context after validation passes, before workflow chain
+        if task.context.get("workflow") or task.context.get("chain_step"):
+            self._save_upstream_context(task, response)
+
         # Handle post-LLM workflow
         self.logger.debug(f"Running post-LLM workflow for {task.id}")
         await self._handle_success(task, response)
@@ -1257,6 +1261,67 @@ class Agent:
         # Guaranteed fallback
         return extracted[0] if extracted else f"Task {get_type_str(task.type)} completed"
 
+    # -- Upstream Context Handoff --
+
+    UPSTREAM_CONTEXT_MAX_CHARS = 15000
+
+    def _save_upstream_context(self, task: Task, response) -> None:
+        """Save agent's response to disk so downstream agents can read it.
+
+        Creates .agent-context/summaries/{task_id}-{agent_id}.md with
+        the response content (truncated to UPSTREAM_CONTEXT_MAX_CHARS).
+
+        Note: path mirrors FrameworkConfig.context_dir default.
+        """
+        try:
+            from ..utils.atomic_io import atomic_write_text
+
+            summaries_dir = self.workspace / ".agent-context" / "summaries"
+            summaries_dir.mkdir(parents=True, exist_ok=True)
+
+            content = response.content or ""
+            if len(content) > self.UPSTREAM_CONTEXT_MAX_CHARS:
+                content = content[:self.UPSTREAM_CONTEXT_MAX_CHARS] + "\n\n[truncated]"
+
+            context_file = summaries_dir / f"{task.id}-{self.config.base_id}.md"
+            atomic_write_text(context_file, content)
+
+            # Store path in task context for chain propagation
+            task.context["upstream_context_file"] = str(context_file)
+            self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
+        except Exception as e:
+            self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
+
+    def _load_upstream_context(self, task: Task) -> str:
+        """Load upstream agent's findings from disk if available.
+
+        Returns formatted section string or empty string.
+        """
+        context_file = task.context.get("upstream_context_file")
+        if not context_file:
+            return ""
+
+        try:
+            context_path = Path(context_file).resolve()
+            summaries_dir = (self.workspace / ".agent-context" / "summaries").resolve()
+
+            # Only read files inside our summaries directory
+            if not str(context_path).startswith(str(summaries_dir)):
+                self.logger.warning(f"Upstream context path outside summaries dir: {context_file}")
+                return ""
+
+            if not context_path.exists():
+                return ""
+
+            content = context_path.read_text()
+            if not content.strip():
+                return ""
+
+            return f"\n## UPSTREAM AGENT FINDINGS\n{content}\n"
+        except Exception as e:
+            self.logger.debug(f"Failed to load upstream context: {e}")
+            return ""
+
     # -- Agent Memory Integration --
 
     def _get_repo_slug(self, task: Task) -> Optional[str]:
@@ -1893,20 +1958,20 @@ The PR will be created by a downstream agent after all steps complete.
 
 """
 
-        return f"""You are {self.config.id} working on an asynchronous task.
+        # Load upstream context from previous agent if available
+        upstream_context = self._load_upstream_context(task)
+
+        return f"""You are {self.config.id}.
 
 TASK DETAILS:
 {task_json}
 
-{mcp_guidance}
+{mcp_guidance}{upstream_context}
 YOUR RESPONSIBILITIES:
 {agent_prompt}
 
 IMPORTANT:
 - Complete the task described above
-- Create any follow-up tasks by writing JSON files to other agents' queues
-- Use unique task IDs (timestamp or UUID)
-- Set depends_on array for tasks that depend on this one completing
 - This task will be automatically marked as completed when you're done
 """
 
@@ -1959,14 +2024,17 @@ IMPORTANT:
         if task.context.get("chain_step") and not self._is_at_terminal_workflow_step(task):
             chain_note = "\nIMPORTANT: You are an intermediate step in the workflow chain.\nPush your commits but do NOT create a pull request.\n"
 
+        # Load upstream context from previous agent if available
+        upstream_context = self._load_upstream_context(task)
+
         # Build optimized prompt (shorter, focused on essentials)
         agent_prompt = prompt_override or self.config.prompt
-        return f"""You are {self.config.id} working on an asynchronous task.
+        return f"""You are {self.config.id}.
 
 TASK:
 {task_json}
 
-{context_note}{dep_context}{chain_note}
+{context_note}{dep_context}{chain_note}{upstream_context}
 {agent_prompt}
 
 IMPORTANT:
