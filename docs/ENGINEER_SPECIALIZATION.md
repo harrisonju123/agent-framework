@@ -245,7 +245,7 @@ DEBUG: Profile 'frontend': 0/3 files matched (0%)
 
 ### Activity Tracking
 
-Future enhancement: `AgentActivity.specialization` field will track the selected profile for each task.
+The `AgentActivity.specialization` field tracks the selected profile for each task, recorded when prompt building detects a specialization match.
 
 ## Troubleshooting
 
