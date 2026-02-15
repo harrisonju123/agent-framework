@@ -691,6 +691,7 @@ class TestWorktreeSkipForPRCreation:
         agent.multi_repo_manager = MagicMock()
         agent.multi_repo_manager.ensure_repo.return_value = repo_path
         agent.worktree_manager = MagicMock()
+        agent.worktree_manager.find_worktree_by_branch.return_value = None
         agent.worktree_manager.create_worktree.return_value = worktree_path
 
         result = agent._get_working_directory(task)

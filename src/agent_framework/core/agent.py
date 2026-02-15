@@ -1997,11 +1997,22 @@ IMPORTANT:
             base_repo = self._get_base_repo_for_worktree(task, github_repo)
 
             if base_repo:
-                # Create worktree for isolated work
-                # Include task_id[:8] for uniqueness to avoid branch collisions on retries
-                jira_key = task.context.get("jira_key", "task")
-                task_short = task.id[:8]
-                branch_name = f"agent/{self.config.id}/{jira_key}-{task_short}"
+                # Fix-cycle reuse: if a prior step already established a branch, reuse it
+                branch_name = task.context.get("worktree_branch") or task.context.get("implementation_branch")
+
+                if not branch_name:
+                    import hashlib
+                    jira_key = task.context.get("jira_key", "task")
+                    task_hash = hashlib.sha256(task.id.encode()).hexdigest()[:8]
+                    branch_name = f"agent/{self.config.id}/{jira_key}-{task_hash}"
+
+                # If reusing an inherited branch, check for existing worktree first
+                existing = self.worktree_manager.find_worktree_by_branch(branch_name)
+                if existing:
+                    self._active_worktree = existing
+                    task.context["worktree_branch"] = branch_name
+                    self.logger.info(f"Reusing worktree for branch {branch_name}: {existing}")
+                    return existing
 
                 try:
                     worktree_path = self.worktree_manager.create_worktree(
@@ -3097,6 +3108,10 @@ IMPORTANT:
         fix_context["github_repo"] = task.context.get("github_repo")
         fix_context["jira_key"] = jira_key
         fix_context["workflow"] = task.context.get("workflow", "full")
+
+        # Preserve engineer's branch so fix cycle reuses the same worktree
+        if task.context.get("implementation_branch"):
+            fix_context["worktree_branch"] = task.context["implementation_branch"]
 
         # Store structured findings in context for programmatic access
         if has_structured_findings:
