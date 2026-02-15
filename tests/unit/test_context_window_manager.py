@@ -162,10 +162,10 @@ class TestContextWindowManager:
 
     def test_build_context_budget_limit(self, manager):
         """Verify low-priority items are dropped when budget is tight."""
-        # Fill budget with critical items (each ~166 tokens)
+        # Fill budget with critical items (each 125 tokens at ~4 chars/token)
         for i in range(10):
             manager.add_context_item(
-                content="A" * 500,  # ~166 tokens each
+                content="A" * 500,  # 125 tokens each
                 priority=ContextPriority.CRITICAL,
                 category="task_definition",
             )
@@ -177,12 +177,11 @@ class TestContextWindowManager:
             category="metadata",
         )
 
-        # Use small budget so low priority gets dropped
-        context, metadata = manager.build_context(max_tokens=1500)
+        # Budget of 1250 fits exactly the 10 critical items, drops low priority
+        context, metadata = manager.build_context(max_tokens=1250)
 
-        # Low priority should be dropped
         assert "Low priority that won't fit" not in context
-        assert metadata["items_dropped"] >= 1  # At least the low priority item
+        assert metadata["items_dropped"] >= 1
 
     def test_progressive_summarization(self, manager):
         """Verify old messages are summarized while recent ones are kept."""
@@ -215,24 +214,22 @@ class TestContextWindowManager:
         assert status["context_items"] == 1
 
     def test_should_trigger_checkpoint(self, manager):
-        """Verify checkpoint trigger at 90% budget usage."""
+        """Verify checkpoint fires exactly once when crossing 90% threshold."""
+        assert manager.should_trigger_checkpoint() is False  # Under threshold
+
         manager.update_token_usage(9000, 0)
-
-        assert manager.should_trigger_checkpoint() is True  # 90% is at checkpoint
-
-        # Reset and use less
-        manager.budget.used_so_far = 8999
-        assert manager.should_trigger_checkpoint() is False  # < 90%
+        assert manager.should_trigger_checkpoint() is True   # First check at 90%
+        assert manager.should_trigger_checkpoint() is False   # Already fired — won't repeat
 
     def test_token_estimation(self, manager):
         """Verify token estimation heuristic."""
         # Empty string
         assert manager._estimate_tokens("") == 0
 
-        # ~350 characters should be ~100-120 tokens (1 token per ~3 chars)
-        text = "x" * 350
+        # 400 characters at ~4 chars/token = 100 tokens
+        text = "x" * 400
         estimated = manager._estimate_tokens(text)
-        assert 90 <= estimated <= 120
+        assert estimated == 100
 
     def test_summarize_tool_output_read(self, manager):
         """Verify Read tool output summarization keeps head and tail."""

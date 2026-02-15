@@ -92,10 +92,10 @@ class ContextWindowManager:
         self.summary_threshold = summary_threshold
         self.min_message_retention = min_message_retention
 
-        # Context items by priority
         self._context_items: List[ContextItem] = []
         self._message_history: List[ContextItem] = []
         self._summarized_history: Optional[str] = None
+        self._checkpoint_triggered: bool = False
 
     def add_context_item(
         self,
@@ -223,11 +223,18 @@ class ContextWindowManager:
         if self._summarized_history:
             context_parts.append(f"## Previous Activity Summary\n{self._summarized_history}\n")
 
-        # Add included items by category
-        for category in ["task_definition", "error", "message", "tool_output", "metadata"]:
+        # Add included items grouped by category, preserving priority order
+        _CATEGORY_ORDER = ["task_definition", "error", "message", "tool_output", "metadata"]
+        seen = set()
+        for category in _CATEGORY_ORDER:
             category_items = [i for i in included_items if i.category == category]
             if category_items:
                 context_parts.extend(item.content for item in category_items)
+                seen.add(category)
+        # Include any items with categories not in the predefined list
+        remaining = [i for i in included_items if i.category not in seen]
+        if remaining:
+            context_parts.extend(item.content for item in remaining)
 
         context_string = "\n\n".join(context_parts)
 
@@ -270,9 +277,10 @@ class ContextWindowManager:
         self._summarized_history = "\n".join(summary_parts)
 
         # Remove old messages from context items, keep recent
+        recent_ids = {id(m) for m in recent_messages}
         self._context_items = [
             item for item in self._context_items
-            if item.category != "message" or item in recent_messages
+            if item.category != "message" or id(item) in recent_ids
         ]
         self._message_history = recent_messages
 
@@ -303,7 +311,7 @@ class ContextWindowManager:
 
         elif tool_name == "Bash":
             # Keep errors and last few lines
-            error_lines = [l for l in lines if "error" in l.lower() or "failed" in l.lower()]
+            error_lines = [line for line in lines if "error" in line.lower() or "failed" in line.lower()]
             if error_lines:
                 return "\n".join(error_lines[:10] + ["..."] + lines[-10:])
             return "\n".join(lines[-20:])
@@ -317,17 +325,10 @@ class ContextWindowManager:
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
-        """
-        Rough token estimation (1 token ≈ 4 characters for English text).
-
-        This is a heuristic approximation. Actual tokenization varies.
-        """
+        """Rough token estimation (~4 characters per token for English text)."""
         if not text:
             return 0
-
-        # Conservative estimate: 1 token per 3.5 characters
-        # (Claude tends to use ~3-4 chars per token on average)
-        return max(1, len(text) // 3)
+        return max(1, len(text) // 4)
 
     def get_budget_status(self) -> Dict[str, Any]:
         """Get current budget status for logging/monitoring."""
@@ -343,9 +344,13 @@ class ContextWindowManager:
         }
 
     def should_trigger_checkpoint(self) -> bool:
-        """
-        Determine if a checkpoint should be triggered due to budget constraints.
+        """Check if a checkpoint should fire due to budget exhaustion.
 
-        Returns True if budget is >=90% used, suggesting task should be split.
+        Returns True exactly once when budget crosses the 90% threshold.
         """
-        return self.budget.utilization_percent >= 90.0
+        if self._checkpoint_triggered:
+            return False
+        if self.budget.utilization_percent >= 90.0:
+            self._checkpoint_triggered = True
+            return True
+        return False

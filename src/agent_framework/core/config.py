@@ -86,6 +86,13 @@ class SafeguardsConfig(BaseModel):
     watchdog_interval: int = 60
 
 
+class ContextWindowConfig(BaseModel):
+    """Context window management settings."""
+    output_reserve: int = 4096
+    summary_threshold: int = 10
+    min_message_retention: int = 3
+
+
 class OptimizationConfig(BaseModel):
     """Optimization configuration for token usage reduction."""
     # Quick wins (Phase 1)
@@ -108,12 +115,7 @@ class OptimizationConfig(BaseModel):
     # Budget warning threshold (e.g., 1.3 = warn at 130% of budget)
     budget_warning_threshold: float = 1.3
 
-    # Context window management settings
-    context_window: Dict[str, int] = Field(default_factory=lambda: {
-        "output_reserve": 4096,      # Tokens reserved for model output
-        "summary_threshold": 10,      # Messages before summarization
-        "min_message_retention": 3,   # Recent messages to keep verbatim
-    })
+    context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
 
     # Token budgets by task type (configurable)
     token_budgets: Dict[str, int] = Field(default_factory=lambda: {
