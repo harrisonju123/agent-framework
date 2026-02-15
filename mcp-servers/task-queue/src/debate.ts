@@ -17,31 +17,13 @@ import {
   incrementConsultationCount,
   getMaxConsultations,
 } from "./consultation.js";
+import type { DebateInput, DebateResult } from "./types.js";
 
 const logger = createLogger();
 
 // Input length limits
 const MAX_TOPIC_LENGTH = 2000;
 const MAX_CONTEXT_LENGTH = 1000;
-
-export interface DebateInput {
-  topic: string;
-  context?: string;
-  advocate_position?: string;
-  critic_position?: string;
-}
-
-export interface DebateResult {
-  success: boolean;
-  debate_id: string;
-  advocate_argument: string;
-  critic_argument: string;
-  synthesis: string;
-  confidence: "high" | "medium" | "low";
-  recommendation: string;
-  trade_offs: string[];
-  consultations_remaining: number;
-}
 
 function sanitizeLogId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 100);
