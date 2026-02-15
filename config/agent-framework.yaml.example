@@ -78,6 +78,9 @@ optimization:
   canary_percentage: 0
   shadow_mode: false
   budget_warning_threshold: 1.3
+  enable_tool_pattern_tips: false
+  tool_tips_max_chars: 1500
+  tool_tips_max_count: 5
 
 # Session Logging: structured per-task logs for post-hoc analysis
 session_logging:

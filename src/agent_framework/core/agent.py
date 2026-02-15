@@ -32,6 +32,8 @@ from ..utils.rich_logging import ContextLogger, setup_rich_logging
 from ..utils.type_helpers import get_type_str
 from ..memory.memory_store import MemoryStore
 from ..memory.memory_retriever import MemoryRetriever
+from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer
+from ..memory.tool_pattern_store import ToolPatternStore
 from .session_logger import SessionLogger, noop_logger
 
 # Optional sandbox imports (only used if Docker is available)
@@ -257,6 +259,11 @@ class Agent:
         self._memory_enabled = mem_cfg.get("enabled", False)
         self._memory_store = MemoryStore(workspace, enabled=self._memory_enabled)
         self._memory_retriever = MemoryRetriever(self._memory_store)
+
+        # Tool pattern analysis: detect and surface inefficient tool usage
+        tool_tips_enabled = self._optimization_config.get("enable_tool_pattern_tips", False)
+        self._tool_pattern_store = ToolPatternStore(workspace, enabled=tool_tips_enabled)
+        self._tool_tips_enabled = tool_tips_enabled
 
         # Self-Evaluation Loop: review own output before marking done
         eval_cfg = self_eval_config or {}
@@ -527,6 +534,7 @@ class Agent:
         self._push_and_create_pr_if_needed(task)
 
         self._extract_and_store_memories(task, response)
+        self._analyze_tool_patterns(task)
         self._log_task_completion_metrics(task, response, task_start_time)
 
     def _log_task_completion_metrics(self, task: Task, response, task_start_time) -> None:
@@ -1387,6 +1395,65 @@ class Agent:
                 count=count,
             )
 
+    # -- Tool Pattern Analysis --
+
+    def _analyze_tool_patterns(self, task: Task) -> None:
+        """Run post-task analysis on session log to detect inefficient tool usage."""
+        if not self._tool_tips_enabled or not self._session_logging_enabled:
+            return
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return
+
+        session_path = self._session_logs_dir / "sessions" / f"{task.id}.jsonl"
+        if not session_path.exists():
+            return
+
+        try:
+            analyzer = ToolPatternAnalyzer()
+            recommendations = analyzer.analyze_session(session_path)
+            if recommendations:
+                count = self._tool_pattern_store.store_patterns(repo_slug, recommendations)
+                self.logger.debug(f"Stored {count} tool pattern recommendations")
+                self._session_logger.log(
+                    "tool_patterns_analyzed",
+                    repo=repo_slug,
+                    patterns_found=len(recommendations),
+                    patterns_stored=count,
+                )
+        except Exception as e:
+            self.logger.debug(f"Tool pattern analysis failed (non-fatal): {e}")
+
+    def _inject_tool_tips(self, prompt: str, task: Task) -> str:
+        """Append tool efficiency tips from previous session analysis."""
+        if not self._tool_tips_enabled:
+            return prompt
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return prompt
+
+        max_count = self._optimization_config.get("tool_tips_max_count", 5)
+        max_chars = self._optimization_config.get("tool_tips_max_chars", 1500)
+        patterns = self._tool_pattern_store.get_top_patterns(
+            repo_slug, limit=max_count, max_chars=max_chars,
+        )
+        if not patterns:
+            return prompt
+
+        tips_lines = [f"- {p.tip}" for p in patterns]
+        tips_section = "## Tool Efficiency Tips\n\n" + "\n".join(tips_lines)
+
+        self.logger.debug(f"Injected {len(patterns)} tool tips ({len(tips_section)} chars)")
+        self._session_logger.log(
+            "tool_tips_injected",
+            repo=repo_slug,
+            count=len(patterns),
+            chars=len(tips_section),
+        )
+        return prompt + "\n\n" + tips_section
+
     # -- Self-Evaluation Loop --
 
     async def _self_evaluate(self, task: Task, response) -> bool:
@@ -1740,6 +1807,9 @@ Fix the failing tests and ensure all tests pass.
 
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
+
+        # Inject tool efficiency tips from session analysis
+        prompt = self._inject_tool_tips(prompt, task)
 
         # Inject replan history if retrying with revised approach
         prompt = self._inject_replan_context(prompt, task)

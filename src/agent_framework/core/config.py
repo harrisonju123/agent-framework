@@ -108,6 +108,11 @@ class OptimizationConfig(BaseModel):
     enable_result_summarization: bool = False
     enable_error_truncation: bool = False
 
+    # Tool pattern tips (Phase 4) — feed session analysis back into prompts
+    enable_tool_pattern_tips: bool = False
+    tool_tips_max_chars: int = 1500
+    tool_tips_max_count: int = 5
+
     # Rollout settings
     canary_percentage: int = 0  # 0-100
     shadow_mode: bool = False
