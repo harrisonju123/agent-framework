@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -45,7 +45,7 @@ def _make_task(jira_key="PROJ-42", **extra_context):
         priority=1,
         created_by="test",
         assigned_to="engineer",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Test task",
         description="desc",
         context=ctx,
@@ -240,6 +240,7 @@ class TestLifecycleIntegration:
         agent.retry_handler.max_retries = 3
         agent.retry_handler.can_create_escalation.return_value = False
         agent.escalation_handler = MagicMock()
+        agent.escalation_handler.categorize_error.return_value = "unknown"
         agent._log_failed_escalation = MagicMock()
 
         await agent._handle_failure(task)
@@ -262,6 +263,7 @@ class TestLifecycleIntegration:
         agent.retry_handler.max_retries = 3
         agent.retry_handler.can_create_escalation.return_value = False
         agent.escalation_handler = MagicMock()
+        agent.escalation_handler.categorize_error.return_value = "unknown"
         agent._log_failed_escalation = MagicMock()
 
         await agent._handle_failure(task)

@@ -436,4 +436,3 @@ Potential improvements to the structured findings system:
 - [Code Review Workflow](CODE_REVIEW_WORKFLOW.md) - Complete review process including structured findings
 - [Task Model](../src/agent_framework/core/task.py) - Task data structures
 - [Agent Configuration](../config/agents.yaml) - Agent prompts and settings
-- [Review Fixes](REVIEW_FIXES.md) - Engineer workflow for addressing findings

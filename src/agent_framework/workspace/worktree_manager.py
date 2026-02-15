@@ -389,6 +389,16 @@ class WorktreeManager:
                     return path
         return None
 
+    def find_worktree_by_branch(self, branch_name: str) -> Optional[Path]:
+        """Find an existing worktree that has the given branch checked out."""
+        for key, info in self._registry.items():
+            if info.branch == branch_name:
+                path = Path(info.path)
+                if path.exists():
+                    self._update_last_accessed(key)
+                    return path
+        return None
+
     def cleanup_orphaned_worktrees(self) -> Dict[str, int]:
         """
         Remove stale worktrees older than max_age.

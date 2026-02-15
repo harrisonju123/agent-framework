@@ -1,7 +1,7 @@
 """Tests for optimization strategies."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, AsyncMock
 
@@ -23,7 +23,7 @@ def sample_task():
         priority=1,
         created_by="test",
         assigned_to="test-agent",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Implement user authentication",
         description="Add JWT-based authentication to the API endpoints with proper token validation and refresh logic.",
         acceptance_criteria=["JWT tokens generated", "Token refresh works", "Protected endpoints secured"],

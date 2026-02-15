@@ -4,7 +4,7 @@ import asyncio
 import select
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -25,7 +25,7 @@ except ImportError:
     HAS_TTY = False
 
 from ..core.activity import ActivityManager, AgentStatus, TaskPhase
-from ..core.config import load_agents
+from ..core.config import load_agents, RepositoryConfig
 from ..core.orchestrator import Orchestrator
 from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
@@ -46,14 +46,15 @@ class AgentDashboard:
     # Max failed tasks to display
     MAX_FAILED_DISPLAY = 5
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, default_repo: Optional[RepositoryConfig] = None):
         self.workspace = Path(workspace)
         self.activity_manager = ActivityManager(workspace)
         self.console = Console()
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
         self.circuit_breaker = CircuitBreaker(workspace)
         self.queue = FileQueue(workspace)
         self.orchestrator = Orchestrator(workspace)
+        self.default_repo = default_repo
 
         # Selection state
         self.focus_panel = FocusPanel.AGENTS
@@ -106,7 +107,7 @@ class AgentDashboard:
 
     def render_header(self) -> Panel:
         """Render dashboard header with key hints."""
-        uptime = datetime.utcnow() - self.start_time
+        uptime = datetime.now(timezone.utc) - self.start_time
         uptime_str = f"{int(uptime.total_seconds() // 60)}m {int(uptime.total_seconds() % 60)}s"
 
         # Check pause status
@@ -127,6 +128,8 @@ class AgentDashboard:
         header_text.append(":restart ", style="dim")
         header_text.append("p", style="cyan")
         header_text.append(":pause ", style="dim")
+        header_text.append("n", style="cyan")
+        header_text.append(":new ", style="dim")
         header_text.append("?", style="cyan")
         header_text.append(":help ", style="dim")
         header_text.append("q", style="cyan")
@@ -178,7 +181,7 @@ class AgentDashboard:
         # Calculate phase elapsed time
         elapsed_str = ""
         if phase_started:
-            elapsed = (datetime.utcnow() - phase_started).total_seconds()
+            elapsed = (datetime.now(timezone.utc) - phase_started).total_seconds()
             elapsed_str = f"{int(elapsed)}s"
 
         return phase_text, elapsed_str
@@ -429,7 +432,8 @@ class AgentDashboard:
         text.append("Actions:\n", style="bold")
         text.append("  r       Retry selected failed task\n")
         text.append("  R       Restart selected dead agent\n")
-        text.append("  p       Toggle pause/resume\n\n")
+        text.append("  p       Toggle pause/resume\n")
+        text.append("  n       Queue new work\n\n")
         text.append("Other:\n", style="bold")
         text.append("  ?       Toggle this help\n")
         text.append("  q       Quit dashboard\n")
@@ -549,7 +553,72 @@ class AgentDashboard:
                 pause_file.write_text(str(int(time.time())))
                 return "Paused agent processing"
 
+        if key == 'n':
+            return "NEW_WORK"
+
         return None
+
+    def _prompt_new_work(self) -> Optional[str]:
+        """Prompt user for a new goal and queue a planning task.
+
+        Uses self.default_repo if set (from `agent work`), otherwise
+        prompts for repository selection too.
+
+        Returns:
+            Goal string on success, None if cancelled.
+        """
+        from ..core.task_builder import build_planning_task
+
+        try:
+            repo = self.default_repo
+            if repo is None:
+                # No default repo — prompt for selection
+                from ..core.config import load_config
+                framework_config = load_config(self.workspace / "config" / "agent-framework.yaml")
+                repos = framework_config.repositories
+                if not repos:
+                    print("\nNo repositories configured.")
+                    return None
+
+                print("\nWhich repository?")
+                for i, r in enumerate(repos, 1):
+                    jira_info = f"(JIRA: {r.jira_project})" if r.jira_project else "(local tasks)"
+                    print(f"  {i}. {r.github_repo} {jira_info}")
+
+                choice = input("Select repository [1]: ").strip()
+                if not choice:
+                    idx = 0
+                else:
+                    idx = int(choice) - 1
+                if idx < 0 or idx >= len(repos):
+                    print("Invalid selection.")
+                    return None
+                repo = repos[idx]
+            else:
+                print(f"\nRepository: {repo.github_repo}")
+
+            goal = input("Goal: ").strip()
+            if not goal:
+                return None
+
+            task = build_planning_task(
+                goal=goal,
+                workflow="default",
+                github_repo=repo.github_repo,
+                repository_name=repo.name,
+                jira_project=repo.jira_project,
+                created_by="dashboard",
+            )
+            self.queue.push(task, "architect")
+            print(f"✓ Queued: {goal[:60]}")
+            return goal
+
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        except ValueError:
+            print("Invalid input.")
+            return None
 
     async def _read_key(self) -> Optional[str]:
         """Read a single keypress without blocking.
@@ -601,13 +670,25 @@ class AgentDashboard:
                         result = self._handle_key(key)
                         if result == "QUIT":
                             break
+                        elif result == "NEW_WORK":
+                            live.stop()
+                            try:
+                                queued_goal = self._prompt_new_work()
+                                if queued_goal:
+                                    action_message = f"Queued: {queued_goal[:40]}"
+                                    action_message_time = datetime.now(timezone.utc)
+                            except Exception as e:
+                                action_message = f"Error: {str(e)[:40]}"
+                                action_message_time = datetime.now(timezone.utc)
+                            finally:
+                                live.start()
                         elif result:
                             action_message = result
-                            action_message_time = datetime.utcnow()
+                            action_message_time = datetime.now(timezone.utc)
 
                     # Clear action message after 3 seconds
                     if action_message_time:
-                        if (datetime.utcnow() - action_message_time).total_seconds() > 3:
+                        if (datetime.now(timezone.utc) - action_message_time).total_seconds() > 3:
                             action_message = None
                             action_message_time = None
 

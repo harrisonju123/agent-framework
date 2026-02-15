@@ -1,7 +1,7 @@
 """JIRA client for ticket management."""
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from jira import JIRA
@@ -235,7 +235,7 @@ class JIRAClient:
             # Handle JIRA datetime format (ISO 8601 with timezone)
             created_at = datetime.fromisoformat(created_str.replace('Z', '+00:00'))
         except ValueError:
-            created_at = datetime.utcnow()
+            created_at = datetime.now(timezone.utc)
 
         task = Task(
             id=task_id,

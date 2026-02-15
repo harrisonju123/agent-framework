@@ -6,7 +6,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..core.activity import ActivityManager, AgentStatus, TaskPhase
 from ..core.config import load_agents, AgentDefinition
@@ -354,16 +354,31 @@ class DashboardDataProvider:
 
     # ============== Log Reading Methods ==============
 
+    def _get_known_agent_ids(self) -> Set[str]:
+        """Return the set of enabled agent IDs.
+
+        Reuses the cached agents config so this is essentially free.
+        """
+        return {agent.id for agent in self._get_agents_config() if agent.enabled}
+
     def get_logs_dir(self) -> Path:
         """Get the logs directory path."""
         return self.workspace / "logs"
 
     def get_available_log_files(self) -> List[str]:
-        """Get list of available agent log files."""
+        """Get list of available agent log files.
+
+        Only returns IDs for agents defined in agents.yaml whose log file
+        actually exists — avoids picking up CLI/dashboard/artifact logs.
+        """
         logs_dir = self.get_logs_dir()
         if not logs_dir.exists():
             return []
-        return [f.stem for f in logs_dir.glob("*.log")]
+        return [
+            agent_id
+            for agent_id in self._get_known_agent_ids()
+            if (logs_dir / f"{agent_id}.log").exists()
+        ]
 
     def get_agent_logs(self, agent_id: str, lines: int = 100) -> List[str]:
         """Get recent log lines for an agent.
@@ -436,7 +451,10 @@ class DashboardDataProvider:
             return [], position
 
     def get_all_log_positions(self) -> Dict[str, int]:
-        """Get current file sizes for all log files (for tracking).
+        """Get current file sizes for known agent log files (for tracking).
+
+        Only checks logs for agents defined in agents.yaml — avoids globbing
+        hundreds of CLI/dashboard/artifact .log files in the logs directory.
 
         Returns:
             Dict mapping agent_id to file size (byte position)
@@ -446,11 +464,13 @@ class DashboardDataProvider:
             return {}
 
         positions = {}
-        for log_file in logs_dir.glob("*.log"):
-            try:
-                positions[log_file.stem] = log_file.stat().st_size
-            except Exception:
-                positions[log_file.stem] = 0
+        for agent_id in self._get_known_agent_ids():
+            log_file = logs_dir / f"{agent_id}.log"
+            if log_file.exists():
+                try:
+                    positions[agent_id] = log_file.stat().st_size
+                except Exception:
+                    positions[agent_id] = 0
 
         return positions
 

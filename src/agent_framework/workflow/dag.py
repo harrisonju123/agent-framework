@@ -1,8 +1,18 @@
 """Workflow DAG (Directed Acyclic Graph) representation."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 from enum import Enum
+
+
+@dataclass
+class CheckpointConfig:
+    """Configuration for a workflow checkpoint (human approval gate).
+
+    Checkpoints pause workflow execution until a human approves continuation.
+    """
+    message: str  # Displayed when checkpoint is reached
+    reason: Optional[str] = None  # Audit trail context for why approval is needed
 
 
 class EdgeConditionType(str, Enum):
@@ -23,7 +33,7 @@ class EdgeConditionType(str, Enum):
 class EdgeCondition:
     """Condition that must be met for an edge to be traversed."""
     type: EdgeConditionType
-    params: Dict[str, any] = field(default_factory=dict)
+    params: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate condition parameters."""
@@ -50,7 +60,8 @@ class WorkflowStep:
     agent: str  # Agent responsible for this step
     next: List[WorkflowEdge] = field(default_factory=list)
     task_type_override: Optional[str] = None  # Override default task type for this agent
-    metadata: Dict[str, any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    checkpoint: Optional[CheckpointConfig] = None
 
     def __post_init__(self):
         """Sort edges by priority (highest first)."""
@@ -68,7 +79,7 @@ class WorkflowDAG:
     description: str
     steps: Dict[str, WorkflowStep]  # step_id -> WorkflowStep
     start_step: str  # Entry point step ID
-    metadata: Dict[str, any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate the workflow structure."""

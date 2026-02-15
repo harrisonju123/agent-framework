@@ -1,7 +1,7 @@
 """Generate project-level markdown summaries from completed tasks."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -61,7 +61,7 @@ class SummaryGenerator:
             Path to the generated summary file
         """
         if date is None:
-            date = datetime.utcnow()
+            date = datetime.now(timezone.utc)
 
         date_str = date.strftime("%Y-%m-%d")
         tasks = self._collect_tasks_for_date(date)
@@ -188,7 +188,7 @@ class SummaryGenerator:
     ) -> str:
         """Render a project summary as markdown."""
         lines = [f"# {jira_key} - Project Summary", ""]
-        lines.append(f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+        lines.append(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
         lines.append("")
 
         # Overview stats

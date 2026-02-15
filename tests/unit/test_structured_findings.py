@@ -1,7 +1,7 @@
 """Tests for structured findings parsing and formatting."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -351,7 +351,7 @@ def _make_task(
         priority=1,
         created_by="engineer",
         assigned_to=assigned_to,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Review PR #99",
         description="Review the PR.",
         context=context,

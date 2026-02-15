@@ -3,6 +3,7 @@
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -33,6 +34,7 @@ class Orchestrator:
         self.workspace = Path(workspace)
         self.comm_dir = self.workspace / ".agent-communication"
         self.pid_file = self.comm_dir / "pids.txt"
+        self.dashboard_pid_file = self.comm_dir / "dashboard.pid"
         self.lock_dir = self.comm_dir / "locks"
         self.logs_dir = self.workspace / "logs"
 
@@ -109,6 +111,9 @@ class Orchestrator:
         Returns:
             Dict mapping agent_id to Popen object
         """
+        # Clean up stale locks and orphaned tasks from crashed agents
+        self._cleanup(remove_pid_file=False)
+
         if config_path is None:
             config_path = self.workspace / "config" / "agents.yaml"
 
@@ -204,6 +209,131 @@ class Orchestrator:
         self._save_pids()
 
         return proc
+
+    def spawn_dashboard(self, port: int = 8080) -> Optional[subprocess.Popen]:
+        """Spawn dashboard as a background subprocess.
+
+        Stores PID separately from agent PIDs so dashboard shutdown
+        doesn't trigger agent task cleanup (_reset_in_progress_tasks).
+        """
+        if self.is_port_in_use(port):
+            existing = self._load_dashboard_pid()
+            if existing and self._is_running(existing["pid"]):
+                logger.info(f"Dashboard already running on port {port} (PID {existing['pid']})")
+                return None
+            logger.warning(f"Port {port} in use but no dashboard PID found")
+            return None
+
+        log_file_path = self.logs_dir / "dashboard.log"
+        log_file = open(log_file_path, "w")
+
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "agent_framework.run_dashboard", str(port)],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=self.workspace,
+                start_new_session=True,
+            )
+        except Exception:
+            log_file.close()
+            raise
+
+        log_file.close()
+
+        logger.info(f"Spawned dashboard with PID {proc.pid} on port {port}")
+        self._save_dashboard_pid(proc.pid, port)
+
+        return proc
+
+    def stop_dashboard(self, timeout: int = 5) -> None:
+        """Stop the dashboard subprocess."""
+        info = self._load_dashboard_pid()
+        if not info:
+            logger.debug("No dashboard PID file found")
+            return
+
+        pid = info["pid"]
+        if not self._is_running(pid):
+            logger.info("Dashboard process already stopped")
+            self._remove_dashboard_pid()
+            return
+
+        if not self._is_dashboard_process(pid):
+            logger.warning(f"PID {pid} is not a dashboard process (stale or recycled)")
+            self._remove_dashboard_pid()
+            return
+
+        logger.info(f"Stopping dashboard (PID {pid})")
+        kill_process_tree(pid, signal.SIGTERM)
+
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if not self._is_running(pid):
+                logger.info("Dashboard stopped gracefully")
+                self._remove_dashboard_pid()
+                return
+            time.sleep(0.5)
+
+        logger.warning(f"Dashboard didn't stop after {timeout}s, sending SIGKILL")
+        kill_process_tree(pid, signal.SIGKILL)
+        self._remove_dashboard_pid()
+
+    def get_dashboard_info(self) -> Optional[Dict]:
+        """Get info about a running dashboard.
+
+        Returns dict with 'pid' and 'port' keys, or None if not running.
+        """
+        info = self._load_dashboard_pid()
+        if not info:
+            return None
+
+        if not self._is_running(info["pid"]):
+            self._remove_dashboard_pid()
+            return None
+
+        if not self._is_dashboard_process(info["pid"]):
+            self._remove_dashboard_pid()
+            return None
+
+        return info
+
+    def _is_dashboard_process(self, pid: int) -> bool:
+        """Check if PID belongs to a dashboard process."""
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "args="],
+                capture_output=True, text=True, timeout=5,
+            )
+            return "agent_framework.run_dashboard" in result.stdout
+        except Exception:
+            return False
+
+    def _save_dashboard_pid(self, pid: int, port: int) -> None:
+        """Save dashboard PID and port to file."""
+        self.dashboard_pid_file.write_text(f"{pid}:{port}\n")
+
+    def _load_dashboard_pid(self) -> Optional[Dict]:
+        """Load dashboard PID and port from file."""
+        if not self.dashboard_pid_file.exists():
+            return None
+        try:
+            content = self.dashboard_pid_file.read_text().strip()
+            pid_str, port_str = content.split(":", 1)
+            return {"pid": int(pid_str), "port": int(port_str)}
+        except (ValueError, TypeError):
+            logger.warning(f"Malformed dashboard PID file: {self.dashboard_pid_file}")
+            return None
+
+    def _remove_dashboard_pid(self) -> None:
+        """Remove dashboard PID file."""
+        if self.dashboard_pid_file.exists():
+            self.dashboard_pid_file.unlink()
+
+    def is_port_in_use(self, port: int) -> bool:
+        """Check if a TCP port is already in use."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(("127.0.0.1", port)) == 0
 
     def stop_agent(self, agent_id: str, graceful: bool = True, timeout: int = 5) -> None:
         """
@@ -310,11 +440,22 @@ class Orchestrator:
         self._cleanup()
 
     def get_running_agents(self) -> List[str]:
-        """Get list of currently running agent IDs."""
+        """Get list of currently running agent IDs.
+
+        Falls back to the PID file when self.processes is empty,
+        which happens when called from a separate CLI invocation.
+        """
         running = []
         for agent_id, proc in self.processes.items():
             if self._is_running(proc.pid):
                 running.append(agent_id)
+
+        if not running:
+            pids = self._load_pids()
+            for agent_id, pid in pids.items():
+                if self._is_running(pid) and self._is_agent_process(pid):
+                    running.append(agent_id)
+
         return running
 
     def setup_signal_handlers(self) -> None:
@@ -396,18 +537,25 @@ class Orchestrator:
             if self.pid_file.exists():
                 self.pid_file.unlink()
 
-    def _cleanup(self) -> None:
-        """Clean up after shutdown."""
-        # Remove lock files
+    def _cleanup(self, remove_pid_file: bool = True) -> None:
+        """Clean up after shutdown.
+
+        Args:
+            remove_pid_file: Whether to remove the PID file (skip during pre-start cleanup)
+        """
+        # Remove lock files (each lock is a directory with a pid file inside)
         if self.lock_dir.exists():
             for lock_dir in self.lock_dir.glob("*.lock"):
-                if lock_dir.is_dir():
-                    for f in lock_dir.iterdir():
-                        f.unlink()
-                    lock_dir.rmdir()
+                try:
+                    if lock_dir.is_dir():
+                        for f in lock_dir.iterdir():
+                            f.unlink()
+                        lock_dir.rmdir()
+                except OSError as e:
+                    logger.warning(f"Failed to remove lock {lock_dir.name}: {e}")
 
         # Remove PID file
-        if self.pid_file.exists():
+        if remove_pid_file and self.pid_file.exists():
             self.pid_file.unlink()
 
         # Reset in_progress tasks to pending

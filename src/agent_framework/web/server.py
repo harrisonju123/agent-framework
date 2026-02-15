@@ -691,31 +691,36 @@ def register_routes(app: FastAPI):
                 current_positions = app.state.data_provider.get_all_log_positions()
 
                 for agent_id, current_size in current_positions.items():
-                    last_position = log_positions.get(agent_id, 0)
+                    try:
+                        last_position = log_positions.get(agent_id, 0)
 
-                    # If this is a new file or we haven't seen it, start from recent
-                    if agent_id not in log_positions:
-                        # Start from near the end to avoid sending huge backlog
-                        log_positions[agent_id] = max(0, current_size - 4096)
-                        last_position = log_positions[agent_id]
+                        # If this is a new file or we haven't seen it, start from recent
+                        if agent_id not in log_positions:
+                            # Start from near the end to avoid sending huge backlog
+                            log_positions[agent_id] = max(0, current_size - 4096)
+                            last_position = log_positions[agent_id]
 
-                    if current_size > last_position:
-                        # Read new lines
-                        new_lines, new_position = app.state.data_provider.read_log_from_position(
-                            agent_id, last_position
-                        )
-                        log_positions[agent_id] = new_position
+                        if current_size > last_position:
+                            # Read new lines
+                            new_lines, new_position = app.state.data_provider.read_log_from_position(
+                                agent_id, last_position
+                            )
+                            log_positions[agent_id] = new_position
 
-                        # Send each line as a separate message
-                        for line in new_lines:
-                            level = app.state.data_provider.parse_log_level(line)
-                            await websocket.send_json({
-                                "agent": agent_id,
-                                "source": "agent",
-                                "line": line,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "level": level,
-                            })
+                            # Send each line as a separate message
+                            for line in new_lines:
+                                level = app.state.data_provider.parse_log_level(line)
+                                await websocket.send_json({
+                                    "agent": agent_id,
+                                    "source": "agent",
+                                    "line": line,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "level": level,
+                                })
+                    except WebSocketDisconnect:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Error streaming agent log {agent_id}: {e}")
 
                 # === Stream Claude CLI subprocess logs ===
                 cli_positions = app.state.data_provider.get_all_claude_cli_log_positions()
@@ -730,31 +735,36 @@ def register_routes(app: FastAPI):
                     if task_id not in task_to_agent:
                         continue
 
-                    last_position = cli_log_positions.get(task_id, 0)
+                    try:
+                        last_position = cli_log_positions.get(task_id, 0)
 
-                    # If this is a new file, start from near the end
-                    if task_id not in cli_log_positions:
-                        cli_log_positions[task_id] = max(0, current_size - 4096)
-                        last_position = cli_log_positions[task_id]
+                        # If this is a new file, start from near the end
+                        if task_id not in cli_log_positions:
+                            cli_log_positions[task_id] = max(0, current_size - 4096)
+                            last_position = cli_log_positions[task_id]
 
-                    if current_size > last_position:
-                        new_lines, new_position = app.state.data_provider.read_claude_cli_log_from_position(
-                            task_id, last_position
-                        )
-                        cli_log_positions[task_id] = new_position
+                        if current_size > last_position:
+                            new_lines, new_position = app.state.data_provider.read_claude_cli_log_from_position(
+                                task_id, last_position
+                            )
+                            cli_log_positions[task_id] = new_position
 
-                        agent_id = task_to_agent[task_id]
+                            agent_id = task_to_agent[task_id]
 
-                        for line in new_lines:
-                            level = app.state.data_provider.parse_log_level(line)
-                            await websocket.send_json({
-                                "agent": agent_id,
-                                "task_id": task_id,
-                                "source": "claude-cli",
-                                "line": line,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "level": level,
-                            })
+                            for line in new_lines:
+                                level = app.state.data_provider.parse_log_level(line)
+                                await websocket.send_json({
+                                    "agent": agent_id,
+                                    "task_id": task_id,
+                                    "source": "claude-cli",
+                                    "line": line,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    "level": level,
+                                })
+                    except WebSocketDisconnect:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"Error streaming CLI log {task_id}: {e}")
 
                 # Cleanup: remove entries for task IDs no longer in active tasks
                 stale_task_ids = [tid for tid in cli_log_positions if tid not in task_to_agent]

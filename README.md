@@ -1,22 +1,19 @@
 # Agent Framework
 
-Multi-agent system for autonomous software development. Agents plan, implement, test, review, and ship code from JIRA tickets — with zero human intervention.
+Multi-agent system for autonomous software development. Agents plan, implement, test, review, and ship code — with zero human intervention. Works with or without JIRA.
 
 ![Agent Dashboard](img.png)
 
 ## How It Works
 
 ```
-You describe what to build (or point at a JIRA epic)
+You describe what to build
   |
   v
 Architect plans, routes, and breaks down work
   |
   v
 Engineer implements --> QA verifies + reviews --> PRs created
-  |
-  v
-JIRA updated, ready for merge
 ```
 
 Three self-sufficient agents form a complete autonomous engineering team. Fewer agents = fewer queue hops = faster execution = more autonomy.
@@ -28,38 +25,44 @@ With **Team Mode** enabled, each ticket runs as a single Claude Agent Teams sess
 ```bash
 pip install -e .
 
+# Set up your config
+cp config/agent-framework.yaml.example config/agent-framework.yaml
+```
+
+Edit `config/agent-framework.yaml` and add your repositories (see [Configuration](#configuration) below), then:
+
+```bash
 # Build MCP servers (JIRA + GitHub access during execution)
 cd mcp-servers/jira && npm install && npm run build && cd ../..
 cd mcp-servers/github && npm install && npm run build && cd ../..
 
-# Configure credentials
+# Configure credentials (optional — only needed for JIRA/GitHub MCP tools)
 cp .env.example .env   # Edit with JIRA_SERVER, JIRA_EMAIL, JIRA_API_TOKEN, GITHUB_TOKEN
 
 # Validate setup
 agent doctor
 ```
 
-### Process a JIRA Epic
-
-```bash
-# Start agents
-agent start --replicas 3
-
-# Fire off an epic — parallel worktrees, each ticket gets its own team
-agent work --epic ME-443 --parallel -w standard --no-dashboard
-
-# Monitor progress
-agent summary --epic ME-443
-agent status --watch
-```
-
 ### Describe What to Build
 
 ```bash
+agent up            # starts agents + dashboard, opens browser, returns terminal
 agent work
 # > What would you like to work on? Add retry logic to the payment webhook handler
-# > Which repository? justworkshr/pto
-# > Workflow? standard
+# > Which repository? your-org/your-repo
+
+agent down          # tears everything down when you're done
+```
+
+The framework queues a planning task to the Architect, who breaks it down, chains to Engineer for implementation, then QA for review — all locally via file queues.
+
+### Process a JIRA Epic (optional)
+
+If your repo has a `jira_project` configured:
+
+```bash
+agent work --epic PROJ-100 --parallel
+agent summary --epic PROJ-100
 ```
 
 ### Work a Single Ticket
@@ -128,6 +131,33 @@ QA finds issues → Engineer fixes → QA re-verifies
 After 5 retries → escalate to Architect for replanning
 ```
 
+## Workflow Checkpoints
+
+Add configurable pause points for human approval at high-stakes workflow steps:
+
+```yaml
+workflows:
+  production-deploy:
+    steps:
+      engineer:
+        agent: engineer
+        checkpoint:
+          message: "Review implementation before production deployment"
+          reason: "High-risk production changes require approval"
+        next:
+          - target: qa
+```
+
+```bash
+# List tasks awaiting approval
+agent approve
+
+# Approve a checkpoint to continue workflow
+agent approve chain-abc123-engineer -m "Reviewed, looks good"
+```
+
+See [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md) for full documentation.
+
 ## CLI Reference
 
 ### Core
@@ -139,14 +169,20 @@ After 5 retries → escalate to Architect for replanning
 | `agent work --epic PROJ-100 --parallel` | Process epic tickets in parallel worktrees |
 | `agent run PROJ-123` | Work on a single JIRA ticket |
 | `agent pull --project PROJ` | Pull unassigned tickets from JIRA backlog |
+| `agent approve` | List tasks awaiting checkpoint approval |
+| `agent approve <task-id>` | Approve a checkpoint to continue workflow |
 
 ### Operations
 
 | Command | Description |
 |---------|-------------|
-| `agent start` | Start all agents |
+| `agent up` | Start agents + web dashboard in background, open browser, return terminal |
+| `agent up --no-browser` | Same but skip opening browser |
+| `agent down` | Stop agents + dashboard |
+| `agent down --force` | Force-kill everything |
+| `agent start` | Start agents only (blocks terminal, no dashboard) |
 | `agent start --replicas 4` | Start N replicas per agent type (parallel processing) |
-| `agent stop` | Stop agents gracefully |
+| `agent stop` | Stop agents + dashboard gracefully |
 | `agent pause` / `agent resume` | Pause/resume task processing |
 | `agent status --watch` | Live terminal dashboard |
 | `agent summary --epic PROJ-100` | Epic progress with PR links and errors |
@@ -178,36 +214,55 @@ After 5 retries → escalate to Architect for replanning
 
 ### `config/agent-framework.yaml`
 
+This file is **not tracked by git** — it contains your repo list and local settings. Copy the example to get started:
+
+```bash
+cp config/agent-framework.yaml.example config/agent-framework.yaml
+```
+
+The key section is `repositories` — add the repos you want agents to work on:
+
+```yaml
+repositories:
+  # Local-only repo (no JIRA)
+  - github_repo: your-org/your-app
+    display_name: Your App
+
+  # Repo with JIRA integration
+  - github_repo: your-org/another-repo
+    jira_project: PROJ
+    display_name: Another Repo
+```
+
+`jira_project` is optional. Repos without it use local-only task tracking — tasks flow through the same architect → engineer → QA pipeline, just without JIRA ticket creation or status sync.
+
+Other settings you may want to adjust:
+
 ```yaml
 llm:
-  mode: claude_cli
-  use_mcp: true
-  mcp_config_path: /path/to/config/mcp-config.json
+  mode: claude_cli                          # or "litellm" for API calls
+  claude_cli_default_model: claude-sonnet-4-5-20250929
+  use_mcp: true                             # JIRA/GitHub access during execution
+  mcp_config_path: config/mcp-config.json
 
 team_mode:
-  enabled: true          # Use Agent Teams for multi-agent workflows
-  min_workflow: standard  # simple = never, standard = eng+QA, full = arch+eng+QA
-
-task:
-  poll_interval: 30
-  max_retries: 5
+  enabled: true       # Multi-agent Claude Teams sessions
 
 multi_repo:
   workspace_root: ~/.agent-workspaces
   worktree:
-    enabled: true        # Isolated branches per task
-    cleanup_on_complete: true
-
-repositories:
-  - github_repo: owner/repo
-    jira_project: PROJ
+    enabled: true     # Isolated git worktrees per task
 ```
+
+See `config/agent-framework.yaml.example` for all available options.
 
 ### `config/agents.yaml`
 
 Defines agent roles, prompts, and permissions. Each agent has a queue, prompt, and JIRA/GitHub permissions. See `config/agents.yaml` for the full definitions.
 
-### `.env`
+### `.env` (optional)
+
+Only needed if you're using JIRA or GitHub MCP integrations:
 
 ```
 JIRA_SERVER=https://your-org.atlassian.net
@@ -269,10 +324,12 @@ agent cleanup-worktrees   # Remove stale worktrees
 
 | Problem | Fix |
 |---------|-----|
+| Missing config | `cp config/agent-framework.yaml.example config/agent-framework.yaml` |
+| Tasks stuck as in_progress | Agent auto-recovers orphaned tasks on next poll cycle |
+| Stale locks | Watchdog auto-cleans, or `rm -rf .agent-communication/locks/*.lock` |
+| Agents not responding | `agent down && agent up` or `agent restart` |
 | JIRA auth failed | New token at https://id.atlassian.com/manage-profile/security/api-tokens |
 | GitHub auth failed | New token at https://github.com/settings/tokens (needs `repo` scope) |
-| Stale locks | Watchdog auto-cleans, or `rm -rf .agent-communication/locks/*.lock` |
-| Agents not responding | `agent stop && agent start` |
 | MCP tool name conflict | Framework uses `--strict-mcp-config` to avoid global config collisions |
 
 See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for more.

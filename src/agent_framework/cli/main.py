@@ -153,7 +153,7 @@ def analyze(ctx, repo, severity, max_issues, dry_run, focus):
 
     # Create analysis task for architect agent
     import time
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     task_id = f"analysis-{repo.replace('/', '-')}-{int(time.time())}"
 
@@ -204,7 +204,7 @@ When analyzing this repository:
         priority=1,
         created_by="cli",
         assigned_to="architect",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title=f"Analyze repository: {repo}",
         description=description,
         context=task_context,
@@ -312,14 +312,16 @@ def pull(ctx, project, max):
 @click.option("--no-dashboard", is_flag=True, help="Skip live dashboard")
 @click.option("--epic", "-e", help="JIRA epic key to process (e.g., PROJ-100)")
 @click.option("--parallel", "-p", is_flag=True, help="Process epic tickets in parallel (requires worktrees)")
+@click.option("--auto-approve", is_flag=True, help="Skip plan checkpoint, run fully autonomous")
 @click.pass_context
-def work(ctx, no_dashboard, epic, parallel):
+def work(ctx, no_dashboard, epic, parallel, auto_approve):
     """Interactive mode: describe what to build, delegate to Architect agent.
 
     With --epic: Process all tickets in an existing JIRA epic.
     Without --epic: Describe a new feature to implement.
 
     Use --parallel with --epic to process multiple tickets concurrently.
+    Use --auto-approve to skip the plan review checkpoint.
     """
     workspace = ctx.obj["workspace"]
 
@@ -331,7 +333,7 @@ def work(ctx, no_dashboard, epic, parallel):
 
     # Handle epic processing mode
     if epic:
-        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel)
+        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel, auto_approve)
         return
 
     # Check if repos are registered
@@ -366,7 +368,7 @@ def work(ctx, no_dashboard, epic, parallel):
         console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/]")
         console.print("[dim]No JIRA project configured - using local task tracking[/]")
 
-    workflow = "default"
+    workflow = "default_auto" if auto_approve else "default"
 
     # Step 3: Create planning task for Architect
     from ..core.task_builder import build_planning_task
@@ -386,6 +388,10 @@ def work(ctx, no_dashboard, epic, parallel):
 
     console.print(f"\n[green]✓[/] Task queued: Analyze goal and create JIRA epic with breakdown")
 
+    if not auto_approve:
+        console.print("[dim]Workflow will pause after architect plans for your review.[/]")
+        console.print("[dim]Run 'agent approve <task-id>' to proceed to implementation.[/]")
+
     # Step 4: Ensure agents are running (don't block)
     orchestrator = Orchestrator(workspace)
 
@@ -400,35 +406,39 @@ def work(ctx, no_dashboard, epic, parallel):
         orchestrator.spawn_all_agents()
         console.print("[green]✓[/] Agents started")
 
-    if no_dashboard:
+    # If dashboard is already running (from `agent up`), skip TUI and return
+    dash_info = orchestrator.get_dashboard_info()
+    if dash_info:
+        dash_url = f"http://localhost:{dash_info['port']}"
+        console.print(f"\n[green]✓ Task queued. Dashboard: {dash_url}[/]")
+        console.print("[dim]Monitor progress in your browser or with 'agent status --watch'[/]")
+    elif no_dashboard:
         # Print status without launching dashboard
         if selected_repo.jira_project:
-            console.print(f"\n[bold cyan]🎯 Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
+            console.print(f"\n[bold cyan]Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
         else:
-            console.print(f"\n[bold cyan]🎯 Tasks will be created in local queues[/]")
-        console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
-        console.print(f"[dim]📝 View logs: tail -f logs/architect.log[/]")
+            console.print(f"\n[bold cyan]Tasks will be created in local queues[/]")
+        console.print(f"[dim]Monitor progress: agent status --watch[/]")
+        console.print(f"[dim]View logs: tail -f logs/architect.log[/]")
         console.print()
         console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {selected_repo.github_repo} to ~/.agent-workspaces/")
         console.print(f"  2. Analyze the codebase")
         if selected_repo.jira_project:
             console.print(f"  3. Create JIRA epic in project {selected_repo.jira_project}")
-            console.print(f"  4. Break down into architect → engineer → qa subtasks")
+            console.print(f"  4. Break down into architect -> engineer -> qa subtasks")
         else:
             console.print(f"  3. Create tasks in local queues (.agent-communication/queues/)")
             console.print(f"  4. Route to appropriate agents based on workflow")
         console.print(f"  5. Queue tasks for other agents")
-        console.print()
-        console.print("[dim]Dashboard disabled. Use 'agent status --watch' to monitor.[/]")
     else:
-        # Start live dashboard
+        # Start live dashboard (blocks terminal)
         console.print("\n[bold cyan]✓ Task queued, starting live dashboard...[/]")
         console.print("[dim]Press Ctrl+C to exit dashboard[/]\n")
 
         from .dashboard import AgentDashboard
 
-        dashboard = AgentDashboard(workspace)
+        dashboard = AgentDashboard(workspace, default_repo=selected_repo)
         try:
             asyncio.run(dashboard.run())
         except KeyboardInterrupt:
@@ -814,6 +824,153 @@ def summary(ctx, epic):
 
 
 @cli.command()
+@click.argument("task_id")
+@click.option("--hint", "-h", required=True, help="Human guidance hint to inject for retry")
+@click.pass_context
+def guide(ctx, task_id, hint):
+    """Inject human guidance into a failed task and retry.
+
+    This command allows you to provide specific guidance to help the agent
+    overcome a failure. The hint will be injected into the task context and
+    the task will be retried with this additional information.
+
+    Examples:
+        agent guide task-123 --hint "The API endpoint changed to /v2/users"
+        agent guide escalation-456 --hint "Use authentication header X-API-Key instead of Bearer"
+    """
+    workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
+
+    # Try to find the task (could be in failed, escalation, or completed)
+    task = queue.get_failed_task(task_id)
+
+    if not task:
+        # Check if it's an escalation task
+        escalations_dir = workspace / ".agent-communication" / "escalations"
+        if escalations_dir.exists():
+            escalation_file = escalations_dir / f"{task_id}.json"
+            if escalation_file.exists():
+                import json
+                from ..core.task import Task
+                with open(escalation_file, 'r') as f:
+                    task_data = json.load(f)
+                task = Task(**task_data)
+
+    if not task:
+        console.print(f"[red]Error: Task {task_id} not found[/]")
+        console.print("[dim]Task must be in FAILED status or logged as escalation[/]")
+        return
+
+    # Show current status
+    console.print(f"[bold]Task: {task.title}[/]")
+    console.print(f"Status: {task.status}")
+    console.print(f"Retry count: {task.retry_count}")
+    console.print()
+
+    # Show escalation report if available
+    if task.escalation_report:
+        console.print(f"[bold cyan]Escalation Report:[/]")
+        console.print(f"Pattern: {task.escalation_report.failure_pattern}")
+        console.print(f"Hypothesis: {task.escalation_report.root_cause_hypothesis}")
+        console.print()
+
+    console.print(f"[yellow]Human Guidance:[/] {hint}")
+    console.print()
+
+    if not click.confirm("Inject this guidance and retry task?"):
+        console.print("[yellow]Cancelled[/]")
+        return
+
+    # Inject human guidance
+    if task.escalation_report:
+        task.escalation_report.human_guidance = hint
+    else:
+        # Create basic escalation report with guidance
+        from ..core.task import EscalationReport
+        task.escalation_report = EscalationReport(
+            task_id=task.id,
+            original_title=task.title,
+            total_attempts=task.retry_count,
+            attempt_history=task.retry_attempts,
+            root_cause_hypothesis="Human guidance provided",
+            suggested_interventions=[hint],
+            human_guidance=hint,
+        )
+
+    # Add to context for agent visibility
+    task.context["human_guidance"] = hint
+    task.context["guided_retry"] = True
+
+    # Reset retry count to give it fresh attempts with guidance
+    task.retry_count = 0
+    task.status = TaskStatus.PENDING
+    task.notes.append(f"Human guidance injected: {hint}")
+
+    if not task.assigned_to:
+        console.print("[red]Error: Task has no assigned_to agent — cannot re-queue[/]")
+        return
+
+    # Re-queue the task
+    queue.requeue_task(task)
+
+    console.print(f"[green]✓ Guidance injected and task re-queued to {task.assigned_to}[/]")
+    console.print(f"[dim]The agent will receive your guidance on next attempt[/]")
+    console.print(f"[dim]Monitor with: agent status --watch[/]")
+
+
+@cli.command()
+@click.argument("task_id")
+@click.option("--reason", "-r", default=None, help="Reason for cancellation")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.pass_context
+def cancel(ctx, task_id, reason, yes):
+    """Cancel a queued or in-progress task so it won't be retried.
+
+    TASK_ID can be a task ID or JIRA key (e.g., PROJ-104).
+    Cancelled tasks are moved out of the queue and will not be retried
+    even if the subprocess is killed.
+
+    Examples:
+        agent cancel task-123
+        agent cancel PROJ-104 --reason "duplicate task"
+        agent cancel task-123 --yes          # Skip confirmation
+    """
+    workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
+
+    task = queue.find_task(task_id)
+
+    if not task:
+        console.print(f"[red]Error: Task '{task_id}' not found in any queue[/]")
+        return
+
+    jira_key = task.context.get("jira_key", task.id)
+    console.print(f"[bold]Task: {jira_key} - {task.title}[/]")
+    console.print(f"Status: {task.status}")
+    console.print(f"Assigned to: {task.assigned_to}")
+    console.print()
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED):
+        console.print(f"[yellow]Task is already {task.status} — nothing to cancel[/]")
+        return
+
+    if not yes and not click.confirm("Cancel this task?"):
+        console.print("[yellow]Aborted[/]")
+        return
+
+    cancelled_by = os.getenv("USER", "cli")
+    task.mark_cancelled(cancelled_by, reason)
+
+    # Persist the updated status so the agent sees it on next poll
+    queue.update(task)
+
+    console.print(f"[green]Task {jira_key} cancelled[/]")
+    if reason:
+        console.print(f"[dim]Reason: {reason}[/]")
+    console.print(f"[dim]If the agent is mid-execution, it will skip retry on exit.[/]")
+
+
+@cli.command()
 @click.argument("identifier", required=False)
 @click.option("--reset-retries", is_flag=True, help="Reset retry count to 0")
 @click.option("--all", "retry_all", is_flag=True, help="Retry all failed tasks")
@@ -965,6 +1122,129 @@ def start(ctx, watchdog, replicas, log_level):
 
 
 @cli.command()
+@click.option("--port", "-p", default=8080, help="Dashboard port (default: 8080)")
+@click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
+@click.option("--watchdog/--no-watchdog", default=True, help="Start watchdog")
+@click.option(
+    "--replicas", "-r",
+    default=1,
+    type=click.IntRange(min=1, max=50),
+    help="Number of replicas per agent (1-50)"
+)
+@click.option(
+    "--log-level", "-l",
+    default="INFO",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    help="Logging level"
+)
+@click.pass_context
+def up(ctx, port, no_browser, watchdog, replicas, log_level):
+    """Start agents + dashboard in background, return terminal immediately.
+
+    One command to bring everything up. Use 'agent down' to tear it down.
+
+    Examples:
+        agent up                    # Start everything, open browser
+        agent up --no-browser       # Start without opening browser
+        agent up --port 9000        # Use custom dashboard port
+        agent up --replicas 2       # 2 replicas per agent type
+    """
+    import time
+    import webbrowser
+
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold cyan]Starting Agent Framework[/]")
+
+    try:
+        orchestrator = Orchestrator(workspace)
+
+        # --- Agents ---
+        running = orchestrator.get_running_agents()
+        if running:
+            console.print(f"[green]Agents already running: {', '.join(running)}[/]")
+        else:
+            orchestrator.spawn_all_agents(replicas=replicas, log_level=log_level)
+            running = list(orchestrator.processes.keys())
+            console.print(f"[green]Started {len(running)} agents[/]")
+
+        # --- Watchdog ---
+        if watchdog and "watchdog" not in running:
+            try:
+                orchestrator.spawn_watchdog()
+                console.print("[green]Started watchdog[/]")
+            except Exception as e:
+                console.print(f"[yellow]Watchdog failed to start: {e}[/]")
+
+        # --- Dashboard ---
+        dash_info = orchestrator.get_dashboard_info()
+        if dash_info:
+            console.print(f"[green]Dashboard already running on port {dash_info['port']}[/]")
+            port = dash_info["port"]
+        else:
+            proc = orchestrator.spawn_dashboard(port=port)
+            if proc:
+                for _ in range(10):
+                    time.sleep(0.5)
+                    if orchestrator.is_port_in_use(port):
+                        break
+                console.print(f"[green]Dashboard started on port {port}[/]")
+            else:
+                console.print(f"[yellow]Dashboard could not start (port {port} in use). Try: agent down, or --port <other>[/]")
+
+        # --- Browser ---
+        if not no_browser:
+            url = f"http://localhost:{port}"
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+        # --- Summary ---
+        console.print()
+        console.print(f"[bold green]Agent Framework is up[/]")
+        console.print(f"  Dashboard: http://localhost:{port}")
+        console.print(f"  Agents:    {len(running)}")
+        console.print()
+        console.print("[dim]Queue work:  agent work[/]")
+        console.print("[dim]Tear down:   agent down[/]")
+        console.print("[dim]View logs:   tail -f logs/<agent>.log[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command()
+@click.option("--graceful/--force", default=True, help="Graceful shutdown")
+@click.pass_context
+def down(ctx, graceful):
+    """Stop agents + dashboard. Counterpart to 'agent up'.
+
+    Examples:
+        agent down           # Graceful shutdown
+        agent down --force   # Force kill all processes
+    """
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold yellow]Stopping Agent Framework[/]")
+
+    try:
+        orchestrator = Orchestrator(workspace)
+
+        # Stop dashboard first (fast, doesn't reset tasks)
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+            console.print("[green]Dashboard stopped[/]")
+
+        # Stop agents (handles PID file cleanup and task reset)
+        orchestrator.stop_all_agents(graceful=graceful)
+        console.print("[green]All agents stopped[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command()
 @click.option("--graceful/--force", default=True, help="Graceful shutdown")
 @click.pass_context
 def stop(ctx, graceful):
@@ -975,6 +1255,12 @@ def stop(ctx, graceful):
 
     try:
         orchestrator = Orchestrator(workspace)
+
+        # Also stop dashboard if running (consistent with `agent down`)
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+            console.print("[green]✓ Dashboard stopped[/]")
+
         orchestrator.stop_all_agents(graceful=graceful)
         console.print("[green]✓ All agents stopped[/]")
 
@@ -994,6 +1280,11 @@ def restart(ctx, watchdog, dashboard):
 
     try:
         orchestrator = Orchestrator(workspace)
+
+        # Stop dashboard if running
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+            console.print("[green]✓ Dashboard stopped[/]")
 
         # Stop existing agents
         orchestrator.stop_all_agents(graceful=True)
@@ -1152,6 +1443,107 @@ def resume(ctx):
 
 
 @cli.command()
+@click.argument("task_id", required=False)
+@click.option("--message", "-m", help="Optional approval message")
+@click.pass_context
+def approve(ctx, task_id, message):
+    """Approve a task waiting at a checkpoint.
+
+    Example:
+        agent approve                        # List all checkpoints
+        agent approve chain-abc123-engineer  # Approve specific checkpoint
+        agent approve chain-abc123-engineer -m "Reviewed and looks good"
+    """
+    import os
+    from datetime import UTC, datetime
+    from ..core.task import TaskStatus
+
+    workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
+    queue_dir = workspace / ".agent-communication" / "queues"
+    checkpoint_dir = queue_dir / "checkpoints"
+
+    if not task_id:
+        if not checkpoint_dir.exists() or not any(checkpoint_dir.glob("*.json")):
+            console.print("[green]No tasks awaiting approval at checkpoints[/]")
+            return
+
+        console.print("[bold]Tasks Awaiting Checkpoint Approval:[/]")
+        console.print()
+
+        table = Table()
+        table.add_column("Task ID")
+        table.add_column("Title")
+        table.add_column("Checkpoint")
+        table.add_column("Message")
+
+        for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
+            task = FileQueue.load_task_file(checkpoint_file)
+
+            title = task.title[:40] + "..." if len(task.title) > 40 else task.title
+            cp_msg = task.checkpoint_message or "N/A"
+            if len(cp_msg) > 50:
+                cp_msg = cp_msg[:50] + "..."
+
+            table.add_row(
+                task.id,
+                title,
+                task.checkpoint_reached or "N/A",
+                cp_msg,
+            )
+
+        console.print(table)
+        console.print()
+        console.print("[dim]Use 'agent approve <task_id>' to approve a specific checkpoint[/]")
+        return
+
+    checkpoint_file = checkpoint_dir / f"{task_id}.json"
+    if not checkpoint_file.exists():
+        console.print(f"[red]Error: No task found at checkpoint with ID '{task_id}'[/]")
+        console.print("[dim]Use 'agent approve' to see all checkpoints[/]")
+        return
+
+    task = FileQueue.load_task_file(checkpoint_file)
+
+    if task.status != TaskStatus.AWAITING_APPROVAL:
+        console.print(f"[yellow]Warning: Task {task_id} is not awaiting approval[/]")
+        console.print(f"[dim]Current status: {task.status}[/]")
+        return
+
+    console.print(f"[bold]Checkpoint Details:[/]")
+    console.print(f"  Task: {task.title}")
+    console.print(f"  Checkpoint: {task.checkpoint_reached}")
+    console.print(f"  Message: {task.checkpoint_message}")
+    console.print()
+
+    if not click.confirm("Approve this checkpoint and continue workflow?"):
+        console.print("[yellow]Approval cancelled[/]")
+        return
+
+    approver = os.getenv("USER", "user")
+    task.approve_checkpoint(approver)
+
+    if message:
+        task.notes.append(f"Checkpoint approved: {message}")
+    else:
+        task.notes.append(f"Checkpoint approved at {datetime.now(UTC).isoformat()}")
+
+    # Re-queue then remove checkpoint file — only delete after successful push
+    queue = FileQueue(workspace)
+    try:
+        queue.push(task, task.assigned_to)
+        checkpoint_file.unlink()
+    except Exception as e:
+        console.print(f"[red]Error re-queuing task: {e}[/]")
+        console.print("[dim]Checkpoint file preserved — task not lost[/]")
+        return
+
+    console.print(f"[green]Checkpoint approved for task {task_id}[/]")
+    console.print(f"[dim]Task re-queued to {task.assigned_to} for continuation[/]")
+    console.print(f"[dim]Monitor with: agent status --watch[/]")
+
+
+@cli.command()
 @click.option("--fix", is_flag=True, help="Auto-fix detected issues")
 @click.pass_context
 def check(ctx, fix):
@@ -1237,7 +1629,7 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
 
         # Show worktrees
         from rich.table import Table
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         table = Table()
         table.add_column("Agent")
@@ -1246,7 +1638,7 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
         table.add_column("Age")
         table.add_column("Status")
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         to_remove = []
 
         for wt in worktrees:
@@ -1467,7 +1859,7 @@ This PR implements the same pattern/functionality as the reference implementatio
         traceback.print_exc()
 
 
-def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False):
+def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False, auto_approve: bool = False):
     """Handle --epic mode: process tickets in a JIRA epic.
 
     Args:
@@ -1477,6 +1869,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         epic_key: JIRA epic key (e.g., PROJ-100)
         no_dashboard: Skip dashboard if True
         parallel: If True, process tickets in parallel (no dependencies)
+        auto_approve: If True, skip plan checkpoint (use default_auto workflow)
     """
     from datetime import datetime
     import time
@@ -1536,7 +1929,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             console.print("[yellow]Cancelled[/]")
             return
 
-        workflow = "default"
+        workflow = "default_auto" if auto_approve else "default"
 
         # Determine target repository from epic or config
         github_repo = None
@@ -1646,7 +2039,10 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             console.print("[dim]Press Ctrl+C to exit dashboard[/]\n")
 
             from .dashboard import AgentDashboard
-            dashboard = AgentDashboard(workspace)
+            matched_repo = next(
+                (r for r in framework_config.repositories if r.github_repo == github_repo), None
+            )
+            dashboard = AgentDashboard(workspace, default_repo=matched_repo)
             try:
                 asyncio.run(dashboard.run())
             except KeyboardInterrupt:

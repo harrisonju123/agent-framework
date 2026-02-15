@@ -1,6 +1,6 @@
 """Tests for the QA → Engineer review feedback loop."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -39,7 +39,7 @@ def _make_task(
         priority=1,
         created_by="engineer",
         assigned_to=assigned_to,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Review PR #99",
         description="Review the PR.",
         context=context,

@@ -21,22 +21,47 @@ WORKFLOW_TEAMMATES: Dict[str, List[str]] = {
 def compose_default_team(
     agent_def: AgentDefinition,
     default_model: str = "sonnet",
+    specialization_profile=None,
 ) -> Optional[dict]:
     """Build team from agent's configured teammates (always-on mode).
 
     Each agent defines its own teammates in agents.yaml. This function
     converts those definitions into the dict format expected by --agents.
+
+    Args:
+        agent_def: Agent definition from config
+        default_model: Default model for teammates
+        specialization_profile: Optional SpecializationProfile for engineer agents.
+            When provided, merges specialized teammates into the team.
     """
     if not agent_def.teammates:
         return None
 
+    teammates_dict = dict(agent_def.teammates)
+
+    # Merge specialized teammates when a profile is provided
+    if specialization_profile:
+        from .engineer_specialization import get_specialized_teammates
+
+        logger.info(f"Applying {specialization_profile.name} teammates for engineer")
+        teammates_dict = get_specialized_teammates(teammates_dict, specialization_profile)
+
+    # Convert to --agents format
     agents_dict = {}
-    for teammate_id, teammate in agent_def.teammates.items():
-        agents_dict[teammate_id] = {
-            "model": teammate.model or default_model,
-            "description": teammate.description,
-            "prompt": teammate.prompt,
-        }
+    for teammate_id, teammate_data in teammates_dict.items():
+        # Handle both TeammateDefinition objects and dict (from specialization)
+        if isinstance(teammate_data, dict):
+            agents_dict[teammate_id] = {
+                "model": default_model,
+                "description": teammate_data["description"],
+                "prompt": teammate_data["prompt"],
+            }
+        else:
+            agents_dict[teammate_id] = {
+                "model": teammate_data.model or default_model,
+                "description": teammate_data.description,
+                "prompt": teammate_data.prompt,
+            }
 
     return agents_dict
 

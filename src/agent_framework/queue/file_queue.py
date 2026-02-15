@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List
 
@@ -114,6 +114,22 @@ class FileQueue:
             try:
                 task = self._load_task(task_file)
 
+                # Recover orphaned in_progress tasks (agent crashed/restarted)
+                if task.status == TaskStatus.IN_PROGRESS:
+                    if self._is_orphaned(task):
+                        logger.warning(
+                            f"Recovering orphaned task {task.id} "
+                            f"(was in_progress by {task.started_by})"
+                        )
+                        task.status = TaskStatus.PENDING
+                        task.started_at = None
+                        task.started_by = None
+                        atomic_write_model(task_file, task)
+                        # Fall through to pending processing below
+                    else:
+                        non_pending.add(task_file.name)
+                        continue
+
                 # Only process pending tasks
                 if task.status != TaskStatus.PENDING:
                     non_pending.add(task_file.name)
@@ -138,6 +154,27 @@ class FileQueue:
                 continue
 
         return None
+
+    def _is_orphaned(self, task: Task) -> bool:
+        """Check if an in_progress task is orphaned (no agent heartbeat).
+
+        A task is orphaned when the agent that started it is no longer alive.
+        We detect this by checking if the agent's heartbeat file is stale.
+        """
+        if not task.started_by:
+            return True
+
+        heartbeat_file = self.heartbeat_dir / f"{task.started_by}.json"
+        if not heartbeat_file.exists():
+            return True
+
+        try:
+            stat = heartbeat_file.stat()
+            age_seconds = time.time() - stat.st_mtime
+            # Stale if no heartbeat for 2 minutes (agents write every poll cycle)
+            return age_seconds > 120
+        except OSError:
+            return True
 
     def _quarantine_malformed_task(self, task_file: Path, error: Exception) -> None:
         """Move malformed task file to malformed directory for investigation."""
@@ -177,6 +214,14 @@ class FileQueue:
 
     def mark_completed(self, task: Task) -> None:
         """Move task to completed storage."""
+        self.move_to_completed(task)
+
+    def move_to_completed(self, task: Task) -> None:
+        """Move task to completed storage without changing its status.
+
+        Use this when the task already has the correct terminal status
+        (e.g. CANCELLED) and you just need to archive it.
+        """
         queue_path = self.queue_dir / task.assigned_to
         task_file = queue_path / f"{task.id}.json"
 
@@ -227,6 +272,11 @@ class FileQueue:
 
     def _load_task(self, task_file: Path) -> Task:
         """Load a task from a JSON file."""
+        return self.load_task_file(task_file)
+
+    @staticmethod
+    def load_task_file(task_file: Path) -> Task:
+        """Load a task from a JSON file. Public for CLI/external use."""
         data = json.loads(task_file.read_text())
         return Task(**data)
 
@@ -242,7 +292,7 @@ class FileQueue:
         backoff = self.backoff_initial * (self.backoff_multiplier ** (task.retry_count - 1))
         backoff = min(backoff, self.backoff_max)
 
-        time_since_failure = (datetime.utcnow() - task.last_failed_at).total_seconds()
+        time_since_failure = (datetime.now(timezone.utc) - task.last_failed_at).total_seconds()
         return time_since_failure >= backoff
 
     def _dependencies_met(self, task: Task) -> bool:
@@ -349,20 +399,21 @@ class FileQueue:
         Returns:
             Task if found and failed, None otherwise
         """
-        # Check completed directory for failed tasks
-        if self.completed_dir.exists():
-            for task_file in self.completed_dir.glob("*.json"):
-                try:
-                    task = self._load_task(task_file)
-                    if task.status != TaskStatus.FAILED:
-                        continue
-                    # Match by task ID or JIRA key
-                    if task.id == identifier or task.context.get("jira_key") == identifier:
-                        return task
-                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
-                    continue
+        task = self.find_task(identifier)
+        if task and task.status == TaskStatus.FAILED:
+            return task
+        return None
 
-        # Also check queue directories for failed tasks
+    def find_task(self, identifier: str) -> Optional[Task]:
+        """Find a task by ID or JIRA key across all queues and completed, regardless of status.
+
+        Args:
+            identifier: Task ID or JIRA key (e.g., PROJ-104)
+
+        Returns:
+            Task if found, None otherwise
+        """
+        # Check queue directories first (active tasks)
         if self.queue_dir.exists():
             for queue_dir in self.queue_dir.iterdir():
                 if not queue_dir.is_dir():
@@ -370,12 +421,20 @@ class FileQueue:
                 for task_file in queue_dir.glob("*.json"):
                     try:
                         task = self._load_task(task_file)
-                        if task.status != TaskStatus.FAILED:
-                            continue
                         if task.id == identifier or task.context.get("jira_key") == identifier:
                             return task
                     except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
                         continue
+
+        # Check completed directory
+        if self.completed_dir.exists():
+            for task_file in self.completed_dir.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.id == identifier or task.context.get("jira_key") == identifier:
+                        return task
+                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                    continue
 
         return None
 
@@ -449,3 +508,116 @@ class FileQueue:
 
         # Push to appropriate queue
         self.push(task, task.assigned_to)
+
+    def check_subtasks_complete(self, parent_task_id: str, subtask_ids: list[str]) -> bool:
+        """Check if all subtasks of a parent are completed successfully.
+
+        Args:
+            parent_task_id: The parent task ID
+            subtask_ids: List of expected subtask IDs
+
+        Returns:
+            True only when ALL subtask_ids are found in completed/ with COMPLETED status.
+        """
+        if not subtask_ids:
+            return True
+
+        for subtask_id in subtask_ids:
+            subtask_file = self.completed_dir / f"{subtask_id}.json"
+            if not subtask_file.exists():
+                return False
+
+            try:
+                subtask = self._load_task(subtask_file)
+                if subtask.status != TaskStatus.COMPLETED:
+                    return False
+            except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                return False
+
+        return True
+
+    def get_subtasks(self, parent_task_id: str) -> List[Task]:
+        """Get all subtasks of a parent across all queues and completed directory.
+
+        Searches by checking task's parent_task_id field.
+        Returns tasks from both active queues and completed directory.
+        """
+        subtasks = []
+
+        # Search all queue directories
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if not queue_dir.is_dir():
+                    continue
+                for task_file in queue_dir.glob("*.json"):
+                    try:
+                        task = self._load_task(task_file)
+                        if task.parent_task_id == parent_task_id:
+                            subtasks.append(task)
+                    except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                        continue
+
+        # Search completed directory
+        if self.completed_dir.exists():
+            for task_file in self.completed_dir.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.parent_task_id == parent_task_id:
+                        subtasks.append(task)
+                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                    continue
+
+        return subtasks
+
+    def get_parent_task(self, task: Task) -> Optional[Task]:
+        """Load the parent task for a subtask.
+
+        Looks up task.parent_task_id in all queues and completed directory.
+        Returns None if task has no parent or parent not found.
+        """
+        if not task.parent_task_id:
+            return None
+
+        return self.find_task(task.parent_task_id)
+
+    def create_fan_in_task(self, parent_task: Task, completed_subtasks: List[Task]) -> Task:
+        """Create a continuation task that aggregates subtask results.
+
+        The fan-in task:
+        - ID: f"fan-in-{parent_task.id}"
+        - Type: matches parent's original type
+        - Inherits parent's context with added fan_in=True
+        - Aggregates result_summary from all completed subtasks
+        - Assigned to the next agent in workflow (typically QA)
+        """
+        # Aggregate results
+        aggregated_results = []
+        for subtask in completed_subtasks:
+            if subtask.result_summary:
+                aggregated_results.append(f"[{subtask.title}]: {subtask.result_summary}")
+
+        fan_in_task = Task(
+            id=f"fan-in-{parent_task.id}",
+            type=parent_task.type,
+            status=TaskStatus.PENDING,
+            priority=parent_task.priority,
+            created_by="system",
+            assigned_to="qa",  # Next step after engineer in default workflow
+            created_at=datetime.now(UTC),
+            title=f"[fan-in] {parent_task.title}",
+            description=parent_task.description,
+            context={
+                **parent_task.context,
+                "fan_in": True,
+                "parent_task_id": parent_task.id,
+                "subtask_count": len(completed_subtasks),
+                "aggregated_results": "\n".join(aggregated_results),
+            },
+            result_summary="\n".join(aggregated_results) if aggregated_results else None,
+        )
+        return fan_in_task
+
+    def _fan_in_already_created(self, parent_task_id: str) -> bool:
+        """Check if fan-in task already exists (prevent duplicate creation)."""
+        fan_in_id = f"fan-in-{parent_task_id}"
+        return self.find_task(fan_in_id) is not None

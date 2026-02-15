@@ -75,4 +75,9 @@ docs/_build/
 # agent stuff
 task_results/*
 
+# User-specific config (contains private repo references and credentials)
+config/agent-framework.yaml
+config/jira.yaml
+config/github.yaml
+
 CLAUDE.md

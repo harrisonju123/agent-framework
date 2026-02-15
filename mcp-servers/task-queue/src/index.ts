@@ -16,8 +16,9 @@ import {
   getEpicProgress,
   writeRoutingSignal,
 } from "./queue-tools.js";
-import { consultAgent } from "./consultation.js";
+import { consultAgent, getRemainingConsultations, decrementConsultations } from "./consultation.js";
 import { shareKnowledge, getKnowledge } from "./knowledge.js";
+import { debateTopic } from "./debate.js";
 import type { QueueTaskInput, AgentId } from "./types.js";
 
 const logger = createLogger();
@@ -226,6 +227,39 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "debate_topic",
+    description:
+      "Spawn a multi-perspective debate on a complex decision. An Advocate argues in favor, a Critic argues against, and an Arbiter synthesizes both into a recommendation with trade-offs and confidence level. Uses 2 consultation slots. Best for architectural choices, approach decisions, or trade-off analysis.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          description: "The decision or approach to debate (e.g., 'Should we use Redis or in-memory caching?')",
+        },
+        context: {
+          type: "string",
+          description: "Optional context about the situation, requirements, or constraints",
+        },
+        custom_perspectives: {
+          type: "object",
+          properties: {
+            advocate: {
+              type: "string",
+              description: "Custom perspective for the advocate (default: argue in favor)",
+            },
+            critic: {
+              type: "string",
+              description: "Custom perspective for the critic (default: argue against)",
+            },
+          },
+          description: "Optional custom perspectives instead of default advocate/critic roles",
+        },
+      },
+      required: ["topic"],
+    },
+  },
+  {
     name: "share_knowledge",
     description:
       "Share a discovery or insight with other agents via the shared knowledge base. Use this to store reusable information like repo structure, test frameworks, or conventions discovered during your work.",
@@ -417,6 +451,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           getTopic,
           typeof getKey === "string" ? getKey : undefined,
           typeof max_age_hours === "number" ? max_age_hours : undefined,
+        );
+        break;
+      }
+      case "debate_topic": {
+        const { topic, context, custom_perspectives } = args as Record<string, unknown>;
+        if (typeof topic !== "string") {
+          throw new Error("debate_topic requires string topic");
+        }
+        const perspectives = custom_perspectives as { advocate?: string; critic?: string } | undefined;
+        result = debateTopic(
+          workspace,
+          topic,
+          typeof context === "string" ? context : undefined,
+          perspectives && typeof perspectives.advocate === "string" && typeof perspectives.critic === "string"
+            ? { advocate: perspectives.advocate, critic: perspectives.critic }
+            : undefined,
+          getRemainingConsultations,
+          decrementConsultations,
         );
         break;
       }

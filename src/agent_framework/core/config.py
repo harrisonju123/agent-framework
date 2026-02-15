@@ -42,11 +42,11 @@ class LLMConfig(BaseModel):
     claude_cli_timeout: int = 3600  # Default fallback timeout (1 hour)
     claude_cli_cheap_model: str = "haiku"
     claude_cli_default_model: str = "sonnet"
-    claude_cli_premium_model: str = "opus"
+    claude_cli_premium_model: str = "opus"  # YAML overrides with full model ID
 
     # Task-type-specific timeouts (used by ModelSelector.select_timeout)
-    claude_cli_timeout_large: int = 3600   # 1 hour - IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING
-    claude_cli_timeout_bounded: int = 1800  # 30 min - TESTING, VERIFICATION, FIX, BUGFIX, REVIEW
+    claude_cli_timeout_large: int = 3600   # 1 hour - IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, REVIEW
+    claude_cli_timeout_bounded: int = 1800  # 30 min - TESTING, VERIFICATION, FIX, BUGFIX, PR_REQUEST
     claude_cli_timeout_simple: int = 900    # 15 min - DOCUMENTATION, COORDINATION, STATUS_REPORT
 
     # MCP settings
@@ -86,6 +86,13 @@ class SafeguardsConfig(BaseModel):
     watchdog_interval: int = 60
 
 
+class ContextWindowConfig(BaseModel):
+    """Context window management settings."""
+    output_reserve: int = 4096
+    summary_threshold: int = 10
+    min_message_retention: int = 3
+
+
 class OptimizationConfig(BaseModel):
     """Optimization configuration for token usage reduction."""
     # Quick wins (Phase 1)
@@ -101,12 +108,19 @@ class OptimizationConfig(BaseModel):
     enable_result_summarization: bool = False
     enable_error_truncation: bool = False
 
+    # Tool pattern tips (Phase 4) — feed session analysis back into prompts
+    enable_tool_pattern_tips: bool = False
+    tool_tips_max_chars: int = 1500
+    tool_tips_max_count: int = 5
+
     # Rollout settings
     canary_percentage: int = 0  # 0-100
     shadow_mode: bool = False
 
     # Budget warning threshold (e.g., 1.3 = warn at 130% of budget)
     budget_warning_threshold: float = 1.3
+
+    context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
 
     # Token budgets by task type (configurable)
     token_budgets: Dict[str, int] = Field(default_factory=lambda: {
@@ -207,14 +221,144 @@ class TeamModeConfig(BaseModel):
     enabled: bool = True
 
 
+class WorkflowStepDefinition(BaseModel):
+    """Defines a single step in a DAG workflow."""
+    agent: str
+    next: Optional[List[Dict[str, Any]]] = None  # List of edge definitions
+    task_type: Optional[str] = None  # Override default task type
+    checkpoint: Optional[Dict[str, str]] = None  # Parsed into CheckpointConfig in to_dag()
+
+
 class WorkflowDefinition(BaseModel):
-    """Defines a workflow's agent chain and behaviour."""
+    """Defines a workflow's agent chain and behaviour.
+
+    Supports both legacy linear format (agents list) and new DAG format (steps dict).
+    """
     description: str = ""
-    agents: List[str] = Field(default_factory=list)
+
+    # Legacy format (backward compatible)
+    agents: Optional[List[str]] = None
+
+    # DAG format
+    steps: Optional[Dict[str, WorkflowStepDefinition]] = None
+    start_step: Optional[str] = None
+
+    # Common metadata
     pr_creator: Optional[str] = None
     auto_review: bool = True
     require_tests: bool = True
     output: Optional[str] = None
+
+    @model_validator(mode='after')
+    def validate_workflow(self) -> 'WorkflowDefinition':
+        """Validate that either agents or steps is provided, but not both."""
+        if self.agents is None and self.steps is None:
+            raise ValueError("Workflow must have either 'agents' (legacy) or 'steps' (DAG)")
+
+        if self.agents is not None and self.steps is not None:
+            raise ValueError("Workflow cannot have both 'agents' and 'steps' (choose one format)")
+
+        if self.steps is not None and self.start_step is None:
+            raise ValueError("DAG workflow must specify 'start_step'")
+
+        if self.steps is not None and self.start_step not in self.steps:
+            raise ValueError(f"start_step '{self.start_step}' not found in steps")
+
+        return self
+
+    @property
+    def is_legacy_format(self) -> bool:
+        """Check if this is a legacy linear workflow."""
+        return self.agents is not None
+
+    @property
+    def agent_list(self) -> List[str]:
+        """Safe accessor — returns agents list or empty list for DAG workflows."""
+        return self.agents or []
+
+    def to_dag(self, name: str):
+        """Convert to WorkflowDAG instance (cached after first call).
+
+        For legacy format, creates a linear DAG.
+        For DAG format, builds the full DAG from step definitions.
+        """
+        # Return cached DAG if available
+        cached = getattr(self, "_cached_dag", None)
+        if cached is not None:
+            return cached
+
+        from ..workflow.dag import (
+            WorkflowDAG,
+            WorkflowStep,
+            WorkflowEdge,
+            EdgeCondition,
+            EdgeConditionType,
+            CheckpointConfig,
+        )
+
+        if self.is_legacy_format:
+            dag = WorkflowDAG.from_linear_chain(name, self.agents, self.description)
+            object.__setattr__(self, "_cached_dag", dag)
+            return dag
+
+        # Build DAG from step definitions
+        dag_steps = {}
+        for step_id, step_def in self.steps.items():
+            edges = []
+            if step_def.next:
+                for edge_def in step_def.next:
+                    if isinstance(edge_def, str):
+                        edges.append(WorkflowEdge(
+                            target=edge_def,
+                            condition=EdgeCondition(EdgeConditionType.ALWAYS)
+                        ))
+                    elif isinstance(edge_def, dict):
+                        target = edge_def.get("target")
+                        condition_type = edge_def.get("condition", "always")
+                        condition_params = edge_def.get("params", {})
+                        priority = edge_def.get("priority", 0)
+
+                        if not target:
+                            raise ValueError(f"Edge in step '{step_id}' missing 'target'")
+
+                        edges.append(WorkflowEdge(
+                            target=target,
+                            condition=EdgeCondition(
+                                EdgeConditionType(condition_type),
+                                condition_params
+                            ),
+                            priority=priority
+                        ))
+
+            checkpoint = None
+            if step_def.checkpoint:
+                checkpoint = CheckpointConfig(
+                    message=step_def.checkpoint["message"],
+                    reason=step_def.checkpoint.get("reason"),
+                )
+
+            dag_steps[step_id] = WorkflowStep(
+                id=step_id,
+                agent=step_def.agent,
+                next=edges,
+                task_type_override=step_def.task_type,
+                checkpoint=checkpoint
+            )
+
+        dag = WorkflowDAG(
+            name=name,
+            description=self.description,
+            steps=dag_steps,
+            start_step=self.start_step,
+            metadata={
+                "pr_creator": self.pr_creator,
+                "auto_review": self.auto_review,
+                "require_tests": self.require_tests,
+                "output": self.output,
+            }
+        )
+        object.__setattr__(self, "_cached_dag", dag)
+        return dag
 
 
 class MultiRepoConfig(BaseModel):
@@ -272,6 +416,9 @@ class AgentDefinition(BaseModel):
     # Permissions
     can_commit: bool = False
     can_create_pr: bool = False
+
+    # Per-agent toggle for engineer specialization (only applies to engineer agents)
+    specialization_enabled: bool = True
 
 
 class JIRAConfig(BaseModel):
@@ -441,6 +588,60 @@ def load_github_config(github_path: Path = Path("config/github.yaml")) -> Option
     if not github_path.exists():
         return None
     return _get_cached_or_load(github_path.resolve(), _load_github_config_from_file)
+
+
+# --- Specialization config models and loader ---
+
+
+class SpecializationTeammateConfig(BaseModel):
+    """Teammate definition within a specialization profile."""
+    description: str
+    prompt: str
+
+
+class SpecializationProfileConfig(BaseModel):
+    """A single specialization profile from YAML."""
+    id: str
+    name: str
+    description: str
+    file_patterns: List[str]
+    prompt_suffix: str
+    tool_guidance: str
+    teammates: Dict[str, SpecializationTeammateConfig] = Field(default_factory=dict)
+
+
+class SpecializationConfig(BaseModel):
+    """Top-level specialization configuration."""
+    enabled: bool = True
+    profiles: List[SpecializationProfileConfig] = Field(default_factory=list)
+
+
+def _load_specializations_from_file(spec_path: Path) -> SpecializationConfig:
+    """Internal loader for specialization config (no caching)."""
+    with open(spec_path) as f:
+        data = yaml.safe_load(f) or {}
+    return SpecializationConfig(**data)
+
+
+SPECIALIZATIONS_CONFIG_PATH = Path("config/specializations.yaml")
+
+
+def clear_config_cache() -> None:
+    """Clear the module-level config cache. Useful for tests."""
+    _config_cache.clear()
+
+
+def load_specializations(
+    spec_path: Path = SPECIALIZATIONS_CONFIG_PATH,
+) -> Optional[SpecializationConfig]:
+    """Load specialization configuration from YAML file.
+
+    Uses mtime-based caching — returns cached config if the file hasn't changed.
+    Returns None when the file doesn't exist (callers fall back to hardcoded defaults).
+    """
+    if not spec_path.exists():
+        return None
+    return _get_cached_or_load(spec_path.resolve(), _load_specializations_from_file)
 
 
 def _expand_env_vars(data: Any, _path: str = "") -> Any:

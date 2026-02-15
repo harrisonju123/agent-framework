@@ -1,6 +1,6 @@
 """Retry handler with exponential backoff (ported from Bash system)."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..core.task import Task
 
@@ -46,7 +46,7 @@ class RetryHandler:
 
         if task.last_failed_at:
             backoff = self.calculate_backoff(task.retry_count)
-            time_since_failure = (datetime.utcnow() - task.last_failed_at).total_seconds()
+            time_since_failure = (datetime.now(timezone.utc) - task.last_failed_at).total_seconds()
             return time_since_failure >= backoff
 
         return True
