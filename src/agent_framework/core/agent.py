@@ -628,6 +628,7 @@ class Agent:
         ))
 
         task_succeeded = task.status == TaskStatus.COMPLETED
+        self._sync_worktree_queued_tasks()
         self._cleanup_worktree(task, success=task_succeeded)
 
         if lock:
@@ -2152,6 +2153,55 @@ IMPORTANT:
                 self.logger.error(f"Failed to get base repo from multi_repo_manager: {e}")
 
         return None
+
+    def _sync_worktree_queued_tasks(self) -> None:
+        """Move any task files the LLM wrote to the worktree's queues back to the main queue.
+
+        When the Claude CLI subprocess runs in a worktree, the LLM may create
+        subtask JSON files via the Write tool at .agent-communication/queues/<agent>/.
+        These land in the worktree instead of the main repo's queue that agent
+        workers actually poll.  This method finds those orphaned files and
+        re-queues them through the canonical FileQueue.push() path.
+        """
+        if not self._active_worktree:
+            return
+
+        worktree_queue_dir = self._active_worktree / ".agent-communication" / "queues"
+        if not worktree_queue_dir.exists():
+            return
+
+        # Don't sync from the main workspace back into itself
+        main_queue_dir = self.queue.queue_dir
+        try:
+            if worktree_queue_dir.resolve() == main_queue_dir.resolve():
+                return
+        except OSError:
+            return
+
+        synced = 0
+        for agent_dir in worktree_queue_dir.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            # Skip non-agent directories (checkpoints, completed, etc.)
+            queue_id = agent_dir.name
+            if queue_id in ("checkpoints", "completed", "failed", "locks", "heartbeats", "malformed"):
+                continue
+
+            for task_file in agent_dir.glob("*.json"):
+                try:
+                    data = json.loads(task_file.read_text())
+                    synced_task = Task(**data)
+                    self.queue.push(synced_task, synced_task.assigned_to)
+                    task_file.unlink()
+                    synced += 1
+                    self.logger.info(
+                        f"Synced worktree queue task {synced_task.id} → {synced_task.assigned_to}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to sync worktree task {task_file.name}: {e}")
+
+        if synced:
+            self.logger.info(f"Synced {synced} task(s) from worktree to main queue")
 
     def _cleanup_worktree(self, task: Task, success: bool) -> None:
         """Cleanup worktree after task completion based on config.
