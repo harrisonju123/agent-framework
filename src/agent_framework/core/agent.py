@@ -22,6 +22,7 @@ from .task_validator import validate_task, ValidationResult
 from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase, ToolActivity
 from .routing import read_routing_signal, validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
 from .team_composer import compose_default_team, compose_team
+from .context_window_manager import ContextWindowManager, ContextPriority
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
@@ -279,6 +280,10 @@ class Agent:
         retention_days = sl_cfg.get("retention_days", 30)
         if self._session_logging_enabled and retention_days > 0:
             SessionLogger.cleanup_old_sessions(self._session_logs_dir, retention_days)
+
+        # Context window management: track token budgets and manage message history
+        # per task (initialized when task starts)
+        self._context_window_manager: Optional[ContextWindowManager] = None
 
         # Sandbox for isolated test execution
         self._test_runner = None
@@ -685,6 +690,20 @@ class Agent:
             task_type=get_type_str(task.type),
         )
 
+        # Initialize context window manager for this task
+        task_budget = self._get_token_budget(task.type)
+        context_config = self._optimization_config.get("context_window", {})
+        self._context_window_manager = ContextWindowManager(
+            total_budget=task_budget,
+            output_reserve=context_config.get("output_reserve", 4096),
+            summary_threshold=context_config.get("summary_threshold", 10),
+            min_message_retention=context_config.get("min_message_retention", 3),
+        )
+        self.logger.debug(
+            f"Context window manager initialized: budget={task_budget}, "
+            f"available_for_input={self._context_window_manager.budget.available_for_input}"
+        )
+
         try:
             # Initialize task execution
             self._initialize_task_execution(task, task_start_time)
@@ -835,6 +854,32 @@ class Agent:
                 cost=response.reported_cost_usd,
                 duration_ms=response.latency_ms,
             )
+
+            # Update context window manager with actual token usage
+            if self._context_window_manager:
+                self._context_window_manager.update_token_usage(
+                    response.input_tokens,
+                    response.output_tokens
+                )
+                budget_status = self._context_window_manager.get_budget_status()
+                self.logger.debug(
+                    f"Context budget: {budget_status['utilization_percent']:.1f}% used "
+                    f"({budget_status['used_so_far']}/{budget_status['total_budget']} tokens)"
+                )
+
+                # Check if we should trigger a checkpoint due to budget exhaustion
+                if self._context_window_manager.should_trigger_checkpoint():
+                    self.logger.warning(
+                        f"Context budget critically low (>90% used). "
+                        f"Consider splitting task into subtasks."
+                    )
+                    self.activity_manager.append_event(ActivityEvent(
+                        type="context_budget_critical",
+                        agent=self.config.id,
+                        task_id=task.id,
+                        title=f"Context budget >90%: consider task splitting",
+                        timestamp=datetime.utcnow()
+                    ))
 
             # Clear tool activity after LLM completes
             try:
