@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -45,7 +45,7 @@ def _make_task(jira_key="PROJ-42", **extra_context):
         priority=1,
         created_by="test",
         assigned_to="engineer",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Test task",
         description="desc",
         context=ctx,

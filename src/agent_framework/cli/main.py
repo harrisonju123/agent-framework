@@ -153,7 +153,7 @@ def analyze(ctx, repo, severity, max_issues, dry_run, focus):
 
     # Create analysis task for architect agent
     import time
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     task_id = f"analysis-{repo.replace('/', '-')}-{int(time.time())}"
 
@@ -204,7 +204,7 @@ When analyzing this repository:
         priority=1,
         created_by="cli",
         assigned_to="architect",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title=f"Analyze repository: {repo}",
         description=description,
         context=task_context,
@@ -1491,7 +1491,7 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
 
         # Show worktrees
         from rich.table import Table
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         table = Table()
         table.add_column("Agent")
@@ -1500,7 +1500,7 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
         table.add_column("Age")
         table.add_column("Status")
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         to_remove = []
 
         for wt in worktrees:

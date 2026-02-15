@@ -1,6 +1,6 @@
 """Tests for escalation handler — verifies routing to architect after consolidation."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -16,7 +16,7 @@ def _make_failed_task(**overrides) -> Task:
         priority=1,
         created_by="engineer",
         assigned_to="engineer",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Implement feature X",
         description="Some description",
         retry_count=5,

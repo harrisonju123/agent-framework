@@ -1,6 +1,6 @@
 """Tests for workflow condition evaluators."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -33,7 +33,7 @@ def _make_task(**context_overrides):
         priority=1,
         created_by="architect",
         assigned_to="engineer",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Test task",
         description="Test description",
         context=context,

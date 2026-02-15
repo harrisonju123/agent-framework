@@ -1,6 +1,6 @@
 """Tests for workflow chain enforcement."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -23,7 +23,7 @@ def _make_task(workflow="default", task_id="task-abc123def456", **ctx_overrides)
         priority=1,
         created_by="architect",
         assigned_to="engineer",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Implement feature X",
         description="Build the thing.",
         context=context,

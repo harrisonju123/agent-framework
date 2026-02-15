@@ -8,7 +8,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -232,7 +232,7 @@ class Watchdog:
         self.activity_manager.update_activity(AgentActivity(
             agent_id=agent_id,
             status=AgentStatus.DEAD,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         ))
 
         # Reset tasks and restart

@@ -1,7 +1,7 @@
 """Test dashboard functionality."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 
@@ -28,7 +28,7 @@ def test_activity_manager_basic_operations():
         activity = AgentActivity(
             agent_id="test-agent",
             status=AgentStatus.IDLE,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         )
         manager.update_activity(activity)
 
@@ -58,10 +58,10 @@ def test_activity_manager_working_state():
                 id="task-123",
                 title="Test task",
                 type="implementation",
-                started_at=datetime.utcnow()
+                started_at=datetime.now(timezone.utc)
             ),
             current_phase=TaskPhase.EXECUTING_LLM,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         )
         manager.update_activity(activity)
 
@@ -90,14 +90,14 @@ def test_activity_event_stream():
                 agent="engineer",
                 task_id="task-1",
                 title="Task 1",
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             ),
             ActivityEvent(
                 type="complete",
                 agent="engineer",
                 task_id="task-1",
                 title="Task 1",
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 duration_ms=5000
             ),
             ActivityEvent(
@@ -105,7 +105,7 @@ def test_activity_event_stream():
                 agent="engineer",
                 task_id="task-2",
                 title="Task 2",
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 retry_count=2
             ),
         ]
@@ -137,7 +137,7 @@ def test_activity_stream_rotation():
                 agent="test",
                 task_id=f"task-{i}",
                 title=f"Task {i}",
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             manager.append_event(event)
 
@@ -180,7 +180,7 @@ agents:
         activity_manager.update_activity(AgentActivity(
             agent_id="architect",
             status=AgentStatus.IDLE,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         ))
         activity_manager.update_activity(AgentActivity(
             agent_id="engineer",
@@ -189,10 +189,10 @@ agents:
                 id="task-123",
                 title="Test implementation",
                 type="implementation",
-                started_at=datetime.utcnow()
+                started_at=datetime.now(timezone.utc)
             ),
             current_phase=TaskPhase.EXECUTING_LLM,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         ))
 
         # Create dashboard and render

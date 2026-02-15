@@ -4,7 +4,7 @@ import asyncio
 import select
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -50,7 +50,7 @@ class AgentDashboard:
         self.workspace = Path(workspace)
         self.activity_manager = ActivityManager(workspace)
         self.console = Console()
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
         self.circuit_breaker = CircuitBreaker(workspace)
         self.queue = FileQueue(workspace)
         self.orchestrator = Orchestrator(workspace)
@@ -106,7 +106,7 @@ class AgentDashboard:
 
     def render_header(self) -> Panel:
         """Render dashboard header with key hints."""
-        uptime = datetime.utcnow() - self.start_time
+        uptime = datetime.now(timezone.utc) - self.start_time
         uptime_str = f"{int(uptime.total_seconds() // 60)}m {int(uptime.total_seconds() % 60)}s"
 
         # Check pause status
@@ -178,7 +178,7 @@ class AgentDashboard:
         # Calculate phase elapsed time
         elapsed_str = ""
         if phase_started:
-            elapsed = (datetime.utcnow() - phase_started).total_seconds()
+            elapsed = (datetime.now(timezone.utc) - phase_started).total_seconds()
             elapsed_str = f"{int(elapsed)}s"
 
         return phase_text, elapsed_str
@@ -603,11 +603,11 @@ class AgentDashboard:
                             break
                         elif result:
                             action_message = result
-                            action_message_time = datetime.utcnow()
+                            action_message_time = datetime.now(timezone.utc)
 
                     # Clear action message after 3 seconds
                     if action_message_time:
-                        if (datetime.utcnow() - action_message_time).total_seconds() > 3:
+                        if (datetime.now(timezone.utc) - action_message_time).total_seconds() > 3:
                             action_message = None
                             action_message_time = None
 

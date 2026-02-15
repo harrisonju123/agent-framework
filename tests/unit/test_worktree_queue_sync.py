@@ -1,7 +1,7 @@
 """Tests for syncing LLM-created queue tasks from worktrees to the main queue."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -21,7 +21,7 @@ def _make_task_json(task_id, assigned_to="engineer"):
         "priority": 1,
         "created_by": "architect",
         "assigned_to": assigned_to,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "title": f"Task {task_id}",
         "description": "A test task",
     }

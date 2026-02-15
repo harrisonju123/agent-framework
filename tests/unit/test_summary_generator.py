@@ -1,7 +1,7 @@
 """Tests for SummaryGenerator."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -51,13 +51,13 @@ def create_task(
         priority=1,
         created_by="test",
         assigned_to="engineer",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title=title,
         description=f"Description for {title}",
         context=context,
         plan=plan,
         result_summary=result_summary,
-        completed_at=completed_at or datetime.utcnow(),
+        completed_at=completed_at or datetime.now(timezone.utc),
         completed_by="engineer",
     )
 
@@ -177,7 +177,7 @@ class TestDailySummary:
 
     def test_generate_daily_summary_with_tasks(self, summary_generator, file_queue):
         """Test generating daily summary with tasks."""
-        today = datetime.utcnow()
+        today = datetime.now(timezone.utc)
 
         tasks = [
             create_task(
@@ -210,7 +210,7 @@ class TestDailySummary:
 
     def test_daily_summary_filters_by_date(self, summary_generator, file_queue):
         """Test that daily summary only includes tasks from specified date."""
-        today = datetime.utcnow()
+        today = datetime.now(timezone.utc)
         yesterday = today - timedelta(days=1)
 
         task_today = create_task(

@@ -8,7 +8,7 @@ token efficiency, and cost per task.
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -93,7 +93,7 @@ class PerformanceMetrics:
         Returns:
             PerformanceReport with aggregated metrics
         """
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         # Parse activity stream
         events = self._read_events(cutoff_time)
@@ -117,7 +117,7 @@ class PerformanceMetrics:
         success_rate = (completed / total_tasks * 100) if total_tasks > 0 else 0.0
 
         report = PerformanceReport(
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             time_range_hours=hours,
             overall_success_rate=success_rate,
             total_tasks=total_tasks,

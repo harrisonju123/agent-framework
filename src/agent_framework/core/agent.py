@@ -321,7 +321,7 @@ class Agent:
         self.activity_manager.update_activity(AgentActivity(
             agent_id=self.config.id,
             status=AgentStatus.IDLE,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         ))
 
         # Drain stale review-chain tasks left over from before the cycle-count guard
@@ -340,7 +340,7 @@ class Agent:
                     self.activity_manager.update_activity(AgentActivity(
                         agent_id=self.config.id,
                         status=AgentStatus.IDLE,
-                        last_updated=datetime.utcnow()
+                        last_updated=datetime.now(timezone.utc)
                     ))
                 await asyncio.sleep(self.config.poll_interval)
                 continue
@@ -430,7 +430,7 @@ class Agent:
                 started_at=task_start_time
             ),
             current_phase=TaskPhase.ANALYZING,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         ))
 
         # Append start event
@@ -439,7 +439,7 @@ class Agent:
             agent=self.config.id,
             task_id=task.id,
             title=task.title,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(timezone.utc)
         ))
 
         # Deterministic JIRA transition on task start
@@ -545,7 +545,7 @@ class Agent:
         budget = self._get_token_budget(task.type)
         cost = self._estimate_cost(response)
 
-        duration = (datetime.utcnow() - task_start_time).total_seconds()
+        duration = (datetime.now(timezone.utc) - task_start_time).total_seconds()
         self.logger.token_usage(response.input_tokens, response.output_tokens, cost)
         self.logger.task_completed(duration, tokens_used=total_tokens)
 
@@ -563,18 +563,18 @@ class Agent:
                     agent=self.config.id,
                     task_id=task.id,
                     title=f"Token budget exceeded: {total_tokens} > {budget}",
-                    timestamp=datetime.utcnow()
+                    timestamp=datetime.now(timezone.utc)
                 ))
 
         # Append complete event
-        duration_ms = int((datetime.utcnow() - task_start_time).total_seconds() * 1000)
+        duration_ms = int((datetime.now(timezone.utc) - task_start_time).total_seconds() * 1000)
         pr_url = task.context.get("pr_url")
         self.activity_manager.append_event(ActivityEvent(
             type="complete",
             agent=self.config.id,
             task_id=task.id,
             title=task.title,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             duration_ms=duration_ms,
             pr_url=pr_url,
             input_tokens=response.input_tokens,
@@ -618,7 +618,7 @@ class Agent:
             agent=self.config.id,
             task_id=task.id,
             title=task.title,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             retry_count=task.retry_count,
             error_message=task.last_error
         ))
@@ -632,7 +632,7 @@ class Agent:
         self.activity_manager.update_activity(AgentActivity(
             agent_id=self.config.id,
             status=AgentStatus.IDLE,
-            last_updated=datetime.utcnow()
+            last_updated=datetime.now(timezone.utc)
         ))
 
         task_succeeded = task.status == TaskStatus.COMPLETED
@@ -687,7 +687,7 @@ class Agent:
             return
 
         self._current_task_id = task.id
-        task_start_time = datetime.utcnow()
+        task_start_time = datetime.now(timezone.utc)
 
         # Session logger: structured JSONL for post-hoc analysis
         self._session_logger = SessionLogger(
@@ -759,7 +759,7 @@ class Agent:
                     ta = ToolActivity(
                         tool_name=tool_name,
                         tool_input_summary=tool_input_summary,
-                        started_at=datetime.utcnow(),
+                        started_at=datetime.now(timezone.utc),
                         tool_call_count=_tool_call_count[0],
                     )
                     self.activity_manager.update_tool_activity(self.config.id, ta)
@@ -859,7 +859,7 @@ class Agent:
                     agent=self.config.id,
                     task_id=task.id,
                     title=task.title,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                 ))
                 self.logger.info(f"Task {task.id} reset to pending after interruption")
                 return
@@ -906,7 +906,7 @@ class Agent:
                         agent=self.config.id,
                         task_id=task.id,
                         title=f"Context budget >90%: consider task splitting",
-                        timestamp=datetime.utcnow()
+                        timestamp=datetime.now(timezone.utc)
                     ))
 
             # Clear tool activity after LLM completes
@@ -936,7 +936,7 @@ class Agent:
                 agent=self.config.id,
                 task_id=task.id,
                 title=task.title,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 retry_count=task.retry_count,
                 error_message=task.last_error
             ))
@@ -1029,7 +1029,7 @@ class Agent:
 
         # Add metadata for human review
         task_dict = task.model_dump()
-        task_dict["logged_at"] = datetime.utcnow().isoformat()
+        task_dict["logged_at"] = datetime.now(timezone.utc).isoformat()
         task_dict["logged_by"] = self.config.id
         task_dict["requires_human_intervention"] = True
         task_dict["escalation_failed"] = True
@@ -1857,7 +1857,7 @@ Fix the failing tests and ensure all tests pass.
                 ),
                 "canary_active": self._should_use_optimization(task),
                 "optimizations_enabled": self._get_active_optimizations(),
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
             # Write to metrics file for later analysis
@@ -2330,7 +2330,7 @@ IMPORTANT:
                     agent=self.config.id,
                     task_id=activity.current_task.id,
                     title=activity.current_task.title,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     phase=phase
                 ))
 
@@ -2702,7 +2702,7 @@ IMPORTANT:
                 agent=self.config.id,
                 task_id=task.id,
                 title=test_result.summary,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             ))
 
             return test_result
@@ -2808,7 +2808,7 @@ IMPORTANT:
             priority=task.priority,
             created_by=self.config.id,
             assigned_to="qa",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             title=f"Review PR #{pr_number} - [{jira_key}] {task.title[:50]}",
             description=f"""Automated code review request for PR #{pr_number}.
 
@@ -2915,6 +2915,12 @@ IMPORTANT:
 
         # Skip if task type is already a review or escalation
         if task.type in (TaskType.REVIEW, TaskType.ESCALATION):
+            return
+
+        # Chain tasks are routed by the workflow DAG which already includes
+        # the QA step — creating a separate review task would duplicate it.
+        if task.context.get("chain_step"):
+            self.logger.debug(f"Skipping review for chain task {task.id}: DAG handles QA routing")
             return
 
         # Skip if this task already hit the escalation threshold — the review
@@ -3349,7 +3355,7 @@ IMPORTANT:
             priority=task.priority,
             created_by=self.config.id,
             assigned_to="engineer",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             title=f"Fix review issues (cycle {cycle_count}) - [{jira_key}]",
             description=description,
             context=fix_context,
@@ -3369,7 +3375,7 @@ IMPORTANT:
             priority=max(1, task.priority - 1),  # Lower number = higher priority
             created_by=self.config.id,
             assigned_to="architect",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             title=f"Review escalation ({cycle_count} cycles) - [{jira_key}]",
             description=f"""QA and Engineer failed to resolve review issues after {cycle_count} cycles.
 
@@ -3405,6 +3411,16 @@ IMPORTANT:
 
         Supports both legacy linear workflows and new DAG workflows with conditions.
         """
+        # REVIEW/FIX tasks are routed by _queue_code_review_if_needed and
+        # _queue_review_fix_if_needed respectively — letting them also route
+        # through the DAG creates a duplicate-routing feedback loop.
+        if task.type in (TaskType.REVIEW, TaskType.FIX):
+            self.logger.debug(
+                f"Skipping workflow chain for {task.id}: "
+                f"task type {task.type.value} handled by dedicated review routing"
+            )
+            return
+
         workflow_name = task.context.get("workflow")
         if not workflow_name or workflow_name not in self._workflows_config:
             self.logger.debug(
@@ -3580,7 +3596,7 @@ IMPORTANT:
             priority=task.priority,
             created_by=self.config.id,
             assigned_to=next_agent,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             title=f"[chain] {task.title}",
             description=task.description,
             context={
@@ -3623,7 +3639,7 @@ IMPORTANT:
             priority=task.priority,
             created_by=self.config.id,
             assigned_to=pr_creator,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             title=f"[pr] {task.title}",
             description=task.description,
             context={

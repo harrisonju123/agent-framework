@@ -8,7 +8,7 @@ Provides tabbed interface showing:
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +30,7 @@ class AnalyticsDashboard:
     def __init__(self, workspace: Path):
         self.workspace = Path(workspace)
         self.console = Console()
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
 
         # Analytics modules
         self.performance_metrics = PerformanceMetrics(workspace)
@@ -56,7 +56,7 @@ class AnalyticsDashboard:
 
     def render_header(self) -> Panel:
         """Render dashboard header."""
-        uptime = datetime.utcnow() - self.start_time
+        uptime = datetime.now(timezone.utc) - self.start_time
         uptime_str = f"{int(uptime.total_seconds() // 60)}m {int(uptime.total_seconds() % 60)}s"
 
         header_text = Text()

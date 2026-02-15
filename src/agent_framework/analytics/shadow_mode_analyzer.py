@@ -10,7 +10,7 @@ Analyzes shadow mode data to evaluate optimization effectiveness:
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -70,7 +70,7 @@ class ShadowModeAnalyzer:
         Returns:
             OptimizationReport with optimization effectiveness analysis
         """
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         # Read optimization metrics
         optimization_data = self._read_optimization_data(cutoff_time)
@@ -91,7 +91,7 @@ class ShadowModeAnalyzer:
         overall_recommendation = self._generate_overall_recommendation(metrics, safe_strategies)
 
         report = OptimizationReport(
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             time_range_hours=hours,
             total_shadow_runs=len(optimization_data),
             strategies_analyzed=len(metrics),
@@ -283,7 +283,7 @@ class ShadowModeAnalyzer:
     def _empty_report(self, hours: int) -> OptimizationReport:
         """Generate empty report when no shadow mode data exists."""
         return OptimizationReport(
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             time_range_hours=hours,
             total_shadow_runs=0,
             strategies_analyzed=0,

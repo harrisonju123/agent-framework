@@ -1,6 +1,6 @@
 """Tests for guided escalation feature with structured reports."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -17,7 +17,7 @@ def _make_failed_task_with_attempts(**overrides) -> Task:
         priority=1,
         created_by="engineer",
         assigned_to="engineer",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         title="Implement feature X",
         description="Some description",
         retry_count=3,
@@ -25,21 +25,21 @@ def _make_failed_task_with_attempts(**overrides) -> Task:
         retry_attempts=[
             RetryAttempt(
                 attempt_number=1,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 error_message="Connection refused: API endpoint not reachable",
                 agent_id="engineer",
                 error_type="network",
             ),
             RetryAttempt(
                 attempt_number=2,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 error_message="Connection timeout after 30s",
                 agent_id="engineer",
                 error_type="network",
             ),
             RetryAttempt(
                 attempt_number=3,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(timezone.utc),
                 error_message="Network unreachable",
                 agent_id="engineer",
                 error_type="network",
@@ -153,21 +153,21 @@ class TestFailurePatternAnalysis:
             retry_attempts=[
                 RetryAttempt(
                     attempt_number=1,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     error_message="Connection refused",
                     agent_id="engineer",
                     error_type="network",
                 ),
                 RetryAttempt(
                     attempt_number=2,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     error_message="Validation error",
                     agent_id="engineer",
                     error_type="validation",
                 ),
                 RetryAttempt(
                     attempt_number=3,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     error_message="Unauthorized",
                     agent_id="engineer",
                     error_type="authentication",
@@ -203,7 +203,7 @@ class TestHumanGuidanceInjection:
             priority=1,
             created_by="engineer",
             assigned_to="engineer",
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             title="Test task",
             description="Test",
         )

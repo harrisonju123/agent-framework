@@ -3,7 +3,7 @@
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -18,6 +18,9 @@ from ..core.task import TaskStatus, TaskType
 from ..core.routing import WORKFLOW_COMPLETE
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling on chain depth to prevent runaway loops regardless of routing logic
+MAX_CHAIN_DEPTH = 10
 
 
 @dataclass
@@ -254,6 +257,15 @@ class WorkflowExecutor:
         """Route task to the target workflow step."""
         next_agent = target_step.agent
 
+        # Hard ceiling: refuse to create chain tasks beyond max depth
+        chain_depth = task.context.get("_chain_depth", 0)
+        if chain_depth >= MAX_CHAIN_DEPTH:
+            self.logger.warning(
+                f"Chain depth {chain_depth} reached max ({MAX_CHAIN_DEPTH}) "
+                f"for task {task.id} — halting workflow to prevent runaway loop"
+            )
+            return
+
         if self._is_chain_task_already_queued(next_agent, task.id):
             self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
@@ -268,10 +280,14 @@ class WorkflowExecutor:
             self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
 
     def _is_chain_task_already_queued(self, next_agent: str, source_task_id: str) -> bool:
-        """Check if chain task already exists in target queue."""
+        """Check if chain task already exists in target queue or completed."""
         chain_id = f"chain-{source_task_id[:12]}-{next_agent}"
         queue_path = self.queue_dir / next_agent / f"{chain_id}.json"
-        return queue_path.exists()
+        if queue_path.exists():
+            return True
+        # Also check completed to prevent re-queuing tasks that already ran
+        completed_path = self.queue_dir / "completed" / f"{chain_id}.json"
+        return completed_path.exists()
 
     def _build_chain_task(
         self, task: "Task", target_step: WorkflowStep, current_agent_id: str
@@ -294,7 +310,7 @@ class WorkflowExecutor:
             priority=task.priority,
             created_by=current_agent_id,
             assigned_to=next_agent,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             title=f"[chain] {task.title}",
             description=task.description,
             context={
@@ -303,6 +319,7 @@ class WorkflowExecutor:
                 "source_agent": current_agent_id,
                 "chain_step": True,
                 "workflow_step": target_step.id,
+                "_chain_depth": task.context.get("_chain_depth", 0) + 1,
             },
         )
 
@@ -327,5 +344,5 @@ class WorkflowExecutor:
             workflow_name=workflow_name,
             current_step=current_step,
             completed_steps=completed,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
         )

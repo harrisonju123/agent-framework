@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -150,7 +150,7 @@ class FailureAnalyzer:
         Returns:
             FailureAnalysisReport with categorized failures and recommendations
         """
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         # Read failure events
         failures = self._read_failures(cutoff_time)
@@ -173,7 +173,7 @@ class FailureAnalyzer:
         failure_rate = (len(failures) / total_tasks * 100) if total_tasks > 0 else 0.0
 
         report = FailureAnalysisReport(
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             time_range_hours=hours,
             total_failures=len(failures),
             failure_rate=failure_rate,
@@ -280,8 +280,8 @@ class FailureAnalyzer:
 
     def _calculate_trends(self, hours: int) -> List[FailureTrend]:
         """Calculate failure trends by comparing to previous period."""
-        current_cutoff = datetime.utcnow() - timedelta(hours=hours)
-        previous_cutoff = datetime.utcnow() - timedelta(hours=hours * 2)
+        current_cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        previous_cutoff = datetime.now(timezone.utc) - timedelta(hours=hours * 2)
 
         current_failures = self._read_failures(current_cutoff)
         previous_failures = self._read_failures(previous_cutoff)
@@ -354,7 +354,7 @@ class FailureAnalyzer:
     def _empty_report(self, hours: int) -> FailureAnalysisReport:
         """Generate an empty report when no failures found."""
         return FailureAnalysisReport(
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             time_range_hours=hours,
             total_failures=0,
             failure_rate=0.0,

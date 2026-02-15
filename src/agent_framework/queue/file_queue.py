@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List
 
@@ -292,7 +292,7 @@ class FileQueue:
         backoff = self.backoff_initial * (self.backoff_multiplier ** (task.retry_count - 1))
         backoff = min(backoff, self.backoff_max)
 
-        time_since_failure = (datetime.utcnow() - task.last_failed_at).total_seconds()
+        time_since_failure = (datetime.now(timezone.utc) - task.last_failed_at).total_seconds()
         return time_since_failure >= backoff
 
     def _dependencies_met(self, task: Task) -> bool:

@@ -3,7 +3,7 @@
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Set
 
@@ -205,7 +205,7 @@ class CircuitBreaker:
     def check_stale_tasks(self) -> List[Task]:
         """Find tasks older than max age."""
         stale_tasks = []
-        cutoff_date = datetime.utcnow() - timedelta(days=self.max_task_age_days)
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=self.max_task_age_days)
 
         if not self.queue_dir.exists():
             return stale_tasks
@@ -232,7 +232,7 @@ class CircuitBreaker:
         if not self.queue_dir.exists():
             return True, ""
 
-        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
         recent_count = 0
         total_count = 0
 

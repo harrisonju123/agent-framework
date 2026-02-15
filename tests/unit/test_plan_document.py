@@ -1,7 +1,7 @@
 """Tests for PlanDocument model and serialization."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -91,7 +91,7 @@ class TestTaskWithPlan:
             "priority": 1,
             "created_by": "architect",
             "assigned_to": "engineer",
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
             "title": "Test task",
             "description": "Test description",
         }
