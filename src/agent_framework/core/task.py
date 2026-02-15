@@ -153,6 +153,10 @@ class Task(BaseModel):
     escalation_report: Optional[EscalationReport] = None
     retry_attempts: List[RetryAttempt] = Field(default_factory=list)
 
+    # Task decomposition and fan-in support
+    parent_task_id: Optional[str] = None
+    subtask_ids: list[str] = Field(default_factory=list)
+
     class Config:
         """Pydantic config."""
         use_enum_values = True
