@@ -412,6 +412,9 @@ class AgentDefinition(BaseModel):
     can_commit: bool = False
     can_create_pr: bool = False
 
+    # Per-agent toggle for engineer specialization (only applies to engineer agents)
+    specialization_enabled: bool = True
+
 
 class JIRAConfig(BaseModel):
     """JIRA configuration."""
@@ -580,6 +583,60 @@ def load_github_config(github_path: Path = Path("config/github.yaml")) -> Option
     if not github_path.exists():
         return None
     return _get_cached_or_load(github_path.resolve(), _load_github_config_from_file)
+
+
+# --- Specialization config models and loader ---
+
+
+class SpecializationTeammateConfig(BaseModel):
+    """Teammate definition within a specialization profile."""
+    description: str
+    prompt: str
+
+
+class SpecializationProfileConfig(BaseModel):
+    """A single specialization profile from YAML."""
+    id: str
+    name: str
+    description: str
+    file_patterns: List[str]
+    prompt_suffix: str
+    tool_guidance: str
+    teammates: Dict[str, SpecializationTeammateConfig] = Field(default_factory=dict)
+
+
+class SpecializationConfig(BaseModel):
+    """Top-level specialization configuration."""
+    enabled: bool = True
+    profiles: List[SpecializationProfileConfig] = Field(default_factory=list)
+
+
+def _load_specializations_from_file(spec_path: Path) -> SpecializationConfig:
+    """Internal loader for specialization config (no caching)."""
+    with open(spec_path) as f:
+        data = yaml.safe_load(f) or {}
+    return SpecializationConfig(**data)
+
+
+SPECIALIZATIONS_CONFIG_PATH = Path("config/specializations.yaml")
+
+
+def clear_config_cache() -> None:
+    """Clear the module-level config cache. Useful for tests."""
+    _config_cache.clear()
+
+
+def load_specializations(
+    spec_path: Path = SPECIALIZATIONS_CONFIG_PATH,
+) -> Optional[SpecializationConfig]:
+    """Load specialization configuration from YAML file.
+
+    Uses mtime-based caching — returns cached config if the file hasn't changed.
+    Returns None when the file doesn't exist (callers fall back to hardcoded defaults).
+    """
+    if not spec_path.exists():
+        return None
+    return _get_cached_or_load(spec_path.resolve(), _load_specializations_from_file)
 
 
 def _expand_env_vars(data: Any, _path: str = "") -> Any:

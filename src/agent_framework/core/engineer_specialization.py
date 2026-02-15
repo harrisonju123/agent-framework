@@ -1,15 +1,20 @@
 """Engineer specialization system based on file patterns.
 
 Selects specialized engineer profiles (backend, frontend, infrastructure) based on
-file patterns detected in tasks.
+file patterns detected in tasks. Profiles are loaded from config/specializations.yaml
+with hardcoded defaults as fallback.
 """
 
 import fnmatch
+import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from .task import Task
+
+logger = logging.getLogger(__name__)
 
 
 # Extensions that indicate source code (not config, docs, etc.)
@@ -268,12 +273,89 @@ COMMON TOOLS FOR INFRASTRUCTURE:
 )
 
 
-# All available profiles
-SPECIALIZATION_PROFILES = [
+# Fallback profiles used when config/specializations.yaml doesn't exist.
+# The YAML file is the source of truth when present.
+_FALLBACK_PROFILES = [
     BACKEND_PROFILE,
     FRONTEND_PROFILE,
     INFRASTRUCTURE_PROFILE,
 ]
+
+# Public alias kept for backward compatibility (tests import this)
+SPECIALIZATION_PROFILES = _FALLBACK_PROFILES
+
+# Identity-based cache: avoids re-converting Pydantic→dataclass on every call
+# when the underlying SpecializationConfig object hasn't changed.
+_profiles_cache: Optional[tuple] = None  # (config_identity, profiles)
+
+
+def _load_profiles() -> List[SpecializationProfile]:
+    """Load profiles from YAML config, falling back to hardcoded defaults.
+
+    Converts Pydantic config models to SpecializationProfile dataclasses so the
+    rest of the module works with a single type. Uses an identity-based cache to
+    skip reconversion when the mtime-cached config object hasn't changed.
+    """
+    global _profiles_cache
+    from .config import load_specializations, SPECIALIZATIONS_CONFIG_PATH
+
+    config = load_specializations(SPECIALIZATIONS_CONFIG_PATH)
+    if config is None:
+        logger.debug("No specializations.yaml found, using hardcoded defaults")
+        return _FALLBACK_PROFILES
+
+    # Return cached conversion if the config object is the same instance
+    if _profiles_cache is not None and _profiles_cache[0] is config:
+        return _profiles_cache[1]
+
+    profiles = []
+    for p in config.profiles:
+        teammates = {
+            tid: {"description": t.description, "prompt": t.prompt}
+            for tid, t in p.teammates.items()
+        }
+        profiles.append(SpecializationProfile(
+            id=p.id,
+            name=p.name,
+            description=p.description,
+            file_patterns=p.file_patterns,
+            prompt_suffix=p.prompt_suffix,
+            tool_guidance=p.tool_guidance,
+            teammates=teammates,
+        ))
+
+    logger.debug("Loaded %d specialization profiles from YAML", len(profiles))
+    _profiles_cache = (config, profiles)
+    return profiles
+
+
+def get_specialization_enabled() -> bool:
+    """Check whether specialization is globally enabled via YAML config.
+
+    Returns True when the config file doesn't exist (opt-out model).
+    """
+    from .config import load_specializations, SPECIALIZATIONS_CONFIG_PATH
+
+    config = load_specializations(SPECIALIZATIONS_CONFIG_PATH)
+    if config is None:
+        return True
+    return config.enabled
+
+
+def _get_profile_by_id(
+    profile_id: str,
+    profiles: Optional[List[SpecializationProfile]] = None,
+) -> Optional[SpecializationProfile]:
+    """Look up a profile by its id.
+
+    Args:
+        profile_id: The profile id to search for.
+        profiles: Pre-loaded profiles list. Loads from config if not provided.
+    """
+    for profile in (profiles if profiles is not None else _load_profiles()):
+        if profile.id == profile_id:
+            return profile
+    return None
 
 
 def detect_file_patterns(task: Task) -> List[str]:
@@ -317,7 +399,9 @@ def detect_file_patterns(task: Task) -> List[str]:
     for match in re.finditer(file_pattern, description_text):
         files.append(match.group(0))
 
-    return list(set(files))  # Deduplicate
+    result = list(set(files))  # Deduplicate
+    logger.debug("Extracted %d files from task (first 10: %s)", len(result), result[:10])
+    return result
 
 
 def _matches_pattern(file_path: str, pattern: str) -> bool:
@@ -352,14 +436,15 @@ def match_patterns(files: List[str], patterns: List[str]) -> int:
                 matches += 1
                 break  # Count each file only once
 
+    logger.debug("Matched %d/%d files against %d patterns", matches, len(files), len(patterns))
     return matches
 
 
 def detect_specialization(task: Task) -> Optional[SpecializationProfile]:
     """Detect the appropriate engineer specialization based on task file patterns.
 
-    Analyzes files mentioned in the task and returns the specialization profile
-    with the highest number of matching patterns.
+    Checks for a specialization_hint override first (for monorepo tasks), then
+    falls back to file-pattern scoring across all loaded profiles.
 
     Args:
         task: Task to analyze
@@ -367,32 +452,69 @@ def detect_specialization(task: Task) -> Optional[SpecializationProfile]:
     Returns:
         SpecializationProfile if a clear match is found, None for generic engineer
     """
+    # Load profiles once — reused for hint lookup and scoring
+    profiles = _load_profiles()
+
+    # Check for explicit hint override (monorepo support)
+    context = task.context or {}
+    hint = context.get("specialization_hint")
+    if hint and isinstance(hint, str):
+        profile = _get_profile_by_id(hint, profiles)
+        if profile:
+            logger.info(
+                "Specialization hint '%s' matched profile '%s', skipping file detection",
+                hint, profile.name,
+            )
+            return profile
+        logger.warning(
+            "Specialization hint '%s' does not match any profile, falling back to file detection",
+            hint,
+        )
+
     # Extract files from task
     files = detect_file_patterns(task)
 
     if not files:
+        logger.debug("No files detected in task, skipping specialization")
         return None
 
     # Score each specialization profile
     scores = []
-    for profile in SPECIALIZATION_PROFILES:
+    for profile in profiles:
         match_count = match_patterns(files, profile.file_patterns)
         if match_count > 0:
             scores.append((match_count, profile))
 
     if not scores:
+        logger.debug("No profile matched any files")
         return None
 
     # Sort by match count (descending)
     scores.sort(reverse=True, key=lambda x: x[0])
 
-    top_score, top_profile = scores[0]
     total_files = len(files)
+    for score, profile in scores:
+        pct = (score / total_files * 100) if total_files else 0
+        logger.debug(
+            "Profile '%s': %d/%d files matched (%.0f%%)",
+            profile.id, score, total_files, pct,
+        )
+
+    top_score, top_profile = scores[0]
 
     # Require clear signal: at least 2 matching files AND >50% of files
-    if top_score >= max(2, total_files * 0.5):
+    threshold = max(2, total_files * 0.5)
+    if top_score >= threshold:
+        logger.info(
+            "Selected specialization '%s' (score=%d, threshold=%.0f, total_files=%d)",
+            top_profile.name, top_score, threshold, total_files,
+        )
         return top_profile
 
+    logger.debug(
+        "Top profile '%s' score=%d below threshold=%.0f, no specialization selected",
+        top_profile.id, top_score, threshold,
+    )
     return None
 
 

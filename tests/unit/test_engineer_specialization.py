@@ -2,6 +2,7 @@
 
 import pytest
 from datetime import datetime, UTC
+from unittest.mock import patch
 
 from agent_framework.core.engineer_specialization import (
     detect_file_patterns,
@@ -9,10 +10,20 @@ from agent_framework.core.engineer_specialization import (
     detect_specialization,
     apply_specialization_to_prompt,
     get_specialized_teammates,
+    get_specialization_enabled,
+    _load_profiles,
+    _get_profile_by_id,
+    SpecializationProfile,
     BACKEND_PROFILE,
     FRONTEND_PROFILE,
     INFRASTRUCTURE_PROFILE,
+    SPECIALIZATION_PROFILES,
     KNOWN_SOURCE_EXTENSIONS,
+)
+from agent_framework.core.config import (
+    SpecializationConfig,
+    SpecializationProfileConfig,
+    SpecializationTeammateConfig,
 )
 from agent_framework.core.task import Task, TaskType, TaskStatus, PlanDocument
 
@@ -188,7 +199,8 @@ class TestDetectSpecialization:
             "internal/service/user.go",
         ])
         profile = detect_specialization(task)
-        assert profile == BACKEND_PROFILE
+        assert profile is not None
+        assert profile.id == "backend"
 
     def test_backend_specialization_python(self):
         """Should detect backend specialization for Python files."""
@@ -198,7 +210,8 @@ class TestDetectSpecialization:
             "tests/test_api.py",
         ])
         profile = detect_specialization(task)
-        assert profile == BACKEND_PROFILE
+        assert profile is not None
+        assert profile.id == "backend"
 
     def test_frontend_specialization_react(self):
         """Should detect frontend specialization for React files."""
@@ -208,7 +221,8 @@ class TestDetectSpecialization:
             "src/styles/app.scss",
         ])
         profile = detect_specialization(task)
-        assert profile == FRONTEND_PROFILE
+        assert profile is not None
+        assert profile.id == "frontend"
 
     def test_frontend_specialization_vue(self):
         """Should detect frontend specialization for Vue files."""
@@ -217,7 +231,8 @@ class TestDetectSpecialization:
             "src/views/Home.vue",
         ])
         profile = detect_specialization(task)
-        assert profile == FRONTEND_PROFILE
+        assert profile is not None
+        assert profile.id == "frontend"
 
     def test_infrastructure_specialization_docker(self):
         """Should detect infrastructure specialization for Docker files."""
@@ -227,7 +242,8 @@ class TestDetectSpecialization:
             ".github/workflows/ci.yml",
         ])
         profile = detect_specialization(task)
-        assert profile == INFRASTRUCTURE_PROFILE
+        assert profile is not None
+        assert profile.id == "infrastructure"
 
     def test_infrastructure_specialization_k8s(self):
         """Should detect infrastructure specialization for Kubernetes files."""
@@ -237,7 +253,8 @@ class TestDetectSpecialization:
             "helm/values.yaml",
         ])
         profile = detect_specialization(task)
-        assert profile == INFRASTRUCTURE_PROFILE
+        assert profile is not None
+        assert profile.id == "infrastructure"
 
     def test_infrastructure_not_triggered_by_generic_yaml(self):
         """Generic YAML config files should not trigger infrastructure specialization."""
@@ -258,7 +275,8 @@ class TestDetectSpecialization:
             "src/components/Button.tsx",  # One frontend file
         ])
         profile = detect_specialization(task)
-        assert profile == BACKEND_PROFILE
+        assert profile is not None
+        assert profile.id == "backend"
 
     def test_mixed_patterns_no_clear_winner(self):
         """Should return None for mixed patterns with no clear winner."""
@@ -366,14 +384,14 @@ class TestEndToEnd:
         )
 
         profile = detect_specialization(task)
-        assert profile == BACKEND_PROFILE
+        assert profile is not None
+        assert profile.id == "backend"
 
         base_prompt = "You are the Software Engineer responsible for implementing features."
         specialized_prompt = apply_specialization_to_prompt(base_prompt, profile)
 
         assert "BACKEND SPECIALIZATION" in specialized_prompt
-        assert "API design and implementation" in specialized_prompt
-        assert "parameterized queries" in specialized_prompt
+        assert "API design" in specialized_prompt
 
     def test_frontend_workflow(self):
         """Test full workflow for frontend specialization."""
@@ -387,7 +405,8 @@ class TestEndToEnd:
         )
 
         profile = detect_specialization(task)
-        assert profile == FRONTEND_PROFILE
+        assert profile is not None
+        assert profile.id == "frontend"
 
         base_prompt = "You are the Software Engineer responsible for implementing features."
         specialized_prompt = apply_specialization_to_prompt(base_prompt, profile)
@@ -411,3 +430,108 @@ class TestEndToEnd:
 
         assert specialized_prompt == base_prompt
         assert "SPECIALIZATION" not in specialized_prompt
+
+
+class TestLoadProfiles:
+    """Tests for YAML-based profile loading."""
+
+    @patch("agent_framework.core.config.load_specializations")
+    def test_load_profiles_fallback_to_defaults(self, mock_load):
+        """No YAML file → hardcoded profiles returned."""
+        mock_load.return_value = None
+        profiles = _load_profiles()
+        assert profiles is SPECIALIZATION_PROFILES
+        assert len(profiles) == 3
+
+    @patch("agent_framework.core.config.load_specializations")
+    def test_load_profiles_from_yaml(self, mock_load):
+        """YAML config → profiles converted from Pydantic models."""
+        mock_load.return_value = SpecializationConfig(
+            enabled=True,
+            profiles=[
+                SpecializationProfileConfig(
+                    id="custom",
+                    name="Custom Engineer",
+                    description="A custom profile",
+                    file_patterns=["**/*.custom"],
+                    prompt_suffix="CUSTOM PROMPT",
+                    tool_guidance="CUSTOM TOOLS",
+                    teammates={
+                        "helper": SpecializationTeammateConfig(
+                            description="A helper",
+                            prompt="Help with things.",
+                        )
+                    },
+                )
+            ],
+        )
+        profiles = _load_profiles()
+        assert len(profiles) == 1
+        assert profiles[0].id == "custom"
+        assert profiles[0].name == "Custom Engineer"
+        assert profiles[0].file_patterns == ["**/*.custom"]
+        assert "helper" in profiles[0].teammates
+
+    @patch("agent_framework.core.config.load_specializations")
+    def test_get_specialization_enabled_default_true(self, mock_load):
+        """No config file → enabled defaults to True."""
+        mock_load.return_value = None
+        assert get_specialization_enabled() is True
+
+    @patch("agent_framework.core.config.load_specializations")
+    def test_get_specialization_enabled_from_config(self, mock_load):
+        """Config sets enabled=False → returns False."""
+        mock_load.return_value = SpecializationConfig(enabled=False, profiles=[])
+        assert get_specialization_enabled() is False
+
+
+class TestSpecializationHint:
+    """Tests for specialization_hint override."""
+
+    def test_hint_selects_correct_profile(self):
+        """Valid hint should return matching profile immediately."""
+        task = create_test_task(files_in_plan=["README.md"])
+        task.context["specialization_hint"] = "backend"
+        profile = detect_specialization(task)
+        assert profile is not None
+        assert profile.id == "backend"
+
+    def test_hint_invalid_falls_back(self):
+        """Invalid hint should fall through to file detection."""
+        task = create_test_task(files_in_plan=[
+            "src/components/Button.tsx",
+            "src/pages/Home.tsx",
+            "src/styles/app.scss",
+        ])
+        task.context["specialization_hint"] = "nonexistent"
+        profile = detect_specialization(task)
+        # Falls back to file detection → frontend wins
+        assert profile is not None
+        assert profile.id == "frontend"
+
+    def test_hint_overrides_file_detection(self):
+        """Hint should win even when files point to a different profile."""
+        task = create_test_task(files_in_plan=[
+            "src/components/Button.tsx",
+            "src/pages/Home.tsx",
+            "src/styles/app.scss",
+        ])
+        # Files are frontend, but hint says infrastructure
+        task.context["specialization_hint"] = "infrastructure"
+        profile = detect_specialization(task)
+        assert profile is not None
+        assert profile.id == "infrastructure"
+
+
+class TestGetProfileById:
+    """Tests for _get_profile_by_id helper."""
+
+    def test_returns_matching_profile(self):
+        """Should find profile by id."""
+        profile = _get_profile_by_id("frontend")
+        assert profile is not None
+        assert profile.id == "frontend"
+
+    def test_returns_none_for_unknown(self):
+        """Should return None for unknown id."""
+        assert _get_profile_by_id("nonexistent") is None

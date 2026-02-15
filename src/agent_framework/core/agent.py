@@ -1613,20 +1613,24 @@ Fix the failing tests and ensure all tests pass.
         """Detect engineer specialization profile for this task.
 
         Returns the profile if this is an engineer agent with a clear match, else None.
+        Respects both per-agent and global enable/disable toggles.
         """
         if self.config.base_id != "engineer":
             return None
 
-        from .engineer_specialization import detect_specialization
+        # Per-agent toggle from agents.yaml
+        if self._agent_definition and not self._agent_definition.specialization_enabled:
+            self.logger.debug("Specialization disabled for this agent via agents.yaml")
+            return None
 
-        profile = detect_specialization(task)
+        # Global toggle from specializations.yaml
+        from .engineer_specialization import detect_specialization, get_specialization_enabled
 
-        if profile:
-            self.logger.info(f"Engineer specialization detected: {profile.name}")
-        else:
-            self.logger.debug("No specialization detected, using generic engineer profile")
+        if not get_specialization_enabled():
+            self.logger.debug("Specialization disabled globally via specializations.yaml")
+            return None
 
-        return profile
+        return detect_specialization(task)
 
     def _build_prompt(self, task: Task) -> str:
         """
