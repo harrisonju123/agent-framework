@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Optional, List
 
@@ -508,3 +508,116 @@ class FileQueue:
 
         # Push to appropriate queue
         self.push(task, task.assigned_to)
+
+    def check_subtasks_complete(self, parent_task_id: str, subtask_ids: list[str]) -> bool:
+        """Check if all subtasks of a parent are completed successfully.
+
+        Args:
+            parent_task_id: The parent task ID
+            subtask_ids: List of expected subtask IDs
+
+        Returns:
+            True only when ALL subtask_ids are found in completed/ with COMPLETED status.
+        """
+        if not subtask_ids:
+            return True
+
+        for subtask_id in subtask_ids:
+            subtask_file = self.completed_dir / f"{subtask_id}.json"
+            if not subtask_file.exists():
+                return False
+
+            try:
+                subtask = self._load_task(subtask_file)
+                if subtask.status != TaskStatus.COMPLETED:
+                    return False
+            except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                return False
+
+        return True
+
+    def get_subtasks(self, parent_task_id: str) -> List[Task]:
+        """Get all subtasks of a parent across all queues and completed directory.
+
+        Searches by checking task's parent_task_id field.
+        Returns tasks from both active queues and completed directory.
+        """
+        subtasks = []
+
+        # Search all queue directories
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if not queue_dir.is_dir():
+                    continue
+                for task_file in queue_dir.glob("*.json"):
+                    try:
+                        task = self._load_task(task_file)
+                        if task.parent_task_id == parent_task_id:
+                            subtasks.append(task)
+                    except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                        continue
+
+        # Search completed directory
+        if self.completed_dir.exists():
+            for task_file in self.completed_dir.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.parent_task_id == parent_task_id:
+                        subtasks.append(task)
+                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                    continue
+
+        return subtasks
+
+    def get_parent_task(self, task: Task) -> Optional[Task]:
+        """Load the parent task for a subtask.
+
+        Looks up task.parent_task_id in all queues and completed directory.
+        Returns None if task has no parent or parent not found.
+        """
+        if not task.parent_task_id:
+            return None
+
+        return self.find_task(task.parent_task_id)
+
+    def create_fan_in_task(self, parent_task: Task, completed_subtasks: List[Task]) -> Task:
+        """Create a continuation task that aggregates subtask results.
+
+        The fan-in task:
+        - ID: f"fan-in-{parent_task.id}"
+        - Type: matches parent's original type
+        - Inherits parent's context with added fan_in=True
+        - Aggregates result_summary from all completed subtasks
+        - Assigned to the next agent in workflow (typically QA)
+        """
+        # Aggregate results
+        aggregated_results = []
+        for subtask in completed_subtasks:
+            if subtask.result_summary:
+                aggregated_results.append(f"[{subtask.title}]: {subtask.result_summary}")
+
+        fan_in_task = Task(
+            id=f"fan-in-{parent_task.id}",
+            type=parent_task.type,
+            status=TaskStatus.PENDING,
+            priority=parent_task.priority,
+            created_by="system",
+            assigned_to="qa",  # Next step after engineer in default workflow
+            created_at=datetime.now(UTC),
+            title=f"[fan-in] {parent_task.title}",
+            description=parent_task.description,
+            context={
+                **parent_task.context,
+                "fan_in": True,
+                "parent_task_id": parent_task.id,
+                "subtask_count": len(completed_subtasks),
+                "aggregated_results": "\n".join(aggregated_results),
+            },
+            result_summary="\n".join(aggregated_results) if aggregated_results else None,
+        )
+        return fan_in_task
+
+    def _fan_in_already_created(self, parent_task_id: str) -> bool:
+        """Check if fan-in task already exists (prevent duplicate creation)."""
+        fan_in_id = f"fan-in-{parent_task_id}"
+        return self.find_task(fan_in_id) is not None
