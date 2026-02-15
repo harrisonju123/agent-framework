@@ -460,7 +460,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("debate_topic requires string topic");
         }
         const perspectives = custom_perspectives as { advocate?: string; critic?: string } | undefined;
-        result = debateTopic(
+        result = await debateTopic(
           workspace,
           topic,
           typeof context === "string" ? context : undefined,
