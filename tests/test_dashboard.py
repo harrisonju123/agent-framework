@@ -16,6 +16,7 @@ from agent_framework.core.activity import (
     TaskPhase,
 )
 from agent_framework.cli.dashboard import AgentDashboard
+from agent_framework.core.config import RepositoryConfig
 
 
 def test_activity_manager_basic_operations():
@@ -201,6 +202,119 @@ agents:
 
         # Basic checks - should not raise exceptions
         assert layout is not None
+
+
+def _make_dashboard_workspace(tmpdir):
+    """Create a minimal workspace with agents config for dashboard tests."""
+    workspace = Path(tmpdir)
+    config_dir = workspace / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "agents.yaml").write_text("""
+agents:
+  - id: architect
+    name: Technical Architect
+    queue: architect
+    enabled: true
+    prompt: "Test prompt"
+""")
+    return workspace
+
+
+def test_handle_key_n_returns_new_work():
+    """Pressing 'n' returns NEW_WORK action."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = _make_dashboard_workspace(tmpdir)
+        dashboard = AgentDashboard(workspace)
+        assert dashboard._handle_key('n') == "NEW_WORK"
+
+
+def test_prompt_new_work_with_default_repo(monkeypatch):
+    """_prompt_new_work() queues task using default_repo, only prompts for goal."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = _make_dashboard_workspace(tmpdir)
+        repo = RepositoryConfig(github_repo="owner/myrepo", jira_project="PROJ")
+        dashboard = AgentDashboard(workspace, default_repo=repo)
+
+        monkeypatch.setattr("builtins.input", lambda prompt: "Implement feature X")
+
+        result = dashboard._prompt_new_work()
+        assert result == "Implement feature X"
+
+        # Verify task was queued to architect
+        stats = dashboard.queue.get_queue_stats("architect")
+        assert stats["count"] == 1
+
+        task = dashboard.queue.pop("architect")
+        assert task.title == "Plan and delegate: Implement feature X"
+        assert task.context["github_repo"] == "owner/myrepo"
+        assert task.created_by == "dashboard"
+
+
+def test_prompt_new_work_no_default_repo_prompts_selection(monkeypatch):
+    """Without default_repo, prompts for both repo and goal."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = _make_dashboard_workspace(tmpdir)
+
+        # Write framework config with repos
+        (workspace / "config" / "agent-framework.yaml").write_text("""
+repositories:
+  - github_repo: owner/repo-a
+    jira_project: REPA
+  - github_repo: owner/repo-b
+""")
+        dashboard = AgentDashboard(workspace)
+
+        inputs = iter(["2", "Fix bug Y"])
+        monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+        result = dashboard._prompt_new_work()
+        assert result == "Fix bug Y"
+
+        task = dashboard.queue.pop("architect")
+        assert task is not None
+        assert task.context["github_repo"] == "owner/repo-b"
+
+
+def test_prompt_new_work_empty_goal_returns_none(monkeypatch):
+    """Empty goal input returns None without queuing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = _make_dashboard_workspace(tmpdir)
+        repo = RepositoryConfig(github_repo="owner/myrepo")
+        dashboard = AgentDashboard(workspace, default_repo=repo)
+
+        monkeypatch.setattr("builtins.input", lambda prompt: "")
+
+        result = dashboard._prompt_new_work()
+        assert result is None
+        assert dashboard.queue.get_queue_stats("architect")["count"] == 0
+
+
+def test_prompt_new_work_keyboard_interrupt_returns_none(monkeypatch):
+    """KeyboardInterrupt during input returns None."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = _make_dashboard_workspace(tmpdir)
+        repo = RepositoryConfig(github_repo="owner/myrepo")
+        dashboard = AgentDashboard(workspace, default_repo=repo)
+
+        def raise_interrupt(prompt):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("builtins.input", raise_interrupt)
+
+        result = dashboard._prompt_new_work()
+        assert result is None
+
+
+def test_help_overlay_includes_n_shortcut():
+    """Help overlay lists the 'n' shortcut."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = _make_dashboard_workspace(tmpdir)
+        dashboard = AgentDashboard(workspace)
+        panel = dashboard.render_help_overlay()
+        # Panel.renderable is the Text object
+        help_text = str(panel.renderable)
+        assert "n" in help_text
+        assert "Queue new work" in help_text
 
 
 if __name__ == "__main__":

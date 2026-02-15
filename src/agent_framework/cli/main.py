@@ -438,7 +438,7 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve):
 
         from .dashboard import AgentDashboard
 
-        dashboard = AgentDashboard(workspace)
+        dashboard = AgentDashboard(workspace, default_repo=selected_repo)
         try:
             asyncio.run(dashboard.run())
         except KeyboardInterrupt:
@@ -2039,7 +2039,10 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             console.print("[dim]Press Ctrl+C to exit dashboard[/]\n")
 
             from .dashboard import AgentDashboard
-            dashboard = AgentDashboard(workspace)
+            matched_repo = next(
+                (r for r in framework_config.repositories if r.github_repo == github_repo), None
+            )
+            dashboard = AgentDashboard(workspace, default_repo=matched_repo)
             try:
                 asyncio.run(dashboard.run())
             except KeyboardInterrupt:
