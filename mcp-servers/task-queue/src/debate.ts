@@ -9,10 +9,12 @@
  * multiple perspectives simultaneously.
  */
 
-import { execFileSync } from "child_process";
+import { spawn } from "child_process";
 import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { createLogger } from "./logger.js";
+import { buildConsultationEnv } from "./consultation.js";
+import type { PerspectiveArgument, DebateResult } from "./types.js";
 
 const logger = createLogger();
 
@@ -22,52 +24,6 @@ const DEBATE_COST = 2;
 // Input validation limits
 const MAX_TOPIC_LENGTH = 1500;
 const MAX_DEBATE_CONTEXT_LENGTH = 3000;
-
-export interface PerspectiveArgument {
-  perspective: string;
-  argument: string;
-  success: boolean;
-  error?: string;
-}
-
-export interface DebateResult {
-  success: boolean;
-  topic: string;
-  advocate: PerspectiveArgument;
-  critic: PerspectiveArgument;
-  synthesis: {
-    recommendation: string;
-    confidence: "high" | "medium" | "low";
-    trade_offs: string[];
-    reasoning: string;
-  };
-  debate_id: string;
-  consultations_used: number;
-  consultations_remaining: number;
-}
-
-/**
- * Build a minimal env for debate subprocesses.
- * Reuses the same pattern as consultation.ts.
- */
-function buildDebateEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  const allowedVars = [
-    "PATH",
-    "HOME",
-    "USER",
-    "SHELL",
-    "TERM",
-    "ANTHROPIC_API_KEY",
-    "TMPDIR",
-  ];
-  for (const key of allowedVars) {
-    if (process.env[key]) {
-      env[key] = process.env[key]!;
-    }
-  }
-  return env;
-}
 
 function sanitizeDebateId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 100);
@@ -87,7 +43,7 @@ function logDebate(
 }
 
 /**
- * Spawn a single perspective agent with a specific role.
+ * Spawn a single perspective agent with a specific role (async).
  */
 function spawnPerspective(
   workspace: string,
@@ -95,18 +51,21 @@ function spawnPerspective(
   topic: string,
   context: string,
   timeout: number,
-): PerspectiveArgument {
-  const prompt = [
-    `You are participating in a structured debate to help make a complex decision.`,
-    `Your role: ${perspective}`,
-    `Topic: ${topic}`,
-    context ? `\nContext: ${context}` : "",
-    `\nProvide your argument in 3-5 sentences. Be specific and focus on practical implications.`,
-    `Your goal is to argue your assigned perspective, even if you see merit in the other side.`,
-  ].join("\n");
+): Promise<PerspectiveArgument> {
+  return new Promise((resolve) => {
+    const prompt = [
+      `You are participating in a structured debate to help make a complex decision.`,
+      `Your role: ${perspective}`,
+      `Topic: ${topic}`,
+      context ? `\nContext: ${context}` : "",
+      `\nProvide your argument in 3-5 sentences. Be specific and focus on practical implications.`,
+      `Your goal is to argue your assigned perspective, even if you see merit in the other side.`,
+    ].join("\n");
 
-  try {
-    const result = execFileSync(
+    let output = "";
+    let errorOutput = "";
+
+    const proc = spawn(
       "claude",
       [
         "--print",
@@ -116,33 +75,59 @@ function spawnPerspective(
         "1",
       ],
       {
-        input: prompt,
-        timeout,
-        encoding: "utf-8",
         cwd: workspace,
-        env: buildDebateEnv(),
+        env: buildConsultationEnv(),
+        timeout,
       },
     );
 
-    return {
-      perspective,
-      argument: result.trim(),
-      success: true,
-    };
-  } catch (error: unknown) {
-    const err = error as Error;
-    logger.error(`Perspective ${perspective} failed`, { error: err.message });
-    return {
-      perspective,
-      argument: "",
-      success: false,
-      error: err.message,
-    };
-  }
+    proc.stdout.on("data", (data: Buffer) => {
+      output += data.toString();
+    });
+
+    proc.stderr.on("data", (data: Buffer) => {
+      errorOutput += data.toString();
+    });
+
+    proc.on("close", (code: number) => {
+      if (code === 0) {
+        resolve({
+          perspective,
+          argument: output.trim(),
+          success: true,
+        });
+      } else {
+        logger.error(`Perspective ${perspective} failed`, {
+          error: errorOutput || `Process exited with code ${code}`
+        });
+        resolve({
+          perspective,
+          argument: "",
+          success: false,
+          error: errorOutput || `Process exited with code ${code}`,
+        });
+      }
+    });
+
+    proc.on("error", (err: Error) => {
+      logger.error(`Perspective ${perspective} failed`, { error: err.message });
+      resolve({
+        perspective,
+        argument: "",
+        success: false,
+        error: err.message,
+      });
+    });
+
+    if (proc.stdin) {
+      proc.stdin.write(prompt);
+      proc.stdin.end();
+    }
+  });
 }
 
 /**
- * Arbiter synthesizes both perspectives into a final recommendation.
+ * Arbiter synthesizes both perspectives into a final recommendation (async).
  */
 function synthesizeArguments(
   workspace: string,
@@ -150,33 +135,36 @@ function synthesizeArguments(
   advocate: PerspectiveArgument,
   critic: PerspectiveArgument,
   timeout: number,
-): {
+): Promise<{
   recommendation: string;
   confidence: "high" | "medium" | "low";
   trade_offs: string[];
   reasoning: string;
-} {
-  const prompt = [
-    `You are an Arbiter synthesizing two perspectives on a complex decision.`,
-    `\nTopic: ${topic}`,
-    `\nAdvocate's argument:\n${advocate.argument}`,
-    `\nCritic's argument:\n${critic.argument}`,
-    `\nYour task:`,
-    `1. Provide a clear recommendation (2-3 sentences)`,
-    `2. State your confidence level: high, medium, or low`,
-    `3. List 2-4 key trade-offs to consider`,
-    `4. Explain your reasoning (2-3 sentences)`,
-    `\nFormat your response as JSON:`,
-    `{`,
-    `  "recommendation": "...",`,
-    `  "confidence": "high|medium|low",`,
-    `  "trade_offs": ["...", "..."],`,
-    `  "reasoning": "..."`,
-    `}`,
-  ].join("\n");
+}> {
+  return new Promise((resolve) => {
+    const prompt = [
+      `You are an Arbiter synthesizing two perspectives on a complex decision.`,
+      `\nTopic: ${topic}`,
+      `\nAdvocate's argument:\n${advocate.argument}`,
+      `\nCritic's argument:\n${critic.argument}`,
+      `\nYour task:`,
+      `1. Provide a clear recommendation (2-3 sentences)`,
+      `2. State your confidence level: high, medium, or low`,
+      `3. List 2-4 key trade-offs to consider`,
+      `4. Explain your reasoning (2-3 sentences)`,
+      `\nFormat your response as JSON:`,
+      `{`,
+      `  "recommendation": "...",`,
+      `  "confidence": "high|medium|low",`,
+      `  "trade_offs": ["...", "..."],`,
+      `  "reasoning": "..."`,
+      `}`,
+    ].join("\n");
 
-  try {
-    const result = execFileSync(
+    let output = "";
+    let errorOutput = "";
+
+    const proc = spawn(
       "claude",
       [
         "--print",
@@ -186,62 +174,100 @@ function synthesizeArguments(
         "1",
       ],
       {
-        input: prompt,
-        timeout,
-        encoding: "utf-8",
         cwd: workspace,
-        env: buildDebateEnv(),
+        env: buildConsultationEnv(),
+        timeout,
       },
     );
 
-    // Parse JSON from the response
-    const text = result.trim();
-    // Extract JSON from markdown code blocks if present
-    const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) ||
-                      text.match(/(\{[\s\S]*\})/);
+    proc.stdout.on("data", (data: Buffer) => {
+      output += data.toString();
+    });
 
-    if (!jsonMatch) {
-      throw new Error("Could not extract JSON from arbiter response");
+    proc.stderr.on("data", (data: Buffer) => {
+      errorOutput += data.toString();
+    });
+
+    proc.on("close", (code: number) => {
+      if (code !== 0) {
+        logger.error("Arbiter synthesis failed", {
+          error: errorOutput || `Process exited with code ${code}`
+        });
+        resolve({
+          recommendation: "Unable to synthesize perspectives due to execution error. Review both arguments and decide based on your judgment.",
+          confidence: "low",
+          trade_offs: ["Synthesis failed - manual review needed"],
+          reasoning: `Arbiter failed: ${errorOutput || `exit code ${code}`}`,
+        });
+        return;
+      }
+
+      try {
+        // Parse JSON from the response
+        const text = output.trim();
+        // Extract JSON from markdown code blocks if present
+        const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) ||
+                          text.match(/(\{[\s\S]*\})/);
+
+        if (!jsonMatch) {
+          throw new Error("Could not extract JSON from arbiter response");
+        }
+
+        const synthesis = JSON.parse(jsonMatch[1]);
+
+        // Validate structure
+        if (!synthesis.recommendation || !synthesis.confidence || !Array.isArray(synthesis.trade_offs)) {
+          throw new Error("Invalid synthesis structure");
+        }
+
+        resolve({
+          recommendation: synthesis.recommendation,
+          confidence: synthesis.confidence as "high" | "medium" | "low",
+          trade_offs: synthesis.trade_offs,
+          reasoning: synthesis.reasoning || "No reasoning provided",
+        });
+      } catch (error: unknown) {
+        const err = error as Error;
+        logger.error("Arbiter synthesis failed", { error: err.message });
+
+        // Fallback synthesis
+        resolve({
+          recommendation: "Unable to synthesize perspectives due to parsing error. Review both arguments and decide based on your judgment.",
+          confidence: "low",
+          trade_offs: ["Synthesis failed - manual review needed"],
+          reasoning: `Arbiter failed: ${err.message}`,
+        });
+      }
+    });
+
+    proc.on("error", (err: Error) => {
+      logger.error("Arbiter synthesis failed", { error: err.message });
+      resolve({
+        recommendation: "Unable to synthesize perspectives due to execution error. Review both arguments and decide based on your judgment.",
+        confidence: "low",
+        trade_offs: ["Synthesis failed - manual review needed"],
+        reasoning: `Arbiter failed: ${err.message}`,
+      });
+    });
+
+    if (proc.stdin) {
+      proc.stdin.write(prompt);
+      proc.stdin.end();
     }
-
-    const synthesis = JSON.parse(jsonMatch[1]);
-
-    // Validate structure
-    if (!synthesis.recommendation || !synthesis.confidence || !Array.isArray(synthesis.trade_offs)) {
-      throw new Error("Invalid synthesis structure");
-    }
-
-    return {
-      recommendation: synthesis.recommendation,
-      confidence: synthesis.confidence as "high" | "medium" | "low",
-      trade_offs: synthesis.trade_offs,
-      reasoning: synthesis.reasoning || "No reasoning provided",
-    };
-  } catch (error: unknown) {
-    const err = error as Error;
-    logger.error("Arbiter synthesis failed", { error: err.message });
-
-    // Fallback synthesis
-    return {
-      recommendation: "Unable to synthesize perspectives due to parsing error. Review both arguments and decide based on your judgment.",
-      confidence: "low",
-      trade_offs: ["Synthesis failed - manual review needed"],
-      reasoning: `Arbiter failed: ${err.message}`,
-    };
-  }
+  });
 }
 
 /**
  * Main debate function - coordinates advocate, critic, and arbiter.
  */
-export function debateTopic(
+export async function debateTopic(
   workspace: string,
   topic: string,
   context?: string,
   customPerspectives?: { advocate: string; critic: string },
   getRemainingConsultations?: () => number,
   decrementConsultations?: (count: number) => boolean,
-): DebateResult {
+): Promise<DebateResult> {
   const debateId = `debate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // Input validation
@@ -303,10 +329,25 @@ export function debateTopic(
 
   logger.info(`Starting debate: ${topic}`, { debate_id: debateId });
 
-  // Spawn advocate and critic in parallel (but we'll do them sequentially for error handling)
-  // In a real async implementation, these could run in parallel
-  const advocate = spawnPerspective(workspace, advocatePerspective, topic, contextStr, timeout);
-  const critic = spawnPerspective(workspace, criticPerspective, topic, contextStr, timeout);
+  // Spawn advocate and critic in parallel using Promise.allSettled
+  const [advocateResult, criticResult] = await Promise.allSettled([
+    spawnPerspective(workspace, advocatePerspective, topic, contextStr, timeout),
+    spawnPerspective(workspace, criticPerspective, topic, contextStr, timeout),
+  ]);
+
+  const advocate = advocateResult.status === "fulfilled" ? advocateResult.value : {
+    perspective: advocatePerspective,
+    argument: "",
+    success: false,
+    error: "Promise rejected",
+  };
+
+  const critic = criticResult.status === "fulfilled" ? criticResult.value : {
+    perspective: criticPerspective,
+    argument: "",
+    success: false,
+    error: "Promise rejected",
+  };
 
   // If both perspectives failed, return early
   if (!advocate.success && !critic.success) {
@@ -341,7 +382,7 @@ export function debateTopic(
   }
 
   // Arbiter synthesis - even if one perspective failed, try to synthesize
-  const synthesis = synthesizeArguments(workspace, topic, advocate, critic, timeout);
+  const synthesis = await synthesizeArguments(workspace, topic, advocate, critic, timeout);
 
   const remaining = getRemainingConsultations ? getRemainingConsultations() : 0;
 
