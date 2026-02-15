@@ -9,7 +9,6 @@ import fnmatch
 import logging
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from .task import Task
