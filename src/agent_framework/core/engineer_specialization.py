@@ -4,12 +4,23 @@ Selects specialized engineer profiles (backend, frontend, infrastructure) based 
 file patterns detected in tasks.
 """
 
+import fnmatch
 import re
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from .task import Task
+
+
+# Extensions that indicate source code (not config, docs, etc.)
+KNOWN_SOURCE_EXTENSIONS = {
+    "go", "py", "rb", "java", "rs", "c", "cpp", "cs",
+    "tsx", "jsx", "vue", "svelte",
+    "ts", "js",
+    "css", "scss", "sass", "less",
+    "tf", "tfvars",
+    "sql", "sh",
+}
 
 
 @dataclass
@@ -98,16 +109,17 @@ FRONTEND_PROFILE = SpecializationProfile(
     name="Frontend Engineer",
     description="Specializes in user interfaces, client-side logic, and web applications",
     file_patterns=[
+        # Framework-specific extensions are strong frontend signals
         "**/*.tsx",
         "**/*.jsx",
-        "**/*.ts",
-        "**/*.js",
         "**/*.vue",
         "**/*.svelte",
+        # Style files
         "**/*.css",
         "**/*.scss",
         "**/*.sass",
         "**/*.less",
+        # Directory-based signals (strong indicators)
         "**/components/**",
         "**/pages/**",
         "**/views/**",
@@ -115,10 +127,9 @@ FRONTEND_PROFILE = SpecializationProfile(
         "**/public/**",
         "**/src/app/**",
         "**/src/components/**",
+        # Test files with frontend-specific extensions
         "**/*.test.tsx",
         "**/*.test.jsx",
-        "**/*.test.ts",
-        "**/*.test.js",
         "**/*.spec.tsx",
         "**/*.spec.jsx",
     ],
@@ -172,36 +183,40 @@ INFRASTRUCTURE_PROFILE = SpecializationProfile(
     name="Infrastructure Engineer",
     description="Specializes in DevOps, CI/CD, infrastructure as code, and deployment",
     file_patterns=[
+        # Container files
         "**/Dockerfile*",
         "Dockerfile*",
         "**/docker-compose*.yml",
         "docker-compose*.yml",
+        # Terraform
         "**/*.tf",
         "**/*.tfvars",
         "**/terraform/**",
+        # CI/CD pipelines
         ".github/workflows/**",
         "**/.github/workflows/**",
-        "**/github/workflows/**",
         ".gitlab-ci.yml",
         "**/.gitlab-ci.yml",
         "**/Jenkinsfile",
-        "**/*.yaml",
-        "**/*.yml",
-        "**/k8s/**",
-        "**/kubernetes/**",
-        "**/helm/**",
-        "**/charts/**",
-        "**/deployment/**",
-        "**/manifests/**",
-        "**/ansible/**",
-        "**/playbooks/**",
-        "**/*.sh",
-        "**/scripts/**",
+        # Kubernetes / Helm — use both anchored and unanchored forms
+        # because Path.match matches from the right
+        "k8s/**",
+        "kubernetes/**",
+        "helm/**",
+        "charts/**",
+        "deployment/**",
+        "manifests/**",
+        # Config management
+        "ansible/**",
+        "playbooks/**",
+        # Build / scripts
         "**/Makefile",
         "**/nginx.conf",
-        "**/prometheus/**",
-        "**/grafana/**",
-        "**/monitoring/**",
+        "**/*.sh",
+        # Monitoring
+        "prometheus/**",
+        "grafana/**",
+        "monitoring/**",
     ],
     prompt_suffix="""
 INFRASTRUCTURE SPECIALIZATION:
@@ -292,13 +307,31 @@ def detect_file_patterns(task: Task) -> List[str]:
                     files.append(finding["file"])
 
     # Parse file paths from description text
-    # Look for patterns like: src/path/to/file.ext
+    # Match paths like src/path/to/file.ext — require known source extension
+    # to avoid false positives on version strings, URLs, etc.
     description_text = f"{task.title} {task.description}"
-    file_pattern = r'\b[\w\-\.]+/[\w\-\./]+\.\w+\b'
+    ext_pattern = "|".join(re.escape(e) for e in sorted(KNOWN_SOURCE_EXTENSIONS))
+    file_pattern = rf'\b[\w\-\.]+/[\w\-\./]+\.({ext_pattern})\b'
     matches = re.findall(file_pattern, description_text)
-    files.extend(matches)
+    # re.findall with groups returns just the group — reconstruct full matches
+    for match in re.finditer(file_pattern, description_text):
+        files.append(match.group(0))
 
     return list(set(files))  # Deduplicate
+
+
+def _matches_pattern(file_path: str, pattern: str) -> bool:
+    """Check if a file path matches a glob pattern.
+
+    Uses fnmatch for matching, with a fallback for **/ prefix patterns
+    so root-level files (e.g. 'handler.go') can still match '**/*.go'.
+    """
+    if fnmatch.fnmatch(file_path, pattern):
+        return True
+    # **/ prefix requires at least one directory — strip it for root-level files
+    if pattern.startswith("**/"):
+        return fnmatch.fnmatch(file_path, pattern[3:])
+    return False
 
 
 def match_patterns(files: List[str], patterns: List[str]) -> int:
@@ -314,9 +347,8 @@ def match_patterns(files: List[str], patterns: List[str]) -> int:
     matches = 0
 
     for file_path in files:
-        path = Path(file_path)
         for pattern in patterns:
-            if path.match(pattern):
+            if _matches_pattern(file_path, pattern):
                 matches += 1
                 break  # Count each file only once
 
@@ -339,7 +371,6 @@ def detect_specialization(task: Task) -> Optional[SpecializationProfile]:
     files = detect_file_patterns(task)
 
     if not files:
-        # No file patterns detected, use generic engineer
         return None
 
     # Score each specialization profile
@@ -350,21 +381,18 @@ def detect_specialization(task: Task) -> Optional[SpecializationProfile]:
             scores.append((match_count, profile))
 
     if not scores:
-        # No matches, use generic engineer
         return None
 
     # Sort by match count (descending)
     scores.sort(reverse=True, key=lambda x: x[0])
 
-    # Return profile with highest score
-    # Only return specialized profile if it has clear majority (>50% of files)
     top_score, top_profile = scores[0]
     total_files = len(files)
 
-    if top_score >= max(2, total_files * 0.5):  # At least 2 files OR 50% of files
+    # Require clear signal: at least 2 matching files AND >50% of files
+    if top_score >= max(2, total_files * 0.5):
         return top_profile
 
-    # Mixed patterns, use generic engineer
     return None
 
 
@@ -384,7 +412,6 @@ def apply_specialization_to_prompt(
     if not profile:
         return base_prompt
 
-    # Append specialization context to base prompt
     return f"{base_prompt}\n\n{profile.prompt_suffix}\n\n{profile.tool_guidance}"
 
 
@@ -404,7 +431,6 @@ def get_specialized_teammates(
     if not profile:
         return base_teammates
 
-    # Merge: specialization teammates override base teammates with same name
     merged = dict(base_teammates)
     merged.update(profile.teammates)
 

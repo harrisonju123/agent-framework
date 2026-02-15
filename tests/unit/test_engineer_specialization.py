@@ -8,9 +8,11 @@ from agent_framework.core.engineer_specialization import (
     match_patterns,
     detect_specialization,
     apply_specialization_to_prompt,
+    get_specialized_teammates,
     BACKEND_PROFILE,
     FRONTEND_PROFILE,
     INFRASTRUCTURE_PROFILE,
+    KNOWN_SOURCE_EXTENSIONS,
 )
 from agent_framework.core.task import Task, TaskType, TaskStatus, PlanDocument
 
@@ -106,6 +108,27 @@ class TestDetectFilePatterns:
         files = detect_file_patterns(task)
         assert files.count("src/api/handler.go") == 1
 
+    def test_description_regex_ignores_non_source_extensions(self):
+        """Should not match version strings or URL-like paths in descriptions."""
+        task = create_test_task(
+            description_text="Use version/2.0.1 and check http/1.1 and config/data.yaml"
+        )
+        files = detect_file_patterns(task)
+        # version/2.0.1 has no known source extension
+        assert not any("version" in f for f in files)
+        assert not any("http" in f for f in files)
+        # .yaml is not in KNOWN_SOURCE_EXTENSIONS
+        assert not any("config/data.yaml" in f for f in files)
+
+    def test_description_regex_matches_known_extensions(self):
+        """Should match paths with known source extensions."""
+        task = create_test_task(
+            description_text="Modify src/utils/helper.go and lib/parser.ts"
+        )
+        files = detect_file_patterns(task)
+        assert "src/utils/helper.go" in files
+        assert "lib/parser.ts" in files
+
 
 class TestMatchPatterns:
     """Tests for pattern matching."""
@@ -123,7 +146,7 @@ class TestMatchPatterns:
         assert matches == 3
 
     def test_match_dockerfile(self):
-        """Should match Dockerfile against infrastructure patterns."""
+        """Should match infrastructure-specific files."""
         files = ["Dockerfile", "docker-compose.yml", "k8s/deployment.yaml"]
         matches = match_patterns(files, INFRASTRUCTURE_PROFILE.file_patterns)
         assert matches == 3
@@ -140,6 +163,18 @@ class TestMatchPatterns:
         files = ["src/handler_test.go"]
         matches = match_patterns(files, BACKEND_PROFILE.file_patterns)
         assert matches == 1
+
+    def test_generic_yaml_not_matched_as_infrastructure(self):
+        """Generic YAML files should not match infrastructure patterns."""
+        files = ["config/agents.yaml", "data/fixtures.yml", "settings.yaml"]
+        matches = match_patterns(files, INFRASTRUCTURE_PROFILE.file_patterns)
+        assert matches == 0
+
+    def test_plain_ts_js_not_matched_as_frontend(self):
+        """Plain .ts/.js files should not match frontend patterns (could be backend Node.js)."""
+        files = ["src/server.ts", "src/routes/api.js", "src/middleware/auth.ts"]
+        matches = match_patterns(files, FRONTEND_PROFILE.file_patterns)
+        assert matches == 0
 
 
 class TestDetectSpecialization:
@@ -203,6 +238,16 @@ class TestDetectSpecialization:
         ])
         profile = detect_specialization(task)
         assert profile == INFRASTRUCTURE_PROFILE
+
+    def test_infrastructure_not_triggered_by_generic_yaml(self):
+        """Generic YAML config files should not trigger infrastructure specialization."""
+        task = create_test_task(files_in_plan=[
+            "config/agents.yaml",
+            "config/settings.yml",
+            "data/fixtures.yaml",
+        ])
+        profile = detect_specialization(task)
+        assert profile is None
 
     def test_mixed_patterns_backend_dominant(self):
         """Should pick backend when it has clear majority."""
@@ -279,12 +324,38 @@ class TestApplySpecializationToPrompt:
         assert specialized == base_prompt
 
 
+class TestGetSpecializedTeammates:
+    """Tests for teammate merging."""
+
+    def test_merge_with_base_teammates(self):
+        """Should merge specialization teammates into base."""
+        base = {"code-reviewer": {"description": "Reviews code", "prompt": "Review code."}}
+        merged = get_specialized_teammates(base, BACKEND_PROFILE)
+
+        assert "code-reviewer" in merged
+        assert "database-expert" in merged
+        assert "api-reviewer" in merged
+
+    def test_no_profile_returns_base(self):
+        """Should return base unchanged when no profile."""
+        base = {"code-reviewer": {"description": "Reviews code", "prompt": "Review code."}}
+        result = get_specialized_teammates(base, None)
+        assert result == base
+
+    def test_specialization_overrides_same_key(self):
+        """Specialization teammates should override base with same key."""
+        base = {"database-expert": {"description": "Old", "prompt": "Old prompt."}}
+        merged = get_specialized_teammates(base, BACKEND_PROFILE)
+
+        # Should be overridden by BACKEND_PROFILE's database-expert
+        assert "query optimization" in merged["database-expert"]["description"]
+
+
 class TestEndToEnd:
     """End-to-end tests for the specialization system."""
 
     def test_backend_workflow(self):
         """Test full workflow for backend specialization."""
-        # Create task with Go API files
         task = create_test_task(
             files_in_plan=[
                 "internal/api/handler.go",
@@ -294,22 +365,18 @@ class TestEndToEnd:
             description_text="Add new user registration endpoint",
         )
 
-        # Detect specialization
         profile = detect_specialization(task)
         assert profile == BACKEND_PROFILE
 
-        # Apply to prompt
         base_prompt = "You are the Software Engineer responsible for implementing features."
         specialized_prompt = apply_specialization_to_prompt(base_prompt, profile)
 
-        # Verify specialization context
         assert "BACKEND SPECIALIZATION" in specialized_prompt
         assert "API design and implementation" in specialized_prompt
         assert "parameterized queries" in specialized_prompt
 
     def test_frontend_workflow(self):
         """Test full workflow for frontend specialization."""
-        # Create task with React component files
         task = create_test_task(
             files_in_plan=[
                 "src/components/UserProfile.tsx",
@@ -319,35 +386,28 @@ class TestEndToEnd:
             description_text="Build user profile dashboard",
         )
 
-        # Detect specialization
         profile = detect_specialization(task)
         assert profile == FRONTEND_PROFILE
 
-        # Apply to prompt
         base_prompt = "You are the Software Engineer responsible for implementing features."
         specialized_prompt = apply_specialization_to_prompt(base_prompt, profile)
 
-        # Verify specialization context
         assert "FRONTEND SPECIALIZATION" in specialized_prompt
         assert "accessibility" in specialized_prompt
         assert "Component design" in specialized_prompt
 
     def test_generic_workflow(self):
         """Test workflow when no specialization applies."""
-        # Create task with generic documentation files
         task = create_test_task(
             files_in_plan=["README.md"],
             description_text="Update documentation",
         )
 
-        # Detect specialization
         profile = detect_specialization(task)
         assert profile is None
 
-        # Apply to prompt
         base_prompt = "You are the Software Engineer responsible for implementing features."
         specialized_prompt = apply_specialization_to_prompt(base_prompt, profile)
 
-        # Should be unchanged
         assert specialized_prompt == base_prompt
         assert "SPECIALIZATION" not in specialized_prompt

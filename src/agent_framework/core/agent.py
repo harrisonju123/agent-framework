@@ -245,6 +245,8 @@ class Agent:
         # Cache for team composition (fixed per agent lifetime / workflow)
         self._default_team_cache: Optional[dict] = None
         self._workflow_team_cache: Dict[str, Optional[dict]] = {}
+        # Set per-task by _build_prompt, consumed by team composition
+        self._current_specialization = None
 
         # Pause signal cache (avoid 2x exists() calls every 2s)
         self._pause_signal_cache: Optional[bool] = None
@@ -762,16 +764,14 @@ class Agent:
                 # For other agents, teammates are fixed (use cache)
                 if self._agent_definition and self._agent_definition.teammates:
                     if self.config.base_id == "engineer":
-                        # Engineer specialization: compose teammates per task
                         default_team = compose_default_team(
                             self._agent_definition,
                             default_model=self._team_mode_default_model,
-                            task=task,  # Pass task for specialization detection
+                            specialization_profile=self._current_specialization,
                         ) or {}
                         if default_team:
                             team_agents.update(default_team)
                     else:
-                        # Other agents: use cached teammates
                         if self._default_team_cache is None:
                             self._default_team_cache = compose_default_team(
                                 self._agent_definition,
@@ -1570,10 +1570,10 @@ Please carefully consider this guidance when approaching the task.
 
         return prompt
 
-    def _handle_shadow_mode_comparison(self, task: Task) -> str:
+    def _handle_shadow_mode_comparison(self, task: Task, prompt_override: str = None) -> str:
         """Generate and compare both prompts in shadow mode, return legacy prompt."""
-        legacy_prompt = self._build_prompt_legacy(task)
-        optimized_prompt = self._build_prompt_optimized(task)
+        legacy_prompt = self._build_prompt_legacy(task, prompt_override=prompt_override)
+        optimized_prompt = self._build_prompt_optimized(task, prompt_override=prompt_override)
 
         # Log comparison
         legacy_len = len(legacy_prompt)
@@ -1613,30 +1613,24 @@ Your previous implementation had test failures. Please fix the issues below:
 Fix the failing tests and ensure all tests pass.
 """
 
-    def _apply_engineer_specialization(self, task: Task) -> str:
-        """Apply engineer specialization based on task file patterns.
+    def _detect_engineer_specialization(self, task: Task):
+        """Detect engineer specialization profile for this task.
 
-        Returns the appropriate prompt for the engineer based on detected files.
-        If this is not an engineer agent, returns the base prompt unchanged.
+        Returns the profile if this is an engineer agent with a clear match, else None.
         """
-        # Only apply specialization to engineer agents
         if self.config.base_id != "engineer":
-            return self.config.prompt
+            return None
 
-        # Import specialization module
-        from .engineer_specialization import detect_specialization, apply_specialization_to_prompt
+        from .engineer_specialization import detect_specialization
 
-        # Detect specialization profile from task
         profile = detect_specialization(task)
 
         if profile:
-            self.logger.info(f"🎯 Engineer specialization detected: {profile.name}")
-            self.logger.debug(f"Specialization based on file patterns: {profile.file_patterns[:3]}...")
+            self.logger.info(f"Engineer specialization detected: {profile.name}")
         else:
             self.logger.debug("No specialization detected, using generic engineer profile")
 
-        # Apply specialization to base prompt
-        return apply_specialization_to_prompt(self.config.prompt, profile)
+        return profile
 
     def _build_prompt(self, task: Task) -> str:
         """
@@ -1654,36 +1648,29 @@ Fix the failing tests and ensure all tests pass.
         shadow_mode = self._optimization_config.get("shadow_mode", False)
         use_optimizations = self._should_use_optimization(task)
 
-        # Apply engineer specialization (modifies self.config.prompt temporarily)
-        original_prompt = self.config.prompt
-        specialized_prompt = self._apply_engineer_specialization(task)
+        # Detect specialization once — reused for both prompt and team composition
+        from .engineer_specialization import apply_specialization_to_prompt
+        profile = self._detect_engineer_specialization(task)
+        self._current_specialization = profile
+        prompt_text = apply_specialization_to_prompt(self.config.prompt, profile)
 
-        # Temporarily update config prompt for this task
-        self.config = replace(self.config, prompt=specialized_prompt)
+        # Determine which prompt to use
+        if shadow_mode:
+            prompt = self._handle_shadow_mode_comparison(task, prompt_override=prompt_text)
+        elif use_optimizations:
+            prompt = self._build_prompt_optimized(task, prompt_override=prompt_text)
+        else:
+            prompt = self._build_prompt_legacy(task, prompt_override=prompt_text)
 
-        try:
-            # Determine which prompt to use
-            if shadow_mode:
-                prompt = self._handle_shadow_mode_comparison(task)
-            elif use_optimizations:
-                prompt = self._build_prompt_optimized(task)
-            else:
-                prompt = self._build_prompt_legacy(task)
+        # Log prompt preview for debugging (sanitized)
+        if self.logger.isEnabledFor(logging.DEBUG):
+            prompt_preview = prompt[:500].replace(task.id, "TASK_ID")
+            if hasattr(task, 'context') and task.context.get('jira_key'):
+                prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
+            self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
 
-            # Log prompt preview for debugging (sanitized)
-            if self.logger.isEnabledFor(logging.DEBUG):
-                prompt_preview = prompt[:500].replace(task.id, "TASK_ID")
-                if hasattr(task, 'context') and task.context.get('jira_key'):
-                    prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
-                self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
-
-            # Append test failure context if present
-            prompt = self._append_test_failure_context(prompt, task)
-        finally:
-            # Restore original prompt
-            self.config = replace(self.config, prompt=original_prompt)
-
-        return prompt
+        # Append test failure context if present
+        prompt = self._append_test_failure_context(prompt, task)
 
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
@@ -1877,9 +1864,10 @@ If a tool call fails:
 """
         return self._error_handling_guidance
 
-    def _build_prompt_legacy(self, task: Task) -> str:
+    def _build_prompt_legacy(self, task: Task, prompt_override: str = None) -> str:
         """Build prompt using legacy format (original implementation)."""
         task_json = task.model_dump_json(indent=2)
+        agent_prompt = prompt_override or self.config.prompt
 
         # Extract integration context
         jira_key = task.context.get("jira_key")
@@ -1903,7 +1891,7 @@ TASK DETAILS:
 
 {mcp_guidance}
 YOUR RESPONSIBILITIES:
-{self.config.prompt}
+{agent_prompt}
 
 IMPORTANT:
 - Complete the task described above
@@ -1913,7 +1901,7 @@ IMPORTANT:
 - This task will be automatically marked as completed when you're done
 """
 
-    def _build_prompt_optimized(self, task: Task) -> str:
+    def _build_prompt_optimized(self, task: Task, prompt_override: str = None) -> str:
         """
         Build prompt using optimized format.
 
@@ -1958,13 +1946,14 @@ IMPORTANT:
                     dep_context += f"- {dep_task.title}: {dep_task.result_summary}\n"
 
         # Build optimized prompt (shorter, focused on essentials)
+        agent_prompt = prompt_override or self.config.prompt
         return f"""You are {self.config.id} working on an asynchronous task.
 
 TASK:
 {task_json}
 
 {context_note}{dep_context}
-{self.config.prompt}
+{agent_prompt}
 
 IMPORTANT:
 - Complete the task described above
