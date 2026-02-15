@@ -74,7 +74,7 @@ class ModelSelector:
 
         Timeout tiers:
         - Large (1hr): IMPLEMENTATION, ARCHITECTURE, ANALYSIS, PLANNING, ESCALATION, ENHANCEMENT, REVIEW
-        - Bounded (30min): TESTING, VERIFICATION, FIX, BUGFIX, PR_REQUEST
+        - Bounded (30min): TESTING, VERIFICATION, FIX, BUGFIX, PR_REQUEST, PREVIEW
         - Simple (15min): DOCUMENTATION, COORDINATION, STATUS_REPORT
         """
         simple_types = {
@@ -90,6 +90,7 @@ class ModelSelector:
             TaskType.BUGFIX,
             TaskType.BUG_FIX,
             TaskType.PR_REQUEST,
+            TaskType.PREVIEW,
         }
 
         if task_type in simple_types:

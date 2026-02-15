@@ -78,3 +78,15 @@ class TestTimeoutSelection:
 
     def test_coordination_gets_simple_timeout(self, selector):
         assert selector.select_timeout(TaskType.COORDINATION) == 900
+
+
+def test_preview_uses_default_model(selector):
+    """PREVIEW tasks use sonnet (default model), not premium or cheap."""
+    model = selector.select(TaskType.PREVIEW)
+    assert model == selector.default_model
+
+
+def test_preview_uses_bounded_timeout(selector):
+    """PREVIEW tasks get bounded timeout (30min) since they're planning-only."""
+    timeout = selector.select_timeout(TaskType.PREVIEW)
+    assert timeout == selector.timeout_bounded

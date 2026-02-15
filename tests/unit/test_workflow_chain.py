@@ -698,3 +698,84 @@ class TestWorktreeSkipForPRCreation:
 
         assert result == worktree_path
         agent.worktree_manager.create_worktree.assert_called_once()
+
+
+# -- Preview mode --
+
+class TestPreviewMode:
+    """Tests for PREVIEW task type routing and prompt injection."""
+
+    def test_preview_routes_back_to_architect(self, agent, queue):
+        """Engineer completing a PREVIEW task routes back to architect, not QA."""
+        task = _make_task(workflow="default")
+        task.type = TaskType.PREVIEW
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response)
+
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "architect"
+        assert chain_task.assigned_to == "architect"
+
+    def test_preview_does_not_route_to_qa(self, agent, queue):
+        """PREVIEW tasks must skip QA — only architect reviews previews."""
+        task = _make_task(workflow="default")
+        task.type = TaskType.PREVIEW
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response)
+
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue != "qa"
+
+    def test_non_preview_still_routes_normally(self, agent, queue):
+        """Regular IMPLEMENTATION tasks still follow the default workflow chain."""
+        task = _make_task(workflow="default")
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response)
+
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "qa"
+
+    def test_preview_routing_only_applies_to_engineer(self, agent, queue):
+        """Architect completing a PREVIEW task should NOT trigger preview routing."""
+        agent.config = AgentConfig(
+            id="architect", name="Architect", queue="architect", prompt="You are an architect.",
+        )
+        task = _make_task(workflow="default")
+        task.type = TaskType.PREVIEW
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response)
+
+        # Should follow normal workflow chain, not preview routing
+        if queue.push.called:
+            target_queue = queue.push.call_args[0][1]
+            assert target_queue != "architect"
+
+    def test_inject_preview_mode_prepends_constraints(self, agent):
+        """_inject_preview_mode prepends read-only constraints before the original prompt."""
+        task = _make_task()
+        task.type = TaskType.PREVIEW
+        original_prompt = "Build feature X with tests."
+
+        result = agent._inject_preview_mode(original_prompt, task)
+
+        assert result.endswith(original_prompt)
+        assert "PREVIEW MODE" in result
+        assert "Do NOT use Write, Edit, or NotebookEdit" in result
+        assert result.index("PREVIEW MODE") < result.index(original_prompt)
+
+    def test_inject_preview_mode_includes_required_sections(self, agent):
+        """Preview prompt includes all required output sections."""
+        task = _make_task()
+        result = agent._inject_preview_mode("original", task)
+
+        assert "### Files to Modify" in result
+        assert "### New Files to Create" in result
+        assert "### Implementation Approach" in result
+        assert "### Risks and Edge Cases" in result
+        assert "### Estimated Total Change Size" in result

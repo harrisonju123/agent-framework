@@ -92,3 +92,12 @@ def test_task_reset_to_pending():
     assert task.status == TaskStatus.PENDING
     assert task.started_at is None
     assert task.started_by is None
+
+
+def test_preview_task_type():
+    """PREVIEW task type exists and serializes correctly."""
+    assert TaskType.PREVIEW == "preview"
+    assert TaskType.PREVIEW.value == "preview"
+
+    task = _make_task(type=TaskType.PREVIEW)
+    assert task.type == TaskType.PREVIEW
