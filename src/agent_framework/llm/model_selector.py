@@ -90,6 +90,7 @@ class ModelSelector:
             TaskType.BUGFIX,
             TaskType.BUG_FIX,
             TaskType.PR_REQUEST,
+            TaskType.PREVIEW,
         }
 
         if task_type in simple_types:
