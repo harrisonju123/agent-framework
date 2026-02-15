@@ -2001,12 +2001,11 @@ IMPORTANT:
                 branch_name = task.context.get("worktree_branch") or task.context.get("implementation_branch")
 
                 if not branch_name:
-                    import hashlib
                     jira_key = task.context.get("jira_key", "task")
                     task_hash = hashlib.sha256(task.id.encode()).hexdigest()[:8]
                     branch_name = f"agent/{self.config.id}/{jira_key}-{task_hash}"
 
-                # If reusing an inherited branch, check for existing worktree first
+                # Check registry for existing worktree on this branch (reuse or retry)
                 existing = self.worktree_manager.find_worktree_by_branch(branch_name)
                 if existing:
                     self._active_worktree = existing
@@ -2652,6 +2651,7 @@ IMPORTANT:
                 "review_mode": True,
                 "source_task_id": task.id,
                 "source_agent": self.config.id,
+                "implementation_branch": task.context.get("implementation_branch"),
                 # Carry review cycle count so QA → Engineer loop is capped
                 "_review_cycle_count": task.context.get("_review_cycle_count", 0),
             },
