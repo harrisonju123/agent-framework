@@ -16,10 +16,10 @@ import {
   getEpicProgress,
   writeRoutingSignal,
 } from "./queue-tools.js";
-import { consultAgent } from "./consultation.js";
+import { consultAgent, getRemainingConsultations, decrementConsultations } from "./consultation.js";
 import { shareKnowledge, getKnowledge } from "./knowledge.js";
 import { debateTopic } from "./debate.js";
-import type { QueueTaskInput, AgentId, DebateInput } from "./types.js";
+import type { QueueTaskInput, AgentId } from "./types.js";
 
 const logger = createLogger();
 
@@ -229,25 +229,31 @@ const TOOLS: Tool[] = [
   {
     name: "debate_topic",
     description:
-      "Spawn a structured debate between Advocate and Critic perspectives on a complex decision. An Arbiter synthesizes the final recommendation. Use this for architectural trade-offs, technology choices, or any decision with significant pros and cons. Costs 2 consultation slots.",
+      "Spawn a multi-perspective debate on a complex decision. An Advocate argues in favor, a Critic argues against, and an Arbiter synthesizes both into a recommendation with trade-offs and confidence level. Uses 2 consultation slots. Best for architectural choices, approach decisions, or trade-off analysis.",
     inputSchema: {
       type: "object",
       properties: {
         topic: {
           type: "string",
-          description: "The decision or question to debate (e.g., 'Should we use WebSockets or SSE for real-time updates?')",
+          description: "The decision or approach to debate (e.g., 'Should we use Redis or in-memory caching?')",
         },
         context: {
           type: "string",
-          description: "Background context to help debaters understand the situation",
+          description: "Optional context about the situation, requirements, or constraints",
         },
-        advocate_position: {
-          type: "string",
-          description: "What the advocate should argue for (default: the proposed approach)",
-        },
-        critic_position: {
-          type: "string",
-          description: "What the critic should argue against (default: alternatives and risks)",
+        custom_perspectives: {
+          type: "object",
+          properties: {
+            advocate: {
+              type: "string",
+              description: "Custom perspective for the advocate (default: argue in favor)",
+            },
+            critic: {
+              type: "string",
+              description: "Custom perspective for the critic (default: argue against)",
+            },
+          },
+          description: "Optional custom perspectives instead of default advocate/critic roles",
         },
       },
       required: ["topic"],
@@ -427,19 +433,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
         break;
       }
-      case "debate_topic": {
-        const { topic, context, advocate_position, critic_position } = args as Record<string, unknown>;
-        if (typeof topic !== "string") {
-          throw new Error("debate_topic requires string topic");
-        }
-        result = await debateTopic(workspace, {
-          topic,
-          context: typeof context === "string" ? context : undefined,
-          advocate_position: typeof advocate_position === "string" ? advocate_position : undefined,
-          critic_position: typeof critic_position === "string" ? critic_position : undefined,
-        });
-        break;
-      }
       case "share_knowledge": {
         const { topic, key, value } = args as Record<string, unknown>;
         if (typeof topic !== "string" || typeof key !== "string" || typeof value !== "string") {
@@ -458,6 +451,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           getTopic,
           typeof getKey === "string" ? getKey : undefined,
           typeof max_age_hours === "number" ? max_age_hours : undefined,
+        );
+        break;
+      }
+      case "debate_topic": {
+        const { topic, context, custom_perspectives } = args as Record<string, unknown>;
+        if (typeof topic !== "string") {
+          throw new Error("debate_topic requires string topic");
+        }
+        const perspectives = custom_perspectives as { advocate?: string; critic?: string } | undefined;
+        result = await debateTopic(
+          workspace,
+          topic,
+          typeof context === "string" ? context : undefined,
+          perspectives && typeof perspectives.advocate === "string" && typeof perspectives.critic === "string"
+            ? { advocate: perspectives.advocate, critic: perspectives.critic }
+            : undefined,
+          getRemainingConsultations,
+          decrementConsultations,
         );
         break;
       }

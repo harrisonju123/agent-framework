@@ -279,3 +279,47 @@ class TestSpecializationYAMLLoading:
             assert result.enabled is False
         finally:
             tmp_path.unlink()
+
+
+class TestSpecializationActivityTracking:
+    """Verify that specialization information is tracked in activity logs."""
+
+    def test_activity_has_specialization_field(self):
+        """AgentActivity model includes specialization field."""
+        from agent_framework.core.activity import AgentActivity, AgentStatus
+
+        activity = AgentActivity(
+            agent_id="engineer",
+            status=AgentStatus.WORKING,
+            specialization="backend",
+            last_updated=datetime.now(UTC),
+        )
+
+        assert activity.specialization == "backend"
+
+        # Test serialization/deserialization
+        data = activity.model_dump()
+        assert data["specialization"] == "backend"
+
+        restored = AgentActivity(**data)
+        assert restored.specialization == "backend"
+
+    def test_activity_specialization_is_optional(self):
+        """Specialization field is optional for backward compatibility."""
+        from agent_framework.core.activity import AgentActivity, AgentStatus
+
+        activity = AgentActivity(
+            agent_id="architect",
+            status=AgentStatus.IDLE,
+            last_updated=datetime.now(UTC),
+        )
+
+        assert activity.specialization is None
+
+        # Test serialization/deserialization without specialization
+        data = activity.model_dump()
+        assert "specialization" in data
+        assert data["specialization"] is None
+
+        restored = AgentActivity(**data)
+        assert restored.specialization is None

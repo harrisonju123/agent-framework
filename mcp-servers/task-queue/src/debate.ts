@@ -1,33 +1,31 @@
 /**
- * Multi-perspective debate module.
+ * Multi-perspective debate system for adversarial reasoning.
  *
- * Spawns parallel Advocate and Critic perspectives, then an Arbiter
- * synthesizes a final recommendation with confidence level.
+ * Spawns Advocate and Critic agents in parallel to argue different
+ * perspectives on a complex decision, then an Arbiter synthesizes
+ * a final recommendation with trade-offs and confidence level.
+ *
+ * Uses the same infrastructure as consultation.ts but orchestrates
+ * multiple perspectives simultaneously.
  */
 
 import { spawn } from "child_process";
-import { existsSync, writeFileSync, mkdirSync } from "fs";
+import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { createLogger } from "./logger.js";
-import {
-  buildConsultationEnv,
-  getConsultationCount,
-  incrementConsultationCount,
-} from "./consultation.js";
-import type { DebateInput, DebateResult } from "./types.js";
+import { buildConsultationEnv } from "./consultation.js";
+import type { PerspectiveArgument, DebateResult } from "./types.js";
 
 const logger = createLogger();
 
-const MAX_CONSULTATIONS = Math.min(
-  parseInt(process.env.MAX_CONSULTATIONS_PER_SESSION || "5", 10),
-  20,
-);
+// Debate counts against the consultation rate limit (2 slots per debate)
+const DEBATE_COST = 2;
 
-const MAX_TOPIC_LENGTH = 2000;
-const MAX_CONTEXT_LENGTH = 1000;
-const DEBATE_COST = 2; // advocate + critic count as 2 consultation slots
+// Input validation limits
+const MAX_TOPIC_LENGTH = 1500;
+const MAX_DEBATE_CONTEXT_LENGTH = 3000;
 
-function sanitizeLogId(id: string): string {
+function sanitizeDebateId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 100);
 }
 
@@ -40,257 +38,377 @@ function logDebate(
   if (!existsSync(logDir)) {
     mkdirSync(logDir, { recursive: true });
   }
-  const safeId = sanitizeLogId(id);
+  const safeId = sanitizeDebateId(id);
   writeFileSync(join(logDir, `${safeId}.json`), JSON.stringify(data, null, 2));
 }
 
 /**
- * Parse arbiter output into structured components.
- * Expected format: RECOMMENDATION: ... | CONFIDENCE: ... | TRADE-OFFS: ... | REASONING: ...
+ * Spawn a single perspective agent with a specific role (async).
  */
-function parseArbiterOutput(output: string): {
+function spawnPerspective(
+  workspace: string,
+  perspective: string,
+  topic: string,
+  context: string,
+  timeout: number,
+): Promise<PerspectiveArgument> {
+  return new Promise((resolve) => {
+    const prompt = [
+      `You are participating in a structured debate to help make a complex decision.`,
+      `Your role: ${perspective}`,
+      `Topic: ${topic}`,
+      context ? `\nContext: ${context}` : "",
+      `\nProvide your argument in 3-5 sentences. Be specific and focus on practical implications.`,
+      `Your goal is to argue your assigned perspective, even if you see merit in the other side.`,
+    ].join("\n");
+
+    let output = "";
+    let errorOutput = "";
+
+    const proc = spawn(
+      "claude",
+      [
+        "--print",
+        "--model",
+        "haiku",
+        "--max-turns",
+        "1",
+      ],
+      {
+        cwd: workspace,
+        env: buildConsultationEnv(),
+        timeout,
+      },
+    );
+
+    proc.stdout.on("data", (data: Buffer) => {
+      output += data.toString();
+    });
+
+    proc.stderr.on("data", (data: Buffer) => {
+      errorOutput += data.toString();
+    });
+
+    proc.on("close", (code: number) => {
+      if (code === 0) {
+        resolve({
+          perspective,
+          argument: output.trim(),
+          success: true,
+        });
+      } else {
+        logger.error(`Perspective ${perspective} failed`, {
+          error: errorOutput || `Process exited with code ${code}`
+        });
+        resolve({
+          perspective,
+          argument: "",
+          success: false,
+          error: errorOutput || `Process exited with code ${code}`,
+        });
+      }
+    });
+
+    proc.on("error", (err: Error) => {
+      logger.error(`Perspective ${perspective} failed`, { error: err.message });
+      resolve({
+        perspective,
+        argument: "",
+        success: false,
+        error: err.message,
+      });
+    });
+
+    if (proc.stdin) {
+      proc.stdin.write(prompt);
+      proc.stdin.end();
+    }
+  });
+}
+
+/**
+ * Arbiter synthesizes both perspectives into a final recommendation (async).
+ */
+function synthesizeArguments(
+  workspace: string,
+  topic: string,
+  advocate: PerspectiveArgument,
+  critic: PerspectiveArgument,
+  timeout: number,
+): Promise<{
   recommendation: string;
   confidence: "high" | "medium" | "low";
   trade_offs: string[];
   reasoning: string;
-} {
-  const lines = output.trim();
+}> {
+  return new Promise((resolve) => {
+    const prompt = [
+      `You are an Arbiter synthesizing two perspectives on a complex decision.`,
+      `\nTopic: ${topic}`,
+      `\nAdvocate's argument:\n${advocate.argument}`,
+      `\nCritic's argument:\n${critic.argument}`,
+      `\nYour task:`,
+      `1. Provide a clear recommendation (2-3 sentences)`,
+      `2. State your confidence level: high, medium, or low`,
+      `3. List 2-4 key trade-offs to consider`,
+      `4. Explain your reasoning (2-3 sentences)`,
+      `\nFormat your response as JSON:`,
+      `{`,
+      `  "recommendation": "...",`,
+      `  "confidence": "high|medium|low",`,
+      `  "trade_offs": ["...", "..."],`,
+      `  "reasoning": "..."`,
+      `}`,
+    ].join("\n");
 
-  // Extract sections using regex
-  const recMatch = lines.match(/RECOMMENDATION:\s*([^|]+)/i);
-  const confMatch = lines.match(/CONFIDENCE:\s*(\w+)/i);
-  const tradeMatch = lines.match(/TRADE-OFFS:\s*([^|]+)/i);
-  const reasonMatch = lines.match(/REASONING:\s*(.+)/is);
+    let output = "";
+    let errorOutput = "";
 
-  const recommendation = recMatch?.[1]?.trim() || "Unable to reach a decision";
-  const confidenceRaw = confMatch?.[1]?.trim().toLowerCase() || "medium";
-  const confidence =
-    confidenceRaw === "high" || confidenceRaw === "low"
-      ? confidenceRaw
-      : "medium";
-  const tradeText = tradeMatch?.[1]?.trim() || "";
-  const trade_offs = tradeText
-    ? tradeText
-        .split(/[-•]\s*/)
-        .filter((s) => s.trim())
-        .map((s) => s.trim())
-    : ["No trade-offs identified"];
-  const reasoning = reasonMatch?.[1]?.trim() || output;
-
-  return { recommendation, confidence, trade_offs, reasoning };
-}
-
-/**
- * Run a Claude CLI subprocess for a debate perspective.
- * Uses spawn to support stdin piping (execFile doesn't support input in async mode).
- */
-async function runPerspective(
-  workspace: string,
-  prompt: string,
-  role: "advocate" | "critic" | "arbiter",
-): Promise<string> {
-  return new Promise<string>((resolve) => {
     const proc = spawn(
       "claude",
-      ["--print", "--model", "haiku", "--max-turns", "1"],
+      [
+        "--print",
+        "--model",
+        "haiku",
+        "--max-turns",
+        "1",
+      ],
       {
         cwd: workspace,
         env: buildConsultationEnv(),
-        stdio: ["pipe", "pipe", "pipe"],
+        timeout,
       },
     );
 
-    let stdout = "";
-    let stderr = "";
-
-    proc.stdout.on("data", (data) => {
-      stdout += data.toString();
+    proc.stdout.on("data", (data: Buffer) => {
+      output += data.toString();
     });
 
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
+    proc.stderr.on("data", (data: Buffer) => {
+      errorOutput += data.toString();
     });
 
-    proc.on("error", (err) => {
-      logger.warn(`${role} perspective spawn failed`, { error: err.message });
-      resolve(`[${role} failed: ${err.message}]`);
-    });
-
-    proc.on("close", (code) => {
+    proc.on("close", (code: number) => {
       if (code !== 0) {
-        logger.warn(`${role} perspective exited with code ${code}`, { stderr });
-        resolve(`[${role} failed: exit code ${code}]`);
-      } else {
-        resolve(stdout.trim());
+        logger.error("Arbiter synthesis failed", {
+          error: errorOutput || `Process exited with code ${code}`
+        });
+        resolve({
+          recommendation: "Unable to synthesize perspectives due to execution error. Review both arguments and decide based on your judgment.",
+          confidence: "low",
+          trade_offs: ["Synthesis failed - manual review needed"],
+          reasoning: `Arbiter failed: ${errorOutput || `exit code ${code}`}`,
+        });
+        return;
+      }
+
+      try {
+        // Parse JSON from the response
+        const text = output.trim();
+        // Extract JSON from markdown code blocks if present
+        const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/) ||
+                          text.match(/(\{[\s\S]*\})/);
+
+        if (!jsonMatch) {
+          throw new Error("Could not extract JSON from arbiter response");
+        }
+
+        const synthesis = JSON.parse(jsonMatch[1]);
+
+        // Validate structure
+        if (!synthesis.recommendation || !synthesis.confidence || !Array.isArray(synthesis.trade_offs)) {
+          throw new Error("Invalid synthesis structure");
+        }
+
+        resolve({
+          recommendation: synthesis.recommendation,
+          confidence: synthesis.confidence as "high" | "medium" | "low",
+          trade_offs: synthesis.trade_offs,
+          reasoning: synthesis.reasoning || "No reasoning provided",
+        });
+      } catch (error: unknown) {
+        const err = error as Error;
+        logger.error("Arbiter synthesis failed", { error: err.message });
+
+        // Fallback synthesis
+        resolve({
+          recommendation: "Unable to synthesize perspectives due to parsing error. Review both arguments and decide based on your judgment.",
+          confidence: "low",
+          trade_offs: ["Synthesis failed - manual review needed"],
+          reasoning: `Arbiter failed: ${err.message}`,
+        });
       }
     });
 
-    // Timeout after 60 seconds
-    const timeout = setTimeout(() => {
-      proc.kill();
-      resolve(`[${role} failed: timeout]`);
-    }, 60_000);
-
-    proc.on("close", () => {
-      clearTimeout(timeout);
+    proc.on("error", (err: Error) => {
+      logger.error("Arbiter synthesis failed", { error: err.message });
+      resolve({
+        recommendation: "Unable to synthesize perspectives due to execution error. Review both arguments and decide based on your judgment.",
+        confidence: "low",
+        trade_offs: ["Synthesis failed - manual review needed"],
+        reasoning: `Arbiter failed: ${err.message}`,
+      });
     });
 
-    // Write prompt to stdin and close
-    proc.stdin.write(prompt);
-    proc.stdin.end();
+    if (proc.stdin) {
+      proc.stdin.write(prompt);
+      proc.stdin.end();
+    }
   });
 }
 
+/**
+ * Main debate function - coordinates advocate, critic, and arbiter.
+ */
 export async function debateTopic(
   workspace: string,
-  input: DebateInput,
+  topic: string,
+  context?: string,
+  customPerspectives?: { advocate: string; critic: string },
+  getRemainingConsultations?: () => number,
+  decrementConsultations?: (count: number) => boolean,
 ): Promise<DebateResult> {
   const debateId = `debate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  // Rate limit check — debate costs 2 slots
-  const currentCount = getConsultationCount();
-  if (currentCount + DEBATE_COST > MAX_CONSULTATIONS) {
-    return {
-      success: false,
-      debate_id: debateId,
-      advocate_argument: "",
-      critic_argument: "",
-      synthesis: `Debate limit reached (${MAX_CONSULTATIONS} consultations per session, debate costs ${DEBATE_COST}). Proceed with your best judgment.`,
-      confidence: "low",
-      recommendation: "Cannot proceed with debate",
-      trade_offs: [],
-      consultations_remaining: Math.max(0, MAX_CONSULTATIONS - currentCount),
-    };
-  }
-
   // Input validation
-  let { topic, context, advocate_position, critic_position } = input;
   if (topic.length > MAX_TOPIC_LENGTH) {
     topic = topic.substring(0, MAX_TOPIC_LENGTH) + "... [truncated]";
   }
-  if (context && context.length > MAX_CONTEXT_LENGTH) {
-    context = context.substring(0, MAX_CONTEXT_LENGTH) + "... [truncated]";
+  if (context && context.length > MAX_DEBATE_CONTEXT_LENGTH) {
+    context = context.substring(0, MAX_DEBATE_CONTEXT_LENGTH) + "... [truncated]";
   }
 
-  const advocatePos =
-    advocate_position || "in favor of the proposed approach";
-  const criticPos =
-    critic_position ||
-    "against the proposed approach, proposing alternatives";
+  // Check if we have enough consultation slots (debates cost 2 slots)
+  if (getRemainingConsultations && decrementConsultations) {
+    const remaining = getRemainingConsultations();
+    if (remaining < DEBATE_COST) {
+      return {
+        success: false,
+        topic,
+        advocate: { perspective: "advocate", argument: "", success: false, error: "Insufficient consultations" },
+        critic: { perspective: "critic", argument: "", success: false, error: "Insufficient consultations" },
+        synthesis: {
+          recommendation: `Debate limit reached (need ${DEBATE_COST} consultations, ${remaining} remaining). Proceed with your best judgment.`,
+          confidence: "low",
+          trade_offs: [],
+          reasoning: "Insufficient consultation slots for debate",
+        },
+        debate_id: debateId,
+        consultations_used: 0,
+        consultations_remaining: remaining,
+      };
+    }
 
-  // Build prompts
-  const advocatePrompt = [
-    "You are the Advocate in a structured debate. Argue IN FAVOR of the following approach.",
-    "Present the strongest case: benefits, evidence, precedent. Be specific and practical.",
-    `\nTopic: ${topic}`,
-    context ? `\nContext: ${context}` : "",
-    `\nPosition: ${advocatePos}`,
-    "\nProvide a concise argument (3-5 sentences).",
-  ].join("\n");
+    // Reserve consultation slots
+    if (!decrementConsultations(DEBATE_COST)) {
+      return {
+        success: false,
+        topic,
+        advocate: { perspective: "advocate", argument: "", success: false, error: "Failed to reserve slots" },
+        critic: { perspective: "critic", argument: "", success: false, error: "Failed to reserve slots" },
+        synthesis: {
+          recommendation: "Failed to reserve consultation slots. Proceed with your best judgment.",
+          confidence: "low",
+          trade_offs: [],
+          reasoning: "Could not decrement consultation counter",
+        },
+        debate_id: debateId,
+        consultations_used: 0,
+        consultations_remaining: getRemainingConsultations(),
+      };
+    }
+  }
 
-  const criticPrompt = [
-    "You are the Critic in a structured debate. Argue AGAINST the following approach.",
-    "Identify risks, weaknesses, alternatives, and hidden costs. Be specific and constructive — don't just naysay, propose better alternatives.",
-    `\nTopic: ${topic}`,
-    context ? `\nContext: ${context}` : "",
-    `\nPosition: ${criticPos}`,
-    "\nProvide a concise argument (3-5 sentences).",
-  ].join("\n");
+  const advocatePerspective = customPerspectives?.advocate ||
+    "Advocate - argue in favor of this approach, focusing on benefits and opportunities";
+  const criticPerspective = customPerspectives?.critic ||
+    "Critic - argue against this approach, focusing on risks and downsides";
 
-  // Run advocate and critic in parallel
-  const [advocateArgument, criticArgument] = await Promise.all([
-    runPerspective(workspace, advocatePrompt, "advocate"),
-    runPerspective(workspace, criticPrompt, "critic"),
+  const timeout = 45_000; // 45 seconds per perspective
+  const contextStr = context || "";
+
+  logger.info(`Starting debate: ${topic}`, { debate_id: debateId });
+
+  // Spawn advocate and critic in parallel using Promise.allSettled
+  const [advocateResult, criticResult] = await Promise.allSettled([
+    spawnPerspective(workspace, advocatePerspective, topic, contextStr, timeout),
+    spawnPerspective(workspace, criticPerspective, topic, contextStr, timeout),
   ]);
 
-  // Check if both failed
-  if (
-    advocateArgument.startsWith("[advocate failed") &&
-    criticArgument.startsWith("[critic failed")
-  ) {
-    return {
-      success: false,
-      debate_id: debateId,
-      advocate_argument: advocateArgument,
-      critic_argument: criticArgument,
-      synthesis: "Both debate perspectives failed. Unable to proceed.",
-      confidence: "low",
-      recommendation: "Unable to reach a decision",
-      trade_offs: [],
-      consultations_remaining: Math.max(
-        0,
-        MAX_CONSULTATIONS - currentCount - DEBATE_COST,
-      ),
-    };
-  }
-
-  // Run arbiter synthesis (sequential, after advocate+critic)
-  const arbiterPrompt = [
-    "You are the Arbiter synthesizing a debate. Given the Advocate's and Critic's arguments, produce a final recommendation.",
-    "Be decisive — pick a clear direction.",
-    "\nFormat your response EXACTLY as:",
-    "RECOMMENDATION: [one sentence verdict]",
-    "CONFIDENCE: [high/medium/low]",
-    "TRADE-OFFS: [bullet list of key trade-offs, one per line with - prefix]",
-    "REASONING: [2-3 sentences explaining your synthesis]",
-    `\n--- ADVOCATE ARGUMENT ---\n${advocateArgument}`,
-    `\n--- CRITIC ARGUMENT ---\n${criticArgument}`,
-  ].join("\n");
-
-  const arbiterOutput = await runPerspective(workspace, arbiterPrompt, "arbiter");
-
-  if (arbiterOutput.startsWith("[arbiter failed")) {
-    logger.warn("Arbiter failed, returning raw arguments");
-    // Graceful degradation: return arguments without synthesis
-    const result: DebateResult = {
-      success: true,
-      debate_id: debateId,
-      advocate_argument: advocateArgument,
-      critic_argument: criticArgument,
-      synthesis: arbiterOutput,
-      confidence: "low",
-      recommendation: "See advocate and critic arguments for manual synthesis",
-      trade_offs: ["Arbiter synthesis unavailable"],
-      consultations_remaining: Math.max(
-        0,
-        MAX_CONSULTATIONS - currentCount - DEBATE_COST,
-      ),
-    };
-    logDebate(workspace, debateId, {
-      ...result,
-      timestamp: new Date().toISOString(),
-    });
-    incrementConsultationCount(DEBATE_COST);
-    return result;
-  }
-
-  const parsed = parseArbiterOutput(arbiterOutput);
-
-  incrementConsultationCount(DEBATE_COST);
-
-  const result: DebateResult = {
-    success: true,
-    debate_id: debateId,
-    advocate_argument: advocateArgument,
-    critic_argument: criticArgument,
-    synthesis: parsed.reasoning,
-    confidence: parsed.confidence,
-    recommendation: parsed.recommendation,
-    trade_offs: parsed.trade_offs,
-    consultations_remaining: Math.max(
-      0,
-      MAX_CONSULTATIONS - currentCount - DEBATE_COST,
-    ),
+  const advocate = advocateResult.status === "fulfilled" ? advocateResult.value : {
+    perspective: advocatePerspective,
+    argument: "",
+    success: false,
+    error: "Promise rejected",
   };
 
+  const critic = criticResult.status === "fulfilled" ? criticResult.value : {
+    perspective: criticPerspective,
+    argument: "",
+    success: false,
+    error: "Promise rejected",
+  };
+
+  // If both perspectives failed, return early
+  if (!advocate.success && !critic.success) {
+    logger.error("Both perspectives failed", { debate_id: debateId });
+
+    const remaining = getRemainingConsultations ? getRemainingConsultations() : 0;
+
+    logDebate(workspace, debateId, {
+      topic,
+      advocate,
+      critic,
+      synthesis: null,
+      timestamp: new Date().toISOString(),
+      success: false,
+    });
+
+    return {
+      success: false,
+      topic,
+      advocate,
+      critic,
+      synthesis: {
+        recommendation: "Both debate perspectives failed. Proceed with your best judgment based on available information.",
+        confidence: "low",
+        trade_offs: ["Unable to generate debate perspectives"],
+        reasoning: "Debate execution failed",
+      },
+      debate_id: debateId,
+      consultations_used: DEBATE_COST,
+      consultations_remaining: remaining,
+    };
+  }
+
+  // Arbiter synthesis - even if one perspective failed, try to synthesize
+  const synthesis = await synthesizeArguments(workspace, topic, advocate, critic, timeout);
+
+  const remaining = getRemainingConsultations ? getRemainingConsultations() : 0;
+
   logDebate(workspace, debateId, {
-    ...result,
     topic,
-    context,
+    context: contextStr,
+    advocate,
+    critic,
+    synthesis,
     timestamp: new Date().toISOString(),
+    success: true,
   });
 
-  logger.info("Debate completed", { debate_id: debateId });
+  logger.info(`Debate completed: ${topic}`, {
+    debate_id: debateId,
+    confidence: synthesis.confidence,
+  });
 
-  return result;
+  return {
+    success: true,
+    topic,
+    advocate,
+    critic,
+    synthesis,
+    debate_id: debateId,
+    consultations_used: DEBATE_COST,
+    consultations_remaining: remaining,
+  };
 }

@@ -1,0 +1,55 @@
+{
+  "id": "fix-test-integration-1771047635",
+  "type": "fix",
+  "status": "pending",
+  "priority": 2,
+  "created_by": "qa",
+  "assigned_to": "engineer",
+  "created_at": "2026-02-14T05:40:35.000000",
+  "title": "[FIX] Integrate WorkflowExecutor to Fix 10 Failing Tests",
+  "description": "10 unit tests in tests/unit/test_workflow_chain.py are failing because the WorkflowExecutor is not being initialized in the agent.\n\nFAILING TESTS:\n- test_queues_next_agent_no_pr\n- test_chains_even_with_team_mode\n- test_chains_with_team_override_false\n- test_chains_with_team_override_true\n- test_chain_task_type_engineer\n- test_chain_task_type_qa\n- test_signal_overrides_default_chain\n- test_signal_fallback_on_self_route\n- test_no_signal_uses_default_chain\n- test_escalation_task_rejects_signal\n\nROOT CAUSE:\nTests expect queue.push() to be called when routing to next agent via DAG executor, but the executor is not instantiated.\n\nFIXES REQUIRED:\n\n1. Initialize WorkflowExecutor in agent (src/agent_framework/core/agent.py):\n   ```python\n   from agent_framework.workflow.executor import WorkflowExecutor\n   \n   def __init__(self, ...):\n       # ... existing code ...\n       self._workflow_executor = WorkflowExecutor(self.queue, self.queue.queue_dir)\n   ```\n\n2. Update test fixture if needed (tests/unit/test_workflow_chain.py):\n   ```python\n   from agent_framework.workflow.executor import WorkflowExecutor\n   a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)\n   ```\n\n3. Minor style fixes (optional but recommended):\n   - Remove unused imports: Path (conditions.py), Set (dag.py)\n   - Use lazy logging: logger.info('text %s', var) instead of f-strings\n   - Fix line length in executor.py:142\n\nTEST VALIDATION:\nRun: python -m pytest tests/unit/test_workflow_chain.py -v\nExpected: 30/30 tests passing\n\nNOTE: This fix is only needed IF we decide to keep the conditional workflows implementation. Awaiting architect decision on whether to proceed with this feature or pivot to interactive checkpoints.",
+  "depends_on": ["chain-chain-planni-qa"],
+  "blocks": [],
+  "acceptance_criteria": [
+    "All 30 tests in test_workflow_chain.py pass",
+    "WorkflowExecutor properly integrated in agent initialization",
+    "No new test failures introduced"
+  ],
+  "deliverables": [
+    "Updated agent.py with WorkflowExecutor initialization",
+    "Updated test fixtures if needed",
+    "Test run output showing 30/30 passing"
+  ],
+  "notes": [
+    "Source: QA review of chain-chain-planni-qa",
+    "Current status: 20 passing, 10 failing",
+    "Quality: Code is good, just needs integration",
+    "Priority: Medium - blocked by architect decision on feature direction"
+  ],
+  "context": {
+    "mode": "fix",
+    "workflow": "default",
+    "github_repo": "harrisonju123/agent-framework",
+    "repository_name": "Agent Framework",
+    "source_task_id": "chain-chain-planni-qa",
+    "source_agent": "qa",
+    "jira_available": false
+  },
+  "retry_count": 0,
+  "last_failed_at": null,
+  "started_at": null,
+  "started_by": null,
+  "completed_at": null,
+  "completed_by": null,
+  "failed_at": null,
+  "failed_by": null,
+  "failed_task_id": null,
+  "needs_human_review": false,
+  "estimated_effort": "1-2 hours",
+  "result_summary": null,
+  "last_error": null,
+  "optimization_override": null,
+  "optimization_override_reason": null,
+  "plan": null,
+  "replan_history": []
+}

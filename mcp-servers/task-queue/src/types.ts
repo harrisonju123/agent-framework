@@ -157,21 +157,34 @@ export interface GetKnowledgeInput {
 
 // Multi-perspective debate types
 
-export interface DebateInput {
-  topic: string;
-  context?: string;
-  advocate_position?: string;
-  critic_position?: string;
+export interface PerspectiveArgument {
+  perspective: string;
+  argument: string;
+  success: boolean;
+  error?: string;
 }
 
 export interface DebateResult {
   success: boolean;
+  topic: string;
+  advocate: PerspectiveArgument;
+  critic: PerspectiveArgument;
+  synthesis: {
+    recommendation: string;
+    confidence: "high" | "medium" | "low";
+    trade_offs: string[];
+    reasoning: string;
+  };
   debate_id: string;
-  advocate_argument: string;
-  critic_argument: string;
-  synthesis: string;
-  confidence: "high" | "medium" | "low";
-  recommendation: string;
-  trade_offs: string[];
+  consultations_used: number;
   consultations_remaining: number;
+}
+
+export interface DebateInput {
+  topic: string;
+  context?: string;
+  custom_perspectives?: {
+    advocate: string;
+    critic: string;
+  };
 }
