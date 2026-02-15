@@ -406,29 +406,33 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve):
         orchestrator.spawn_all_agents()
         console.print("[green]✓[/] Agents started")
 
-    if no_dashboard:
+    # If dashboard is already running (from `agent up`), skip TUI and return
+    dash_info = orchestrator.get_dashboard_info()
+    if dash_info:
+        dash_url = f"http://localhost:{dash_info['port']}"
+        console.print(f"\n[green]✓ Task queued. Dashboard: {dash_url}[/]")
+        console.print("[dim]Monitor progress in your browser or with 'agent status --watch'[/]")
+    elif no_dashboard:
         # Print status without launching dashboard
         if selected_repo.jira_project:
-            console.print(f"\n[bold cyan]🎯 Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
+            console.print(f"\n[bold cyan]Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
         else:
-            console.print(f"\n[bold cyan]🎯 Tasks will be created in local queues[/]")
-        console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
-        console.print(f"[dim]📝 View logs: tail -f logs/architect.log[/]")
+            console.print(f"\n[bold cyan]Tasks will be created in local queues[/]")
+        console.print(f"[dim]Monitor progress: agent status --watch[/]")
+        console.print(f"[dim]View logs: tail -f logs/architect.log[/]")
         console.print()
         console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {selected_repo.github_repo} to ~/.agent-workspaces/")
         console.print(f"  2. Analyze the codebase")
         if selected_repo.jira_project:
             console.print(f"  3. Create JIRA epic in project {selected_repo.jira_project}")
-            console.print(f"  4. Break down into architect → engineer → qa subtasks")
+            console.print(f"  4. Break down into architect -> engineer -> qa subtasks")
         else:
             console.print(f"  3. Create tasks in local queues (.agent-communication/queues/)")
             console.print(f"  4. Route to appropriate agents based on workflow")
         console.print(f"  5. Queue tasks for other agents")
-        console.print()
-        console.print("[dim]Dashboard disabled. Use 'agent status --watch' to monitor.[/]")
     else:
-        # Start live dashboard
+        # Start live dashboard (blocks terminal)
         console.print("\n[bold cyan]✓ Task queued, starting live dashboard...[/]")
         console.print("[dim]Press Ctrl+C to exit dashboard[/]\n")
 
@@ -1118,6 +1122,129 @@ def start(ctx, watchdog, replicas, log_level):
 
 
 @cli.command()
+@click.option("--port", "-p", default=8080, help="Dashboard port (default: 8080)")
+@click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
+@click.option("--watchdog/--no-watchdog", default=True, help="Start watchdog")
+@click.option(
+    "--replicas", "-r",
+    default=1,
+    type=click.IntRange(min=1, max=50),
+    help="Number of replicas per agent (1-50)"
+)
+@click.option(
+    "--log-level", "-l",
+    default="INFO",
+    type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False),
+    help="Logging level"
+)
+@click.pass_context
+def up(ctx, port, no_browser, watchdog, replicas, log_level):
+    """Start agents + dashboard in background, return terminal immediately.
+
+    One command to bring everything up. Use 'agent down' to tear it down.
+
+    Examples:
+        agent up                    # Start everything, open browser
+        agent up --no-browser       # Start without opening browser
+        agent up --port 9000        # Use custom dashboard port
+        agent up --replicas 2       # 2 replicas per agent type
+    """
+    import time
+    import webbrowser
+
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold cyan]Starting Agent Framework[/]")
+
+    try:
+        orchestrator = Orchestrator(workspace)
+
+        # --- Agents ---
+        running = orchestrator.get_running_agents()
+        if running:
+            console.print(f"[green]Agents already running: {', '.join(running)}[/]")
+        else:
+            orchestrator.spawn_all_agents(replicas=replicas, log_level=log_level)
+            running = list(orchestrator.processes.keys())
+            console.print(f"[green]Started {len(running)} agents[/]")
+
+        # --- Watchdog ---
+        if watchdog and "watchdog" not in running:
+            try:
+                orchestrator.spawn_watchdog()
+                console.print("[green]Started watchdog[/]")
+            except Exception as e:
+                console.print(f"[yellow]Watchdog failed to start: {e}[/]")
+
+        # --- Dashboard ---
+        dash_info = orchestrator.get_dashboard_info()
+        if dash_info:
+            console.print(f"[green]Dashboard already running on port {dash_info['port']}[/]")
+            port = dash_info["port"]
+        else:
+            proc = orchestrator.spawn_dashboard(port=port)
+            if proc:
+                for _ in range(10):
+                    time.sleep(0.5)
+                    if orchestrator.is_port_in_use(port):
+                        break
+                console.print(f"[green]Dashboard started on port {port}[/]")
+            else:
+                console.print(f"[yellow]Dashboard could not start (port {port} in use). Try: agent down, or --port <other>[/]")
+
+        # --- Browser ---
+        if not no_browser:
+            url = f"http://localhost:{port}"
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+
+        # --- Summary ---
+        console.print()
+        console.print(f"[bold green]Agent Framework is up[/]")
+        console.print(f"  Dashboard: http://localhost:{port}")
+        console.print(f"  Agents:    {len(running)}")
+        console.print()
+        console.print("[dim]Queue work:  agent work[/]")
+        console.print("[dim]Tear down:   agent down[/]")
+        console.print("[dim]View logs:   tail -f logs/<agent>.log[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command()
+@click.option("--graceful/--force", default=True, help="Graceful shutdown")
+@click.pass_context
+def down(ctx, graceful):
+    """Stop agents + dashboard. Counterpart to 'agent up'.
+
+    Examples:
+        agent down           # Graceful shutdown
+        agent down --force   # Force kill all processes
+    """
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold yellow]Stopping Agent Framework[/]")
+
+    try:
+        orchestrator = Orchestrator(workspace)
+
+        # Stop dashboard first (fast, doesn't reset tasks)
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+            console.print("[green]Dashboard stopped[/]")
+
+        # Stop agents (handles PID file cleanup and task reset)
+        orchestrator.stop_all_agents(graceful=graceful)
+        console.print("[green]All agents stopped[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+
+
+@cli.command()
 @click.option("--graceful/--force", default=True, help="Graceful shutdown")
 @click.pass_context
 def stop(ctx, graceful):
@@ -1128,6 +1255,12 @@ def stop(ctx, graceful):
 
     try:
         orchestrator = Orchestrator(workspace)
+
+        # Also stop dashboard if running (consistent with `agent down`)
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+            console.print("[green]✓ Dashboard stopped[/]")
+
         orchestrator.stop_all_agents(graceful=graceful)
         console.print("[green]✓ All agents stopped[/]")
 
@@ -1147,6 +1280,11 @@ def restart(ctx, watchdog, dashboard):
 
     try:
         orchestrator = Orchestrator(workspace)
+
+        # Stop dashboard if running
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+            console.print("[green]✓ Dashboard stopped[/]")
 
         # Stop existing agents
         orchestrator.stop_all_agents(graceful=True)

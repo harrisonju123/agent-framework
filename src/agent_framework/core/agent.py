@@ -524,17 +524,33 @@ class Agent:
                 f"reason={routing_signal.reason}"
             )
 
+        self._run_post_completion_flow(task, response, routing_signal, task_start_time)
+
+    def _run_post_completion_flow(self, task: Task, response, routing_signal, task_start_time) -> None:
+        """Route completed task through workflow chain, collect metrics.
+
+        Subtasks (parent_task_id set) skip the workflow chain — the fan-in
+        task aggregates results and flows through QA/review/PR instead.
+        """
         # Fan-in check: if this is a subtask, check if all siblings are done
         self._check_and_create_fan_in_task(task)
 
-        self.logger.debug(f"Checking if code review needed for {task.id}")
-        self._queue_code_review_if_needed(task, response)
-        self._queue_review_fix_if_needed(task, response)
-        self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
+        # Subtasks wait for fan-in — don't route them individually through
+        # the workflow chain. The fan-in task handles QA/review/PR creation.
+        if task.parent_task_id is not None:
+            self.logger.debug(
+                f"Subtask {task.id} complete — skipping workflow chain "
+                f"(fan-in will handle routing)"
+            )
+        else:
+            self.logger.debug(f"Checking if code review needed for {task.id}")
+            self._queue_code_review_if_needed(task, response)
+            self._queue_review_fix_if_needed(task, response)
+            self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
-        # Safety net: create PR if LLM pushed but didn't create one.
-        # Runs AFTER workflow chain so pr_url doesn't short-circuit the executor.
-        self._push_and_create_pr_if_needed(task)
+            # Safety net: create PR if LLM pushed but didn't create one.
+            # Runs AFTER workflow chain so pr_url doesn't short-circuit the executor.
+            self._push_and_create_pr_if_needed(task)
 
         self._extract_and_store_memories(task, response)
         self._analyze_tool_patterns(task)

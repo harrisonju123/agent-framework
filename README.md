@@ -46,10 +46,12 @@ agent doctor
 ### Describe What to Build
 
 ```bash
-agent start
+agent up            # starts agents + dashboard, opens browser, returns terminal
 agent work
 # > What would you like to work on? Add retry logic to the payment webhook handler
 # > Which repository? your-org/your-repo
+
+agent down          # tears everything down when you're done
 ```
 
 The framework queues a planning task to the Architect, who breaks it down, chains to Engineer for implementation, then QA for review — all locally via file queues.
@@ -174,9 +176,13 @@ See [docs/CHECKPOINTS.md](docs/CHECKPOINTS.md) for full documentation.
 
 | Command | Description |
 |---------|-------------|
-| `agent start` | Start all agents |
+| `agent up` | Start agents + web dashboard in background, open browser, return terminal |
+| `agent up --no-browser` | Same but skip opening browser |
+| `agent down` | Stop agents + dashboard |
+| `agent down --force` | Force-kill everything |
+| `agent start` | Start agents only (blocks terminal, no dashboard) |
 | `agent start --replicas 4` | Start N replicas per agent type (parallel processing) |
-| `agent stop` | Stop agents gracefully |
+| `agent stop` | Stop agents + dashboard gracefully |
 | `agent pause` / `agent resume` | Pause/resume task processing |
 | `agent status --watch` | Live terminal dashboard |
 | `agent summary --epic PROJ-100` | Epic progress with PR links and errors |
@@ -321,7 +327,7 @@ agent cleanup-worktrees   # Remove stale worktrees
 | Missing config | `cp config/agent-framework.yaml.example config/agent-framework.yaml` |
 | Tasks stuck as in_progress | Agent auto-recovers orphaned tasks on next poll cycle |
 | Stale locks | Watchdog auto-cleans, or `rm -rf .agent-communication/locks/*.lock` |
-| Agents not responding | `agent stop && agent start` |
+| Agents not responding | `agent down && agent up` or `agent restart` |
 | JIRA auth failed | New token at https://id.atlassian.com/manage-profile/security/api-tokens |
 | GitHub auth failed | New token at https://github.com/settings/tokens (needs `repo` scope) |
 | MCP tool name conflict | Framework uses `--strict-mcp-config` to avoid global config collisions |

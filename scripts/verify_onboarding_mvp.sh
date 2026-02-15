@@ -49,7 +49,6 @@ files_to_check=(
     "src/agent_framework/web/frontend/src/components/SetupWizard.vue"
     "docs/TROUBLESHOOTING.md"
     "docs/GETTING_STARTED.md"
-    "docs/ONBOARDING_MVP.md"
 )
 
 for file in "${files_to_check[@]}"; do
@@ -118,4 +117,3 @@ echo ""
 echo "Documentation:"
 echo "  - Getting Started: docs/GETTING_STARTED.md"
 echo "  - Troubleshooting: docs/TROUBLESHOOTING.md"
-echo "  - Implementation: docs/ONBOARDING_MVP.md"

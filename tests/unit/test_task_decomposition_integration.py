@@ -507,3 +507,99 @@ def test_metadata_survival_through_multiple_handoffs(tmp_workspace):
         assert qa_chain_task.context.get("parent_task_id") == "impl-123"
         assert qa_chain_task.context.get("subtask_count") == 4
         assert qa_chain_task.context.get("_chain_depth") == 2  # Incremented
+
+
+class TestSubtaskWorkflowChainGuard:
+    """Tests for the parent_task_id guard that prevents subtasks from
+    individually triggering the workflow chain (QA/review/PR).
+    Only the fan-in task should flow through the chain."""
+
+    @pytest.fixture
+    def mock_agent(self, tmp_workspace):
+        """Create a minimally-mocked Agent for testing _run_post_completion_flow."""
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent.logger = Mock()
+        agent.workspace = tmp_workspace
+        # Bind the real method under test to the mock
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        return agent
+
+    @pytest.fixture
+    def mock_response(self):
+        resp = Mock()
+        resp.input_tokens = 100
+        resp.output_tokens = 50
+        resp.content = "done"
+        return resp
+
+    def _make_task(self, task_id, parent_task_id=None, context=None):
+        return Task(
+            id=task_id,
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.COMPLETED,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title=f"Task {task_id}",
+            description="test task",
+            parent_task_id=parent_task_id,
+            context=context or {},
+        )
+
+    def test_subtask_skips_workflow_chain(self, mock_agent, mock_response):
+        """Subtask (parent_task_id set) must NOT trigger workflow chain or PR creation."""
+        subtask = self._make_task("parent-1-sub1", parent_task_id="parent-1")
+
+        mock_agent._run_post_completion_flow(
+            subtask, mock_response, routing_signal=None, task_start_time=0
+        )
+
+        # Fan-in check should always run
+        mock_agent._check_and_create_fan_in_task.assert_called_once_with(subtask)
+
+        # Workflow chain methods should NOT be called for subtasks
+        mock_agent._queue_code_review_if_needed.assert_not_called()
+        mock_agent._queue_review_fix_if_needed.assert_not_called()
+        mock_agent._enforce_workflow_chain.assert_not_called()
+        mock_agent._push_and_create_pr_if_needed.assert_not_called()
+
+        # Per-subtask learning/metrics should still run
+        mock_agent._extract_and_store_memories.assert_called_once()
+        mock_agent._analyze_tool_patterns.assert_called_once()
+        mock_agent._log_task_completion_metrics.assert_called_once()
+
+    def test_regular_task_still_chains(self, mock_agent, mock_response):
+        """Non-subtask (parent_task_id=None) must still get full workflow chain."""
+        task = self._make_task("regular-task-1")
+
+        mock_agent._run_post_completion_flow(
+            task, mock_response, routing_signal=None, task_start_time=0
+        )
+
+        mock_agent._check_and_create_fan_in_task.assert_called_once_with(task)
+        mock_agent._queue_code_review_if_needed.assert_called_once()
+        mock_agent._queue_review_fix_if_needed.assert_called_once()
+        mock_agent._enforce_workflow_chain.assert_called_once()
+        mock_agent._push_and_create_pr_if_needed.assert_called_once()
+
+    def test_fan_in_task_flows_through_chain(self, mock_agent, mock_response):
+        """Fan-in task (parent_task_id=None, context.fan_in=True) flows through
+        the full workflow chain — it's the aggregated result that should create PRs."""
+        fan_in = self._make_task(
+            "fan-in-parent-1",
+            parent_task_id=None,
+            context={"fan_in": True, "parent_task_id": "parent-1", "subtask_count": 3},
+        )
+
+        mock_agent._run_post_completion_flow(
+            fan_in, mock_response, routing_signal=None, task_start_time=0
+        )
+
+        mock_agent._check_and_create_fan_in_task.assert_called_once()
+        mock_agent._queue_code_review_if_needed.assert_called_once()
+        mock_agent._queue_review_fix_if_needed.assert_called_once()
+        mock_agent._enforce_workflow_chain.assert_called_once()
+        mock_agent._push_and_create_pr_if_needed.assert_called_once()
