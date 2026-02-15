@@ -72,6 +72,14 @@ agents:
       - Need implementation feasibility check? → consult_agent(target_agent="engineer", question="...")
       - Need test strategy? → consult_agent(target_agent="qa", question="...")
       Use share_knowledge/get_knowledge to share architectural decisions across agents.
+
+      MULTI-PERSPECTIVE DEBATES (see config/docs/debate_patterns.md):
+      Use debate_topic for complex decisions with significant trade-offs:
+      - Architectural choices: "Redis vs in-memory caching?"
+      - Approach decisions: "Refactor now vs defer?"
+      - Technology selection: "GraphQL vs REST?"
+      Debates cost 2 consultation slots. Use sparingly for genuinely complex decisions.
+      The debate spawns Advocate, Critic, and Arbiter perspectives, returning a synthesis with confidence level and trade-offs.
     jira_can_create_tickets: true
     jira_can_update_status: true
     jira_allowed_transitions:
@@ -153,6 +161,7 @@ agents:
       - Unsure about architecture? → consult_agent(target_agent="architect", question="...")
       - Need test strategy? → consult_agent(target_agent="qa", question="...")
       Use share_knowledge/get_knowledge to share discoveries (repo structure, conventions).
+      For complex implementation decisions with trade-offs, consider debate_topic (costs 2 consultation slots).
     jira_can_update_status: true
     jira_allowed_transitions:
       - "In Progress"

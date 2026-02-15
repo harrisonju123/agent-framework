@@ -21,6 +21,27 @@ const MAX_CONSULTATIONS = Math.min(
   20, // hard upper bound
 );
 
+/**
+ * Get remaining consultation slots.
+ * Used by debate system to check availability before spawning perspectives.
+ */
+export function getRemainingConsultations(): number {
+  return MAX_CONSULTATIONS - consultationCount;
+}
+
+/**
+ * Decrement consultation counter by a given amount.
+ * Used by debate system to reserve slots (debates cost 2 slots).
+ * Returns false if insufficient slots available.
+ */
+export function decrementConsultations(count: number): boolean {
+  if (consultationCount + count > MAX_CONSULTATIONS) {
+    return false;
+  }
+  consultationCount += count;
+  return true;
+}
+
 // Input length limits
 const MAX_QUESTION_LENGTH = 2000;
 const MAX_CONTEXT_LENGTH = 1000;
