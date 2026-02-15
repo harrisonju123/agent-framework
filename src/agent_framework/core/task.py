@@ -51,6 +51,7 @@ class TaskStatus(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"  # At checkpoint, needs human approval
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class TaskType(str, Enum):
@@ -188,6 +189,18 @@ class Task(BaseModel):
                 }
             )
             self.retry_attempts.append(attempt)
+
+    def mark_cancelled(self, cancelled_by: str, reason: Optional[str] = None) -> None:
+        """Mark task as cancelled so it won't be retried."""
+        self.status = TaskStatus.CANCELLED
+        self.failed_at = datetime.utcnow()
+        self.failed_by = cancelled_by
+        if reason:
+            self.last_error = f"Cancelled: {reason}"
+            self.notes.append(f"Cancelled by {cancelled_by}: {reason}")
+        else:
+            self.last_error = "Cancelled"
+            self.notes.append(f"Cancelled by {cancelled_by}")
 
     def reset_to_pending(self) -> None:
         """Reset task to pending for retry with backoff."""
