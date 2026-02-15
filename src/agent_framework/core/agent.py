@@ -1797,6 +1797,15 @@ If a tool call fails:
                 mcp_guidance += self._build_github_guidance(github_repo, jira_key)
             mcp_guidance += self._build_error_handling_guidance()
 
+        # Intermediate chain steps must not create PRs — the terminal step handles that
+        if task.context.get("chain_step") and not self._is_at_terminal_workflow_step(task):
+            mcp_guidance += """
+IMPORTANT: You are an intermediate step in the workflow chain.
+Push your commits but do NOT create a pull request.
+The PR will be created by a downstream agent after all steps complete.
+
+"""
+
         return f"""You are {self.config.id} working on an asynchronous task.
 
 TASK DETAILS:
@@ -1858,13 +1867,18 @@ IMPORTANT:
                 if dep_task and dep_task.result_summary:
                     dep_context += f"- {dep_task.title}: {dep_task.result_summary}\n"
 
+        # Intermediate chain steps must not create PRs
+        chain_note = ""
+        if task.context.get("chain_step") and not self._is_at_terminal_workflow_step(task):
+            chain_note = "\nIMPORTANT: You are an intermediate step in the workflow chain.\nPush your commits but do NOT create a pull request.\n"
+
         # Build optimized prompt (shorter, focused on essentials)
         return f"""You are {self.config.id} working on an asynchronous task.
 
 TASK:
 {task_json}
 
-{context_note}{dep_context}
+{context_note}{dep_context}{chain_note}
 {self.config.prompt}
 
 IMPORTANT:
@@ -1876,11 +1890,20 @@ IMPORTANT:
         """Get working directory for task (worktree, target repo, or framework workspace).
 
         Priority:
+        0. PR creation tasks with an implementation_branch skip worktree entirely
         1. If worktree mode enabled (config or task override), create isolated worktree
         2. If multi_repo_manager available, use shared clone
         3. Fall back to framework workspace
         """
         github_repo = task.context.get("github_repo")
+
+        # PR creation tasks that reference an upstream implementation branch
+        # don't need their own worktree — `gh pr create` works from the shared clone
+        if task.context.get("pr_creation_step") and task.context.get("implementation_branch"):
+            if github_repo and self.multi_repo_manager:
+                repo_path = self.multi_repo_manager.ensure_repo(github_repo)
+                self.logger.info("PR creation task — using shared clone (no worktree needed)")
+                return repo_path
 
         # Check if worktree mode should be used
         use_worktree = self._should_use_worktree(task)
@@ -1905,6 +1928,7 @@ IMPORTANT:
                         owner_repo=github_repo,
                     )
                     self._active_worktree = worktree_path
+                    task.context["worktree_branch"] = branch_name
                     self.logger.info(f"Using worktree: {github_repo} at {worktree_path}")
                     return worktree_path
                 except Exception as e:
@@ -2124,10 +2148,20 @@ IMPORTANT:
         Runs after the LLM finishes but before the task is marked completed,
         so the PR URL is available in task.context for downstream chain steps.
         Only acts when working in a worktree with actual unpushed commits.
+
+        Intermediate workflow steps push their branch but skip PR creation —
+        the terminal step (or pr_creator) handles that.
         """
         # Already has a PR (created by the LLM via MCP or _handle_success)
         if task.context.get("pr_url"):
             self.logger.debug(f"PR already exists for {task.id}: {task.context['pr_url']}")
+            return
+
+        # PR creation task with an implementation branch from upstream — create
+        # the PR from that branch without needing a worktree
+        impl_branch = task.context.get("implementation_branch")
+        if task.context.get("pr_creation_step") and impl_branch:
+            self._create_pr_from_branch(task, impl_branch)
             return
 
         # Only act if we have an active worktree with changes
@@ -2179,11 +2213,21 @@ IMPORTANT:
                     self.logger.error(f"Failed to push branch: {push_result.stderr}")
                     return
 
+            # Intermediate workflow steps: push code but skip PR creation.
+            # Store the branch so downstream agents can create the PR later.
+            if not self._is_at_terminal_workflow_step(task):
+                task.context["implementation_branch"] = branch
+                self.logger.info(
+                    f"Intermediate step — pushed {branch} but skipped PR creation"
+                )
+                return
+
             # Create PR using gh CLI
             pr_title = task.title
-            # Strip [chain] prefixes for cleaner PR titles
-            while pr_title.startswith("[chain] "):
-                pr_title = pr_title[8:]
+            # Strip [chain]/[pr] prefixes for cleaner PR titles
+            for prefix in ("[chain] ", "[pr] "):
+                while pr_title.startswith(prefix):
+                    pr_title = pr_title[len(prefix):]
             pr_title = pr_title[:70]
 
             pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
@@ -2201,7 +2245,7 @@ IMPORTANT:
             if pr_result.returncode == 0:
                 pr_url = pr_result.stdout.strip()
                 task.context["pr_url"] = pr_url
-                self.logger.info(f"🔀 Created PR: {pr_url}")
+                self.logger.info(f"Created PR: {pr_url}")
             else:
                 # gh returns non-zero if PR already exists — check for that
                 if "already exists" in pr_result.stderr:
@@ -2213,6 +2257,60 @@ IMPORTANT:
             self.logger.error("Timed out pushing branch or creating PR")
         except Exception as e:
             self.logger.error(f"Error creating PR: {e}")
+
+    def _create_pr_from_branch(self, task: Task, branch: str) -> None:
+        """Create a PR from an existing pushed branch (used by pr_creation_step tasks).
+
+        Called when the terminal PR creation agent receives a task with an
+        implementation_branch set by an upstream agent. No worktree needed —
+        just runs `gh pr create --head <branch>` against the repo.
+        """
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            self.logger.warning("No github_repo in context, cannot create PR from branch")
+            return
+
+        # Build a clean PR title
+        pr_title = task.title
+        for prefix in ("[chain] ", "[pr] "):
+            while pr_title.startswith(prefix):
+                pr_title = pr_title[len(prefix):]
+        pr_title = pr_title[:70]
+
+        pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
+
+        # Determine cwd — use shared clone if available, otherwise workspace
+        cwd = self.workspace
+        if self.multi_repo_manager:
+            try:
+                cwd = self.multi_repo_manager.ensure_repo(github_repo)
+            except Exception:
+                pass
+
+        try:
+            self.logger.info(f"Creating PR from branch {branch} for {github_repo}")
+            pr_result = subprocess.run(
+                ["gh", "pr", "create",
+                 "--repo", github_repo,
+                 "--title", pr_title,
+                 "--body", pr_body,
+                 "--head", branch],
+                cwd=cwd, capture_output=True, text=True, timeout=30,
+            )
+
+            if pr_result.returncode == 0:
+                pr_url = pr_result.stdout.strip()
+                task.context["pr_url"] = pr_url
+                self.logger.info(f"Created PR from implementation branch: {pr_url}")
+            else:
+                if "already exists" in pr_result.stderr:
+                    self.logger.info("PR already exists for this branch")
+                else:
+                    self.logger.error(f"Failed to create PR: {pr_result.stderr}")
+        except subprocess.TimeoutExpired:
+            self.logger.error("Timed out creating PR from branch")
+        except Exception as e:
+            self.logger.error(f"Error creating PR from branch: {e}")
 
     def _remote_branch_exists(self, worktree_path) -> bool:
         """Check if current branch exists on the remote (origin)."""
@@ -3101,6 +3199,34 @@ IMPORTANT:
                 )
         except Exception as e:
             self.logger.error(f"Workflow execution failed for task {task.id}: {e}")
+
+    def _is_at_terminal_workflow_step(self, task: Task) -> bool:
+        """Check if the current agent is at the last step in the workflow DAG.
+
+        Returns True for standalone tasks (no workflow) to preserve backward
+        compatibility — standalone agents should always be allowed to create PRs.
+        """
+        workflow_name = task.context.get("workflow")
+        if not workflow_name or workflow_name not in self._workflows_config:
+            return True
+
+        workflow_def = self._workflows_config[workflow_name]
+        try:
+            dag = workflow_def.to_dag(workflow_name)
+        except Exception:
+            return True
+
+        # Prefer explicit workflow_step from chain context
+        step_id = task.context.get("workflow_step")
+        if step_id and step_id in dag.steps:
+            return dag.is_terminal_step(step_id)
+
+        # Fallback: find the step for this agent's base_id
+        for step in dag.steps.values():
+            if step.agent == self.config.base_id:
+                return dag.is_terminal_step(step.id)
+
+        return True
 
     def _get_changed_files(self) -> List[str]:
         """Get list of changed files from git diff (staged and unstaged)."""
