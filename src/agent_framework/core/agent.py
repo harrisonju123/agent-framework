@@ -929,6 +929,13 @@ class Agent:
 
         Ported from scripts/async-agent-runner.sh lines 374-394.
         """
+        # Re-read from disk to detect external status changes (e.g. `agent cancel`)
+        refreshed = self.queue.find_task(task.id)
+        if refreshed and refreshed.status == TaskStatus.CANCELLED:
+            self.logger.info(f"Task {task.id} was cancelled, skipping retry")
+            self.queue.mark_completed(refreshed)
+            return
+
         if task.retry_count >= self.retry_handler.max_retries:
             # Max retries exceeded - mark as failed
             self.logger.error(

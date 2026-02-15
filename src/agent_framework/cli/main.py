@@ -905,6 +905,58 @@ def guide(ctx, task_id, hint):
 
 
 @cli.command()
+@click.argument("task_id")
+@click.option("--reason", "-r", default=None, help="Reason for cancellation")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.pass_context
+def cancel(ctx, task_id, reason, yes):
+    """Cancel a queued or in-progress task so it won't be retried.
+
+    TASK_ID can be a task ID or JIRA key (e.g., PROJ-104).
+    Cancelled tasks are moved out of the queue and will not be retried
+    even if the subprocess is killed.
+
+    Examples:
+        agent cancel task-123
+        agent cancel PROJ-104 --reason "duplicate task"
+        agent cancel task-123 --yes          # Skip confirmation
+    """
+    workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
+
+    task = queue.find_task(task_id)
+
+    if not task:
+        console.print(f"[red]Error: Task '{task_id}' not found in any queue[/]")
+        return
+
+    jira_key = task.context.get("jira_key", task.id)
+    console.print(f"[bold]Task: {jira_key} - {task.title}[/]")
+    console.print(f"Status: {task.status}")
+    console.print(f"Assigned to: {task.assigned_to}")
+    console.print()
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED):
+        console.print(f"[yellow]Task is already {task.status} — nothing to cancel[/]")
+        return
+
+    if not yes and not click.confirm("Cancel this task?"):
+        console.print("[yellow]Aborted[/]")
+        return
+
+    cancelled_by = os.getenv("USER", "cli")
+    task.mark_cancelled(cancelled_by, reason)
+
+    # Persist the updated status so the agent sees it on next poll
+    queue.update(task)
+
+    console.print(f"[green]Task {jira_key} cancelled[/]")
+    if reason:
+        console.print(f"[dim]Reason: {reason}[/]")
+    console.print(f"[dim]If the agent is mid-execution, it will skip retry on exit.[/]")
+
+
+@cli.command()
 @click.argument("identifier", required=False)
 @click.option("--reset-retries", is_flag=True, help="Reset retry count to 0")
 @click.option("--all", "retry_all", is_flag=True, help="Retry all failed tasks")
