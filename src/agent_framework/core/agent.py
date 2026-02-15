@@ -73,6 +73,12 @@ CHAIN_TASK_TYPES = {
     "architect": TaskType.REVIEW,
 }
 
+# When architect routes a preview task, engineer gets PREVIEW type
+# When preview completes, architect routes back with IMPLEMENTATION type
+PREVIEW_CHAIN_TYPES = {
+    "engineer": TaskType.PREVIEW,
+}
+
 # Cap review cycles to prevent infinite QA ↔ Engineer loops
 MAX_REVIEW_CYCLES = 3
 
@@ -1668,6 +1674,51 @@ Previous attempts failed. Use this revised approach:
 
         return prompt + replan_section
 
+    def _inject_preview_mode(self, prompt: str, task: Task) -> str:
+        """Inject preview mode constraints when task is a preview."""
+        preview_section = """
+## PREVIEW MODE — READ-ONLY EXECUTION
+You are in PREVIEW MODE. You must plan your implementation WITHOUT writing any files.
+
+CONSTRAINTS:
+- Do NOT use Write, Edit, or NotebookEdit tools
+- Do NOT use Bash to create, modify, or delete files
+- DO use Read, Glob, Grep, and Bash (read-only commands like git log, git diff, ls) to explore
+- DO read every file you plan to modify to understand current state
+
+REQUIRED OUTPUT — Produce a structured execution preview:
+
+### Files to Modify
+For each file, list:
+- File path
+- What changes will be made (specific, not vague)
+- Estimated lines added/removed
+
+### New Files to Create
+For each new file:
+- File path
+- Purpose
+- Key contents/structure
+- Estimated line count
+
+### Implementation Approach
+- Step-by-step plan with ordering
+- Which patterns from existing code will be followed
+- Any dependencies between changes
+
+### Risks and Edge Cases
+- What could go wrong
+- Edge cases to handle
+- Backward compatibility concerns
+
+### Estimated Total Change Size
+- Total lines added/removed
+- Number of files affected
+
+This preview will be reviewed by the architect before implementation is authorized.
+"""
+        return preview_section + "\n\n" + prompt
+
     def _categorize_error(self, error_message: str) -> Optional[str]:
         """Categorize error message for better diagnostics.
 
@@ -1813,6 +1864,10 @@ Fix the failing tests and ensure all tests pass.
             prompt = self._build_prompt_optimized(task, prompt_override=prompt_text)
         else:
             prompt = self._build_prompt_legacy(task, prompt_override=prompt_text)
+
+        # Inject preview mode constraints when task is a preview
+        if task.type == TaskType.PREVIEW or task.type == 'preview':
+            prompt = self._inject_preview_mode(prompt, task)
 
         # Log prompt preview for debugging (sanitized)
         if self.logger.isEnabledFor(logging.DEBUG):
@@ -3523,6 +3578,11 @@ IMPORTANT:
             if self._should_decompose_task(task):
                 self._decompose_and_queue_subtasks(task)
                 return
+
+        # Preview tasks route back to architect for review, not to QA
+        if task.type in (TaskType.PREVIEW, 'preview') and self.config.base_id == 'engineer':
+            self._route_to_agent(task, 'architect', 'preview_review')
+            return
 
         # REVIEW/FIX tasks are routed by _queue_code_review_if_needed and
         # _queue_review_fix_if_needed respectively — letting them also route

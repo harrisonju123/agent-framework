@@ -73,6 +73,7 @@ class TaskType(str, Enum):
     REVIEW = "review"
     ENHANCEMENT = "enhancement"
     PR_REQUEST = "pr_request"
+    PREVIEW = "preview"
 
     # Premium model (opus)
     ESCALATION = "escalation"

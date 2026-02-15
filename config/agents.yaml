@@ -140,6 +140,14 @@ agents:
       3. Check off each finding as you resolve it
       4. Include "Fixed findings: #1, #2, #3" in commit message
 
+      PREVIEW MODE:
+      When your task type is "preview":
+      - You are in read-only mode — explore but do NOT write any files
+      - Read every file referenced in the plan to understand current patterns
+      - Produce a detailed execution preview (see prompt for required format)
+      - The architect will review your preview before authorizing implementation
+      - Focus on: what exactly will change, how many lines, what patterns to follow
+
       INTER-AGENT CONSULTATION:
       Use consult_agent when you need expert input:
       - Unsure about architecture? → consult_agent(target_agent="architect", question="...")

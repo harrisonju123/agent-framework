@@ -92,3 +92,24 @@ def test_task_reset_to_pending():
     assert task.status == TaskStatus.PENDING
     assert task.started_at is None
     assert task.started_by is None
+
+
+def test_preview_task_type():
+    """PREVIEW task type exists and serializes correctly."""
+    from datetime import UTC
+
+    assert TaskType.PREVIEW == "preview"
+    assert TaskType.PREVIEW.value == "preview"
+    # Can create a task with PREVIEW type
+    task = Task(
+        id="test-preview",
+        type=TaskType.PREVIEW,
+        status=TaskStatus.PENDING,
+        priority=1,
+        created_by="architect",
+        assigned_to="engineer",
+        created_at=datetime.now(UTC),
+        title="Preview: add auth",
+        description="Preview implementation plan",
+    )
+    assert task.type == "preview"
