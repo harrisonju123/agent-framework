@@ -73,12 +73,6 @@ CHAIN_TASK_TYPES = {
     "architect": TaskType.REVIEW,
 }
 
-# When architect routes a preview task, engineer gets PREVIEW type
-# When preview completes, architect routes back with IMPLEMENTATION type
-PREVIEW_CHAIN_TYPES = {
-    "engineer": TaskType.PREVIEW,
-}
-
 # Cap review cycles to prevent infinite QA ↔ Engineer loops
 MAX_REVIEW_CYCLES = 3
 
@@ -1866,7 +1860,7 @@ Fix the failing tests and ensure all tests pass.
             prompt = self._build_prompt_legacy(task, prompt_override=prompt_text)
 
         # Inject preview mode constraints when task is a preview
-        if task.type == TaskType.PREVIEW or task.type == 'preview':
+        if task.type == TaskType.PREVIEW:
             prompt = self._inject_preview_mode(prompt, task)
 
         # Log prompt preview for debugging (sanitized)
@@ -3580,7 +3574,7 @@ IMPORTANT:
                 return
 
         # Preview tasks route back to architect for review, not to QA
-        if task.type in (TaskType.PREVIEW, 'preview') and self.config.base_id == 'engineer':
+        if task.type == TaskType.PREVIEW and self.config.base_id == 'engineer':
             self._route_to_agent(task, 'architect', 'preview_review')
             return
 
