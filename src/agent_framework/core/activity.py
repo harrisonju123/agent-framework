@@ -77,6 +77,7 @@ class AgentActivity(BaseModel):
     current_phase: Optional[TaskPhase] = None
     phases: List[PhaseRecord] = []
     tool_activity: Optional[ToolActivity] = None
+    specialization: Optional[str] = None  # Engineer specialization: "backend", "frontend", "infrastructure"
     last_updated: datetime
 
     def get_elapsed_seconds(self) -> Optional[int]:
