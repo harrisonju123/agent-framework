@@ -33,9 +33,11 @@ class TestContextBudget:
             total_budget=10000,
             reserved_for_output=2000,
             available_for_input=8000,
-            used_so_far=5000,
+            peak_input_tokens=3000,
+            cumulative_output_tokens=2000,
         )
 
+        assert budget.used_so_far == 5000
         assert budget.utilization_percent == 50.0
         assert budget.remaining == 5000
 
@@ -45,12 +47,13 @@ class TestContextBudget:
             total_budget=10000,
             reserved_for_output=2000,
             available_for_input=8000,
-            used_so_far=8000,
+            peak_input_tokens=4000,
+            cumulative_output_tokens=4000,
         )
 
         assert budget.is_near_limit is True  # 80% is at limit
 
-        budget.used_so_far = 7999
+        budget.cumulative_output_tokens = 3999
         assert budget.is_near_limit is False  # < 80%
 
 

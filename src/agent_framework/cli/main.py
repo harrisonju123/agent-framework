@@ -896,6 +896,10 @@ def guide(ctx, task_id, hint):
     task.status = TaskStatus.PENDING
     task.notes.append(f"Human guidance injected: {hint}")
 
+    if not task.assigned_to:
+        console.print("[red]Error: Task has no assigned_to agent — cannot re-queue[/]")
+        return
+
     # Re-queue the task
     queue.requeue_task(task)
 
@@ -1306,12 +1310,12 @@ def approve(ctx, task_id, message):
         agent approve chain-abc123-engineer  # Approve specific checkpoint
         agent approve chain-abc123-engineer -m "Reviewed and looks good"
     """
-    import json
     import os
     from datetime import UTC, datetime
-    from ..core.task import Task, TaskStatus
+    from ..core.task import TaskStatus
 
     workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
     queue_dir = workspace / ".agent-communication" / "queues"
     checkpoint_dir = queue_dir / "checkpoints"
 
@@ -1330,9 +1334,7 @@ def approve(ctx, task_id, message):
         table.add_column("Message")
 
         for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
-            with open(checkpoint_file, 'r') as f:
-                task_data = json.load(f)
-            task = Task(**task_data)
+            task = FileQueue.load_task_file(checkpoint_file)
 
             title = task.title[:40] + "..." if len(task.title) > 40 else task.title
             cp_msg = task.checkpoint_message or "N/A"
@@ -1357,10 +1359,7 @@ def approve(ctx, task_id, message):
         console.print("[dim]Use 'agent approve' to see all checkpoints[/]")
         return
 
-    with open(checkpoint_file, 'r') as f:
-        task_data = json.load(f)
-
-    task = Task(**task_data)
+    task = FileQueue.load_task_file(checkpoint_file)
 
     if task.status != TaskStatus.AWAITING_APPROVAL:
         console.print(f"[yellow]Warning: Task {task_id} is not awaiting approval[/]")

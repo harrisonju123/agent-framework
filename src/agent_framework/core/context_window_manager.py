@@ -33,11 +33,22 @@ class ContextItem:
 
 @dataclass
 class ContextBudget:
-    """Token budget tracking for a task."""
+    """Token budget tracking for a task.
+
+    Tracks peak input tokens (the largest single prompt sent) plus
+    cumulative output tokens (total generated across all turns).
+    This avoids double-counting input context that's re-sent each turn.
+    """
     total_budget: int
     reserved_for_output: int
     available_for_input: int
-    used_so_far: int = 0
+    peak_input_tokens: int = 0
+    cumulative_output_tokens: int = 0
+
+    @property
+    def used_so_far(self) -> int:
+        """Effective usage: peak input context + total output generated."""
+        return self.peak_input_tokens + self.cumulative_output_tokens
 
     @property
     def remaining(self) -> int:
@@ -165,8 +176,14 @@ class ContextWindowManager:
         )
 
     def update_token_usage(self, input_tokens: int, output_tokens: int) -> None:
-        """Update budget with actual token usage from LLM call."""
-        self.budget.used_so_far += input_tokens + output_tokens
+        """Update budget with actual token usage from LLM call.
+
+        Tracks peak input (largest prompt across all turns) and cumulative
+        output (total tokens generated) to avoid double-counting the prompt
+        which is re-sent on every turn.
+        """
+        self.budget.peak_input_tokens = max(self.budget.peak_input_tokens, input_tokens)
+        self.budget.cumulative_output_tokens += output_tokens
 
         if self.budget.is_near_limit:
             logger.warning(
@@ -269,10 +286,13 @@ class ContextWindowManager:
         # Create summary of old messages
         summary_parts = []
         for msg in messages_to_summarize:
-            # Extract key actions/outcomes
             role = msg.metadata.get("role", "assistant")
-            content_preview = msg.content[:200].replace("\n", " ")
-            summary_parts.append(f"- [{role}] {content_preview}...")
+            flat = msg.content.replace("\n", " ")
+            # Truncate at word boundary to avoid garbled output
+            if len(flat) > 200:
+                cut = flat[:200].rfind(" ")
+                flat = flat[:cut if cut > 100 else 200]
+            summary_parts.append(f"- [{role}] {flat}...")
 
         self._summarized_history = "\n".join(summary_parts)
 
@@ -301,26 +321,25 @@ class ContextWindowManager:
         if len(lines) <= MAX_LINES:
             return output
 
-        # Tool-specific summarization
+        # Tool-specific summarization with non-overlapping head/tail
+        half = MAX_LINES // 2
+
         if tool_name in ("Read", "Grep"):
-            # Keep first and last portions
-            head = lines[:20]
-            tail = lines[-20:]
-            omitted = len(lines) - 40
+            head = lines[:half]
+            tail = lines[-half:]
+            omitted = len(lines) - len(head) - len(tail)
             return "\n".join(head + [f"... ({omitted} lines omitted) ..."] + tail)
 
         elif tool_name == "Bash":
-            # Keep errors and last few lines
             error_lines = [line for line in lines if "error" in line.lower() or "failed" in line.lower()]
             if error_lines:
                 return "\n".join(error_lines[:10] + ["..."] + lines[-10:])
-            return "\n".join(lines[-20:])
+            return "\n".join(lines[-MAX_LINES:])
 
         else:
-            # Generic: keep start and end
-            head = lines[:25]
-            tail = lines[-25:]
-            omitted = len(lines) - 50
+            head = lines[:half]
+            tail = lines[-half:]
+            omitted = len(lines) - len(head) - len(tail)
             return "\n".join(head + [f"... ({omitted} lines omitted) ..."] + tail)
 
     @staticmethod

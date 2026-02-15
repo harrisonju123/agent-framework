@@ -693,13 +693,13 @@ class Agent:
         # Initialize context window manager for this task
         task_budget = self._get_token_budget(task.type)
         ctx_cfg = self._optimization_config.get("context_window", {})
-        # Support both Pydantic model and plain dict access
-        _get = getattr(ctx_cfg, "get", None) or (lambda k, d: getattr(ctx_cfg, k, d))
+        if not isinstance(ctx_cfg, dict):
+            ctx_cfg = ctx_cfg.model_dump() if hasattr(ctx_cfg, "model_dump") else {}
         self._context_window_manager = ContextWindowManager(
             total_budget=task_budget,
-            output_reserve=_get("output_reserve", 4096),
-            summary_threshold=_get("summary_threshold", 10),
-            min_message_retention=_get("min_message_retention", 3),
+            output_reserve=ctx_cfg.get("output_reserve", 4096),
+            summary_threshold=ctx_cfg.get("summary_threshold", 10),
+            min_message_retention=ctx_cfg.get("min_message_retention", 3),
         )
         self.logger.debug(
             f"Context window manager initialized: budget={task_budget}, "
@@ -933,7 +933,8 @@ class Agent:
         refreshed = self.queue.find_task(task.id)
         if refreshed and refreshed.status == TaskStatus.CANCELLED:
             self.logger.info(f"Task {task.id} was cancelled, skipping retry")
-            self.queue.mark_completed(refreshed)
+            # Preserve CANCELLED status — mark_completed would overwrite it
+            self.queue.move_to_completed(refreshed)
             return
 
         if task.retry_count >= self.retry_handler.max_retries:
@@ -1503,24 +1504,12 @@ Previous attempts failed. Use this revised approach:
         return prompt + replan_section
 
     def _categorize_error(self, error_message: str) -> Optional[str]:
-        """Categorize error message for better diagnostics."""
-        if not error_message:
-            return None
+        """Categorize error message for better diagnostics.
 
-        error_lower = error_message.lower()
-        patterns = {
-            "network": ["connection", "timeout", "unreachable", "dns", "resolve host"],
-            "authentication": ["unauthorized", "authentication", "credential", "permission denied", "403", "401"],
-            "validation": ["validation", "invalid", "schema", "type error", "missing required"],
-            "resource": ["out of memory", "disk full", "too many", "resource exhausted"],
-            "logic": ["null reference", "index out of range", "assertion", "unexpected state"],
-        }
-
-        for category, keywords in patterns.items():
-            if any(keyword in error_lower for keyword in keywords):
-                return category
-
-        return "unknown"
+        Delegates to EscalationHandler.categorize_error for consistent
+        pattern matching across the codebase.
+        """
+        return self.escalation_handler.categorize_error(error_message)
 
     def _inject_human_guidance(self, prompt: str, task: Task) -> str:
         """Inject human guidance from escalation report if available."""
@@ -2207,6 +2196,8 @@ IMPORTANT:
         Intermediate workflow steps push their branch but skip PR creation —
         the terminal step (or pr_creator) handles that.
         """
+        from ..utils.subprocess_utils import run_git_command, run_command, SubprocessError
+
         # Already has a PR (created by the LLM via MCP or _handle_success)
         if task.context.get("pr_url"):
             self.logger.debug(f"PR already exists for {task.id}: {task.context['pr_url']}")
@@ -2243,9 +2234,9 @@ IMPORTANT:
             worktree = self._active_worktree
 
             # Get the current branch name
-            result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=worktree, capture_output=True, text=True, timeout=10,
+            result = run_git_command(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree, check=False, timeout=10,
             )
             if result.returncode != 0:
                 self.logger.warning("Could not determine branch name, skipping PR creation")
@@ -2260,9 +2251,9 @@ IMPORTANT:
             # Push the branch (skip if LLM already pushed it)
             if not branch_already_pushed:
                 self.logger.info(f"Pushing branch {branch} to origin")
-                push_result = subprocess.run(
-                    ["git", "push", "-u", "origin", branch],
-                    cwd=worktree, capture_output=True, text=True, timeout=60,
+                push_result = run_git_command(
+                    ["push", "-u", "origin", branch],
+                    cwd=worktree, check=False, timeout=60,
                 )
                 if push_result.returncode != 0:
                     self.logger.error(f"Failed to push branch: {push_result.stderr}")
@@ -2277,39 +2268,10 @@ IMPORTANT:
                 )
                 return
 
-            # Create PR using gh CLI
-            pr_title = task.title
-            # Strip [chain]/[pr] prefixes for cleaner PR titles
-            for prefix in ("[chain] ", "[pr] "):
-                while pr_title.startswith(prefix):
-                    pr_title = pr_title[len(prefix):]
-            pr_title = pr_title[:70]
+            self._create_pr_via_gh(task, github_repo, branch, cwd=worktree)
 
-            pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
-
-            self.logger.info(f"Creating PR for {github_repo}")
-            pr_result = subprocess.run(
-                ["gh", "pr", "create",
-                 "--repo", github_repo,
-                 "--title", pr_title,
-                 "--body", pr_body,
-                 "--head", branch],
-                cwd=worktree, capture_output=True, text=True, timeout=30,
-            )
-
-            if pr_result.returncode == 0:
-                pr_url = pr_result.stdout.strip()
-                task.context["pr_url"] = pr_url
-                self.logger.info(f"Created PR: {pr_url}")
-            else:
-                # gh returns non-zero if PR already exists — check for that
-                if "already exists" in pr_result.stderr:
-                    self.logger.info("PR already exists for this branch")
-                else:
-                    self.logger.error(f"Failed to create PR: {pr_result.stderr}")
-
-        except subprocess.TimeoutExpired:
-            self.logger.error("Timed out pushing branch or creating PR")
+        except SubprocessError as e:
+            self.logger.error(f"Subprocess error during PR creation: {e}")
         except Exception as e:
             self.logger.error(f"Error creating PR: {e}")
 
@@ -2325,15 +2287,6 @@ IMPORTANT:
             self.logger.warning("No github_repo in context, cannot create PR from branch")
             return
 
-        # Build a clean PR title
-        pr_title = task.title
-        for prefix in ("[chain] ", "[pr] "):
-            while pr_title.startswith(prefix):
-                pr_title = pr_title[len(prefix):]
-        pr_title = pr_title[:70]
-
-        pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
-
         # Determine cwd — use shared clone if available, otherwise workspace
         cwd = self.workspace
         if self.multi_repo_manager:
@@ -2342,49 +2295,64 @@ IMPORTANT:
             except Exception:
                 pass
 
+        self._create_pr_via_gh(task, github_repo, branch, cwd=cwd)
+
+    def _create_pr_via_gh(self, task: Task, github_repo: str, branch: str, *, cwd) -> None:
+        """Create a PR via gh CLI. Shared by worktree and branch-based flows."""
+        from ..utils.subprocess_utils import run_command, SubprocessError
+
+        # Build a clean PR title — strip workflow prefixes
+        pr_title = task.title
+        for prefix in ("[chain] ", "[pr] "):
+            if pr_title.startswith(prefix):
+                pr_title = pr_title[len(prefix):]
+        pr_title = pr_title[:70]
+
+        pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
+
+        self.logger.info(f"Creating PR for {github_repo} from branch {branch}")
         try:
-            self.logger.info(f"Creating PR from branch {branch} for {github_repo}")
-            pr_result = subprocess.run(
+            pr_result = run_command(
                 ["gh", "pr", "create",
                  "--repo", github_repo,
                  "--title", pr_title,
                  "--body", pr_body,
                  "--head", branch],
-                cwd=cwd, capture_output=True, text=True, timeout=30,
+                cwd=cwd, check=False, timeout=30,
             )
 
             if pr_result.returncode == 0:
                 pr_url = pr_result.stdout.strip()
                 task.context["pr_url"] = pr_url
-                self.logger.info(f"Created PR from implementation branch: {pr_url}")
+                self.logger.info(f"Created PR: {pr_url}")
             else:
                 if "already exists" in pr_result.stderr:
                     self.logger.info("PR already exists for this branch")
                 else:
                     self.logger.error(f"Failed to create PR: {pr_result.stderr}")
-        except subprocess.TimeoutExpired:
-            self.logger.error("Timed out creating PR from branch")
-        except Exception as e:
-            self.logger.error(f"Error creating PR from branch: {e}")
+        except SubprocessError as e:
+            self.logger.error(f"Failed to create PR: {e}")
 
     def _remote_branch_exists(self, worktree_path) -> bool:
         """Check if current branch exists on the remote (origin)."""
+        from ..utils.subprocess_utils import run_git_command, SubprocessError
+
         try:
-            branch_result = subprocess.run(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=worktree_path, capture_output=True, text=True, timeout=10,
+            branch_result = run_git_command(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree_path, check=False, timeout=10,
             )
             if branch_result.returncode != 0:
                 return False
             branch = branch_result.stdout.strip()
             if branch in ("main", "master", "HEAD"):
                 return False
-            result = subprocess.run(
-                ["git", "ls-remote", "--heads", "origin", branch],
-                cwd=worktree_path, capture_output=True, text=True, timeout=10,
+            result = run_git_command(
+                ["ls-remote", "--heads", "origin", branch],
+                cwd=worktree_path, check=False, timeout=10,
             )
             return bool(result.stdout.strip())
-        except Exception:
+        except SubprocessError:
             return False
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:

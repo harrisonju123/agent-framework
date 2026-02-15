@@ -113,28 +113,28 @@ class TestErrorCategorization:
     def test_network_error_categorization(self):
         """Should categorize network-related errors."""
         handler = EscalationHandler()
-        assert handler._categorize_error("Connection refused") == "network"
-        assert handler._categorize_error("Network timeout") == "network"
-        assert handler._categorize_error("Could not resolve host") == "network"
+        assert handler.categorize_error("Connection refused") == "network"
+        assert handler.categorize_error("Network timeout") == "network"
+        assert handler.categorize_error("Could not resolve host") == "network"
 
     def test_authentication_error_categorization(self):
         """Should categorize authentication-related errors."""
         handler = EscalationHandler()
-        assert handler._categorize_error("Unauthorized: 401") == "authentication"
-        assert handler._categorize_error("Permission denied") == "authentication"
-        assert handler._categorize_error("Invalid credentials") == "authentication"
+        assert handler.categorize_error("Unauthorized: 401") == "authentication"
+        assert handler.categorize_error("Permission denied") == "authentication"
+        assert handler.categorize_error("Invalid credentials") == "authentication"
 
     def test_validation_error_categorization(self):
         """Should categorize validation-related errors."""
         handler = EscalationHandler()
-        assert handler._categorize_error("Validation error: missing field") == "validation"
-        assert handler._categorize_error("Type error: expected int") == "validation"
-        assert handler._categorize_error("Schema mismatch") == "validation"
+        assert handler.categorize_error("Validation error: missing field") == "validation"
+        assert handler.categorize_error("Type error: expected int") == "validation"
+        assert handler.categorize_error("Schema mismatch") == "validation"
 
     def test_unknown_error_fallback(self):
         """Should return unknown for uncategorized errors."""
         handler = EscalationHandler()
-        assert handler._categorize_error("Something weird happened") == "unknown"
+        assert handler.categorize_error("Something weird happened") == "unknown"
 
 
 class TestFailurePatternAnalysis:

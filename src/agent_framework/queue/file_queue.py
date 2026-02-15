@@ -214,6 +214,14 @@ class FileQueue:
 
     def mark_completed(self, task: Task) -> None:
         """Move task to completed storage."""
+        self.move_to_completed(task)
+
+    def move_to_completed(self, task: Task) -> None:
+        """Move task to completed storage without changing its status.
+
+        Use this when the task already has the correct terminal status
+        (e.g. CANCELLED) and you just need to archive it.
+        """
         queue_path = self.queue_dir / task.assigned_to
         task_file = queue_path / f"{task.id}.json"
 
@@ -264,6 +272,11 @@ class FileQueue:
 
     def _load_task(self, task_file: Path) -> Task:
         """Load a task from a JSON file."""
+        return self.load_task_file(task_file)
+
+    @staticmethod
+    def load_task_file(task_file: Path) -> Task:
+        """Load a task from a JSON file. Public for CLI/external use."""
         data = json.loads(task_file.read_text())
         return Task(**data)
 
