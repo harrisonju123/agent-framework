@@ -21,6 +21,14 @@ const MAX_CONSULTATIONS = Math.min(
   20, // hard upper bound
 );
 
+export function getConsultationCount(): number {
+  return consultationCount;
+}
+
+export function incrementConsultationCount(n: number): void {
+  consultationCount += n;
+}
+
 // Input length limits
 const MAX_QUESTION_LENGTH = 2000;
 const MAX_CONTEXT_LENGTH = 1000;
@@ -104,7 +112,7 @@ function logConsultation(
  * Build a minimal env for the consultation subprocess.
  * Only passes what Claude CLI needs — no leaked credentials.
  */
-function buildConsultationEnv(): Record<string, string> {
+export function buildConsultationEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   // Claude CLI needs these to function
   const allowedVars = [

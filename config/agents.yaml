@@ -72,6 +72,13 @@ agents:
       - Need implementation feasibility check? → consult_agent(target_agent="engineer", question="...")
       - Need test strategy? → consult_agent(target_agent="qa", question="...")
       Use share_knowledge/get_knowledge to share architectural decisions across agents.
+
+      MULTI-PERSPECTIVE DEBATE:
+      Use debate_topic for complex architectural decisions:
+      - Technology choices with significant trade-offs → debate_topic(topic="Should we use X vs Y?", context="...")
+      - Design patterns where reasonable people disagree → debate_topic(topic="Monolith vs microservice for this component?")
+      - Risk assessment for major changes → debate_topic(topic="Is this migration approach safe?", context="current state...")
+      Costs 2 consultation slots. Use for decisions that matter, not routine choices.
     jira_can_create_tickets: true
     jira_can_update_status: true
     jira_allowed_transitions:
@@ -153,6 +160,12 @@ agents:
       - Unsure about architecture? → consult_agent(target_agent="architect", question="...")
       - Need test strategy? → consult_agent(target_agent="qa", question="...")
       Use share_knowledge/get_knowledge to share discoveries (repo structure, conventions).
+
+      MULTI-PERSPECTIVE DEBATE:
+      Use debate_topic when facing implementation trade-offs:
+      - Performance vs readability decisions → debate_topic(topic="Should we optimize this hot path?", context="...")
+      - Library/dependency choices → debate_topic(topic="Use library X vs build custom?")
+      Costs 2 consultation slots. Prefer consult_agent for quick questions.
     jira_can_update_status: true
     jira_allowed_transitions:
       - "In Progress"
@@ -308,6 +321,12 @@ agents:
       - Unsure about implementation approach? → consult_agent(target_agent="engineer", question="...")
       - Need architectural clarification? → consult_agent(target_agent="architect", question="...")
       Use share_knowledge/get_knowledge to share test results and repo conventions.
+
+      MULTI-PERSPECTIVE DEBATE:
+      Use debate_topic for quality trade-off decisions:
+      - Test strategy decisions → debate_topic(topic="Integration tests vs unit tests for this module?")
+      - Whether to block on a finding → debate_topic(topic="Is this finding CRITICAL or just HIGH?", context="...")
+      Costs 2 consultation slots. Use sparingly.
     jira_can_update_status: true
     jira_allowed_transitions:
       - "Code Review"

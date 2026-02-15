@@ -18,7 +18,8 @@ import {
 } from "./queue-tools.js";
 import { consultAgent } from "./consultation.js";
 import { shareKnowledge, getKnowledge } from "./knowledge.js";
-import type { QueueTaskInput, AgentId } from "./types.js";
+import { debateTopic } from "./debate.js";
+import type { QueueTaskInput, AgentId, DebateInput } from "./types.js";
 
 const logger = createLogger();
 
@@ -226,6 +227,33 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "debate_topic",
+    description:
+      "Spawn a structured debate between Advocate and Critic perspectives on a complex decision. An Arbiter synthesizes the final recommendation. Use this for architectural trade-offs, technology choices, or any decision with significant pros and cons. Costs 2 consultation slots.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          description: "The decision or question to debate (e.g., 'Should we use WebSockets or SSE for real-time updates?')",
+        },
+        context: {
+          type: "string",
+          description: "Background context to help debaters understand the situation",
+        },
+        advocate_position: {
+          type: "string",
+          description: "What the advocate should argue for (default: the proposed approach)",
+        },
+        critic_position: {
+          type: "string",
+          description: "What the critic should argue against (default: alternatives and risks)",
+        },
+      },
+      required: ["topic"],
+    },
+  },
+  {
     name: "share_knowledge",
     description:
       "Share a discovery or insight with other agents via the shared knowledge base. Use this to store reusable information like repo structure, test frameworks, or conventions discovered during your work.",
@@ -397,6 +425,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           question,
           typeof context === "string" ? context : undefined,
         );
+        break;
+      }
+      case "debate_topic": {
+        const { topic, context, advocate_position, critic_position } = args as Record<string, unknown>;
+        if (typeof topic !== "string") {
+          throw new Error("debate_topic requires string topic");
+        }
+        result = await debateTopic(workspace, {
+          topic,
+          context: typeof context === "string" ? context : undefined,
+          advocate_position: typeof advocate_position === "string" ? advocate_position : undefined,
+          critic_position: typeof critic_position === "string" ? critic_position : undefined,
+        });
         break;
       }
       case "share_knowledge": {

@@ -154,3 +154,24 @@ export interface GetKnowledgeInput {
   key?: string;
   max_age_hours?: number;
 }
+
+// Multi-perspective debate types
+
+export interface DebateInput {
+  topic: string;
+  context?: string;
+  advocate_position?: string;
+  critic_position?: string;
+}
+
+export interface DebateResult {
+  success: boolean;
+  debate_id: string;
+  advocate_argument: string;
+  critic_argument: string;
+  synthesis: string;
+  confidence: "high" | "medium" | "low";
+  recommendation: string;
+  trade_offs: string[];
+  consultations_remaining: number;
+}
