@@ -896,12 +896,68 @@ def guide(ctx, task_id, hint):
     task.status = TaskStatus.PENDING
     task.notes.append(f"Human guidance injected: {hint}")
 
+    if not task.assigned_to:
+        console.print("[red]Error: Task has no assigned_to agent — cannot re-queue[/]")
+        return
+
     # Re-queue the task
     queue.requeue_task(task)
 
     console.print(f"[green]✓ Guidance injected and task re-queued to {task.assigned_to}[/]")
     console.print(f"[dim]The agent will receive your guidance on next attempt[/]")
     console.print(f"[dim]Monitor with: agent status --watch[/]")
+
+
+@cli.command()
+@click.argument("task_id")
+@click.option("--reason", "-r", default=None, help="Reason for cancellation")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.pass_context
+def cancel(ctx, task_id, reason, yes):
+    """Cancel a queued or in-progress task so it won't be retried.
+
+    TASK_ID can be a task ID or JIRA key (e.g., PROJ-104).
+    Cancelled tasks are moved out of the queue and will not be retried
+    even if the subprocess is killed.
+
+    Examples:
+        agent cancel task-123
+        agent cancel PROJ-104 --reason "duplicate task"
+        agent cancel task-123 --yes          # Skip confirmation
+    """
+    workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
+
+    task = queue.find_task(task_id)
+
+    if not task:
+        console.print(f"[red]Error: Task '{task_id}' not found in any queue[/]")
+        return
+
+    jira_key = task.context.get("jira_key", task.id)
+    console.print(f"[bold]Task: {jira_key} - {task.title}[/]")
+    console.print(f"Status: {task.status}")
+    console.print(f"Assigned to: {task.assigned_to}")
+    console.print()
+
+    if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED, TaskStatus.FAILED):
+        console.print(f"[yellow]Task is already {task.status} — nothing to cancel[/]")
+        return
+
+    if not yes and not click.confirm("Cancel this task?"):
+        console.print("[yellow]Aborted[/]")
+        return
+
+    cancelled_by = os.getenv("USER", "cli")
+    task.mark_cancelled(cancelled_by, reason)
+
+    # Persist the updated status so the agent sees it on next poll
+    queue.update(task)
+
+    console.print(f"[green]Task {jira_key} cancelled[/]")
+    if reason:
+        console.print(f"[dim]Reason: {reason}[/]")
+    console.print(f"[dim]If the agent is mid-execution, it will skip retry on exit.[/]")
 
 
 @cli.command()
@@ -1254,12 +1310,12 @@ def approve(ctx, task_id, message):
         agent approve chain-abc123-engineer  # Approve specific checkpoint
         agent approve chain-abc123-engineer -m "Reviewed and looks good"
     """
-    import json
     import os
     from datetime import UTC, datetime
-    from ..core.task import Task, TaskStatus
+    from ..core.task import TaskStatus
 
     workspace = ctx.obj["workspace"]
+    queue = FileQueue(workspace)
     queue_dir = workspace / ".agent-communication" / "queues"
     checkpoint_dir = queue_dir / "checkpoints"
 
@@ -1278,9 +1334,7 @@ def approve(ctx, task_id, message):
         table.add_column("Message")
 
         for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
-            with open(checkpoint_file, 'r') as f:
-                task_data = json.load(f)
-            task = Task(**task_data)
+            task = FileQueue.load_task_file(checkpoint_file)
 
             title = task.title[:40] + "..." if len(task.title) > 40 else task.title
             cp_msg = task.checkpoint_message or "N/A"
@@ -1305,10 +1359,7 @@ def approve(ctx, task_id, message):
         console.print("[dim]Use 'agent approve' to see all checkpoints[/]")
         return
 
-    with open(checkpoint_file, 'r') as f:
-        task_data = json.load(f)
-
-    task = Task(**task_data)
+    task = FileQueue.load_task_file(checkpoint_file)
 
     if task.status != TaskStatus.AWAITING_APPROVAL:
         console.print(f"[yellow]Warning: Task {task_id} is not awaiting approval[/]")

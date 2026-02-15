@@ -214,6 +214,14 @@ class FileQueue:
 
     def mark_completed(self, task: Task) -> None:
         """Move task to completed storage."""
+        self.move_to_completed(task)
+
+    def move_to_completed(self, task: Task) -> None:
+        """Move task to completed storage without changing its status.
+
+        Use this when the task already has the correct terminal status
+        (e.g. CANCELLED) and you just need to archive it.
+        """
         queue_path = self.queue_dir / task.assigned_to
         task_file = queue_path / f"{task.id}.json"
 
@@ -264,6 +272,11 @@ class FileQueue:
 
     def _load_task(self, task_file: Path) -> Task:
         """Load a task from a JSON file."""
+        return self.load_task_file(task_file)
+
+    @staticmethod
+    def load_task_file(task_file: Path) -> Task:
+        """Load a task from a JSON file. Public for CLI/external use."""
         data = json.loads(task_file.read_text())
         return Task(**data)
 
@@ -386,20 +399,21 @@ class FileQueue:
         Returns:
             Task if found and failed, None otherwise
         """
-        # Check completed directory for failed tasks
-        if self.completed_dir.exists():
-            for task_file in self.completed_dir.glob("*.json"):
-                try:
-                    task = self._load_task(task_file)
-                    if task.status != TaskStatus.FAILED:
-                        continue
-                    # Match by task ID or JIRA key
-                    if task.id == identifier or task.context.get("jira_key") == identifier:
-                        return task
-                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
-                    continue
+        task = self.find_task(identifier)
+        if task and task.status == TaskStatus.FAILED:
+            return task
+        return None
 
-        # Also check queue directories for failed tasks
+    def find_task(self, identifier: str) -> Optional[Task]:
+        """Find a task by ID or JIRA key across all queues and completed, regardless of status.
+
+        Args:
+            identifier: Task ID or JIRA key (e.g., PROJ-104)
+
+        Returns:
+            Task if found, None otherwise
+        """
+        # Check queue directories first (active tasks)
         if self.queue_dir.exists():
             for queue_dir in self.queue_dir.iterdir():
                 if not queue_dir.is_dir():
@@ -407,12 +421,20 @@ class FileQueue:
                 for task_file in queue_dir.glob("*.json"):
                     try:
                         task = self._load_task(task_file)
-                        if task.status != TaskStatus.FAILED:
-                            continue
                         if task.id == identifier or task.context.get("jira_key") == identifier:
                             return task
                     except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
                         continue
+
+        # Check completed directory
+        if self.completed_dir.exists():
+            for task_file in self.completed_dir.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.id == identifier or task.context.get("jira_key") == identifier:
+                        return task
+                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                    continue
 
         return None
 

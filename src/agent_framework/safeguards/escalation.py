@@ -2,7 +2,7 @@
 
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import List, Optional
 
 from ..core.task import Task, TaskStatus, TaskType, EscalationReport, RetryAttempt
@@ -124,8 +124,14 @@ class EscalationHandler:
 
         return '\n'.join(result)
 
-    def _categorize_error(self, error_message: str) -> Optional[str]:
-        """Categorize error message by pattern matching."""
+    def categorize_error(self, error_message: str) -> Optional[str]:
+        """Categorize error message by pattern matching.
+
+        Returns one of: network, authentication, validation, resource, logic, unknown.
+        Returns None for empty input.
+        """
+        if not error_message:
+            return None
         error_lower = error_message.lower()
         for category, patterns in self._error_patterns.items():
             for pattern in patterns:
@@ -278,7 +284,7 @@ class EscalationHandler:
             priority=0,  # Highest priority
             created_by=agent_id,
             assigned_to=self.escalation_queue,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(UTC),
             title=f"ESCALATION: Task failed after {failed_task.retry_count} retries",
             description=self._build_description(failed_task, escalation_report),
             failed_task_id=failed_task.id,

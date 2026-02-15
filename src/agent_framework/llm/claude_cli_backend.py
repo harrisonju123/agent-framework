@@ -314,12 +314,32 @@ class ClaudeCLIBackend(LLMBackend):
             async def read_stdout_stream_json(stream):
                 """Read stdout as line-delimited JSON, parse each event."""
                 buffer = b""
+                consecutive_timeouts = 0
+                max_idle_timeouts = 3  # Give up after 180s of no data
                 try:
                     while True:
-                        chunk = await asyncio.wait_for(
-                            stream.read(4096),
-                            timeout=60
-                        )
+                        try:
+                            chunk = await asyncio.wait_for(
+                                stream.read(4096),
+                                timeout=60
+                            )
+                        except asyncio.TimeoutError:
+                            consecutive_timeouts += 1
+                            # If subprocess already exited, no more data is coming
+                            if process.returncode is not None:
+                                logger.debug(
+                                    f"stdout: process exited (rc={process.returncode}), "
+                                    f"stopping after {consecutive_timeouts} idle timeout(s)"
+                                )
+                                break
+                            if consecutive_timeouts >= max_idle_timeouts:
+                                logger.warning(
+                                    f"stdout: {consecutive_timeouts} consecutive read timeouts "
+                                    f"({consecutive_timeouts * 60}s idle), giving up"
+                                )
+                                break
+                            logger.debug(f"stdout: read timeout #{consecutive_timeouts}, retrying")
+                            continue
                         if not chunk:
                             # Process any remaining buffered data
                             if buffer:
@@ -330,6 +350,7 @@ class ClaudeCLIBackend(LLMBackend):
                                     on_session_tool_call,
                                 )
                             break
+                        consecutive_timeouts = 0
                         buffer += chunk
                         # Split on newlines to get complete JSON lines
                         while b"\n" in buffer:
@@ -340,21 +361,38 @@ class ClaudeCLIBackend(LLMBackend):
                                 on_tool_activity,
                                 on_session_tool_call,
                             )
-                except asyncio.TimeoutError:
-                    pass
                 except Exception as e:
                     logger.debug(f"Stream read error (stdout): {e}")
 
             async def read_stderr_stream(stream):
                 """Read stderr chunks (unchanged — not JSON formatted)."""
+                consecutive_timeouts = 0
+                max_idle_timeouts = 3
                 try:
                     while True:
-                        chunk = await asyncio.wait_for(
-                            stream.read(4096),
-                            timeout=60
-                        )
+                        try:
+                            chunk = await asyncio.wait_for(
+                                stream.read(4096),
+                                timeout=60
+                            )
+                        except asyncio.TimeoutError:
+                            consecutive_timeouts += 1
+                            if process.returncode is not None:
+                                logger.debug(
+                                    f"stderr: process exited (rc={process.returncode}), "
+                                    f"stopping after {consecutive_timeouts} idle timeout(s)"
+                                )
+                                break
+                            if consecutive_timeouts >= max_idle_timeouts:
+                                logger.warning(
+                                    f"stderr: {consecutive_timeouts} consecutive read timeouts "
+                                    f"({consecutive_timeouts * 60}s idle), giving up"
+                                )
+                                break
+                            continue
                         if not chunk:
                             break
+                        consecutive_timeouts = 0
                         decoded = chunk.decode(errors='replace')
                         stderr_chunks.append(decoded)
                         if log_file:
@@ -365,21 +403,34 @@ class ClaudeCLIBackend(LLMBackend):
                                 stderr_header_written[0] = True
                             log_file.write(decoded)
                             log_file.flush()
-                except asyncio.TimeoutError:
-                    pass
                 except Exception as e:
                     logger.debug(f"Stream read error (stderr): {e}")
 
+            async def wait_for_process():
+                """Wait for subprocess exit, then close streams to unblock readers."""
+                await process.wait()
+                # Subprocess done — close transport to force EOF on readers
+                try:
+                    process.stdout._transport.close()
+                except Exception:
+                    pass
+                try:
+                    process.stderr._transport.close()
+                except Exception:
+                    pass
+
             try:
-                # Read stdout and stderr concurrently with overall timeout
+                # Race stream readers against process exit and overall timeout.
+                # wait_for_process closes the transports when the subprocess dies,
+                # which unblocks any hung stream.read() calls immediately.
                 await asyncio.wait_for(
                     asyncio.gather(
                         read_stdout_stream_json(process.stdout),
                         read_stderr_stream(process.stderr),
+                        wait_for_process(),
                     ),
                     timeout=timeout
                 )
-                await process.wait()
             except asyncio.TimeoutError:
                 timed_out = True
                 if log_file:

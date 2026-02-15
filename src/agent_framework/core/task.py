@@ -27,7 +27,6 @@ class EscalationReport(BaseModel):
     root_cause_hypothesis: str  # AI-generated hypothesis about what went wrong
     suggested_interventions: List[str]  # Concrete actions a human can take
     failure_pattern: Optional[str] = None  # e.g., "intermittent", "consistent", "degrading"
-    related_tasks: List[str] = Field(default_factory=list)  # Other tasks that failed similarly
     human_guidance: Optional[str] = None  # Human-provided guidance for retry
 
 
@@ -51,6 +50,7 @@ class TaskStatus(str, Enum):
     AWAITING_APPROVAL = "awaiting_approval"  # At checkpoint, needs human approval
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class TaskType(str, Enum):
@@ -157,19 +157,19 @@ class Task(BaseModel):
     def mark_in_progress(self, agent_id: str) -> None:
         """Mark task as in progress."""
         self.status = TaskStatus.IN_PROGRESS
-        self.started_at = datetime.utcnow()
+        self.started_at = datetime.now(UTC)
         self.started_by = agent_id
 
     def mark_completed(self, agent_id: str) -> None:
         """Mark task as completed."""
         self.status = TaskStatus.COMPLETED
-        self.completed_at = datetime.utcnow()
+        self.completed_at = datetime.now(UTC)
         self.completed_by = agent_id
 
     def mark_failed(self, agent_id: str, error_message: Optional[str] = None, error_type: Optional[str] = None) -> None:
         """Mark task as failed and record attempt."""
         self.status = TaskStatus.FAILED
-        self.failed_at = datetime.utcnow()
+        self.failed_at = datetime.now(UTC)
         self.failed_by = agent_id
 
         # Record retry attempt
@@ -177,7 +177,7 @@ class Task(BaseModel):
             self.last_error = error_message
             attempt = RetryAttempt(
                 attempt_number=self.retry_count + 1,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.now(UTC),
                 error_message=error_message,
                 agent_id=agent_id,
                 error_type=error_type,
@@ -189,13 +189,25 @@ class Task(BaseModel):
             )
             self.retry_attempts.append(attempt)
 
+    def mark_cancelled(self, cancelled_by: str, reason: Optional[str] = None) -> None:
+        """Mark task as cancelled so it won't be retried."""
+        self.status = TaskStatus.CANCELLED
+        self.failed_at = datetime.now(UTC)
+        self.failed_by = cancelled_by
+        if reason:
+            self.last_error = f"Cancelled: {reason}"
+            self.notes.append(f"Cancelled by {cancelled_by}: {reason}")
+        else:
+            self.last_error = "Cancelled"
+            self.notes.append(f"Cancelled by {cancelled_by}")
+
     def reset_to_pending(self) -> None:
         """Reset task to pending for retry with backoff."""
         self.status = TaskStatus.PENDING
         self.started_at = None
         self.started_by = None
         self.retry_count += 1
-        self.last_failed_at = datetime.utcnow()
+        self.last_failed_at = datetime.now(UTC)
 
     def mark_awaiting_approval(self, checkpoint_id: str, message: str) -> None:
         """Mark task as awaiting approval at a checkpoint."""
