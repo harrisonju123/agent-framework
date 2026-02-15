@@ -313,6 +313,33 @@ Track these metrics over time:
 
 **Insight:** If Large PRs have >2x rework rate of Small PRs, split more aggressively.
 
+## Automatic Task Decomposition
+
+The architect agent automatically decomposes tasks estimated >500 lines into parallel subtasks:
+
+- **Threshold:** 500 lines estimated (based on files_to_modify count × 15 lines/file)
+- **Target subtask size:** 250 lines (range: 50-300)
+- **Max subtasks:** 5
+- **Strategy:** Files grouped by directory prefix into natural clusters
+- **Fan-in:** When all subtasks complete, a fan-in task advances the workflow to QA
+
+Subtasks run in parallel unless explicit ordering is needed (depends_on between subtasks).
+
+### How It Works
+
+1. **Architect completes planning:** Creates a plan with files_to_modify list
+2. **Decomposition check:** If estimated lines >500, task is split into subtasks
+3. **Parallel execution:** Each subtask is independently queued to engineer
+4. **Fan-in aggregation:** When all subtasks complete, results are aggregated
+5. **Workflow continuation:** Fan-in task routes to QA for verification
+
+### Benefits
+
+- **Parallel development:** Independent file groups can be implemented concurrently
+- **Smaller PRs:** Each subtask results in a focused, reviewable change
+- **Reduced cognitive load:** Engineers work on cohesive file clusters
+- **Better testability:** Smaller changes are easier to test thoroughly
+
 ## Best Practices
 
 1. **Default to smaller PRs** - easier to review, faster to merge

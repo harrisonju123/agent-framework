@@ -303,6 +303,20 @@ class WorkflowExecutor:
         else:
             task_type = AGENT_TASK_TYPES.get(next_agent, task.type)
 
+        # Preserve fan-in metadata through the chain
+        context = {
+            **task.context,
+            "source_task_id": task.id,
+            "source_agent": current_agent_id,
+            "chain_step": True,
+            "workflow_step": target_step.id,
+            "_chain_depth": task.context.get("_chain_depth", 0) + 1,
+        }
+        if task.context.get("fan_in"):
+            context["fan_in"] = True
+            context["parent_task_id"] = task.context.get("parent_task_id")
+            context["subtask_count"] = task.context.get("subtask_count")
+
         return Task(
             id=chain_id,
             type=task_type,
@@ -313,14 +327,7 @@ class WorkflowExecutor:
             created_at=datetime.now(timezone.utc),
             title=f"[chain] {task.title}",
             description=task.description,
-            context={
-                **task.context,
-                "source_task_id": task.id,
-                "source_agent": current_agent_id,
-                "chain_step": True,
-                "workflow_step": target_step.id,
-                "_chain_depth": task.context.get("_chain_depth", 0) + 1,
-            },
+            context=context,
         )
 
     def _save_task_checkpoint(self, task: "Task") -> None:

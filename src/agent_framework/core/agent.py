@@ -524,6 +524,9 @@ class Agent:
                 f"reason={routing_signal.reason}"
             )
 
+        # Fan-in check: if this is a subtask, check if all siblings are done
+        self._check_and_create_fan_in_task(task)
+
         self.logger.debug(f"Checking if code review needed for {task.id}")
         self._queue_code_review_if_needed(task, response)
         self._queue_review_fix_if_needed(task, response)
@@ -3404,6 +3407,94 @@ IMPORTANT:
         except Exception as e:
             self.logger.error(f"Failed to escalate review to architect: {e}")
 
+    # -- Fan-in task creation --
+
+    def _check_and_create_fan_in_task(self, task: Task) -> None:
+        """Check if this subtask completion triggers fan-in task creation.
+
+        When a subtask completes, checks if all siblings are also complete.
+        If so, creates a fan-in task that aggregates results and continues workflow.
+        """
+        if not task.parent_task_id:
+            return
+
+        # This is a subtask - check if all siblings are done
+        parent = self.queue.find_task(task.parent_task_id)
+        if not parent or not parent.subtask_ids:
+            return
+
+        if self.queue.check_subtasks_complete(parent.id, parent.subtask_ids):
+            # All subtasks done - create fan-in task
+            if not self.queue._fan_in_already_created(parent.id):
+                completed_subtasks = [
+                    self.queue.get_completed(sid) for sid in parent.subtask_ids
+                ]
+                completed_subtasks = [s for s in completed_subtasks if s is not None]
+                fan_in_task = self.queue.create_fan_in_task(parent, completed_subtasks)
+                self.queue.push(fan_in_task, fan_in_task.assigned_to)
+                self.logger.info(
+                    f"🔀 All subtasks complete - created fan-in task {fan_in_task.id}"
+                )
+        else:
+            self.logger.info(
+                f"Subtask {task.id} complete, waiting for siblings"
+            )
+
+    # -- Task decomposition --
+
+    def _should_decompose_task(self, task: Task) -> bool:
+        """Check if task should be decomposed into subtasks.
+
+        Only applies to architect-created tasks with plans.
+        Uses TaskDecomposer heuristics (estimated lines > threshold).
+        """
+        if not task.plan:
+            return False
+
+        # Don't decompose subtasks (max depth = 1)
+        if task.parent_task_id:
+            return False
+
+        # Estimate lines: files_to_modify count * 15 lines/file (rough heuristic)
+        estimated_lines = len(task.plan.files_to_modify) * 15 if task.plan.files_to_modify else 0
+
+        from .task_decomposer import TaskDecomposer
+        decomposer = TaskDecomposer()
+        return decomposer.should_decompose(task.plan, estimated_lines)
+
+    def _decompose_and_queue_subtasks(self, task: Task) -> None:
+        """Decompose task into subtasks and queue them to engineer.
+
+        Replaces normal workflow routing - subtasks will each flow through
+        the workflow individually, and fan-in will aggregate them at completion.
+        """
+        from .task_decomposer import TaskDecomposer
+
+        decomposer = TaskDecomposer()
+        estimated_lines = len(task.plan.files_to_modify) * 15 if task.plan.files_to_modify else 0
+
+        self.logger.info(
+            f"Decomposing task {task.id} into parallel subtasks "
+            f"(estimated {estimated_lines} lines across {len(task.plan.files_to_modify)} files)"
+        )
+
+        subtasks = decomposer.decompose(task, task.plan, estimated_lines)
+
+        # Queue each subtask to engineer
+        for subtask in subtasks:
+            self.queue.push(subtask, "engineer")
+            self.logger.info(f"  ✅ Queued subtask: {subtask.id} ({subtask.title})")
+
+        # Update parent task with subtask IDs and save to completed
+        # (parent is now just a container for subtasks)
+        task.subtask_ids = [st.id for st in subtasks]
+        task.result_summary = f"Decomposed into {len(subtasks)} subtasks"
+        self.queue.update(task)
+
+        self.logger.info(
+            f"🔀 Task {task.id} decomposed into {len(subtasks)} parallel subtasks"
+        )
+
     # -- Workflow chain enforcement --
 
     def _enforce_workflow_chain(self, task: Task, response, routing_signal=None) -> None:
@@ -3411,6 +3502,12 @@ IMPORTANT:
 
         Supports both legacy linear workflows and new DAG workflows with conditions.
         """
+        # Task decomposition: architect auto-decomposes large tasks before routing to engineer
+        if self.config.base_id == "architect" and task.plan:
+            if self._should_decompose_task(task):
+                self._decompose_and_queue_subtasks(task)
+                return
+
         # REVIEW/FIX tasks are routed by _queue_code_review_if_needed and
         # _queue_review_fix_if_needed respectively — letting them also route
         # through the DAG creates a duplicate-routing feedback loop.

@@ -207,3 +207,65 @@ When analyzing this repository:
 """
 
     return description
+
+
+def build_decomposed_subtask(
+    parent_task: Task,
+    name: str,
+    description: str,
+    files_to_modify: list[str],
+    approach_steps: list[str],
+    index: int,
+    depends_on: list[str] = None,
+) -> Task:
+    """Build a subtask from a decomposed parent.
+
+    ID pattern: {parent_task.id}-sub-{index}
+    Inherits parent's context, priority, and workflow info.
+
+    Args:
+        parent_task: The parent task being decomposed
+        name: Short name/title for the subtask
+        description: Detailed description of what this subtask should accomplish
+        files_to_modify: List of files this subtask will modify
+        approach_steps: Step-by-step approach for implementing this subtask
+        index: Subtask index (0-based)
+        depends_on: Optional list of task IDs this subtask depends on
+
+    Returns:
+        Task configured as a subtask of parent_task
+    """
+    subtask_id = f"{parent_task.id}-sub-{index}"
+
+    # Build context inheriting from parent
+    subtask_context = {
+        **parent_task.context,
+        "parent_task_id": parent_task.id,
+        "subtask_index": index,
+        "files_to_modify": files_to_modify,
+    }
+
+    # Build plan document for the subtask
+    from .task import PlanDocument
+    plan = PlanDocument(
+        objectives=[name],
+        approach=approach_steps,
+        files_to_modify=files_to_modify,
+        success_criteria=[f"Complete implementation of: {name}"],
+    )
+
+    return Task(
+        id=subtask_id,
+        type=parent_task.type,
+        status=TaskStatus.PENDING,
+        priority=parent_task.priority,
+        created_by="decomposer",
+        assigned_to=parent_task.assigned_to,
+        created_at=datetime.now(timezone.utc),
+        title=name,
+        description=description,
+        context=subtask_context,
+        depends_on=depends_on or [],
+        parent_task_id=parent_task.id,
+        plan=plan,
+    )

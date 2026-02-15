@@ -98,10 +98,21 @@ class Task(BaseModel):
     # Optional fields with defaults
     depends_on: list[str] = Field(default_factory=list)
     blocks: list[str] = Field(default_factory=list)
+
+    # Parent-child hierarchy for task decomposition
+    parent_task_id: Optional[str] = None
+    subtask_ids: list[str] = Field(default_factory=list)
+    decomposition_strategy: Optional[str] = None  # by_feature, by_layer, by_refactor_feature
+
     acceptance_criteria: list[str] = Field(default_factory=list)
     deliverables: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
+
+    # Parent-child hierarchy for task decomposition
+    parent_task_id: Optional[str] = None
+    subtask_ids: list[str] = Field(default_factory=list)
+    decomposition_strategy: Optional[str] = None  # by_feature, by_layer, by_refactor_feature
 
     # Retry tracking
     retry_count: int = 0
@@ -146,6 +157,10 @@ class Task(BaseModel):
     # Escalation tracking
     escalation_report: Optional[EscalationReport] = None
     retry_attempts: List[RetryAttempt] = Field(default_factory=list)
+
+    # Task decomposition and fan-in support
+    parent_task_id: Optional[str] = None
+    subtask_ids: list[str] = Field(default_factory=list)
 
     class Config:
         """Pydantic config."""
