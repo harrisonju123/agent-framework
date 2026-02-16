@@ -116,6 +116,160 @@ class Agent:
     at lines 254-407.
     """
 
+    def _init_core_dependencies(
+        self,
+        config,
+        llm,
+        queue,
+        workspace,
+        jira_client,
+        github_client,
+        multi_repo_manager,
+        jira_config,
+        github_config,
+        mcp_enabled,
+        worktree_manager,
+    ):
+        """Initialize core dependencies and basic state."""
+        self.config = config
+        self.llm = llm
+        self.queue = queue
+        self.workspace = Path(workspace)
+        self.jira_client = jira_client
+        self.github_client = github_client
+        self.multi_repo_manager = multi_repo_manager
+        self.jira_config = jira_config
+        self.github_config = github_config
+        self._mcp_enabled = mcp_enabled
+        self._running = False
+        self._current_task_id: Optional[str] = None
+        self.worktree_manager = worktree_manager
+        self._active_worktree: Optional[Path] = None
+
+    def _init_team_mode(self, agents_config, agent_definition, team_mode_enabled, team_mode_default_model, workflows_config):
+        """Initialize team mode and workflow configuration."""
+        self._agents_config = agents_config or []
+        self._agent_definition = agent_definition
+        self._team_mode_enabled = team_mode_enabled
+        self._team_mode_default_model = team_mode_default_model
+        self._workflows_config = workflows_config or {}
+
+    def _init_logging(self, workspace):
+        """Setup rich logging and workflow executor."""
+        import os
+        log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO")
+        self.logger = setup_rich_logging(
+            agent_id=self.config.id,
+            workspace=workspace,
+            log_level=log_level,
+            use_file=True,
+            use_json=False,
+        )
+        from ..workflow.executor import WorkflowExecutor
+        self._workflow_executor = WorkflowExecutor(self.queue, self.queue.queue_dir, agent_logger=self.logger)
+
+    def _init_optimization_and_safeguards(self, optimization_config):
+        """Initialize optimization config and safeguards (retry/escalation)."""
+        sanitized_config = self._sanitize_optimization_config(optimization_config or {})
+        self._optimization_config = MappingProxyType(sanitized_config)
+        self.logger.info(f"🔧 Optimization config: {self._get_active_optimizations()}")
+
+        self.retry_handler = RetryHandler(max_retries=self.config.max_retries)
+        enable_error_truncation = self._optimization_config.get("enable_error_truncation", False)
+        self.escalation_handler = EscalationHandler(enable_error_truncation=enable_error_truncation)
+
+    def _init_state_tracking(self):
+        """Initialize heartbeat, activity tracking, and caches."""
+        self.heartbeat_file = self.workspace / ".agent-communication" / "heartbeats" / self.config.id
+        self.activity_manager = ActivityManager(self.workspace)
+        self._paused = False
+
+        # Caches for prompt guidance
+        self._error_handling_guidance: Optional[str] = None
+        self._guidance_cache: Dict[str, str] = {}
+
+        # Team composition caches
+        self._default_team_cache: Optional[dict] = None
+        self._workflow_team_cache: Dict[str, Optional[dict]] = {}
+        self._current_specialization = None
+        self._current_file_count = 0
+
+        # Pause signal cache
+        self._pause_signal_cache: Optional[bool] = None
+        self._pause_signal_cache_time: float = 0.0
+
+    def _init_agentic_features(self, memory_config, self_eval_config, replan_config):
+        """Initialize agentic features: memory, tool patterns, self-eval, replanning."""
+        # Memory system
+        mem_cfg = memory_config or {}
+        self._memory_enabled = mem_cfg.get("enabled", False)
+        self._memory_store = MemoryStore(self.workspace, enabled=self._memory_enabled)
+        self._memory_retriever = MemoryRetriever(self._memory_store)
+
+        # Tool pattern analysis
+        tool_tips_enabled = self._optimization_config.get("enable_tool_pattern_tips", False)
+        self._tool_pattern_store = ToolPatternStore(self.workspace, enabled=tool_tips_enabled)
+        self._tool_tips_enabled = tool_tips_enabled
+
+        # Self-evaluation
+        eval_cfg = self_eval_config or {}
+        self._self_eval_enabled = eval_cfg.get("enabled", False)
+        self._self_eval_max_retries = eval_cfg.get("max_retries", 2)
+        self._self_eval_model = eval_cfg.get("model", "haiku")
+
+        # Dynamic replanning
+        replan_cfg = replan_config or {}
+        self._replan_enabled = replan_cfg.get("enabled", False)
+        self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
+        self._replan_model = replan_cfg.get("model", "haiku")
+
+    def _init_session_logging(self, session_logging_config):
+        """Initialize session logging configuration."""
+        sl_cfg = session_logging_config or {}
+        self._session_logging_enabled = sl_cfg.get("enabled", False)
+        self._session_log_prompts = sl_cfg.get("log_prompts", True)
+        self._session_log_tool_inputs = sl_cfg.get("log_tool_inputs", True)
+        self._session_logs_dir = self.workspace / "logs"
+        self._session_logger: SessionLogger = noop_logger()
+
+        retention_days = sl_cfg.get("retention_days", 30)
+        if self._session_logging_enabled and retention_days > 0:
+            SessionLogger.cleanup_old_sessions(self._session_logs_dir, retention_days)
+
+    def _init_context_window_manager(self):
+        """Initialize per-task context window manager (set to None, initialized per task)."""
+        self._context_window_manager: Optional[ContextWindowManager] = None
+
+    def _init_sandbox(self):
+        """Initialize sandbox for isolated test execution."""
+        self._test_runner = None
+        if self.config.enable_sandbox and SANDBOX_AVAILABLE:
+            try:
+                executor = DockerExecutor(image=self.config.sandbox_image)
+                if executor.health_check():
+                    self._test_runner = GoTestRunner(executor=executor)
+                    self.logger.info(f"Agent {self.config.id} sandbox enabled with image {self.config.sandbox_image}")
+                else:
+                    self.logger.warning(f"Docker not available, sandbox disabled for {self.config.id}")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize sandbox for {self.config.id}: {e}")
+
+    def _init_pr_lifecycle(self, repositories_config, pr_lifecycle_config):
+        """Initialize PR lifecycle manager for autonomous CI poll → fix → merge."""
+        self._pr_lifecycle_manager = None
+        if repositories_config:
+            from .pr_lifecycle import PRLifecycleManager
+            repo_lookup = {rc.github_repo: rc.model_dump() for rc in repositories_config}
+            if repo_lookup:
+                self._pr_lifecycle_manager = PRLifecycleManager(
+                    queue=self.queue,
+                    workspace=self.workspace,
+                    repo_configs=repo_lookup,
+                    pr_lifecycle_config=pr_lifecycle_config,
+                    logger_instance=self.logger,
+                    multi_repo_manager=self.multi_repo_manager,
+                )
+
     def __init__(
         self,
         config: AgentConfig,
@@ -142,156 +296,39 @@ class Agent:
         repositories_config: Optional[List["RepositoryConfig"]] = None,
         pr_lifecycle_config: Optional[dict] = None,
     ):
-        self.config = config
-        self.llm = llm
-        self.queue = queue
-        self.workspace = Path(workspace)
-        self.jira_client = jira_client
-        self.github_client = github_client
-        self.multi_repo_manager = multi_repo_manager
-        self.jira_config = jira_config
-        self.github_config = github_config
-        self._mcp_enabled = mcp_enabled
-        self._running = False
-        self._current_task_id: Optional[str] = None
-        self.worktree_manager = worktree_manager
-
-        # Team mode: use Claude Agent Teams for multi-agent workflows
-        self._agents_config = agents_config or []
-        self._agent_definition = agent_definition
-        self._team_mode_enabled = team_mode_enabled
-        self._team_mode_default_model = team_mode_default_model
-
-        # Workflow chain definitions for automatic next-agent queuing
-        self._workflows_config = workflows_config or {}
-
-        # Setup rich logging (log_level passed from CLI via environment)
-        import os
-        log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO")
-        self.logger = setup_rich_logging(
-            agent_id=config.id,
-            workspace=workspace,
-            log_level=log_level,
-            use_file=True,
-            use_json=False,
+        """Initialize Agent with modular subsystem setup."""
+        # Core dependencies and basic state
+        self._init_core_dependencies(
+            config, llm, queue, workspace, jira_client, github_client,
+            multi_repo_manager, jira_config, github_config, mcp_enabled, worktree_manager
         )
 
-        # Workflow DAG executor — uses agent's logger so routing shows in agent logs
-        from ..workflow.executor import WorkflowExecutor
-        self._workflow_executor = WorkflowExecutor(queue, queue.queue_dir, agent_logger=self.logger)
+        # Team mode and workflow configuration
+        self._init_team_mode(agents_config, agent_definition, team_mode_enabled, team_mode_default_model, workflows_config)
 
-        # Workflow router: handles workflow chain enforcement and task decomposition
-        self._workflow_router = WorkflowRouter(
-            config=config,
-            queue=queue,
-            workspace=self.workspace,
-            logger=self.logger,
-            session_logger=None,  # Will be set later after session logger initialization
-            workflows_config=self._workflows_config,
-            workflow_executor=self._workflow_executor,
-            agents_config=self._agents_config,
-            multi_repo_manager=multi_repo_manager,
-        )
+        # Logging and workflow executor
+        self._init_logging(workspace)
 
-        # Optimization configuration (sanitize then make immutable for thread safety)
-        sanitized_config = self._sanitize_optimization_config(optimization_config or {})
-        self._optimization_config = MappingProxyType(sanitized_config)
+        # Optimization config and safeguards
+        self._init_optimization_and_safeguards(optimization_config)
 
-        # Log active optimizations on startup
-        self.logger.info(f"🔧 Optimization config: {self._get_active_optimizations()}")
+        # State tracking: heartbeat, activity, caches
+        self._init_state_tracking()
 
-        # Initialize safeguards
-        self.retry_handler = RetryHandler(max_retries=config.max_retries)
-        enable_error_truncation = self._optimization_config.get("enable_error_truncation", False)
-        self.escalation_handler = EscalationHandler(enable_error_truncation=enable_error_truncation)
+        # Agentic features: memory, tool patterns, self-eval, replanning
+        self._init_agentic_features(memory_config, self_eval_config, replan_config)
 
-        # Heartbeat file
-        self.heartbeat_file = self.workspace / ".agent-communication" / "heartbeats" / config.id
+        # Session logging
+        self._init_session_logging(session_logging_config)
 
-        # Activity tracking
-        self.activity_manager = ActivityManager(workspace)
+        # Context window manager (initialized per task)
+        self._init_context_window_manager()
 
-        # Pause state tracking
-        self._paused = False
+        # Sandbox for test execution
+        self._init_sandbox()
 
-        # Cache for team composition (fixed per agent lifetime / workflow)
-        self._default_team_cache: Optional[dict] = None
-        self._workflow_team_cache: Dict[str, Optional[dict]] = {}
-        # Set per-task by PromptBuilder.build(), consumed by team composition
-        self._current_specialization = None
-        self._current_file_count = 0
-
-        # Pause signal cache (avoid 2x exists() calls every 2s)
-        self._pause_signal_cache: Optional[bool] = None
-        self._pause_signal_cache_time: float = 0.0
-
-        # Agent Memory System: persistent cross-task learning
-        mem_cfg = memory_config or {}
-        self._memory_enabled = mem_cfg.get("enabled", False)
-        self._memory_store = MemoryStore(workspace, enabled=self._memory_enabled)
-        self._memory_retriever = MemoryRetriever(self._memory_store)
-
-        # Tool pattern analysis: detect and surface inefficient tool usage
-        tool_tips_enabled = self._optimization_config.get("enable_tool_pattern_tips", False)
-        self._tool_pattern_store = ToolPatternStore(workspace, enabled=tool_tips_enabled)
-        self._tool_tips_enabled = tool_tips_enabled
-
-        # Self-Evaluation Loop: review own output before marking done
-        eval_cfg = self_eval_config or {}
-        self._self_eval_enabled = eval_cfg.get("enabled", False)
-        self._self_eval_max_retries = eval_cfg.get("max_retries", 2)
-        self._self_eval_model = eval_cfg.get("model", "haiku")
-
-        # Dynamic Replanning: generate revised plans on failure retry 2+
-        replan_cfg = replan_config or {}
-        self._replan_enabled = replan_cfg.get("enabled", False)
-        self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
-        self._replan_model = replan_cfg.get("model", "haiku")
-
-        # Session logging: structured per-task JSONL for post-hoc analysis
-        sl_cfg = session_logging_config or {}
-        self._session_logging_enabled = sl_cfg.get("enabled", False)
-        self._session_log_prompts = sl_cfg.get("log_prompts", True)
-        self._session_log_tool_inputs = sl_cfg.get("log_tool_inputs", True)
-        self._session_logs_dir = self.workspace / "logs"
-        self._session_logger: SessionLogger = noop_logger()
-
-        # Cleanup old session logs on startup
-        retention_days = sl_cfg.get("retention_days", 30)
-        if self._session_logging_enabled and retention_days > 0:
-            SessionLogger.cleanup_old_sessions(self._session_logs_dir, retention_days)
-
-        # Context window management: track token budgets and manage message history
-        # per task (initialized when task starts)
-        self._context_window_manager: Optional[ContextWindowManager] = None
-
-        # Sandbox for isolated test execution
-        self._test_runner = None
-        if config.enable_sandbox and SANDBOX_AVAILABLE:
-            try:
-                executor = DockerExecutor(image=config.sandbox_image)
-                if executor.health_check():
-                    self._test_runner = GoTestRunner(executor=executor)
-                    self.logger.info(f"Agent {config.id} sandbox enabled with image {config.sandbox_image}")
-                else:
-                    self.logger.warning(f"Docker not available, sandbox disabled for {config.id}")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize sandbox for {config.id}: {e}")
-
-        # PR lifecycle management: autonomous CI poll → fix → merge
-        self._pr_lifecycle_manager = None
-        if repositories_config:
-            from .pr_lifecycle import PRLifecycleManager
-            repo_lookup = {rc.github_repo: rc.model_dump() for rc in repositories_config}
-            if repo_lookup:
-                self._pr_lifecycle_manager = PRLifecycleManager(
-                    queue=queue,
-                    workspace=workspace,
-                    repo_configs=repo_lookup,
-                    pr_lifecycle_config=pr_lifecycle_config,
-                    logger_instance=self.logger,
-                    multi_repo_manager=multi_repo_manager,
-                )
+        # PR lifecycle management
+        self._init_pr_lifecycle(repositories_config, pr_lifecycle_config)
 
         # Review cycle management: QA → Engineer feedback loop
         self._review_cycle = ReviewCycleManager(
@@ -592,10 +629,6 @@ class Agent:
         if task.context.get("workflow") or task.context.get("chain_step"):
             self._save_upstream_context(task, response)
 
-        # Handle post-LLM workflow
-        self.logger.debug(f"Running post-LLM workflow for {task.id}")
-        await self._handle_success(task, response)
-
         # Mark completed
         self.logger.debug(f"Marking task {task.id} as completed")
         task.mark_completed(self.config.id)
@@ -757,29 +790,15 @@ class Agent:
         if workflow in ("simple", "standard", "full"):
             task.context["workflow"] = "default"
 
-    async def _handle_task(self, task: Task) -> None:
-        """Handle task execution with retry/escalation logic."""
+    def _setup_task_context(self, task: Task, task_start_time) -> None:
+        """Setup task context: logging, session logger, validation."""
         from datetime import datetime
-
-        # Normalize legacy workflow names before anything reads them
-        self._normalize_workflow(task)
 
         # Set task context for logging
         jira_key = task.context.get("jira_key")
         self.logger.task_started(task.id, task.title, jira_key=jira_key)
 
-        # Validate task
-        if not self._validate_task_or_reject(task):
-            return
-
-        # Acquire lock
-        lock = self.queue.acquire_lock(task.id, self.config.id)
-        if not lock:
-            self.logger.warning(f"⏸️  Could not acquire lock, will retry later")
-            return
-
         self._current_task_id = task.id
-        task_start_time = datetime.now(timezone.utc)
 
         # Session logger: structured JSONL for post-hoc analysis
         self._session_logger = SessionLogger(
@@ -799,7 +818,8 @@ class Agent:
             task_type=get_type_str(task.type),
         )
 
-        # Initialize context window manager for this task
+    def _setup_context_window_manager_for_task(self, task: Task) -> None:
+        """Initialize context window manager for this task."""
         task_budget = self._get_token_budget(task.type)
         ctx_cfg = self._optimization_config.get("context_window", {})
         if not isinstance(ctx_cfg, dict):
@@ -815,15 +835,230 @@ class Agent:
             f"available_for_input={self._context_window_manager.budget.available_for_input}"
         )
 
+    def _compose_team_for_task(self, task: Task) -> Optional[dict]:
+        """Compose team agents for task execution if team mode is enabled."""
+        team_override = task.context.get("team_override")
+        if not self._team_mode_enabled or team_override is False:
+            if team_override is False:
+                self.logger.debug("Team mode skipped via task team_override=False")
+            return None
+
+        team_agents = {}
+
+        # Layer 1: agent's configured teammates
+        if self._agent_definition and self._agent_definition.teammates:
+            if self.config.base_id == "engineer":
+                # Engineer teammates vary by specialization (no cache)
+                default_team = compose_default_team(
+                    self._agent_definition,
+                    default_model=self._team_mode_default_model,
+                    specialization_profile=self._current_specialization,
+                ) or {}
+                if default_team:
+                    team_agents.update(default_team)
+            else:
+                # Other agents have fixed teammates (use cache)
+                if self._default_team_cache is None:
+                    self._default_team_cache = compose_default_team(
+                        self._agent_definition,
+                        default_model=self._team_mode_default_model,
+                    ) or {}
+                if self._default_team_cache:
+                    team_agents.update(self._default_team_cache)
+
+        # Layer 2: workflow-required agents (cached per workflow type)
+        workflow = task.context.get("workflow", "default")
+        if workflow not in self._workflow_team_cache:
+            self._workflow_team_cache[workflow] = compose_team(
+                task.context, workflow, self._agents_config,
+                default_model=self._team_mode_default_model,
+                caller_agent_id=self.config.id,
+            )
+        workflow_teammates = self._workflow_team_cache[workflow]
+        if workflow_teammates:
+            collisions = sorted(set(team_agents) & set(workflow_teammates))
+            if collisions:
+                self.logger.warning(
+                    f"Teammate ID collision: {collisions} - workflow agents take precedence"
+                )
+            team_agents.update(workflow_teammates)
+
+        team_agents = team_agents or None
+        if team_agents:
+            self.logger.info(f"Team mode: {list(team_agents.keys())}")
+        return team_agents
+
+    async def _execute_llm_with_interruption_watch(self, task: Task, prompt: str, working_dir: Path, team_agents: Optional[dict]):
+        """Execute LLM with interruption watching, return response or None if interrupted."""
+        from datetime import datetime
+
+        # Setup tool activity callback
+        _tool_call_count = [0]
+        _last_write_time = [0.0]
+
+        def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
+            try:
+                _tool_call_count[0] += 1
+                now = time.time()
+                if now - _last_write_time[0] < 1.0:
+                    return
+                _last_write_time[0] = now
+                ta = ToolActivity(
+                    tool_name=tool_name,
+                    tool_input_summary=tool_input_summary,
+                    started_at=datetime.now(timezone.utc),
+                    tool_call_count=_tool_call_count[0],
+                )
+                self.activity_manager.update_tool_activity(self.config.id, ta)
+            except Exception as e:
+                self.logger.debug(f"Tool activity tracking error (non-fatal): {e}")
+
+        # Log LLM start
+        self._update_phase(TaskPhase.EXECUTING_LLM)
+        self.logger.phase_change("executing_llm")
+        self.logger.info(
+            f"🤖 Calling LLM (model: {task.type}, attempt: {task.retry_count + 1})"
+        )
+        self._session_logger.log(
+            "llm_start",
+            task_type=get_type_str(task.type),
+            retry=task.retry_count,
+        )
+
+        # Race LLM execution against pause/stop signal watcher
+        llm_coro = self.llm.complete(
+            LLMRequest(
+                prompt=prompt,
+                task_type=task.type,
+                retry_count=task.retry_count,
+                context=task.context,
+                working_dir=str(working_dir),
+                agents=team_agents,
+                specialization_profile=self._current_specialization.id if self._current_specialization else None,
+                file_count=self._current_file_count,
+            ),
+            task_id=task.id,
+            on_tool_activity=_on_tool_activity,
+            on_session_tool_call=self._session_logger.log_tool_call,
+        )
+        llm_task = asyncio.create_task(llm_coro)
+        watcher_task = asyncio.create_task(self._watch_for_interruption())
+
+        done, pending = await asyncio.wait(
+            [llm_task, watcher_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if watcher_task in done:
+            # Pause or stop detected — cancel LLM and reset task
+            self.logger.info(f"Interruption detected during task {task.id}, cancelling LLM")
+            self.llm.cancel()
+            llm_task.cancel()
+            try:
+                await llm_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                self.logger.debug(f"LLM task raised during cancellation: {e}")
+
+            task.reset_to_pending()
+            self.queue.update(task)
+            self.activity_manager.append_event(ActivityEvent(
+                type="interrupted",
+                agent=self.config.id,
+                task_id=task.id,
+                title=task.title,
+                timestamp=datetime.now(timezone.utc),
+            ))
+            self.logger.info(f"Task {task.id} reset to pending after interruption")
+            return None
+        else:
+            # LLM finished first — cancel watcher and return response
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except asyncio.CancelledError:
+                pass
+            return llm_task.result()
+
+    def _process_llm_completion(self, response, task: Task) -> None:
+        """Log LLM completion and update context window manager."""
+        from datetime import datetime
+
+        # Log LLM completion to session log
+        self._session_logger.log(
+            "llm_complete",
+            success=response.success,
+            model=response.model_used,
+            tokens_in=response.input_tokens,
+            tokens_out=response.output_tokens,
+            cost=response.reported_cost_usd,
+            duration_ms=response.latency_ms,
+        )
+
+        # Update context window manager with actual token usage
+        if self._context_window_manager:
+            self._context_window_manager.update_token_usage(
+                response.input_tokens,
+                response.output_tokens
+            )
+            budget_status = self._context_window_manager.get_budget_status()
+            self.logger.debug(
+                f"Context budget: {budget_status['utilization_percent']:.1f}% used "
+                f"({budget_status['used_so_far']}/{budget_status['total_budget']} tokens)"
+            )
+
+            # Check if we should trigger a checkpoint due to budget exhaustion
+            if self._context_window_manager.should_trigger_checkpoint():
+                self.logger.warning(
+                    f"Context budget critically low (>90% used). "
+                    f"Consider splitting task into subtasks."
+                )
+                self.activity_manager.append_event(ActivityEvent(
+                    type="context_budget_critical",
+                    agent=self.config.id,
+                    task_id=task.id,
+                    title=f"Context budget >90%: consider task splitting",
+                    timestamp=datetime.now(timezone.utc)
+                ))
+
+        # Clear tool activity after LLM completes
         try:
-            # Initialize task execution
+            self.activity_manager.update_tool_activity(self.config.id, None)
+        except Exception:
+            pass
+
+    async def _handle_task(self, task: Task) -> None:
+        """Handle task execution with retry/escalation logic."""
+        from datetime import datetime
+
+        # Normalize legacy workflow names and validate task
+        self._normalize_workflow(task)
+        if not self._validate_task_or_reject(task):
+            return
+
+        # Acquire lock
+        lock = self.queue.acquire_lock(task.id, self.config.id)
+        if not lock:
+            self.logger.warning(f"⏸️  Could not acquire lock, will retry later")
+            return
+
+        task_start_time = datetime.now(timezone.utc)
+
+        # Setup task context (logging, session logger)
+        self._setup_task_context(task, task_start_time)
+
+        # Initialize context window manager
+        self._setup_context_window_manager_for_task(task)
+
+        try:
+            # Initialize task execution state
             self._initialize_task_execution(task, task_start_time)
 
             # Get working directory for task (worktree, target repo, or framework workspace)
             working_dir = self._git_ops.get_working_directory(task)
             self.logger.info(f"Working directory: {working_dir}")
 
-            # Build prompt and execute LLM
             self.logger.phase_change("analyzing")
             # Update prompt builder with per-task context
             self._prompt_builder.ctx.session_logger = self._session_logger
@@ -840,189 +1075,17 @@ class Agent:
                     activity.specialization = self._current_specialization.id
                     self.activity_manager.update_activity(activity)
 
-            self._update_phase(TaskPhase.EXECUTING_LLM)
-            self.logger.phase_change("executing_llm")
-            self.logger.info(
-                f"🤖 Calling LLM (model: {task.type}, attempt: {task.retry_count + 1})"
-            )
+            # Compose team for task execution
+            team_agents = self._compose_team_for_task(task)
 
-            self._session_logger.log(
-                "llm_start",
-                task_type=get_type_str(task.type),
-                retry=task.retry_count,
-            )
-
-            # Throttled callback so tool activity writes hit disk at most once/sec
-            _tool_call_count = [0]
-            _last_write_time = [0.0]
-
-            def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
-                try:
-                    _tool_call_count[0] += 1
-                    now = time.time()
-                    if now - _last_write_time[0] < 1.0:
-                        return
-                    _last_write_time[0] = now
-                    ta = ToolActivity(
-                        tool_name=tool_name,
-                        tool_input_summary=tool_input_summary,
-                        started_at=datetime.now(timezone.utc),
-                        tool_call_count=_tool_call_count[0],
-                    )
-                    self.activity_manager.update_tool_activity(self.config.id, ta)
-                except Exception as e:
-                    self.logger.debug(f"Tool activity tracking error (non-fatal): {e}")
-
-            # Compose team if team mode is enabled
-            team_agents = None
-            team_override = task.context.get("team_override")
-            if self._team_mode_enabled and team_override is not False:
-                team_agents = {}
-
-                # Layer 1: agent's configured teammates
-                # For engineer agents, teammates vary by task specialization (no cache)
-                # For other agents, teammates are fixed (use cache)
-                if self._agent_definition and self._agent_definition.teammates:
-                    if self.config.base_id == "engineer":
-                        default_team = compose_default_team(
-                            self._agent_definition,
-                            default_model=self._team_mode_default_model,
-                            specialization_profile=self._current_specialization,
-                        ) or {}
-                        if default_team:
-                            team_agents.update(default_team)
-                    else:
-                        if self._default_team_cache is None:
-                            self._default_team_cache = compose_default_team(
-                                self._agent_definition,
-                                default_model=self._team_mode_default_model,
-                            ) or {}
-                        if self._default_team_cache:
-                            team_agents.update(self._default_team_cache)
-
-                # Layer 2: workflow-required agents (cached per workflow type)
-                workflow = task.context.get("workflow", "default")
-                if workflow not in self._workflow_team_cache:
-                    self._workflow_team_cache[workflow] = compose_team(
-                        task.context, workflow, self._agents_config,
-                        default_model=self._team_mode_default_model,
-                        caller_agent_id=self.config.id,
-                    )
-                workflow_teammates = self._workflow_team_cache[workflow]
-                if workflow_teammates:
-                    collisions = sorted(set(team_agents) & set(workflow_teammates))
-                    if collisions:
-                        self.logger.warning(
-                            f"Teammate ID collision: {collisions} - workflow agents take precedence"
-                        )
-                    team_agents.update(workflow_teammates)
-
-                team_agents = team_agents or None
-                if team_agents:
-                    self.logger.info(f"Team mode: {list(team_agents.keys())}")
-            elif team_override is False:
-                self.logger.debug("Team mode skipped via task team_override=False")
-
-            # Race LLM execution against pause/stop signal watcher so we can
-            # interrupt mid-task instead of waiting 30+ minutes for completion
-            llm_coro = self.llm.complete(
-                LLMRequest(
-                    prompt=prompt,
-                    task_type=task.type,
-                    retry_count=task.retry_count,
-                    context=task.context,
-                    working_dir=str(working_dir),
-                    agents=team_agents,
-                    specialization_profile=self._current_specialization.id if self._current_specialization else None,
-                    file_count=self._current_file_count,
-                ),
-                task_id=task.id,
-                on_tool_activity=_on_tool_activity,
-                on_session_tool_call=self._session_logger.log_tool_call,
-            )
-            llm_task = asyncio.create_task(llm_coro)
-            watcher_task = asyncio.create_task(self._watch_for_interruption())
-
-            done, pending = await asyncio.wait(
-                [llm_task, watcher_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            if watcher_task in done:
-                # Pause or stop detected mid-task — kill LLM and reset task
-                self.logger.info(f"Interruption detected during task {task.id}, cancelling LLM")
-                self.llm.cancel()
-                llm_task.cancel()
-                try:
-                    await llm_task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    self.logger.debug(f"LLM task raised during cancellation: {e}")
-
-                task.reset_to_pending()
-                self.queue.update(task)
-
-                self.activity_manager.append_event(ActivityEvent(
-                    type="interrupted",
-                    agent=self.config.id,
-                    task_id=task.id,
-                    title=task.title,
-                    timestamp=datetime.now(timezone.utc),
-                ))
-                self.logger.info(f"Task {task.id} reset to pending after interruption")
+            # Execute LLM with interruption watching
+            response = await self._execute_llm_with_interruption_watch(task, prompt, working_dir, team_agents)
+            if response is None:
+                # Task was interrupted and reset to pending
                 return
-            else:
-                # LLM finished first — cancel the watcher and proceed normally
-                watcher_task.cancel()
-                try:
-                    await watcher_task
-                except asyncio.CancelledError:
-                    pass
-                response = llm_task.result()
 
-            # Log LLM completion to session log
-            self._session_logger.log(
-                "llm_complete",
-                success=response.success,
-                model=response.model_used,
-                tokens_in=response.input_tokens,
-                tokens_out=response.output_tokens,
-                cost=response.reported_cost_usd,
-                duration_ms=response.latency_ms,
-            )
-
-            # Update context window manager with actual token usage
-            if self._context_window_manager:
-                self._context_window_manager.update_token_usage(
-                    response.input_tokens,
-                    response.output_tokens
-                )
-                budget_status = self._context_window_manager.get_budget_status()
-                self.logger.debug(
-                    f"Context budget: {budget_status['utilization_percent']:.1f}% used "
-                    f"({budget_status['used_so_far']}/{budget_status['total_budget']} tokens)"
-                )
-
-                # Check if we should trigger a checkpoint due to budget exhaustion
-                if self._context_window_manager.should_trigger_checkpoint():
-                    self.logger.warning(
-                        f"Context budget critically low (>90% used). "
-                        f"Consider splitting task into subtasks."
-                    )
-                    self.activity_manager.append_event(ActivityEvent(
-                        type="context_budget_critical",
-                        agent=self.config.id,
-                        task_id=task.id,
-                        title=f"Context budget >90%: consider task splitting",
-                        timestamp=datetime.now(timezone.utc)
-                    ))
-
-            # Clear tool activity after LLM completes
-            try:
-                self.activity_manager.update_tool_activity(self.config.id, None)
-            except Exception:
-                pass
+            # Process LLM completion (logging, context window updates)
+            self._process_llm_completion(response, task)
 
             # Handle response
             if response.success:
@@ -1497,99 +1560,271 @@ This preview will be reviewed by the architect before implementation is authoriz
                     phase=phase
                 ))
 
-    async def _handle_success(self, task: Task, llm_response) -> None:
-        """
-        Handle post-LLM workflow: git operations, PR creation, JIRA updates.
+    def _push_and_create_pr_if_needed(self, task: Task) -> None:
+        """Push branch and create PR if the agent produced unpushed commits.
 
-        DEPRECATED: When MCPs are enabled, agents handle this during execution.
-        This method remains for backward compatibility.
+        Runs after the LLM finishes but before the task is marked completed,
+        so the PR URL is available in task.context for downstream chain steps.
+        Only acts when working in a worktree with actual unpushed commits.
+
+        Intermediate workflow steps push their branch but skip PR creation —
+        the terminal step (or pr_creator) handles that.
         """
-        # Skip if MCPs are enabled - agents do this during execution now
-        if self._mcp_enabled:
-            self.logger.debug("MCPs enabled - skipping post-LLM workflow")
+        from ..utils.subprocess_utils import run_git_command, run_command, SubprocessError
+
+        # Already has a PR (created by the LLM via MCP)
+        if task.context.get("pr_url"):
+            self.logger.debug(f"PR already exists for {task.id}: {task.context['pr_url']}")
             return
 
-        jira_key = task.context.get("jira_key")
-        if not jira_key or not self.github_client or not self.jira_client:
-            self.logger.debug("Skipping post-LLM workflow (no JIRA key or clients not configured)")
+        # PR creation task with an implementation branch from upstream — create
+        # the PR from that branch without needing a worktree
+        impl_branch = task.context.get("implementation_branch")
+        if task.context.get("pr_creation_step") and impl_branch:
+            self._create_pr_from_branch(task, impl_branch)
+            return
+
+        # Only act if we have an active worktree with changes
+        if not self._active_worktree or not self.worktree_manager:
+            self.logger.debug(f"No active worktree for {task.id}, skipping PR creation")
+            return
+
+        has_unpushed = self.worktree_manager.has_unpushed_commits(self._active_worktree)
+        branch_already_pushed = False
+        if not has_unpushed:
+            # LLM may have pushed the branch itself — check if it exists on the remote
+            branch_already_pushed = self._remote_branch_exists(self._active_worktree)
+            if not branch_already_pushed:
+                self.logger.debug(f"No unpushed commits and no remote branch for {task.id}")
+                return
+            self.logger.debug(f"Branch already pushed to remote for {task.id}, will create PR only")
+
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            self.logger.debug(f"No github_repo in task context for {task.id}, skipping PR creation")
             return
 
         try:
-            # Get working directory (target repo or framework workspace)
-            workspace = self._git_ops.get_working_directory(task)
-            self.logger.info(f"Running post-LLM workflow for {jira_key} in {workspace}")
+            worktree = self._active_worktree
 
-            # Create branch
-            slug = task.title.lower().replace(" ", "-")[:30]
-            branch = self.github_client.format_branch_name(jira_key, slug)
-
-            self.logger.info(f"Creating branch: {branch}")
-            subprocess.run(
-                ["git", "checkout", "-b", branch],
-                cwd=workspace,
-                check=True,
-                capture_output=True,
+            # Get the current branch name
+            result = run_git_command(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree, check=False, timeout=10,
             )
+            if result.returncode != 0:
+                self.logger.warning("Could not determine branch name, skipping PR creation")
+                return
+            branch = result.stdout.strip()
 
-            # Stage and commit changes
-            self._update_phase(TaskPhase.COMMITTING)
-            self.logger.info("Committing changes")
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=workspace,
-                check=True,
-                capture_output=True,
-            )
+            # Don't create PRs from main/master
+            if branch in ("main", "master"):
+                self.logger.debug(f"On {branch} branch for {task.id}, skipping PR creation")
+                return
 
-            commit_msg = f"[{jira_key}] {task.title}"
-            subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=workspace,
-                check=True,
-                capture_output=True,
-            )
+            # Push the branch (skip if LLM already pushed it)
+            if not branch_already_pushed:
+                self.logger.info(f"Pushing branch {branch} to origin")
+                push_result = run_git_command(
+                    ["push", "-u", "origin", branch],
+                    cwd=worktree, check=False, timeout=60,
+                )
+                if push_result.returncode != 0:
+                    self.logger.error(f"Failed to push branch: {push_result.stderr}")
+                    return
 
-            # Push to remote
-            self.logger.info(f"Pushing branch to origin")
-            subprocess.run(
-                ["git", "push", "-u", "origin", branch],
-                cwd=workspace,
-                check=True,
-                capture_output=True,
-            )
+            # Intermediate workflow steps: push code but skip PR creation.
+            # Store the branch so downstream agents can create the PR later.
+            if not self._is_at_terminal_workflow_step(task):
+                task.context["implementation_branch"] = branch
+                self.logger.info(
+                    f"Intermediate step — pushed {branch} but skipped PR creation"
+                )
+                return
 
-            # Create PR
-            self._update_phase(TaskPhase.CREATING_PR)
-            self.logger.info("Creating pull request")
-            pr_title = self.github_client.format_pr_title(jira_key, task.title)
-            pr_body = f"Implements {jira_key}\n\n{task.description}"
+            self._create_pr_via_gh(task, github_repo, branch, cwd=worktree)
 
-            pr = self.github_client.create_pull_request(
-                title=pr_title,
-                body=pr_body,
-                head_branch=branch,
-            )
-
-            self.logger.info(f"Created PR: {pr.html_url}")
-
-            # Store PR URL in task context for activity events
-            task.context["pr_url"] = pr.html_url
-
-            # Update JIRA
-            self._update_phase(TaskPhase.UPDATING_JIRA)
-            self.logger.info("Updating JIRA ticket")
-            self.jira_client.transition_ticket(jira_key, "code_review")
-            self.jira_client.add_comment(
-                jira_key,
-                f"Pull request created: {pr.html_url}"
-            )
-
-            self.logger.info(f"Post-LLM workflow complete for {jira_key}")
-
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"Git operation failed: {e.stderr.decode() if e.stderr else str(e)}")
+        except SubprocessError as e:
+            self.logger.error(f"Subprocess error during PR creation: {e}")
         except Exception as e:
-            self.logger.exception(f"Error in post-LLM workflow: {e}")
+            self.logger.error(f"Error creating PR: {e}")
+
+    def _manage_pr_lifecycle(self, task: Task) -> None:
+        """Autonomously monitor CI, fix failures, and merge PR if repo opts in."""
+        if not self._pr_lifecycle_manager:
+            return
+        if not self._pr_lifecycle_manager.should_manage(task):
+            return
+
+        try:
+            merged = self._pr_lifecycle_manager.manage(task, self.config.id)
+            if merged:
+                self._sync_jira_status(
+                    task, "Done",
+                    comment=f"PR merged automatically: {task.context.get('pr_url')}",
+                )
+        except Exception as e:
+            self.logger.error(f"PR lifecycle error for {task.id}: {e}")
+
+    def _create_pr_from_branch(self, task: Task, branch: str) -> None:
+        """Create a PR from an existing pushed branch (used by pr_creation_step tasks).
+
+        Called when the terminal PR creation agent receives a task with an
+        implementation_branch set by an upstream agent. No worktree needed —
+        just runs `gh pr create --head <branch>` against the repo.
+        """
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            self.logger.warning("No github_repo in context, cannot create PR from branch")
+            return
+
+        # Determine cwd — use shared clone if available, otherwise workspace
+        cwd = self.workspace
+        if self.multi_repo_manager:
+            try:
+                cwd = self.multi_repo_manager.ensure_repo(github_repo)
+            except Exception:
+                pass
+
+        self._create_pr_via_gh(task, github_repo, branch, cwd=cwd)
+
+    def _create_pr_via_gh(self, task: Task, github_repo: str, branch: str, *, cwd) -> None:
+        """Create a PR via gh CLI. Shared by worktree and branch-based flows."""
+        from ..utils.subprocess_utils import run_command, SubprocessError
+
+        # Build a clean PR title — strip workflow prefixes
+        from ..workflow.executor import _strip_chain_prefixes
+        pr_title = _strip_chain_prefixes(task.title)[:70]
+
+        pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
+
+        self.logger.info(f"Creating PR for {github_repo} from branch {branch}")
+        try:
+            pr_result = run_command(
+                ["gh", "pr", "create",
+                 "--repo", github_repo,
+                 "--title", pr_title,
+                 "--body", pr_body,
+                 "--head", branch],
+                cwd=cwd, check=False, timeout=30,
+            )
+
+            if pr_result.returncode == 0:
+                pr_url = pr_result.stdout.strip()
+                task.context["pr_url"] = pr_url
+                self.logger.info(f"Created PR: {pr_url}")
+                # Clean up orphaned subtask PRs/branches for fan-in tasks
+                self._close_subtask_prs(task, pr_url)
+                self._cleanup_subtask_branches(task)
+            else:
+                if "already exists" in pr_result.stderr:
+                    self.logger.info("PR already exists for this branch")
+                else:
+                    self.logger.error(f"Failed to create PR: {pr_result.stderr}")
+        except SubprocessError as e:
+            self.logger.error(f"Failed to create PR: {e}")
+
+    def _close_subtask_prs(self, task: Task, fan_in_pr_url: str) -> None:
+        """Close orphaned PRs created by subtask LLMs. Best-effort.
+
+        Subtask LLMs may create PRs via MCP despite prompt suppression.
+        After the fan-in PR is created, close those orphans so they don't
+        linger as duplicates.
+        """
+        if not task.context.get("fan_in"):
+            return
+
+        from ..utils.subprocess_utils import run_command
+
+        parent_task_id = task.context.get("parent_task_id")
+        if not parent_task_id:
+            return
+
+        parent = self.queue.find_task(parent_task_id)
+        if not parent or not parent.subtask_ids:
+            return
+
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            return
+
+        for sid in parent.subtask_ids:
+            subtask = self.queue.get_completed(sid)
+            if not subtask:
+                continue
+            pr_url = subtask.context.get("pr_url")
+            if not pr_url:
+                continue
+            # Extract PR number from URL (e.g. .../pull/18 → 18)
+            pr_number = pr_url.rstrip("/").split("/")[-1]
+            self.logger.info(f"Closing orphaned subtask PR #{pr_number}")
+            run_command(
+                ["gh", "pr", "close", pr_number,
+                 "--repo", github_repo,
+                 "--comment", f"Superseded by fan-in PR {fan_in_pr_url}"],
+                check=False, timeout=30,
+            )
+
+    def _cleanup_subtask_branches(self, task: Task) -> None:
+        """Delete remote branches created by subtask LLMs. Best-effort.
+
+        After the fan-in PR lands, subtask branches are stale. Clean them up
+        so they don't clutter the remote.
+        """
+        if not task.context.get("fan_in"):
+            return
+
+        from ..utils.subprocess_utils import run_command
+
+        parent_task_id = task.context.get("parent_task_id")
+        if not parent_task_id:
+            return
+
+        parent = self.queue.find_task(parent_task_id)
+        if not parent or not parent.subtask_ids:
+            return
+
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            return
+
+        for sid in parent.subtask_ids:
+            subtask = self.queue.get_completed(sid)
+            if not subtask:
+                continue
+            branch = (
+                subtask.context.get("implementation_branch")
+                or subtask.context.get("worktree_branch")
+            )
+            if not branch:
+                continue
+            self.logger.info(f"Deleting subtask branch: {branch}")
+            run_command(
+                ["git", "push", "origin", "--delete", branch],
+                check=False, timeout=30,
+            )
+
+    def _remote_branch_exists(self, worktree_path) -> bool:
+        """Check if current branch exists on the remote (origin)."""
+        from ..utils.subprocess_utils import run_git_command, SubprocessError
+
+        try:
+            branch_result = run_git_command(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree_path, check=False, timeout=10,
+            )
+            if branch_result.returncode != 0:
+                return False
+            branch = branch_result.stdout.strip()
+            if branch in ("main", "master", "HEAD"):
+                return False
+            result = run_git_command(
+                ["ls-remote", "--heads", "origin", branch],
+                cwd=worktree_path, check=False, timeout=10,
+            )
+            return bool(result.stdout.strip())
+        except SubprocessError:
+            return False
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
         """Transition a JIRA ticket to target_status if all preconditions are met.
