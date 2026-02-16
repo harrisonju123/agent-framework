@@ -198,14 +198,10 @@ class Agent:
         # Pause state tracking
         self._paused = False
 
-        # Caches for prompt guidance (rebuilt identically per task)
-        self._error_handling_guidance: Optional[str] = None
-        self._guidance_cache: Dict[str, str] = {}
-
         # Cache for team composition (fixed per agent lifetime / workflow)
         self._default_team_cache: Optional[dict] = None
         self._workflow_team_cache: Dict[str, Optional[dict]] = {}
-        # Set per-task by _build_prompt, consumed by team composition
+        # Set per-task by PromptBuilder.build(), consumed by team composition
         self._current_specialization = None
         self._current_file_count = 0
 
@@ -1197,7 +1193,7 @@ class Agent:
             return True
         else:
             # Use deterministic hash for consistent selection
-            task_hash = int(hashlib.md5(task.id.encode()).hexdigest()[:8], 16)
+            task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
             return (task_hash % 100) < canary_pct
 
     def _get_token_budget(self, task_type: TaskType) -> int:
