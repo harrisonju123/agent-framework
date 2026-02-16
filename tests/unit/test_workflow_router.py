@@ -323,7 +323,7 @@ class TestPRCreation:
         """Last agent queues PR creation task when pr_creator is configured."""
         router.config.base_id = "qa"
         router._workflows_config["pr_workflow"] = PR_WORKFLOW
-        task = _make_task(workflow="pr_workflow")
+        task = _make_task(workflow="pr_workflow", implementation_branch="feature/test")
 
         router.queue_pr_creation_if_needed(task, PR_WORKFLOW)
 
