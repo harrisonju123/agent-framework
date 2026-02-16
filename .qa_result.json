@@ -9,17 +9,22 @@
       "passed": 856,
       "failed": 0,
       "skipped": 0,
-      "duration_seconds": 3.06,
-      "note": "Package reinstalled in editable mode from this worktree to resolve stale import issue"
+      "duration_seconds": 2.92,
+      "note": "All 856 tests pass with PYTHONPATH=src to resolve imports from this worktree. The editable install points to the main checkout; this is a local environment issue, not a code defect."
     },
     "budget_specific_tests": {
-      "total": 23,
-      "passed": 23,
+      "total": 41,
+      "passed": 41,
       "failed": 0,
       "breakdown": {
         "test_escalation.py::TestBudgetErrorCategorization": 7,
+        "test_escalation.py::TestEscalationRouting": 5,
+        "test_escalation.py::TestErrorTruncation": 3,
         "test_retry_handler.py::TestNonRetriableErrors": 6,
-        "test_error_translator.py::TestBudgetErrorTranslation": 10
+        "test_retry_handler.py::TestBackoffCalculation": 4,
+        "test_error_translator.py::TestBudgetErrorTranslation": 10,
+        "test_error_translator.py::TestErrorTranslatorFormatting": 3,
+        "test_error_translator.py::TestNonBudgetErrors": 3
       }
     }
   },
@@ -30,47 +35,59 @@
       "category": "correctness",
       "file": "src/agent_framework/errors/translator.py",
       "line": 93,
-      "description": "Documentation link references docs/BUDGET.md which does not exist in the repository.",
-      "suggested_fix": "Create docs/BUDGET.md or change reference to docs/TROUBLESHOOTING.md#budget for consistency with other translator entries.",
+      "description": "Documentation link references docs/BUDGET.md which does not exist in the repository. Other translator entries reference existing docs.",
+      "suggested_fix": "Create docs/BUDGET.md or change reference to docs/TROUBLESHOOTING.md#budget for consistency.",
+      "resolved": false
+    },
+    {
+      "id": "finding-2",
+      "severity": "LOW",
+      "category": "testing",
+      "file": "tests/",
+      "line": null,
+      "description": "No end-to-end integration test wiring categorize_error -> should_retry -> create_escalation in a single scenario.",
+      "suggested_fix": "Consider adding an integration test that exercises the complete budget error lifecycle.",
       "resolved": false
     }
   ],
   "findings_summary": {
-    "total_count": 1,
+    "total_count": 2,
     "critical_count": 0,
     "high_count": 0,
     "major_count": 0,
     "medium_count": 0,
     "minor_count": 1,
-    "low_count": 0,
+    "low_count": 1,
     "suggestion_count": 0
   },
   "acceptance_criteria_verified": true,
   "acceptance_criteria": {
     "budget_category_in_escalation_handler": {
       "status": "PASS",
-      "evidence": "escalation.py:57-63 adds 'budget' category with 5 regex patterns. categorize_error() uses case-insensitive matching (lowercases input). Lines 233-238 add budget-specific interventions. Verified by 7 unit tests in TestBudgetErrorCategorization."
+      "evidence": "escalation.py:57-63 adds 'budget' category with 5 regex patterns (budget.*exceed, max budget, quota.*exceed, insufficient.*credits, usage.*limit.*exceed). Budget patterns correctly removed from 'resource' category. categorize_error() uses case-insensitive matching via .lower(). Lines 233-238 add budget-specific interventions. Verified by 7 passing unit tests."
     },
     "budget_errors_non_retriable": {
       "status": "PASS",
-      "evidence": "retry_handler.py:23 defines NON_RETRIABLE_CATEGORIES = {'budget', 'authentication'}. Lines 53-57: should_retry() checks last retry_attempt.error_type against NON_RETRIABLE_CATEGORIES BEFORE checking retry count, ensuring zero futile retries. Verified by 6 unit tests in TestNonRetriableErrors including edge case (first failure, low retry_count)."
+      "evidence": "retry_handler.py:23 defines NON_RETRIABLE_CATEGORIES = {'budget', 'authentication'}. Lines 53-57: should_retry() checks last retry_attempt.error_type against NON_RETRIABLE_CATEGORIES BEFORE checking retry count at line 59, ensuring zero futile retries. Verified by 6 passing unit tests including edge cases."
     },
     "user_friendly_error_message": {
       "status": "PASS",
-      "evidence": "translator.py:83-94 adds budget pattern with title='Budget or quota exceeded', clear explanation, 4 actionable steps, and docs link. Pattern uses re.IGNORECASE via translate(). Verified by 10 unit tests covering all 5 error variants, case insensitivity, actions content, documentation, exception preservation, and show_technical=False."
+      "evidence": "translator.py:83-94 adds budget pattern with title='Budget or quota exceeded', clear explanation, 4 actionable steps, and docs/BUDGET.md link. Pattern uses re.IGNORECASE via translate(). Verified by 10 passing unit tests covering all 5 error variants, case insensitivity, actionable guidance, documentation link, exception preservation, and show_technical=False."
     },
     "no_regressions": {
       "status": "PASS",
-      "evidence": "856/856 tests pass (0 failures, 3.06s). No pattern overlaps between budget and resource categories verified manually."
+      "evidence": "856/856 tests pass (0 failures, 2.92s). No pattern overlaps between budget and resource categories. Existing error translations unaffected (verified by TestNonBudgetErrors)."
     }
   },
   "code_review": {
-    "correctness": "PASS - Non-retriable check correctly placed before retry count check. Empty retry_attempts list safely evaluates to falsy. No pattern overlap between budget and existing categories.",
-    "security": "PASS - Regex patterns are static literals. No user-controlled input in patterns. No injection risk.",
+    "correctness": "PASS - Non-retriable check correctly placed before retry count check. Empty retry_attempts safely evaluates to falsy. Budget patterns in escalation.py do not overlap with resource patterns.",
+    "security": "PASS - Regex patterns are static literals. No user-controlled input in pattern construction. No injection or data exposure risks.",
     "performance": "PASS - One additional dict entry per iteration; negligible overhead.",
     "readability": "PASS - Consistent with existing code style. Docstrings updated. NON_RETRIABLE_CATEGORIES as class constant is clean and extensible.",
-    "best_practices": "PASS - Tests well-structured with descriptive names. Edge cases covered."
+    "best_practices": "PASS - Tests well-structured with descriptive names covering happy paths, edge cases, and regressions."
   },
   "reviewed_commits": ["8fe86eb", "b35a102", "d5bf96b"],
-  "reviewed_branch": "agent/engineer/task-7283458b"
+  "reviewed_branch": "agent/engineer/task-7283458b",
+  "production_ready": true,
+  "recommendation": "APPROVE for merge. Two non-blocking findings (missing docs/BUDGET.md, no integration test) do not affect correctness or safety."
 }
