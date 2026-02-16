@@ -6,27 +6,44 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.core.agent import Agent, AgentConfig, QAFinding, ReviewOutcome
+from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.review_cycle import QAFinding, ReviewOutcome
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
 
 @pytest.fixture
 def agent():
-    """Create a minimal Agent instance for testing."""
+    """Create a minimal ReviewCycleManager instance for testing.
+
+    Note: The test calls agent.parse_structured_findings() which now lives
+    in ReviewCycleManager. For backward compatibility with tests, we create
+    a mock object that has the ReviewCycleManager methods.
+    """
+    from agent_framework.core.review_cycle import ReviewCycleManager
+
     config = AgentConfig(
         id="qa",
         name="QA",
         queue="qa",
         prompt="Test",
     )
-    a = Agent.__new__(Agent)
-    a.config = config
-    a.logger = MagicMock()
-    return a
+
+    # Create a ReviewCycleManager with minimal mocked dependencies
+    manager = ReviewCycleManager(
+        config=config,
+        queue=MagicMock(),
+        logger=MagicMock(),
+        agent_definition=None,
+        session_logger=MagicMock(),
+        activity_manager=MagicMock(),
+    )
+
+    # Return the manager (tests call agent.parse_structured_findings, etc.)
+    return manager
 
 
 class TestParseStructuredFindings:
-    """Tests for _parse_structured_findings() method."""
+    """Tests for parse_structured_findings() method."""
 
     def test_parses_code_fence_json_with_findings_wrapper(self, agent):
         """Should extract findings from JSON code fence with 'findings' wrapper."""
@@ -54,7 +71,7 @@ class TestParseStructuredFindings:
 ```
 
 Please fix.'''
-        result = agent._parse_structured_findings(content)
+        result = agent.parse_structured_findings(content)
         assert result is not None
         assert len(result) == 1
         assert result[0].severity == "CRITICAL"
@@ -80,7 +97,7 @@ Please fix.'''
 ]
 ```
 '''
-        result = agent._parse_structured_findings(content)
+        result = agent.parse_structured_findings(content)
         assert result is not None
         assert len(result) == 1
         assert result[0].severity == "HIGH"
@@ -89,7 +106,7 @@ Please fix.'''
     def test_parses_inline_json_with_findings_key(self, agent):
         """Should extract findings from inline JSON object."""
         content = '''Review result: {"findings": [{"file": "test.py", "line": 5, "severity": "MEDIUM", "category": "style", "description": "Missing docstring", "suggested_fix": "Add docstring"}], "total_count": 1}'''
-        result = agent._parse_structured_findings(content)
+        result = agent.parse_structured_findings(content)
         assert result is not None
         assert len(result) == 1
         assert result[0].severity == "MEDIUM"
@@ -98,7 +115,7 @@ Please fix.'''
     def test_returns_none_for_text_only(self, agent):
         """Should return None for non-JSON content."""
         content = "CRITICAL: SQL injection in auth.py:42"
-        result = agent._parse_structured_findings(content)
+        result = agent.parse_structured_findings(content)
         assert result is None
 
     def test_returns_none_for_invalid_json(self, agent):
@@ -110,7 +127,7 @@ Please fix.'''
   ]
 }
 ```'''
-        result = agent._parse_structured_findings(content)
+        result = agent.parse_structured_findings(content)
         assert result is None
 
     def test_handles_multiple_findings(self, agent):
@@ -137,7 +154,7 @@ Please fix.'''
   ]
 }
 ```'''
-        result = agent._parse_structured_findings(content)
+        result = agent.parse_structured_findings(content)
         assert result is not None
         assert len(result) == 2
         assert result[0].file == "a.py"
@@ -156,7 +173,7 @@ Please fix.'''
   ]
 }
 ```'''
-        result = agent._parse_structured_findings(content)
+        result = agent.parse_structured_findings(content)
         assert result is not None
         assert len(result) == 1
         assert result[0].file == ""
@@ -165,7 +182,7 @@ Please fix.'''
 
 
 class TestFormatFindingsChecklist:
-    """Tests for _format_findings_checklist() method."""
+    """Tests for format_findings_checklist() method."""
 
     def test_formats_with_file_and_line(self, agent):
         """Should format finding with file and line number."""
@@ -179,7 +196,7 @@ class TestFormatFindingsChecklist:
                 suggested_fix="Use parameterized queries",
             )
         ]
-        result = agent._format_findings_checklist(findings)
+        result = agent.format_findings_checklist(findings)
         assert "1. 🔴 CRITICAL: Security (auth.py:42)" in result
         assert "**Issue**: SQL injection" in result
         assert "**Suggested Fix**: Use parameterized queries" in result
@@ -196,7 +213,7 @@ class TestFormatFindingsChecklist:
                 suggested_fix=None,
             )
         ]
-        result = agent._format_findings_checklist(findings)
+        result = agent.format_findings_checklist(findings)
         assert "1. 🟠 HIGH: Performance (utils.py)" in result
         assert "**Issue**: Slow function" in result
         assert "**Suggested Fix**" not in result
@@ -213,7 +230,7 @@ class TestFormatFindingsChecklist:
                 suggested_fix="Add unit tests",
             )
         ]
-        result = agent._format_findings_checklist(findings)
+        result = agent.format_findings_checklist(findings)
         assert "1. 🔵 MEDIUM: Testing" in result
         assert "auth.py" not in result
 
@@ -245,7 +262,7 @@ class TestFormatFindingsChecklist:
                 suggested_fix=None,
             ),
         ]
-        result = agent._format_findings_checklist(findings)
+        result = agent.format_findings_checklist(findings)
         assert "1. 🔴 CRITICAL" in result
         assert "2. 🟡 MAJOR" in result
         assert "3. 💡 SUGGESTION" in result
@@ -272,12 +289,12 @@ class TestFormatFindingsChecklist:
                     suggested_fix=None,
                 )
             ]
-            result = agent._format_findings_checklist(findings)
+            result = agent.format_findings_checklist(findings)
             assert expected_emoji in result, f"Missing emoji for {severity}"
 
 
 class TestExtractReviewFindingsIntegration:
-    """Integration tests for _extract_review_findings() using new parser."""
+    """Integration tests for extract_review_findings() using new parser."""
 
     def test_uses_new_parser_for_code_fence(self, agent):
         """Should use new parser for code fence JSON."""
@@ -295,7 +312,7 @@ class TestExtractReviewFindingsIntegration:
   ]
 }
 ```'''
-        summary, findings = agent._extract_review_findings(content)
+        summary, findings = agent.extract_review_findings(content)
         assert len(findings) == 1
         assert findings[0].severity == "HIGH"
         assert "test.py:1" in summary
@@ -304,7 +321,7 @@ class TestExtractReviewFindingsIntegration:
         """Should fall back to legacy regex for text-only content."""
         content = """CRITICAL: SQL injection in auth.py:42
 HIGH: Memory leak in cache.py:100"""
-        summary, findings = agent._extract_review_findings(content)
+        summary, findings = agent.extract_review_findings(content)
         assert "CRITICAL: SQL injection" in summary
         assert "HIGH: Memory leak" in summary
 
@@ -324,7 +341,7 @@ HIGH: Memory leak in cache.py:100"""
   ]
 }
 ```'''
-        summary, findings = agent._extract_review_findings(content)
+        summary, findings = agent.extract_review_findings(content)
         assert len(findings) == 1
         assert "CRITICAL: SQL injection (auth.py:42)" in summary
 
@@ -359,7 +376,7 @@ def _make_task(
 
 
 class TestBuildReviewFixTask:
-    """Tests for _build_review_fix_task() with structured findings."""
+    """Tests for build_review_fix_task() with structured findings."""
 
     def test_structured_findings_in_context(self, agent):
         """Structured findings are stored in fix task context."""
@@ -407,7 +424,7 @@ class TestBuildReviewFixTask:
             structured_findings=structured_findings,
         )
 
-        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=1)
+        fix_task = agent.build_review_fix_task(task, outcome, cycle_count=1)
 
         # Verify structured_findings in context
         assert "structured_findings" in fix_task.context
@@ -434,7 +451,7 @@ class TestBuildReviewFixTask:
             findings_summary="CRITICAL: SQL injection in auth.py:42",
         )
 
-        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=1)
+        fix_task = agent.build_review_fix_task(task, outcome, cycle_count=1)
 
         # No structured_findings in context
         assert "structured_findings" not in fix_task.context
@@ -527,7 +544,7 @@ class TestBuildReviewFixTask:
             structured_findings=structured_findings,
         )
 
-        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=1)
+        fix_task = agent.build_review_fix_task(task, outcome, cycle_count=1)
 
         # Verify count in description and acceptance criteria
         assert "QA review found 3 issue(s)" in fix_task.description
@@ -553,7 +570,7 @@ class TestBuildReviewFixTask:
             findings_summary="Tests failed",
         )
 
-        fix_task = agent._build_review_fix_task(task, outcome, cycle_count=2)
+        fix_task = agent.build_review_fix_task(task, outcome, cycle_count=2)
 
         # Essential fields preserved
         assert fix_task.context["pr_url"] == "https://github.com/org/repo/pull/99"

@@ -522,6 +522,8 @@ class TestSubtaskWorkflowChainGuard:
         agent = MagicMock()
         agent.logger = Mock()
         agent.workspace = tmp_workspace
+        # Mock the review cycle manager
+        agent._review_cycle = MagicMock()
         # Bind the real method under test to the mock
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         return agent
@@ -561,8 +563,8 @@ class TestSubtaskWorkflowChainGuard:
         mock_agent._check_and_create_fan_in_task.assert_called_once_with(subtask)
 
         # Workflow chain methods should NOT be called for subtasks
-        mock_agent._queue_code_review_if_needed.assert_not_called()
-        mock_agent._queue_review_fix_if_needed.assert_not_called()
+        mock_agent._review_cycle.queue_code_review_if_needed.assert_not_called()
+        mock_agent._review_cycle.queue_review_fix_if_needed.assert_not_called()
         mock_agent._enforce_workflow_chain.assert_not_called()
         mock_agent._push_and_create_pr_if_needed.assert_not_called()
 
@@ -580,8 +582,8 @@ class TestSubtaskWorkflowChainGuard:
         )
 
         mock_agent._check_and_create_fan_in_task.assert_called_once_with(task)
-        mock_agent._queue_code_review_if_needed.assert_called_once()
-        mock_agent._queue_review_fix_if_needed.assert_called_once()
+        mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
+        mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
         mock_agent._enforce_workflow_chain.assert_called_once()
         mock_agent._push_and_create_pr_if_needed.assert_called_once()
 
@@ -599,7 +601,7 @@ class TestSubtaskWorkflowChainGuard:
         )
 
         mock_agent._check_and_create_fan_in_task.assert_called_once()
-        mock_agent._queue_code_review_if_needed.assert_called_once()
-        mock_agent._queue_review_fix_if_needed.assert_called_once()
+        mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
+        mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
         mock_agent._enforce_workflow_chain.assert_called_once()
         mock_agent._push_and_create_pr_if_needed.assert_called_once()

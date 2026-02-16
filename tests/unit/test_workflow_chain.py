@@ -97,6 +97,17 @@ def agent(queue, tmp_path):
     from agent_framework.workflow.executor import WorkflowExecutor
     a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
 
+    # Initialize review cycle manager (required by delegation shims)
+    from agent_framework.core.review_cycle import ReviewCycleManager
+    a._review_cycle = ReviewCycleManager(
+        config=config,
+        queue=queue,
+        logger=a.logger,
+        agent_definition=None,
+        session_logger=a._session_logger,
+        activity_manager=MagicMock(),
+    )
+
     return a
 
 
@@ -924,10 +935,6 @@ class TestBounceLoopPrevention:
 
     def test_escalation_propagates_root_task_id(self, agent, queue):
         """_escalate_review_to_architect carries _root_task_id from the source task."""
-        from agent_framework.core.agent import Agent
-
-        agent._escalate_review_to_architect = Agent._escalate_review_to_architect.__get__(agent)
-
         task = _make_task(
             workflow="default",
             _root_task_id="original-root-123",
@@ -951,10 +958,6 @@ class TestBounceLoopPrevention:
 
     def test_escalation_stamps_root_when_missing(self, agent, queue):
         """If _root_task_id is missing, escalation stamps task.id as root."""
-        from agent_framework.core.agent import Agent
-
-        agent._escalate_review_to_architect = Agent._escalate_review_to_architect.__get__(agent)
-
         task = _make_task(workflow="default")
         outcome = SimpleNamespace(
             approved=False,
