@@ -9,8 +9,8 @@ from unittest.mock import Mock, patch
 
 from click.testing import CliRunner
 
-from src.agent_framework.core.task import Task, TaskStatus, TaskType
-from src.agent_framework.workflow.dag import (
+from agent_framework.core.task import Task, TaskStatus, TaskType
+from agent_framework.workflow.dag import (
     CheckpointConfig,
     WorkflowDAG,
     WorkflowStep,
@@ -18,7 +18,7 @@ from src.agent_framework.workflow.dag import (
     EdgeCondition,
     EdgeConditionType,
 )
-from src.agent_framework.workflow.executor import WorkflowExecutor
+from agent_framework.workflow.executor import WorkflowExecutor
 
 
 def create_test_task(task_id="test-task", status=TaskStatus.IN_PROGRESS):
@@ -375,7 +375,7 @@ def _write_checkpoint_file(checkpoint_dir, task):
 
 def test_cli_approve_lists_checkpoints(tmp_path):
     """'agent approve' with no args lists pending checkpoints."""
-    from src.agent_framework.cli.main import cli
+    from agent_framework.cli.main import cli
 
     task = create_test_task(status=TaskStatus.AWAITING_APPROVAL)
     task.checkpoint_reached = "wf-engineer"
@@ -393,7 +393,7 @@ def test_cli_approve_lists_checkpoints(tmp_path):
 
 def test_cli_approve_no_checkpoints(tmp_path):
     """'agent approve' shows green message when nothing is pending."""
-    from src.agent_framework.cli.main import cli
+    from agent_framework.cli.main import cli
 
     runner = CliRunner()
     result = runner.invoke(cli, ["--workspace", str(tmp_path), "approve"])
@@ -404,7 +404,7 @@ def test_cli_approve_no_checkpoints(tmp_path):
 
 def test_cli_approve_nonexistent_task(tmp_path):
     """'agent approve <bad-id>' shows error."""
-    from src.agent_framework.cli.main import cli
+    from agent_framework.cli.main import cli
 
     checkpoint_dir = tmp_path / ".agent-communication" / "queues" / "checkpoints"
     checkpoint_dir.mkdir(parents=True)
@@ -418,7 +418,7 @@ def test_cli_approve_nonexistent_task(tmp_path):
 
 def test_cli_approve_specific_task(tmp_path):
     """'agent approve <id>' with confirmation re-queues and removes checkpoint file."""
-    from src.agent_framework.cli.main import cli
+    from agent_framework.cli.main import cli
 
     task = create_test_task(task_id="cp-task-1", status=TaskStatus.AWAITING_APPROVAL)
     task.checkpoint_reached = "wf-engineer"
@@ -445,7 +445,7 @@ def test_cli_approve_specific_task(tmp_path):
 
 def test_cli_approve_cancelled(tmp_path):
     """Declining confirmation preserves checkpoint file."""
-    from src.agent_framework.cli.main import cli
+    from agent_framework.cli.main import cli
 
     task = create_test_task(task_id="cp-task-2", status=TaskStatus.AWAITING_APPROVAL)
     task.checkpoint_reached = "wf-engineer"
