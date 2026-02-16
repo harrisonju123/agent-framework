@@ -2729,11 +2729,7 @@ IMPORTANT:
         from ..utils.subprocess_utils import run_command, SubprocessError
 
         # Build a clean PR title — strip workflow prefixes
-        pr_title = task.title
-        for prefix in ("[chain] ", "[pr] "):
-            if pr_title.startswith(prefix):
-                pr_title = pr_title[len(prefix):]
-        pr_title = pr_title[:70]
+        pr_title = self._strip_chain_prefixes(task.title)[:70]
 
         pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
 
@@ -3945,15 +3941,22 @@ IMPORTANT:
         up (moved to completed/in-progress), this won't detect it — acceptable
         because _handle_successful_response only runs once per task lifecycle.
         """
-        chain_id = f"chain-{source_task_id[:12]}-{next_agent}"
+        chain_id = f"chain-{source_task_id}-{next_agent}"
         queue_path = self.queue.queue_dir / next_agent / f"{chain_id}.json"
         return queue_path.exists()
+
+    @staticmethod
+    def _strip_chain_prefixes(title: str) -> str:
+        """Remove accumulated [chain]/[pr] prefixes so re-wrapping adds exactly one."""
+        while title.startswith(("[chain] ", "[pr] ")):
+            title = title[len("[chain] "):] if title.startswith("[chain] ") else title[len("[pr] "):]
+        return title
 
     def _build_chain_task(self, task: Task, next_agent: str) -> Task:
         """Create a continuation task for the next agent in the chain."""
         from datetime import datetime
 
-        chain_id = f"chain-{task.id[:12]}-{next_agent}"
+        chain_id = f"chain-{task.id}-{next_agent}"
         task_type = CHAIN_TASK_TYPES.get(next_agent, task.type)
 
         return Task(
@@ -3964,7 +3967,7 @@ IMPORTANT:
             created_by=self.config.id,
             assigned_to=next_agent,
             created_at=datetime.now(timezone.utc),
-            title=f"[chain] {task.title}",
+            title=f"[chain] {self._strip_chain_prefixes(task.title)}",
             description=task.description,
             context={
                 **task.context,
@@ -3991,7 +3994,7 @@ IMPORTANT:
             return
 
         # Deterministic ID with -pr suffix to avoid collision with normal chain tasks
-        pr_task_id = f"chain-{task.id[:12]}-{pr_creator}-pr"
+        pr_task_id = f"chain-{task.id}-{pr_creator}-pr"
         queue_path = self.queue.queue_dir / pr_creator / f"{pr_task_id}.json"
         if queue_path.exists():
             self.logger.debug(f"PR creation task {pr_task_id} already queued, skipping")
@@ -4007,7 +4010,7 @@ IMPORTANT:
             created_by=self.config.id,
             assigned_to=pr_creator,
             created_at=datetime.now(timezone.utc),
-            title=f"[pr] {task.title}",
+            title=f"[pr] {self._strip_chain_prefixes(task.title)}",
             description=task.description,
             context={
                 **task.context,

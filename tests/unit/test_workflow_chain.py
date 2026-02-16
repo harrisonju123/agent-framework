@@ -62,10 +62,12 @@ ANALYSIS_WORKFLOW = WorkflowDefinition(
 
 @pytest.fixture
 def queue(tmp_path):
-    """FileQueue mock with real queue_dir for file existence checks."""
+    """FileQueue mock with real queue_dir and completed_dir for file existence checks."""
     q = MagicMock()
     q.queue_dir = tmp_path / "queues"
     q.queue_dir.mkdir()
+    q.completed_dir = tmp_path / "completed"
+    q.completed_dir.mkdir()
     return q
 
 
@@ -133,7 +135,7 @@ class TestEnforceWorkflowChain:
         chain_task = queue.push.call_args[0][0]
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "qa"
-        assert chain_task.id == f"chain-{task.id[:12]}-qa"
+        assert chain_task.id == f"chain-{task.id}-qa"
         assert chain_task.assigned_to == "qa"
         assert chain_task.context["source_task_id"] == task.id
         assert chain_task.context["chain_step"] is True
@@ -191,7 +193,7 @@ class TestEnforceWorkflowChain:
         response = _make_response()
 
         # Pre-create the chain task file
-        chain_id = f"chain-{task.id[:12]}-qa"
+        chain_id = f"chain-{task.id}-qa"
         qa_dir = queue.queue_dir / "qa"
         qa_dir.mkdir()
         (qa_dir / f"{chain_id}.json").write_text("{}")
@@ -448,7 +450,7 @@ class TestPRCreation:
         assert pr_task.type == TaskType.PR_REQUEST
         assert pr_task.context["pr_creation_step"] is True
         assert pr_task.title.startswith("[pr]")
-        assert pr_task.id == f"chain-{task.id[:12]}-architect-pr"
+        assert pr_task.id == f"chain-{task.id}-architect-pr"
 
     def test_last_agent_no_pr_creator_configured(self, pr_agent, queue):
         """No pr_creator on workflow → no task queued (DEFAULT_WORKFLOW)."""
@@ -477,7 +479,7 @@ class TestPRCreation:
         response = _make_response()
 
         # Pre-create the PR task file
-        pr_task_id = f"chain-{task.id[:12]}-architect-pr"
+        pr_task_id = f"chain-{task.id}-architect-pr"
         architect_dir = queue.queue_dir / "architect"
         architect_dir.mkdir()
         (architect_dir / f"{pr_task_id}.json").write_text("{}")
@@ -779,3 +781,77 @@ class TestPreviewMode:
         assert "### Implementation Approach" in result
         assert "### Risks and Edge Cases" in result
         assert "### Estimated Total Change Size" in result
+
+
+# -- Chain ID collision and title accumulation --
+
+class TestChainIdCollision:
+    """Regression tests for chain ID truncation bug that caused task dedup collisions."""
+
+    def test_similar_prefix_tasks_produce_different_chain_ids(self, agent, queue):
+        """Two tasks sharing a 12-char prefix must get distinct chain IDs."""
+        task_a = _make_task(task_id="planning-s6-auth-login")
+        task_b = _make_task(task_id="planning-s6-auth-signup")
+
+        agent._enforce_workflow_chain(task_a, _make_response())
+        chain_a = queue.push.call_args[0][0]
+
+        queue.reset_mock()
+        agent._enforce_workflow_chain(task_b, _make_response())
+        chain_b = queue.push.call_args[0][0]
+
+        assert chain_a.id != chain_b.id
+        assert "planning-s6-auth-login" in chain_a.id
+        assert "planning-s6-auth-signup" in chain_b.id
+
+    def test_chain_title_does_not_accumulate_prefixes(self, agent, queue):
+        """Chaining a [chain]-prefixed task produces a single [chain] prefix, not nested."""
+        task = _make_task()
+        task.title = "[chain] [chain] Implement feature X"
+
+        agent._enforce_workflow_chain(task, _make_response())
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.title == "[chain] Implement feature X"
+        assert not chain_task.title.startswith("[chain] [chain]")
+
+
+class TestExecutorCompletedCheck:
+    """Tests for executor dedup checking the correct completed directory."""
+
+    def test_executor_completed_check_uses_correct_directory(self, queue, tmp_path):
+        """Executor checks queue.completed_dir, not queue_dir/completed."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        # Set up completed_dir on the mock queue (simulates real FileQueue)
+        completed_dir = tmp_path / "comms" / "completed"
+        completed_dir.mkdir(parents=True)
+        queue.completed_dir = completed_dir
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        # Place a completed chain task in the correct completed_dir
+        chain_id = "chain-task-abc-engineer"
+        (completed_dir / f"{chain_id}.json").write_text("{}")
+
+        assert executor._is_chain_task_already_queued("engineer", "task-abc") is True
+
+    def test_executor_completed_check_ignores_wrong_directory(self, queue, tmp_path):
+        """Completed tasks in queue_dir/completed (wrong path) are NOT found."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        # Set completed_dir to the correct location (empty)
+        completed_dir = tmp_path / "comms" / "completed"
+        completed_dir.mkdir(parents=True)
+        queue.completed_dir = completed_dir
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        # Place a file in the WRONG directory (queue_dir/completed)
+        wrong_dir = queue.queue_dir / "completed"
+        wrong_dir.mkdir(parents=True)
+        chain_id = "chain-task-abc-engineer"
+        (wrong_dir / f"{chain_id}.json").write_text("{}")
+
+        # Should NOT find it — the bug was checking the wrong path
+        assert executor._is_chain_task_already_queued("engineer", "task-abc") is False

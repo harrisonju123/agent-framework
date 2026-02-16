@@ -43,6 +43,13 @@ AGENT_TASK_TYPES = {
 _PR_URL_PATTERN = re.compile(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)')
 
 
+def _strip_chain_prefixes(title: str) -> str:
+    """Remove accumulated [chain]/[pr] prefixes so re-wrapping adds exactly one."""
+    while title.startswith(("[chain] ", "[pr] ")):
+        title = title[len("[chain] "):] if title.startswith("[chain] ") else title[len("[pr] "):]
+    return title
+
+
 class WorkflowExecutor:
     """Executes workflow DAGs and routes tasks between agents."""
 
@@ -281,12 +288,12 @@ class WorkflowExecutor:
 
     def _is_chain_task_already_queued(self, next_agent: str, source_task_id: str) -> bool:
         """Check if chain task already exists in target queue or completed."""
-        chain_id = f"chain-{source_task_id[:12]}-{next_agent}"
+        chain_id = f"chain-{source_task_id}-{next_agent}"
         queue_path = self.queue_dir / next_agent / f"{chain_id}.json"
         if queue_path.exists():
             return True
         # Also check completed to prevent re-queuing tasks that already ran
-        completed_path = self.queue_dir / "completed" / f"{chain_id}.json"
+        completed_path = self.queue.completed_dir / f"{chain_id}.json"
         return completed_path.exists()
 
     def _build_chain_task(
@@ -296,7 +303,7 @@ class WorkflowExecutor:
         from ..core.task import Task
 
         next_agent = target_step.agent
-        chain_id = f"chain-{task.id[:12]}-{next_agent}"
+        chain_id = f"chain-{task.id}-{next_agent}"
 
         if target_step.task_type_override:
             task_type = TaskType[target_step.task_type_override.upper()]
@@ -325,7 +332,7 @@ class WorkflowExecutor:
             created_by=current_agent_id,
             assigned_to=next_agent,
             created_at=datetime.now(timezone.utc),
-            title=f"[chain] {task.title}",
+            title=f"[chain] {_strip_chain_prefixes(task.title)}",
             description=task.description,
             context=context,
         )

@@ -191,6 +191,8 @@ def test_executor_continues_after_approval(tmp_path):
     mock_queue = Mock()
     queue_dir = tmp_path / ".agent-communication" / "queues"
     queue_dir.mkdir(parents=True)
+    mock_queue.completed_dir = tmp_path / ".agent-communication" / "completed"
+    mock_queue.completed_dir.mkdir(parents=True)
 
     executor = WorkflowExecutor(mock_queue, queue_dir)
 
@@ -296,6 +298,8 @@ def test_pr_at_non_terminal_step_continues_chain(tmp_path):
     mock_queue = Mock()
     queue_dir = tmp_path / ".agent-communication" / "queues"
     queue_dir.mkdir(parents=True)
+    mock_queue.completed_dir = tmp_path / ".agent-communication" / "completed"
+    mock_queue.completed_dir.mkdir(parents=True)
 
     executor = WorkflowExecutor(mock_queue, queue_dir)
 
