@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 # Hard ceiling on chain depth to prevent runaway loops regardless of routing logic
 MAX_CHAIN_DEPTH = 10
 
-# Cap QA↔engineer review cycles within DAG workflows (mirrors MAX_REVIEW_CYCLES in agent.py)
-MAX_DAG_REVIEW_CYCLES = 3
+# Cap QA→engineer fix cycles. Each increment = one fix round.
+# Value of 2: initial review + 2 fix rounds + final review = 6 chain hops max.
+MAX_DAG_REVIEW_CYCLES = 2
 
 # Absolute ceiling on total chain hops — survives escalation and re-planning resets
 MAX_GLOBAL_CYCLES = 15
@@ -310,9 +311,13 @@ class WorkflowExecutor:
                 else:
                     return
 
-        chain_task = self._build_chain_task(task, target_step, current_agent_id)
+        chain_task = self._build_chain_task(
+            task, target_step, current_agent_id, is_qa_to_engineer=is_qa_to_engineer,
+        )
 
-        if self._is_chain_task_already_queued(next_agent, task.id, chain_id=chain_task.id):
+        if self._is_chain_task_already_queued(
+            next_agent, task.id, chain_id=chain_task.id, title=chain_task.title,
+        ):
             self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
 
@@ -327,19 +332,42 @@ class WorkflowExecutor:
             self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
 
     def _is_chain_task_already_queued(
-        self, next_agent: str, source_task_id: str, *, chain_id: Optional[str] = None
+        self, next_agent: str, source_task_id: str, *,
+        chain_id: Optional[str] = None, title: Optional[str] = None,
     ) -> bool:
         """Check if chain task already exists in target queue or completed."""
+        import json
+
         cid = chain_id or f"chain-{source_task_id}-{next_agent}"
         queue_path = self.queue_dir / next_agent / f"{cid}.json"
         if queue_path.exists():
             return True
         # Also check completed to prevent re-queuing tasks that already ran
         completed_path = self.queue.completed_dir / f"{cid}.json"
-        return completed_path.exists()
+        if completed_path.exists():
+            return True
+
+        # Title-based dedup: catch same work queued under different IDs
+        if title:
+            normalized = _strip_chain_prefixes(title).lower().strip()
+            queue_dir = self.queue_dir / next_agent
+            if queue_dir.exists():
+                for f in queue_dir.glob("*.json"):
+                    try:
+                        data = json.loads(f.read_text())
+                        existing = _strip_chain_prefixes(data.get("title", "")).lower().strip()
+                        if existing == normalized:
+                            self.logger.debug(
+                                f"Title dedup: '{title}' matches existing {f.name}"
+                            )
+                            return True
+                    except (json.JSONDecodeError, OSError):
+                        continue
+        return False
 
     def _build_chain_task(
-        self, task: "Task", target_step: WorkflowStep, current_agent_id: str
+        self, task: "Task", target_step: WorkflowStep, current_agent_id: str,
+        *, is_qa_to_engineer: bool = False,
     ) -> "Task":
         """Create a continuation task for the target step."""
         from ..core.task import Task
@@ -372,6 +400,13 @@ class WorkflowExecutor:
             context["parent_task_id"] = task.context.get("parent_task_id")
             context["subtask_count"] = task.context.get("subtask_count")
 
+        # Prepend QA findings so the fix-cycle engineer sees what to address
+        description = task.description
+        if is_qa_to_engineer:
+            upstream = task.context.get("upstream_summary", "")
+            if upstream:
+                description = f"## QA FINDINGS TO ADDRESS\n{upstream}\n\n## ORIGINAL TASK\n{description}"
+
         return Task(
             id=chain_id,
             type=task_type,
@@ -381,7 +416,7 @@ class WorkflowExecutor:
             assigned_to=next_agent,
             created_at=datetime.now(timezone.utc),
             title=f"[chain] {_strip_chain_prefixes(task.title)}",
-            description=task.description,
+            description=description,
             context=context,
         )
 

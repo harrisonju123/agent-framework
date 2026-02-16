@@ -4,6 +4,7 @@ import pytest
 from datetime import datetime, UTC
 from unittest.mock import patch, MagicMock
 
+from agent_framework.core.prompt_builder import PromptBuilder
 from agent_framework.core.engineer_specialization import (
     detect_file_patterns,
     match_patterns,
@@ -583,20 +584,21 @@ class TestAutoProfileFallback:
     def _make_agent(self, workspace=None):
         """Build a minimal agent mock with engineer base_id."""
         from pathlib import Path
-        from agent_framework.core.agent import Agent
 
-        agent = MagicMock()
-        agent.config = MagicMock()
-        agent.config.base_id = "engineer"
-        agent._agent_definition = MagicMock()
-        agent._agent_definition.specialization_enabled = True
-        agent.workspace = workspace or Path("/tmp")
-        agent.logger = MagicMock()
+        # Create mock prompt builder
+        prompt_builder = MagicMock()
+        prompt_builder.ctx = MagicMock()
+        prompt_builder.ctx.config = MagicMock()
+        prompt_builder.ctx.config.base_id = "engineer"
+        prompt_builder.ctx.agent_definition = MagicMock()
+        prompt_builder.ctx.agent_definition.specialization_enabled = True
+        prompt_builder.ctx.workspace = workspace or Path("/tmp")
+        prompt_builder.logger = MagicMock()
         # Bind the real method
-        agent._detect_engineer_specialization = (
-            Agent._detect_engineer_specialization.__get__(agent)
+        prompt_builder._detect_engineer_specialization = (
+            PromptBuilder._detect_engineer_specialization.__get__(prompt_builder)
         )
-        return agent
+        return prompt_builder
 
     @patch("agent_framework.core.engineer_specialization.get_auto_profile_config")
     @patch("agent_framework.core.engineer_specialization.detect_specialization", return_value=None)
@@ -605,10 +607,10 @@ class TestAutoProfileFallback:
         """Auto-profile should not run when auto_profile_generation.enabled=False."""
         mock_auto_config.return_value = AutoProfileConfig(enabled=False)
 
-        agent = self._make_agent()
+        prompt_builder = self._make_agent()
         task = create_test_task(files_in_plan=["service.proto"])
 
-        result = agent._detect_engineer_specialization(task)
+        result = prompt_builder._detect_engineer_specialization(task)
         assert result is None
 
     @patch("agent_framework.core.profile_generator.ProfileGenerator.generate_profile")
@@ -641,10 +643,10 @@ class TestAutoProfileFallback:
             file_extensions=[".proto"],
         )
 
-        agent = self._make_agent()
+        prompt_builder = self._make_agent()
         task = create_test_task(files_in_plan=["service.proto"])
 
-        result = agent._detect_engineer_specialization(task)
+        result = prompt_builder._detect_engineer_specialization(task)
         assert result is not None
         assert result.id == "grpc"
         mock_store.assert_called_once()
@@ -671,10 +673,10 @@ class TestAutoProfileFallback:
         )
         mock_find.return_value = cached_profile
 
-        agent = self._make_agent()
+        prompt_builder = self._make_agent()
         task = create_test_task(files_in_plan=["service.proto"])
 
-        result = agent._detect_engineer_specialization(task)
+        result = prompt_builder._detect_engineer_specialization(task)
         assert result is not None
         assert result.id == "grpc"
 
@@ -686,8 +688,8 @@ class TestAutoProfileFallback:
         """Auto-profile should not run when no files are detected."""
         mock_auto_config.return_value = AutoProfileConfig(enabled=True)
 
-        agent = self._make_agent()
+        prompt_builder = self._make_agent()
         task = create_test_task()
 
-        result = agent._detect_engineer_specialization(task)
+        result = prompt_builder._detect_engineer_specialization(task)
         assert result is None

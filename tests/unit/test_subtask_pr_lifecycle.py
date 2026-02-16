@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.config import WorkflowDefinition
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
@@ -55,6 +56,17 @@ def agent(tmp_path):
     a.multi_repo_manager = None
     a.jira_client = None
     a._agent_definition = None
+
+    # Create prompt builder with mock context
+    prompt_ctx = PromptContext(
+        config=config,
+        workspace=tmp_path,
+        mcp_enabled=False,
+        optimization_config={},
+    )
+    prompt_builder = PromptBuilder(prompt_ctx)
+    a._prompt_builder = prompt_builder
+
     return a
 
 
@@ -64,23 +76,20 @@ class TestSubtaskPromptSuppression:
     def test_subtask_prompt_includes_suppression(self, agent):
         """Subtask LLMs should be told not to create PRs."""
         task = _make_task(parent_task_id="parent-1")
-        agent._build_prompt_legacy = Agent._build_prompt_legacy.__get__(agent)
-        prompt = agent._build_prompt_legacy(task)
+        prompt = agent._prompt_builder._build_prompt_legacy(task)
         assert "do NOT create a pull request" in prompt
         assert "SUBTASK" in prompt
 
     def test_non_subtask_prompt_excludes_suppression(self, agent):
         """Regular tasks should NOT see subtask PR suppression."""
         task = _make_task()
-        agent._build_prompt_legacy = Agent._build_prompt_legacy.__get__(agent)
-        prompt = agent._build_prompt_legacy(task)
+        prompt = agent._prompt_builder._build_prompt_legacy(task)
         assert "You are a SUBTASK" not in prompt
 
     def test_optimized_prompt_includes_suppression_for_subtask(self, agent):
         """Optimized prompt path also suppresses PR creation for subtasks."""
         task = _make_task(parent_task_id="parent-1")
-        agent._build_prompt_optimized = Agent._build_prompt_optimized.__get__(agent)
-        prompt = agent._build_prompt_optimized(task)
+        prompt = agent._prompt_builder._build_prompt_optimized(task)
         assert "do NOT create a pull request" in prompt
 
 

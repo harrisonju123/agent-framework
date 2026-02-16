@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.config import WorkflowDefinition
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
@@ -107,6 +108,16 @@ def agent(queue, tmp_path):
         session_logger=a._session_logger,
         activity_manager=MagicMock(),
     )
+
+    # Create prompt builder with mock context
+    prompt_ctx = PromptContext(
+        config=config,
+        workspace=tmp_path,
+        mcp_enabled=False,
+        optimization_config={},
+    )
+    prompt_builder = PromptBuilder(prompt_ctx)
+    a._prompt_builder = prompt_builder
 
     return a
 
@@ -779,7 +790,7 @@ class TestPreviewMode:
         task.type = TaskType.PREVIEW
         original_prompt = "Build feature X with tests."
 
-        result = agent._inject_preview_mode(original_prompt, task)
+        result = agent._prompt_builder._inject_preview_mode(original_prompt, task)
 
         assert result.endswith(original_prompt)
         assert "PREVIEW MODE" in result
@@ -789,7 +800,7 @@ class TestPreviewMode:
     def test_inject_preview_mode_includes_required_sections(self, agent):
         """Preview prompt includes all required output sections."""
         task = _make_task()
-        result = agent._inject_preview_mode("original", task)
+        result = agent._prompt_builder._inject_preview_mode("original", task)
 
         assert "### Files to Modify" in result
         assert "### New Files to Create" in result
