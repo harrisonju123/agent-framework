@@ -13,6 +13,11 @@ from agent_framework.core.task import Task, TaskStatus, TaskType
 @pytest.fixture
 def agent():
     """Create a minimal Agent instance for testing."""
+    from agent_framework.core.review_cycle import ReviewCycleManager
+    from agent_framework.queue.file_queue import FileQueue
+    from pathlib import Path
+    import tempfile
+
     config = AgentConfig(
         id="qa",
         name="QA",
@@ -22,6 +27,22 @@ def agent():
     a = Agent.__new__(Agent)
     a.config = config
     a.logger = MagicMock()
+
+    # Create mock queue for ReviewCycleManager
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        queue = FileQueue(tmpdir_path / "queue", tmpdir_path / "completed")
+
+        # Initialize ReviewCycleManager so delegation works
+        a._review_cycle = ReviewCycleManager(
+            config=config,
+            queue=queue,
+            logger=a.logger,
+            agent_definition=None,
+            session_logger=None,
+            activity_manager=None,
+        )
+
     return a
 
 
