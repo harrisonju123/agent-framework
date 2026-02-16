@@ -80,6 +80,19 @@ class ErrorTranslator:
             ]
         },
 
+        # Budget exceeded
+        r"budget.*exceed|max budget|quota.*exceed|insufficient.*credits|usage.*limit.*exceed": {
+            "title": "Budget or quota exceeded",
+            "explanation": "The account has reached its budget limit or usage quota. No more requests can be processed until the limit is increased or reset.",
+            "actions": [
+                "Review your account usage and spending",
+                "Check available credits or quota in your account settings",
+                "Upgrade your account plan or increase budget",
+                "Optimize resource usage to reduce costs"
+            ],
+            "documentation": "docs/BUDGET.md"
+        },
+
         # LLM proxy errors (must precede generic network pattern)
         r"connection.*refused.*ANTHROPIC_BASE_URL|Cannot reach LLM proxy": {
             "title": "Cannot reach LLM proxy",
