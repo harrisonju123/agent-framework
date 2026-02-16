@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # Hard ceiling on chain depth to prevent runaway loops regardless of routing logic
 MAX_CHAIN_DEPTH = 10
 
+# Cap QA↔engineer review cycles within DAG workflows (mirrors MAX_REVIEW_CYCLES in agent.py)
+MAX_DAG_REVIEW_CYCLES = 3
+
 
 @dataclass
 class WorkflowExecutionState:
@@ -273,11 +276,35 @@ class WorkflowExecutor:
             )
             return
 
+        # Cap QA→engineer review cycles to prevent infinite bounce loops.
+        # QA routing back to engineer (needs_fix) increments the counter.
+        qa_cycles = task.context.get("_dag_review_cycles", 0)
+        is_qa_to_engineer = (
+            current_agent_id in ("qa", "qa-1", "qa-2")
+            and target_step.agent == "engineer"
+        )
+        if is_qa_to_engineer:
+            qa_cycles += 1
+            if qa_cycles > MAX_DAG_REVIEW_CYCLES:
+                self.logger.warning(
+                    f"QA→engineer review cycle {qa_cycles} exceeds max ({MAX_DAG_REVIEW_CYCLES}) "
+                    f"for task {task.id} — routing to PR creation instead of another fix cycle"
+                )
+                # Try to route to create_pr step instead of looping back
+                pr_step = workflow.steps.get("create_pr")
+                if pr_step and pr_step != target_step:
+                    target_step = pr_step
+                    next_agent = pr_step.agent
+                else:
+                    return
+
         if self._is_chain_task_already_queued(next_agent, task.id):
             self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
 
         chain_task = self._build_chain_task(task, target_step, current_agent_id)
+        if is_qa_to_engineer:
+            chain_task.context["_dag_review_cycles"] = qa_cycles
 
         try:
             self.queue.push(chain_task, next_agent)
