@@ -79,6 +79,15 @@ def agent(queue, tmp_path):
     from agent_framework.workflow.executor import WorkflowExecutor
     a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
 
+    # Initialize GitOperationsManager
+    from agent_framework.core.git_operations import GitOperationsManager
+    a._git_ops = GitOperationsManager(
+        config=a.config,
+        workspace=a.workspace,
+        queue=a.queue,
+        logger=a.logger,
+        session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
+    )
     return a
 
 
@@ -88,7 +97,7 @@ class TestPushAndCreatePrIfNeeded:
     def test_skips_when_pr_url_exists(self, agent):
         """Short-circuits immediately when task already has a pr_url."""
         task = _make_task(pr_url="https://github.com/org/repo/pull/1")
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
         agent.logger.debug.assert_any_call(
             f"PR already exists for {task.id}: https://github.com/org/repo/pull/1"
         )
@@ -96,9 +105,9 @@ class TestPushAndCreatePrIfNeeded:
     def test_skips_without_worktree(self, agent):
         """No worktree + no implementation branch = nothing to do."""
         task = _make_task()
-        agent._active_worktree = None
+        agent._git_ops._active_worktree = None
         agent.worktree_manager = None
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
         agent.logger.debug.assert_any_call(
             f"No active worktree for {task.id}, skipping PR creation"
         )
@@ -108,11 +117,11 @@ class TestPushAndCreatePrIfNeeded:
         task = _make_task()
         del task.context["github_repo"]
 
-        agent._active_worktree = tmp_path
+        agent._git_ops._active_worktree = tmp_path
         agent.worktree_manager = MagicMock()
         agent.worktree_manager.has_unpushed_commits.return_value = True
 
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
         agent.logger.debug.assert_any_call(
             f"No github_repo in task context for {task.id}, skipping PR creation"
         )
@@ -124,14 +133,14 @@ class TestPushAndCreatePrIfNeeded:
             implementation_branch="feat/my-branch",
         )
         agent._create_pr_from_branch = MagicMock()
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
         agent._create_pr_from_branch.assert_called_once_with(task, "feat/my-branch")
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_skips_pr_on_intermediate_step(self, mock_git, agent, tmp_path):
         """Intermediate workflow steps push but don't create a PR."""
         task = _make_task(workflow="chain")
-        agent._active_worktree = tmp_path
+        agent._git_ops._active_worktree = tmp_path
         agent.worktree_manager = MagicMock()
         agent.worktree_manager.has_unpushed_commits.return_value = True
 
@@ -140,7 +149,7 @@ class TestPushAndCreatePrIfNeeded:
         push_result = MagicMock(returncode=0, stderr="")
         mock_git.side_effect = [branch_result, push_result]
 
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
 
         assert task.context["implementation_branch"] == "feat/my-branch"
         agent.logger.info.assert_any_call(
@@ -152,7 +161,7 @@ class TestPushAndCreatePrIfNeeded:
     def test_creates_pr_on_terminal_step(self, mock_git, mock_cmd, agent, tmp_path):
         """Terminal workflow step pushes and creates PR."""
         task = _make_task(workflow="default")
-        agent._active_worktree = tmp_path
+        agent._git_ops._active_worktree = tmp_path
         agent.worktree_manager = MagicMock()
         agent.worktree_manager.has_unpushed_commits.return_value = True
 
@@ -168,7 +177,7 @@ class TestPushAndCreatePrIfNeeded:
             stderr="",
         )
 
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
 
         assert task.context["pr_url"] == "https://github.com/org/repo/pull/42"
 
@@ -176,13 +185,13 @@ class TestPushAndCreatePrIfNeeded:
     def test_skips_pr_from_main_branch(self, mock_git, agent, tmp_path):
         """Never create PRs when on main/master."""
         task = _make_task()
-        agent._active_worktree = tmp_path
+        agent._git_ops._active_worktree = tmp_path
         agent.worktree_manager = MagicMock()
         agent.worktree_manager.has_unpushed_commits.return_value = True
 
         mock_git.return_value = MagicMock(returncode=0, stdout="main\n")
 
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
         assert "pr_url" not in task.context
 
 
@@ -198,7 +207,7 @@ class TestCreatePrViaGh:
             stderr="",
         )
 
-        agent._create_pr_via_gh(task, "org/repo", "feat/branch", cwd=tmp_path)
+        agent._git_ops._create_pr_via_gh(task, "org/repo", "feat/branch", cwd=tmp_path)
         assert task.context["pr_url"] == "https://github.com/org/repo/pull/99"
 
     @patch("agent_framework.utils.subprocess_utils.run_command")
@@ -210,7 +219,7 @@ class TestCreatePrViaGh:
             stderr="a]pull request already exists for branch",
         )
 
-        agent._create_pr_via_gh(task, "org/repo", "feat/branch", cwd=tmp_path)
+        agent._git_ops._create_pr_via_gh(task, "org/repo", "feat/branch", cwd=tmp_path)
         assert "pr_url" not in task.context
         agent.logger.info.assert_any_call("PR already exists for this branch")
 
@@ -220,7 +229,7 @@ class TestCreatePrViaGh:
         task.title = "[chain] Implement feature X"
         mock_cmd.return_value = MagicMock(returncode=0, stdout="url\n", stderr="")
 
-        agent._create_pr_via_gh(task, "org/repo", "feat/branch", cwd=tmp_path)
+        agent._git_ops._create_pr_via_gh(task, "org/repo", "feat/branch", cwd=tmp_path)
 
         call_args = mock_cmd.call_args[0][0]
         title_idx = call_args.index("--title") + 1
@@ -236,12 +245,12 @@ class TestRemoteBranchExists:
             MagicMock(returncode=0, stdout="feat/branch\n"),  # rev-parse
             MagicMock(returncode=0, stdout="abc123\trefs/heads/feat/branch\n"),  # ls-remote
         ]
-        assert agent._remote_branch_exists(tmp_path) is True
+        assert agent._git_ops._remote_branch_exists(tmp_path) is True
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_returns_false_for_main(self, mock_git, agent, tmp_path):
         mock_git.return_value = MagicMock(returncode=0, stdout="main\n")
-        assert agent._remote_branch_exists(tmp_path) is False
+        assert agent._git_ops._remote_branch_exists(tmp_path) is False
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_returns_false_when_no_remote_branch(self, mock_git, agent, tmp_path):
@@ -249,12 +258,12 @@ class TestRemoteBranchExists:
             MagicMock(returncode=0, stdout="feat/branch\n"),
             MagicMock(returncode=0, stdout=""),  # empty ls-remote
         ]
-        assert agent._remote_branch_exists(tmp_path) is False
+        assert agent._git_ops._remote_branch_exists(tmp_path) is False
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_returns_false_on_detached_head(self, mock_git, agent, tmp_path):
         mock_git.return_value = MagicMock(returncode=0, stdout="HEAD\n")
-        assert agent._remote_branch_exists(tmp_path) is False
+        assert agent._git_ops._remote_branch_exists(tmp_path) is False
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_returns_false_on_subprocess_error(self, mock_git, agent, tmp_path):
@@ -262,4 +271,4 @@ class TestRemoteBranchExists:
         mock_git.side_effect = SubprocessError(
             cmd="git rev-parse", returncode=128, stderr="fatal"
         )
-        assert agent._remote_branch_exists(tmp_path) is False
+        assert agent._git_ops._remote_branch_exists(tmp_path) is False

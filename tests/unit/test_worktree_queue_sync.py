@@ -54,6 +54,15 @@ def agent(queue, main_workspace):
     a.workspace = main_workspace
     a._active_worktree = None
     a.logger = MagicMock()
+    # Initialize GitOperationsManager
+    from agent_framework.core.git_operations import GitOperationsManager
+    a._git_ops = GitOperationsManager(
+        config=a.config,
+        workspace=a.workspace,
+        queue=a.queue,
+        logger=a.logger,
+        session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
+    )
     return a
 
 
@@ -61,7 +70,8 @@ class TestSyncWorktreeQueuedTasks:
     def test_no_worktree_is_noop(self, agent):
         """No active worktree — nothing to sync."""
         agent._active_worktree = None
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
         agent.logger.info.assert_not_called()
 
     def test_worktree_without_queue_dir_is_noop(self, agent, tmp_path):
@@ -69,7 +79,8 @@ class TestSyncWorktreeQueuedTasks:
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         agent._active_worktree = worktree
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
         agent.logger.info.assert_not_called()
 
     def test_syncs_single_task(self, agent, queue, tmp_path):
@@ -82,7 +93,8 @@ class TestSyncWorktreeQueuedTasks:
         (wt_queue / "impl-abc123.json").write_text(json.dumps(task_data))
 
         agent._active_worktree = worktree
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
 
         # Task should now be in main queue
         main_task_file = queue.queue_dir / "engineer" / "impl-abc123.json"
@@ -102,7 +114,8 @@ class TestSyncWorktreeQueuedTasks:
             (wt_queue / f"{task_id}.json").write_text(json.dumps(task_data))
 
         agent._active_worktree = worktree
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
 
         assert (queue.queue_dir / "engineer" / "impl-001.json").exists()
         assert (queue.queue_dir / "engineer" / "impl-002.json").exists()
@@ -123,7 +136,8 @@ class TestSyncWorktreeQueuedTasks:
         (eng_queue / "impl-001.json").write_text(json.dumps(_make_task_json("impl-001")))
 
         agent._active_worktree = worktree
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
 
         # Only the engineer task should be synced
         assert (queue.queue_dir / "engineer" / "impl-001.json").exists()
@@ -134,7 +148,8 @@ class TestSyncWorktreeQueuedTasks:
     def test_skips_when_worktree_is_main_workspace(self, agent, queue, main_workspace):
         """Don't sync from main workspace back into itself."""
         agent._active_worktree = main_workspace
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
         agent.logger.info.assert_not_called()
 
     def test_malformed_json_logged_and_skipped(self, agent, queue, tmp_path):
@@ -150,7 +165,8 @@ class TestSyncWorktreeQueuedTasks:
         (wt_queue / "good-task.json").write_text(json.dumps(task_data))
 
         agent._active_worktree = worktree
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
 
         # Good task synced
         assert (queue.queue_dir / "engineer" / "good-task.json").exists()
@@ -169,7 +185,8 @@ class TestSyncWorktreeQueuedTasks:
         (wt_queue / "impl-xyz789.json").write_text(json.dumps(task_data))
 
         agent._active_worktree = worktree
-        agent._sync_worktree_queued_tasks()
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
 
         # Load from main queue file and verify fields survived round-trip
         task_file = queue.queue_dir / "engineer" / "impl-xyz789.json"
