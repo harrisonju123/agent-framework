@@ -255,6 +255,7 @@ class TestEnforceWorkflowChain:
     def test_skips_last_agent_in_chain(self, agent, queue):
         """Last agent in the chain has nobody to forward to."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         response = _make_response()
 
@@ -273,6 +274,7 @@ class TestEnforceWorkflowChain:
     def test_skips_single_agent_workflow(self, agent, queue):
         """Single-agent workflows (like analysis) have no chain to enforce."""
         agent.config = AgentConfig(id="architect", name="A", queue="a", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="analysis")
         response = _make_response()
 
@@ -284,6 +286,7 @@ class TestEnforceWorkflowChain:
         """Engineer tasks get IMPLEMENTATION type."""
         # architect -> engineer chain
         agent.config = AgentConfig(id="architect", name="A", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         response = _make_response()
 
@@ -545,6 +548,7 @@ class TestPRCreation:
         pr_agent.config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="p",
         )
+        pr_agent._workflow_router.config = pr_agent.config
         task = _make_task(workflow="pr_workflow", pr_creation_step=True)
         response = _make_response()
 
@@ -604,18 +608,21 @@ class TestTerminalStepDetection:
     def test_last_agent_is_terminal(self, agent):
         """QA (last in architect→engineer→qa) is terminal."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         assert agent._is_at_terminal_workflow_step(task) is True
 
     def test_first_agent_is_not_terminal(self, agent):
         """Architect (first in architect→engineer→qa) is not terminal."""
         agent.config = AgentConfig(id="architect", name="A", queue="a", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         assert agent._is_at_terminal_workflow_step(task) is False
 
     def test_single_agent_workflow_is_terminal(self, agent):
         """Single-agent workflow (analysis: [architect]) — architect is terminal."""
         agent.config = AgentConfig(id="architect", name="A", queue="a", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="analysis")
         assert agent._is_at_terminal_workflow_step(task) is True
 
@@ -639,6 +646,7 @@ class TestTerminalStepDetection:
     def test_explicit_workflow_step_intermediate(self, agent):
         """workflow_step pointing to engineer (intermediate) returns False."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="engineer")
         assert agent._is_at_terminal_workflow_step(task) is False
 
@@ -678,7 +686,8 @@ class TestIntermediateStepPRSuppression:
     def test_terminal_step_creates_pr(self, agent, tmp_path):
         """QA (terminal) creates a PR normally."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
-        agent._git_ops.config = agent.config  # Update git_ops config too
+        agent._git_ops.config = agent.config
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", github_repo="org/repo")
 
         worktree_dir = tmp_path / "worktree"
@@ -829,6 +838,7 @@ class TestPreviewMode:
         agent.config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="You are an architect.",
         )
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         task.type = TaskType.PREVIEW
         response = _make_response()

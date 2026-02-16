@@ -559,8 +559,8 @@ class TestSubtaskWorkflowChainGuard:
             subtask, mock_response, routing_signal=None, task_start_time=0
         )
 
-        # Fan-in check should always run
-        mock_agent._check_and_create_fan_in_task.assert_called_once_with(subtask)
+        # Fan-in check should always run (now delegated to workflow router)
+        mock_agent._workflow_router.check_and_create_fan_in_task.assert_called_once_with(subtask)
 
         # Workflow chain methods should NOT be called for subtasks
         mock_agent._review_cycle.queue_code_review_if_needed.assert_not_called()
