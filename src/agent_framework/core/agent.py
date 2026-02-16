@@ -2164,6 +2164,15 @@ The PR will be created by a downstream agent after all steps complete.
 
 """
 
+        # Subtasks must not create PRs — the fan-in task creates a single PR
+        if task.parent_task_id is not None:
+            mcp_guidance += """
+IMPORTANT: You are a SUBTASK of a decomposed task.
+Commit and push your changes, but do NOT create a pull request.
+A fan-in task will aggregate all subtask results and create a single PR.
+
+"""
+
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
@@ -2229,6 +2238,10 @@ IMPORTANT:
         chain_note = ""
         if task.context.get("chain_step") and not self._is_at_terminal_workflow_step(task):
             chain_note = "\nIMPORTANT: You are an intermediate step in the workflow chain.\nPush your commits but do NOT create a pull request.\n"
+
+        # Subtasks must not create PRs — fan-in handles it
+        if task.parent_task_id is not None:
+            chain_note += "\nIMPORTANT: You are a SUBTASK of a decomposed task.\nCommit and push your changes, but do NOT create a pull request.\nA fan-in task will aggregate all subtask results and create a single PR.\n"
 
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
@@ -2702,6 +2715,9 @@ IMPORTANT:
                 pr_url = pr_result.stdout.strip()
                 task.context["pr_url"] = pr_url
                 self.logger.info(f"Created PR: {pr_url}")
+                # Clean up orphaned subtask PRs/branches for fan-in tasks
+                self._close_subtask_prs(task, pr_url)
+                self._cleanup_subtask_branches(task)
             else:
                 if "already exists" in pr_result.stderr:
                     self.logger.info("PR already exists for this branch")
@@ -2709,6 +2725,86 @@ IMPORTANT:
                     self.logger.error(f"Failed to create PR: {pr_result.stderr}")
         except SubprocessError as e:
             self.logger.error(f"Failed to create PR: {e}")
+
+    def _close_subtask_prs(self, task: Task, fan_in_pr_url: str) -> None:
+        """Close orphaned PRs created by subtask LLMs. Best-effort.
+
+        Subtask LLMs may create PRs via MCP despite prompt suppression.
+        After the fan-in PR is created, close those orphans so they don't
+        linger as duplicates.
+        """
+        if not task.context.get("fan_in"):
+            return
+
+        from ..utils.subprocess_utils import run_command
+
+        parent_task_id = task.context.get("parent_task_id")
+        if not parent_task_id:
+            return
+
+        parent = self.queue.find_task(parent_task_id)
+        if not parent or not parent.subtask_ids:
+            return
+
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            return
+
+        for sid in parent.subtask_ids:
+            subtask = self.queue.get_completed(sid)
+            if not subtask:
+                continue
+            pr_url = subtask.context.get("pr_url")
+            if not pr_url:
+                continue
+            # Extract PR number from URL (e.g. .../pull/18 → 18)
+            pr_number = pr_url.rstrip("/").split("/")[-1]
+            self.logger.info(f"Closing orphaned subtask PR #{pr_number}")
+            run_command(
+                ["gh", "pr", "close", pr_number,
+                 "--repo", github_repo,
+                 "--comment", f"Superseded by fan-in PR {fan_in_pr_url}"],
+                check=False, timeout=30,
+            )
+
+    def _cleanup_subtask_branches(self, task: Task) -> None:
+        """Delete remote branches created by subtask LLMs. Best-effort.
+
+        After the fan-in PR lands, subtask branches are stale. Clean them up
+        so they don't clutter the remote.
+        """
+        if not task.context.get("fan_in"):
+            return
+
+        from ..utils.subprocess_utils import run_command
+
+        parent_task_id = task.context.get("parent_task_id")
+        if not parent_task_id:
+            return
+
+        parent = self.queue.find_task(parent_task_id)
+        if not parent or not parent.subtask_ids:
+            return
+
+        github_repo = task.context.get("github_repo")
+        if not github_repo:
+            return
+
+        for sid in parent.subtask_ids:
+            subtask = self.queue.get_completed(sid)
+            if not subtask:
+                continue
+            branch = (
+                subtask.context.get("implementation_branch")
+                or subtask.context.get("worktree_branch")
+            )
+            if not branch:
+                continue
+            self.logger.info(f"Deleting subtask branch: {branch}")
+            run_command(
+                ["git", "push", "origin", "--delete", branch],
+                check=False, timeout=30,
+            )
 
     def _remote_branch_exists(self, worktree_path) -> bool:
         """Check if current branch exists on the remote (origin)."""
