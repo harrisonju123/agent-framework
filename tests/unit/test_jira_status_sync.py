@@ -67,9 +67,37 @@ def _make_agent_definition(**overrides):
     return AgentDefinition(**defaults)
 
 
+class _AgentWithForwardedAttrs:
+    """Agent proxy that forwards retry_handler and escalation_handler to _error_recovery."""
+
+    def __init__(self, agent, error_recovery):
+        self._agent = agent
+        self._error_recovery = error_recovery
+
+    def __getattr__(self, name):
+        return getattr(self._agent, name)
+
+    def __setattr__(self, name, value):
+        if name in ('_agent', '_error_recovery'):
+            object.__setattr__(self, name, value)
+        elif name in ('retry_handler', 'escalation_handler', '_log_failed_escalation'):
+            # Forward to error_recovery
+            setattr(self._error_recovery, name, value)
+            setattr(self._agent, name, value)
+        else:
+            setattr(self._agent, name, value)
+
+    def __delattr__(self, name):
+        if name in ('retry_handler', 'escalation_handler', '_log_failed_escalation'):
+            delattr(self._error_recovery, name)
+        delattr(self._agent, name)
+
+
 def _make_agent(agent_definition=None, jira_client=None):
     """Build a minimal Agent with mocked internals for _sync_jira_status testing."""
     from agent_framework.core.agent import Agent
+    from agent_framework.core.error_recovery import ErrorRecoveryManager
+    from pathlib import Path
 
     config = FakeAgentConfig()
     queue = MagicMock()
@@ -83,12 +111,25 @@ def _make_agent(agent_definition=None, jira_client=None):
     agent.jira_client = jira_client
     agent.jira_config = None
     agent.github_client = None
-    agent.workspace = MagicMock()
+    agent.workspace = Path("/tmp/test-workspace")
     agent._agent_definition = agent_definition
     agent._mcp_enabled = True
     agent.activity_manager = activity_manager
     agent.logger = logging.getLogger("test.agent")
-    return agent
+
+    # Set up ErrorRecoveryManager for _handle_failure delegation
+    error_recovery = MagicMock(spec=ErrorRecoveryManager)
+    error_recovery.handle_failure = ErrorRecoveryManager.handle_failure.__get__(error_recovery)
+    error_recovery._log_failed_escalation = ErrorRecoveryManager._log_failed_escalation.__get__(error_recovery)
+    error_recovery._categorize_error = ErrorRecoveryManager._categorize_error.__get__(error_recovery)
+    error_recovery.config = config
+    error_recovery.queue = queue
+    error_recovery.logger = agent.logger
+    error_recovery.jira_client = jira_client
+    error_recovery.workspace = agent.workspace
+    agent._error_recovery = error_recovery
+
+    return _AgentWithForwardedAttrs(agent, error_recovery)
 
 
 # --- Guard condition tests ---

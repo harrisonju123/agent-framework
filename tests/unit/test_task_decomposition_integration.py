@@ -581,7 +581,7 @@ class TestSubtaskWorkflowChainGuard:
             task, mock_response, routing_signal=None, task_start_time=0
         )
 
-        mock_agent._check_and_create_fan_in_task.assert_called_once_with(task)
+        mock_agent._workflow_router.check_and_create_fan_in_task.assert_called_once_with(task)
         mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
         mock_agent._enforce_workflow_chain.assert_called_once()
@@ -600,7 +600,7 @@ class TestSubtaskWorkflowChainGuard:
             fan_in, mock_response, routing_signal=None, task_start_time=0
         )
 
-        mock_agent._check_and_create_fan_in_task.assert_called_once()
+        mock_agent._workflow_router.check_and_create_fan_in_task.assert_called_once()
         mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
         mock_agent._enforce_workflow_chain.assert_called_once()
