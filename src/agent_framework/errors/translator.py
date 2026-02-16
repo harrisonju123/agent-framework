@@ -80,6 +80,19 @@ class ErrorTranslator:
             ]
         },
 
+        # Budget exceeded
+        r"budget.*exceed|max budget|quota.*exceed|insufficient.*credits|usage.*limit.*exceed": {
+            "title": "API budget exceeded",
+            "explanation": "The agent has reached the configured API usage budget limit. This is a safety mechanism to prevent unexpected costs.",
+            "actions": [
+                "Check API usage in your billing dashboard",
+                "Review token budget settings in agent configuration",
+                "Consider upgrading your API tier or purchasing additional credits",
+                "Optimize prompts and workflows to reduce token consumption"
+            ],
+            "documentation": "docs/TROUBLESHOOTING.md#budget"
+        },
+
         # LLM proxy errors (must precede generic network pattern)
         r"connection.*refused.*ANTHROPIC_BASE_URL|Cannot reach LLM proxy": {
             "title": "Cannot reach LLM proxy",

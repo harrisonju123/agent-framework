@@ -18,6 +18,8 @@ class RetryHandler:
     - CRITICAL: Escalations CANNOT create more escalations
     """
 
+    NON_RETRIABLE_CATEGORIES = {"budget", "authentication"}
+
     def __init__(
         self,
         initial_backoff: int = 30,
@@ -41,6 +43,12 @@ class RetryHandler:
 
     def should_retry(self, task: Task) -> bool:
         """Check if task should be retried."""
+        # Check for non-retriable error types first
+        if hasattr(task, 'retry_attempts') and task.retry_attempts:
+            last_attempt = task.retry_attempts[-1]
+            if last_attempt.error_type in self.NON_RETRIABLE_CATEGORIES:
+                return False
+
         if task.retry_count >= self.max_retries:
             return False
 

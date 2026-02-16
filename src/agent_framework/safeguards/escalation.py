@@ -60,6 +60,13 @@ class EscalationHandler:
                 r"assertion.*fail",
                 r"unexpected.*state",
             ],
+            "budget": [
+                r"budget.*exceed",
+                r"max budget",
+                r"quota.*exceed",
+                r"insufficient.*credits",
+                r"usage.*limit.*exceed",
+            ],
         }
 
     def truncate_error(self, error: str, max_lines: int = 35) -> str:
@@ -228,6 +235,13 @@ class EscalationHandler:
                 "Check assumptions about data state",
                 "Add defensive null checks and bounds validation",
                 "Review recent code changes for regressions",
+            ],
+            "budget": [
+                "Check API usage and billing dashboard",
+                "Review token budget configuration in agent settings",
+                "Consider upgrading API tier or purchasing additional credits",
+                "Optimize prompts to reduce token consumption",
+                "Contact support for budget limit adjustment",
             ],
         }
 
