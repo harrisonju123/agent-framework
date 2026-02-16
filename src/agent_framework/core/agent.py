@@ -593,7 +593,7 @@ class Agent:
         if self._agent_definition and self._agent_definition.jira_on_start:
             self._sync_jira_status(task, self._agent_definition.jira_on_start)
 
-    async def _handle_successful_response(self, task: Task, response, task_start_time) -> None:
+    async def _handle_successful_response(self, task: Task, response, task_start_time, *, working_dir: Optional[Path] = None) -> None:
         """Handle successful LLM response including tests, workflow, and completion."""
         from datetime import datetime, timezone
 
@@ -621,7 +621,11 @@ class Agent:
 
         # Self-evaluation: catch obvious issues before propagating downstream
         if self._self_eval_enabled:
-            passed = await self._self_evaluate(task, response)
+            passed = await self._self_evaluate(
+                task, response,
+                test_passed=test_result.success if test_result else None,
+                working_dir=working_dir,
+            )
             if not passed:
                 return  # Task was reset for self-eval retry
 
@@ -1089,7 +1093,7 @@ class Agent:
 
             # Handle response
             if response.success:
-                await self._handle_successful_response(task, response, task_start_time)
+                await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
                 await self._handle_failed_response(task, response)
 
@@ -1412,12 +1416,14 @@ class Agent:
         except Exception as e:
             self.logger.debug(f"Tool pattern analysis failed (non-fatal): {e}")
 
-    async def _self_evaluate(self, task: Task, response) -> bool:
+    async def _self_evaluate(self, task: Task, response, *, test_passed=None, working_dir=None) -> bool:
         """Review agent's own output against acceptance criteria.
 
         Delegated to ErrorRecoveryManager.
         """
-        return await self._error_recovery.self_evaluate(task, response)
+        return await self._error_recovery.self_evaluate(
+            task, response, test_passed=test_passed, working_dir=working_dir
+        )
 
     # -- Dynamic Replanning --
 

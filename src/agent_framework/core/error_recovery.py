@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from .task import Task, TaskStatus
 from ..llm.base import LLMRequest
+from ..utils.subprocess_utils import run_git_command
 
 
 class ErrorRecoveryManager:
@@ -164,12 +165,45 @@ class ErrorRecoveryManager:
         """
         return self.escalation_handler.categorize_error(error_message)
 
-    async def self_evaluate(self, task: Task, response) -> bool:
+    def _gather_git_evidence(self, working_dir: Path) -> str:
+        """Collect git diff evidence for self-evaluation.
+
+        Returns a formatted string with diff stat and full diff (truncated),
+        or empty string on any error so eval falls back to text-only.
+        """
+        try:
+            stat_result = run_git_command(
+                ["diff", "--stat", "HEAD~1"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            stat_text = (stat_result.stdout or "")[:500]
+
+            diff_result = run_git_command(
+                ["diff", "HEAD~1"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            diff_text = (diff_result.stdout or "")[:2500]
+
+            if not stat_text and not diff_text:
+                return ""
+
+            parts = ["## Git Diff (actual code changes)"]
+            if stat_text:
+                parts.append(f"### Summary\n```\n{stat_text}\n```")
+            if diff_text:
+                parts.append(f"### Diff\n```\n{diff_text}\n```")
+            return "\n".join(parts)
+        except Exception:
+            return ""
+
+    async def self_evaluate(
+        self, task: Task, response, *, test_passed: Optional[bool] = None, working_dir: Optional[Path] = None
+    ) -> bool:
         """Review agent's own output against acceptance criteria.
 
-        Uses a cheap model to check for obvious gaps. If gaps found,
-        resets task with critique context for retry — without consuming
-        a queue-level retry.
+        Uses a cheap model to check for obvious gaps. Feeds git diff and
+        test results as objective evidence so the evaluator can make an
+        evidence-based verdict instead of relying solely on agent prose.
 
         Returns True if evaluation passed (or disabled/skipped).
         Returns False if task was reset for retry.
@@ -189,14 +223,31 @@ class ErrorRecoveryManager:
         criteria_text = "\n".join(f"- {c}" for c in criteria)
         response_preview = response.content[:4000] if response.content else ""
 
+        # Gather objective evidence
+        git_evidence = self._gather_git_evidence(working_dir) if working_dir else ""
+        if test_passed is True:
+            test_section = "## Test Results\nPASSED"
+        elif test_passed is False:
+            test_section = "## Test Results\nFAILED"
+        else:
+            test_section = "## Test Results\nNot run"
+
         eval_prompt = f"""Review this agent's output against the acceptance criteria.
 Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
 
 ## Acceptance Criteria
 {criteria_text}
 
-## Agent Output (preview)
+{test_section}
+
+{git_evidence}
+
+## Agent Output (summary)
 {response_preview}
+
+## Rules
+- If tests PASSED and git diff shows changes consistent with acceptance criteria, verdict is PASS.
+- When in doubt and tests passed, default to PASS.
 
 Verdict:"""
 
@@ -219,6 +270,8 @@ Verdict:"""
                 model=self._self_eval_model,
                 criteria_count=len(criteria),
                 eval_attempt=eval_retries + 1,
+                has_git_evidence=bool(git_evidence),
+                has_test_evidence=test_passed is not None,
             )
 
             if passed:
