@@ -1074,7 +1074,7 @@ class Agent:
         task_dict["escalation_failed"] = True
 
         try:
-            escalation_file.write_text(json.dumps(task_dict, indent=2))
+            escalation_file.write_text(json.dumps(task_dict, indent=2, default=str))
             self.logger.info(
                 f"Logged failed escalation to {escalation_file}. "
                 f"Run 'bash scripts/review-escalations.sh' to review."
@@ -1082,7 +1082,7 @@ class Agent:
         except Exception as e:
             self.logger.error(f"Failed to log escalation to file: {e}")
             # Last resort: at least log the full task details to the log file
-            self.logger.error(f"Failed escalation details: {json.dumps(task_dict, indent=2)}")
+            self.logger.error(f"Failed escalation details: {json.dumps(task_dict, indent=2, default=str)}")
 
     def _sanitize_optimization_config(self, config: dict) -> dict:
         """
