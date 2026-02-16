@@ -605,3 +605,21 @@ class TestSubtaskWorkflowChainGuard:
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
         mock_agent._enforce_workflow_chain.assert_called_once()
         mock_agent._git_ops.push_and_create_pr_if_needed.assert_called_once()
+
+    def test_workflow_task_skips_legacy_routing(self, mock_agent, mock_response):
+        """Task with workflow in context skips legacy review routing but still chains."""
+        task = self._make_task(
+            "workflow-task-1",
+            context={"workflow": "default"},
+        )
+
+        mock_agent._run_post_completion_flow(
+            task, mock_response, routing_signal=None, task_start_time=0
+        )
+
+        # Legacy review routing should NOT be called for workflow-managed tasks
+        mock_agent._review_cycle.queue_code_review_if_needed.assert_not_called()
+        mock_agent._review_cycle.queue_review_fix_if_needed.assert_not_called()
+        # DAG chain routing should still be called
+        mock_agent._enforce_workflow_chain.assert_called_once()
+        mock_agent._git_ops.push_and_create_pr_if_needed.assert_called_once()
