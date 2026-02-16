@@ -109,6 +109,17 @@ def agent(queue, tmp_path):
         activity_manager=MagicMock(),
     )
 
+    # Initialize GitOperationsManager
+    from agent_framework.core.git_operations import GitOperationsManager
+    a._git_ops = GitOperationsManager(
+        config=a.config,
+        workspace=a.workspace,
+        queue=a.queue,
+        logger=a.logger,
+        session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
+        workflows_config=a._workflows_config,
+    )
+
     # Create prompt builder with mock context
     prompt_ctx = PromptContext(
         config=config,
@@ -459,11 +470,22 @@ class TestPRCreation:
         from agent_framework.workflow.executor import WorkflowExecutor
         a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
 
+        # Initialize GitOperationsManager
+        from agent_framework.core.git_operations import GitOperationsManager
+        a._git_ops = GitOperationsManager(
+            config=a.config,
+            workspace=a.workspace,
+            queue=a.queue,
+            logger=a.logger,
+            session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
+            workflows_config=a._workflows_config,
+        )
+
         return a
 
     def test_last_agent_queues_pr_creation(self, pr_agent, queue):
         """QA (last agent) completes → PR_REQUEST queued to architect."""
-        task = _make_task(workflow="pr_workflow")
+        task = _make_task(workflow="pr_workflow", implementation_branch="feature/test")
         response = _make_response()
 
         pr_agent._enforce_workflow_chain(task, response)
@@ -602,20 +624,19 @@ class TestIntermediateStepPRSuppression:
         # Set up a mock worktree with a feature branch
         worktree_dir = tmp_path / "worktree"
         worktree_dir.mkdir()
-        agent._active_worktree = worktree_dir
-        agent.worktree_manager = MagicMock()
-        agent.worktree_manager.has_unpushed_commits.return_value = True
+        agent._git_ops._active_worktree = worktree_dir
+        agent._git_ops.worktree_manager = MagicMock()
+        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
-        import subprocess
         from unittest.mock import patch
 
         # Mock git rev-parse to return a feature branch name
         mock_rev_parse = MagicMock(returncode=0, stdout="agent/engineer/PROJ-123-abc12345\n")
         mock_push = MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch("subprocess.run") as mock_run:
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_run:
             mock_run.side_effect = [mock_rev_parse, mock_push]
-            agent._push_and_create_pr_if_needed(task)
+            agent._git_ops.push_and_create_pr_if_needed(task)
 
         # Branch should be stored for downstream agents
         assert task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc12345"
@@ -626,13 +647,14 @@ class TestIntermediateStepPRSuppression:
     def test_terminal_step_creates_pr(self, agent, tmp_path):
         """QA (terminal) creates a PR normally."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._git_ops.config = agent.config  # Update git_ops config too
         task = _make_task(workflow="default", github_repo="org/repo")
 
         worktree_dir = tmp_path / "worktree"
         worktree_dir.mkdir()
-        agent._active_worktree = worktree_dir
-        agent.worktree_manager = MagicMock()
-        agent.worktree_manager.has_unpushed_commits.return_value = True
+        agent._git_ops._active_worktree = worktree_dir
+        agent._git_ops.worktree_manager = MagicMock()
+        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         from unittest.mock import patch
 
@@ -640,9 +662,11 @@ class TestIntermediateStepPRSuppression:
         mock_push = MagicMock(returncode=0)
         mock_pr_create = MagicMock(returncode=0, stdout="https://github.com/org/repo/pull/10\n")
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [mock_rev_parse, mock_push, mock_pr_create]
-            agent._push_and_create_pr_if_needed(task)
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git, \
+             patch("agent_framework.utils.subprocess_utils.run_command") as mock_cmd:
+            mock_git.side_effect = [mock_rev_parse, mock_push]
+            mock_cmd.return_value = mock_pr_create
+            agent._git_ops.push_and_create_pr_if_needed(task)
 
         assert task.context["pr_url"] == "https://github.com/org/repo/pull/10"
 
@@ -654,17 +678,17 @@ class TestIntermediateStepPRSuppression:
             pr_creation_step=True,
             implementation_branch="agent/engineer/PROJ-123-abc12345",
         )
-        agent._active_worktree = None
-        agent.worktree_manager = None
-        agent.multi_repo_manager = MagicMock()
-        agent.multi_repo_manager.ensure_repo.return_value = tmp_path
+        agent._git_ops._active_worktree = None
+        agent._git_ops.worktree_manager = None
+        agent._git_ops.multi_repo_manager = MagicMock()
+        agent._git_ops.multi_repo_manager.ensure_repo.return_value = tmp_path
 
         from unittest.mock import patch
 
         mock_pr_create = MagicMock(returncode=0, stdout="https://github.com/org/repo/pull/11\n")
 
-        with patch("subprocess.run", return_value=mock_pr_create):
-            agent._push_and_create_pr_if_needed(task)
+        with patch("agent_framework.utils.subprocess_utils.run_command", return_value=mock_pr_create):
+            agent._git_ops.push_and_create_pr_if_needed(task)
 
         assert task.context["pr_url"] == "https://github.com/org/repo/pull/11"
 
@@ -675,11 +699,11 @@ class TestIntermediateStepPRSuppression:
             github_repo="org/repo",
             pr_creation_step=True,
         )
-        agent._active_worktree = None
-        agent.worktree_manager = None
+        agent._git_ops._active_worktree = None
+        agent._git_ops.worktree_manager = None
 
         # No worktree + no implementation_branch → early return (no PR)
-        agent._push_and_create_pr_if_needed(task)
+        agent._git_ops.push_and_create_pr_if_needed(task)
         assert "pr_url" not in task.context
 
 
@@ -700,9 +724,10 @@ class TestWorktreeSkipForPRCreation:
         repo_path.mkdir(parents=True)
 
         agent.multi_repo_manager = MagicMock()
+        agent._git_ops.multi_repo_manager = agent.multi_repo_manager
         agent.multi_repo_manager.ensure_repo.return_value = repo_path
 
-        result = agent._get_working_directory(task)
+        result = agent._git_ops.get_working_directory(task)
 
         assert result == repo_path
         agent.multi_repo_manager.ensure_repo.assert_called_once_with("org/repo")
@@ -716,16 +741,16 @@ class TestWorktreeSkipForPRCreation:
         worktree_path = tmp_path / "worktrees" / "agent-engineer"
         worktree_path.mkdir(parents=True)
 
-        agent.multi_repo_manager = MagicMock()
-        agent.multi_repo_manager.ensure_repo.return_value = repo_path
-        agent.worktree_manager = MagicMock()
-        agent.worktree_manager.find_worktree_by_branch.return_value = None
-        agent.worktree_manager.create_worktree.return_value = worktree_path
+        agent._git_ops.multi_repo_manager = MagicMock()
+        agent._git_ops.multi_repo_manager.ensure_repo.return_value = repo_path
+        agent._git_ops.worktree_manager = MagicMock()
+        agent._git_ops.worktree_manager.find_worktree_by_branch.return_value = None
+        agent._git_ops.worktree_manager.create_worktree.return_value = worktree_path
 
-        result = agent._get_working_directory(task)
+        result = agent._git_ops.get_working_directory(task)
 
         assert result == worktree_path
-        agent.worktree_manager.create_worktree.assert_called_once()
+        agent._git_ops.worktree_manager.create_worktree.assert_called_once()
 
 
 # -- Preview mode --

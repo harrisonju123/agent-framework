@@ -67,6 +67,15 @@ def agent(tmp_path):
     prompt_builder = PromptBuilder(prompt_ctx)
     a._prompt_builder = prompt_builder
 
+    # Initialize GitOperationsManager
+    from agent_framework.core.git_operations import GitOperationsManager
+    a._git_ops = GitOperationsManager(
+        config=a.config,
+        workspace=a.workspace,
+        queue=a.queue,
+        logger=a.logger,
+        session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
+    )
     return a
 
 
@@ -99,8 +108,7 @@ class TestCloseSubtaskPrs:
     def test_noop_for_non_fan_in(self, agent):
         """Should not close anything for regular tasks."""
         task = _make_task()
-        agent._close_subtask_prs = Agent._close_subtask_prs.__get__(agent)
-        agent._close_subtask_prs(task, "https://github.com/org/repo/pull/10")
+        agent._git_ops._close_subtask_prs(task, "https://github.com/org/repo/pull/10")
         agent.queue.find_task.assert_not_called()
 
     @patch("agent_framework.utils.subprocess_utils.run_command")
@@ -118,8 +126,7 @@ class TestCloseSubtaskPrs:
         sub1 = _make_task(task_id="sub-1")  # no PR
         agent.queue.get_completed.side_effect = lambda sid: {"sub-0": sub0, "sub-1": sub1}[sid]
 
-        agent._close_subtask_prs = Agent._close_subtask_prs.__get__(agent)
-        agent._close_subtask_prs(fan_in_task, "https://github.com/org/repo/pull/20")
+        agent._git_ops._close_subtask_prs(fan_in_task, "https://github.com/org/repo/pull/20")
 
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
@@ -129,8 +136,7 @@ class TestCloseSubtaskPrs:
     def test_skips_when_no_parent(self, agent):
         """Fan-in without parent_task_id in context does nothing."""
         task = _make_task(fan_in=True)  # no parent_task_id in context
-        agent._close_subtask_prs = Agent._close_subtask_prs.__get__(agent)
-        agent._close_subtask_prs(task, "https://github.com/org/repo/pull/10")
+        agent._git_ops._close_subtask_prs(task, "https://github.com/org/repo/pull/10")
         agent.queue.find_task.assert_not_called()
 
 
@@ -140,8 +146,7 @@ class TestCleanupSubtaskBranches:
     def test_noop_for_non_fan_in(self, agent):
         """Should not delete anything for regular tasks."""
         task = _make_task()
-        agent._cleanup_subtask_branches = Agent._cleanup_subtask_branches.__get__(agent)
-        agent._cleanup_subtask_branches(task)
+        agent._git_ops._cleanup_subtask_branches(task)
         agent.queue.find_task.assert_not_called()
 
     @patch("agent_framework.utils.subprocess_utils.run_command")
@@ -159,8 +164,7 @@ class TestCleanupSubtaskBranches:
         sub1 = _make_task(task_id="sub-1", worktree_branch="agent/engineer/sub-1")
         agent.queue.get_completed.side_effect = lambda sid: {"sub-0": sub0, "sub-1": sub1}[sid]
 
-        agent._cleanup_subtask_branches = Agent._cleanup_subtask_branches.__get__(agent)
-        agent._cleanup_subtask_branches(fan_in_task)
+        agent._git_ops._cleanup_subtask_branches(fan_in_task)
 
         assert mock_run.call_count == 2
         branches_deleted = [c[0][0][-1] for c in mock_run.call_args_list]
