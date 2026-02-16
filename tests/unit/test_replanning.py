@@ -187,14 +187,14 @@ class TestInjectReplanContext:
         agent = _make_agent()
         task = _make_task()
 
-        result = agent._prompt_builder._inject_replan_context("original prompt", task)
+        result = agent._error_recovery.inject_replan_context("original prompt", task)
         assert result == "original prompt"
 
     def test_appends_revised_approach(self):
         agent = _make_agent()
         task = _make_task(context={"_revised_plan": "Try approach B"})
 
-        result = agent._prompt_builder._inject_replan_context("original prompt", task)
+        result = agent._error_recovery.inject_replan_context("original prompt", task)
 
         assert "original prompt" in result
         assert "REVISED APPROACH" in result
@@ -209,7 +209,7 @@ class TestInjectReplanContext:
             }
         )
 
-        result = agent._prompt_builder._inject_replan_context("prompt", task)
+        result = agent._error_recovery.inject_replan_context("prompt", task)
 
         assert "Self-Evaluation Feedback" in result
         assert "Missing test coverage" in result
@@ -224,7 +224,7 @@ class TestInjectReplanContext:
             ],
         )
 
-        result = agent._prompt_builder._inject_replan_context("prompt", task)
+        result = agent._error_recovery.inject_replan_context("prompt", task)
 
         assert "Previous Attempt History" in result
         assert "first error" in result

@@ -1240,6 +1240,19 @@ class TestPRCreationPlanningSkip:
             session_logger=a._session_logger,
             workflows_config=a._workflows_config,
         )
+
+        from agent_framework.core.workflow_router import WorkflowRouter
+        a._workflow_router = WorkflowRouter(
+            config=config,
+            queue=queue,
+            workspace=tmp_path,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            workflows_config=a._workflows_config,
+            workflow_executor=a._workflow_executor,
+            agents_config=a._agents_config,
+            multi_repo_manager=None,
+        )
         return a
 
     def test_no_branch_no_pr_skips_creation(self, pr_agent, queue):

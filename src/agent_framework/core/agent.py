@@ -340,6 +340,32 @@ class Agent:
             workflows_config=workflows_config,
         )
 
+        # Error recovery and budget management
+        self._error_recovery = ErrorRecoveryManager(
+            config=config,
+            queue=queue,
+            llm=llm,
+            logger=self.logger,
+            session_logger=self._session_logger,
+            retry_handler=self.retry_handler,
+            escalation_handler=self.escalation_handler,
+            workspace=workspace,
+            jira_client=jira_client,
+            memory_store=self._memory_store,
+            replan_config=replan_config,
+            self_eval_config=self_eval_config,
+        )
+
+        self._budget = BudgetManager(
+            agent_id=config.id,
+            optimization_config=dict(self._optimization_config),
+            logger=self.logger,
+            session_logger=self._session_logger,
+            llm=llm,
+            workspace=workspace,
+            activity_manager=self.activity_manager,
+        )
+
     # Backward-compatibility delegation shims for tests that call Agent._* methods
     # These delegate to ReviewCycleManager for cleaner architecture
     def _parse_review_outcome(self, content: str) -> ReviewOutcome:
@@ -390,33 +416,6 @@ class Agent:
         """Delegate to ReviewCycleManager.queue_review_fix_if_needed (without sync callback)."""
         # Note: tests don't pass sync_jira_status_callback, so we use a no-op
         return self._review_cycle.queue_review_fix_if_needed(task, response, lambda *args, **kwargs: None)
-
-
-        # Error recovery and budget management — extracted from Agent
-        self._error_recovery = ErrorRecoveryManager(
-            config=config,
-            queue=queue,
-            llm=llm,
-            logger=self.logger,
-            session_logger=self._session_logger,
-            retry_handler=self.retry_handler,
-            escalation_handler=self.escalation_handler,
-            workspace=workspace,
-            jira_client=jira_client,
-            memory_store=self._memory_store,
-            replan_config=replan_config,
-            self_eval_config=self_eval_config,
-        )
-
-        self._budget = BudgetManager(
-            agent_id=config.id,
-            optimization_config=dict(self._optimization_config),
-            logger=self.logger,
-            session_logger=self._session_logger,
-            llm=llm,
-            workspace=workspace,
-            activity_manager=self.activity_manager,
-        )
 
     async def run(self) -> None:
         """
