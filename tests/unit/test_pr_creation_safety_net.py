@@ -86,7 +86,10 @@ def agent(queue, tmp_path):
         workspace=a.workspace,
         queue=a.queue,
         logger=a.logger,
+        worktree_manager=a.worktree_manager,
+        multi_repo_manager=a.multi_repo_manager,
         session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
+        workflows_config=a._workflows_config,
     )
     return a
 
@@ -106,7 +109,7 @@ class TestPushAndCreatePrIfNeeded:
         """No worktree + no implementation branch = nothing to do."""
         task = _make_task()
         agent._git_ops._active_worktree = None
-        agent.worktree_manager = None
+        agent._git_ops.worktree_manager = None
         agent._git_ops.push_and_create_pr_if_needed(task)
         agent.logger.debug.assert_any_call(
             f"No active worktree for {task.id}, skipping PR creation"
@@ -118,8 +121,8 @@ class TestPushAndCreatePrIfNeeded:
         del task.context["github_repo"]
 
         agent._git_ops._active_worktree = tmp_path
-        agent.worktree_manager = MagicMock()
-        agent.worktree_manager.has_unpushed_commits.return_value = True
+        agent._git_ops.worktree_manager = MagicMock()
+        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         agent._git_ops.push_and_create_pr_if_needed(task)
         agent.logger.debug.assert_any_call(
@@ -132,17 +135,17 @@ class TestPushAndCreatePrIfNeeded:
             pr_creation_step=True,
             implementation_branch="feat/my-branch",
         )
-        agent._create_pr_from_branch = MagicMock()
+        agent._git_ops._create_pr_from_branch = MagicMock()
         agent._git_ops.push_and_create_pr_if_needed(task)
-        agent._create_pr_from_branch.assert_called_once_with(task, "feat/my-branch")
+        agent._git_ops._create_pr_from_branch.assert_called_once_with(task, "feat/my-branch")
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_skips_pr_on_intermediate_step(self, mock_git, agent, tmp_path):
         """Intermediate workflow steps push but don't create a PR."""
         task = _make_task(workflow="chain")
         agent._git_ops._active_worktree = tmp_path
-        agent.worktree_manager = MagicMock()
-        agent.worktree_manager.has_unpushed_commits.return_value = True
+        agent._git_ops.worktree_manager = MagicMock()
+        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         # git rev-parse returns a feature branch
         branch_result = MagicMock(returncode=0, stdout="feat/my-branch\n")
@@ -162,8 +165,8 @@ class TestPushAndCreatePrIfNeeded:
         """Terminal workflow step pushes and creates PR."""
         task = _make_task(workflow="default")
         agent._git_ops._active_worktree = tmp_path
-        agent.worktree_manager = MagicMock()
-        agent.worktree_manager.has_unpushed_commits.return_value = True
+        agent._git_ops.worktree_manager = MagicMock()
+        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         # git rev-parse returns feature branch, push succeeds
         branch_result = MagicMock(returncode=0, stdout="feat/my-branch\n")
@@ -186,8 +189,8 @@ class TestPushAndCreatePrIfNeeded:
         """Never create PRs when on main/master."""
         task = _make_task()
         agent._git_ops._active_worktree = tmp_path
-        agent.worktree_manager = MagicMock()
-        agent.worktree_manager.has_unpushed_commits.return_value = True
+        agent._git_ops.worktree_manager = MagicMock()
+        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         mock_git.return_value = MagicMock(returncode=0, stdout="main\n")
 

@@ -513,21 +513,19 @@ class TestAgentIntegration:
         mock_manager = MagicMock()
         mock_manager.should_manage.return_value = True
         mock_manager.manage.return_value = True
-        agent._pr_lifecycle_manager = mock_manager
+        agent._git_ops._pr_lifecycle_manager = mock_manager
 
         task = _make_task(pr_url="https://github.com/org/repo/pull/10")
-        agent._git_ops.manage_pr_lifecycle = Agent._manage_pr_lifecycle.__get__(agent)
-        agent._sync_jira_status = MagicMock()
+        agent._git_ops._sync_jira_status = MagicMock()
         agent._git_ops.manage_pr_lifecycle(task)
 
         mock_manager.should_manage.assert_called_once_with(task)
         mock_manager.manage.assert_called_once_with(task, "engineer")
         # JIRA should be updated to Done after successful merge
-        agent._sync_jira_status.assert_called_once()
+        agent._git_ops._sync_jira_status.assert_called_once()
 
     def test_lifecycle_skipped_without_manager(self, agent):
         """No-op when _pr_lifecycle_manager is None."""
-        agent._git_ops.manage_pr_lifecycle = Agent._manage_pr_lifecycle.__get__(agent)
         task = _make_task(pr_url="https://github.com/org/repo/pull/10")
         # Should not raise
         agent._git_ops.manage_pr_lifecycle(task)
@@ -536,9 +534,8 @@ class TestAgentIntegration:
         """No-op when should_manage returns False."""
         mock_manager = MagicMock()
         mock_manager.should_manage.return_value = False
-        agent._pr_lifecycle_manager = mock_manager
+        agent._git_ops._pr_lifecycle_manager = mock_manager
 
-        agent._git_ops.manage_pr_lifecycle = Agent._manage_pr_lifecycle.__get__(agent)
         task = _make_task()
         agent._git_ops.manage_pr_lifecycle(task)
 
@@ -549,9 +546,8 @@ class TestAgentIntegration:
         mock_manager = MagicMock()
         mock_manager.should_manage.return_value = True
         mock_manager.manage.side_effect = RuntimeError("boom")
-        agent._pr_lifecycle_manager = mock_manager
+        agent._git_ops._pr_lifecycle_manager = mock_manager
 
-        agent._git_ops.manage_pr_lifecycle = Agent._manage_pr_lifecycle.__get__(agent)
         task = _make_task(pr_url="https://github.com/org/repo/pull/10")
         # Should not raise
         agent._git_ops.manage_pr_lifecycle(task)
@@ -562,14 +558,13 @@ class TestAgentIntegration:
         mock_manager = MagicMock()
         mock_manager.should_manage.return_value = True
         mock_manager.manage.return_value = False
-        agent._pr_lifecycle_manager = mock_manager
+        agent._git_ops._pr_lifecycle_manager = mock_manager
 
-        agent._git_ops.manage_pr_lifecycle = Agent._manage_pr_lifecycle.__get__(agent)
-        agent._sync_jira_status = MagicMock()
+        agent._git_ops._sync_jira_status = MagicMock()
         task = _make_task(pr_url="https://github.com/org/repo/pull/10")
         agent._git_ops.manage_pr_lifecycle(task)
 
-        agent._sync_jira_status.assert_not_called()
+        agent._git_ops._sync_jira_status.assert_not_called()
 
 
 # ===========================================================================

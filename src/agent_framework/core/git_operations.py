@@ -498,6 +498,15 @@ class GitOperationsManager:
         if not github_repo:
             return
 
+        # Get cwd for git command - use shared clone
+        cwd = self.workspace
+        if self.multi_repo_manager:
+            try:
+                cwd = self.multi_repo_manager.ensure_repo(github_repo)
+            except Exception as e:
+                self.logger.warning(f"Failed to get repo path for branch cleanup: {e}")
+                return
+
         for sid in parent.subtask_ids:
             subtask = self.queue.get_completed(sid)
             if not subtask:
@@ -511,6 +520,7 @@ class GitOperationsManager:
             self.logger.info(f"Deleting subtask branch: {branch}")
             run_command(
                 ["git", "push", "origin", "--delete", branch],
+                cwd=cwd,
                 check=False, timeout=30,
             )
 
@@ -571,12 +581,12 @@ class GitOperationsManager:
         workflow_def = self._workflows_config[workflow_name]
         try:
             dag = workflow_def.to_dag(workflow_name)
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Failed to check terminal workflow step: {e}")
             return True
 
         # Check if current agent is a terminal node
-        terminal_nodes = [node for node in dag.nodes() if dag.out_degree(node) == 0]
-        return self.config.id in terminal_nodes
+        return dag.is_terminal_step(self.config.id)
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
         """Transition a JIRA ticket to target_status if all preconditions are met.

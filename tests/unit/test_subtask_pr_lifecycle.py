@@ -108,7 +108,6 @@ class TestCloseSubtaskPrs:
     def test_noop_for_non_fan_in(self, agent):
         """Should not close anything for regular tasks."""
         task = _make_task()
-        agent._git_ops._close_subtask_prs = Agent._close_subtask_prs.__get__(agent)
         agent._git_ops._close_subtask_prs(task, "https://github.com/org/repo/pull/10")
         agent.queue.find_task.assert_not_called()
 
@@ -127,7 +126,6 @@ class TestCloseSubtaskPrs:
         sub1 = _make_task(task_id="sub-1")  # no PR
         agent.queue.get_completed.side_effect = lambda sid: {"sub-0": sub0, "sub-1": sub1}[sid]
 
-        agent._git_ops._close_subtask_prs = Agent._close_subtask_prs.__get__(agent)
         agent._git_ops._close_subtask_prs(fan_in_task, "https://github.com/org/repo/pull/20")
 
         mock_run.assert_called_once()
@@ -138,7 +136,6 @@ class TestCloseSubtaskPrs:
     def test_skips_when_no_parent(self, agent):
         """Fan-in without parent_task_id in context does nothing."""
         task = _make_task(fan_in=True)  # no parent_task_id in context
-        agent._git_ops._close_subtask_prs = Agent._close_subtask_prs.__get__(agent)
         agent._git_ops._close_subtask_prs(task, "https://github.com/org/repo/pull/10")
         agent.queue.find_task.assert_not_called()
 
@@ -149,7 +146,6 @@ class TestCleanupSubtaskBranches:
     def test_noop_for_non_fan_in(self, agent):
         """Should not delete anything for regular tasks."""
         task = _make_task()
-        agent._git_ops._cleanup_subtask_branches = Agent._cleanup_subtask_branches.__get__(agent)
         agent._git_ops._cleanup_subtask_branches(task)
         agent.queue.find_task.assert_not_called()
 
@@ -168,7 +164,6 @@ class TestCleanupSubtaskBranches:
         sub1 = _make_task(task_id="sub-1", worktree_branch="agent/engineer/sub-1")
         agent.queue.get_completed.side_effect = lambda sid: {"sub-0": sub0, "sub-1": sub1}[sid]
 
-        agent._git_ops._cleanup_subtask_branches = Agent._cleanup_subtask_branches.__get__(agent)
         agent._git_ops._cleanup_subtask_branches(fan_in_task)
 
         assert mock_run.call_count == 2

@@ -566,7 +566,7 @@ class TestSubtaskWorkflowChainGuard:
         mock_agent._review_cycle.queue_code_review_if_needed.assert_not_called()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_not_called()
         mock_agent._enforce_workflow_chain.assert_not_called()
-        mock_agent._push_and_create_pr_if_needed.assert_not_called()
+        mock_agent._git_ops.push_and_create_pr_if_needed.assert_not_called()
 
         # Per-subtask learning/metrics should still run
         mock_agent._extract_and_store_memories.assert_called_once()
@@ -585,7 +585,7 @@ class TestSubtaskWorkflowChainGuard:
         mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
         mock_agent._enforce_workflow_chain.assert_called_once()
-        mock_agent._push_and_create_pr_if_needed.assert_called_once()
+        mock_agent._git_ops.push_and_create_pr_if_needed.assert_called_once()
 
     def test_fan_in_task_flows_through_chain(self, mock_agent, mock_response):
         """Fan-in task (parent_task_id=None, context.fan_in=True) flows through
@@ -604,4 +604,4 @@ class TestSubtaskWorkflowChainGuard:
         mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
         mock_agent._enforce_workflow_chain.assert_called_once()
-        mock_agent._push_and_create_pr_if_needed.assert_called_once()
+        mock_agent._git_ops.push_and_create_pr_if_needed.assert_called_once()

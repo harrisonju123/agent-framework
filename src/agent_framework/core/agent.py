@@ -1755,7 +1755,7 @@ breaking the task into smaller steps, or working around the root cause."""
 
         try:
             # Get working directory (target repo or framework workspace)
-            workspace = self._get_working_directory(task)
+            workspace = self._git_ops.get_working_directory(task)
             self.logger.info(f"Running post-LLM workflow for {jira_key} in {workspace}")
 
             # Create branch
