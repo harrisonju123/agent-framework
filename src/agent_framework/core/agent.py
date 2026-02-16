@@ -1484,7 +1484,7 @@ For each new file:
 - Number of files affected
 
 This preview will be reviewed by the architect before implementation is authorized.
-"""
+        """
         return preview_section + "\n\n" + prompt
 
 
