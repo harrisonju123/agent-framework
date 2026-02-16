@@ -191,17 +191,28 @@ class Task(BaseModel):
         # Record retry attempt
         if error_message:
             self.last_error = error_message
+
+            # Build context snapshot with plan information if available
+            context_snapshot = {
+                "task_type": self.type,
+                "assigned_to": self.assigned_to,
+                "has_dependencies": len(self.depends_on) > 0,
+            }
+
+            # Add plan approach and files_to_modify if available
+            if self.plan:
+                if self.plan.approach:
+                    context_snapshot["plan_approach"] = self.plan.approach
+                if self.plan.files_to_modify:
+                    context_snapshot["plan_files_to_modify"] = self.plan.files_to_modify
+
             attempt = RetryAttempt(
                 attempt_number=self.retry_count + 1,
                 timestamp=datetime.now(UTC),
                 error_message=error_message,
                 agent_id=agent_id,
                 error_type=error_type,
-                context_snapshot={
-                    "task_type": self.type,
-                    "assigned_to": self.assigned_to,
-                    "has_dependencies": len(self.depends_on) > 0,
-                }
+                context_snapshot=context_snapshot
             )
             self.retry_attempts.append(attempt)
 

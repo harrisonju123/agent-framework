@@ -238,7 +238,7 @@ class Agent:
 
         # Dynamic Replanning: generate revised plans on failure retry 2+
         replan_cfg = replan_config or {}
-        self._replan_enabled = replan_cfg.get("enabled", False)
+        self._replan_enabled = replan_cfg.get("enabled", True)
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
         self._replan_model = replan_cfg.get("model", "haiku")
 
@@ -1568,9 +1568,12 @@ Verdict:"""
         attempts_text = ""
         if previous_attempts:
             for attempt in previous_attempts:
+                error_type_str = f" [{attempt.get('error_type', 'unknown')}]" if attempt.get('error_type') else ""
+                approach_str = f"\n  Approach tried: {attempt.get('approach_tried', 'unknown')[:200]}"
                 attempts_text += (
-                    f"\n- Attempt {attempt.get('attempt', '?')}: "
+                    f"\n- Attempt {attempt.get('attempt', '?')}{error_type_str}: "
                     f"{attempt.get('error', 'no error recorded')}"
+                    f"{approach_str}"
                 )
 
         # Inject relevant memories for context
@@ -1599,12 +1602,25 @@ Verdict:"""
                         chars_injected=len(memory_section),
                     )
 
+        # Categorize current error
+        error_type = self._categorize_error(error)
+        error_type_str = f" (Type: {error_type})" if error_type else ""
+
+        # Include original plan if available
+        original_plan_section = ""
+        if task.plan and task.plan.approach:
+            original_plan_section = f"""
+
+## Original Plan Approach
+{chr(10).join(f"{i+1}. {step}" for i, step in enumerate(task.plan.approach[:5]))}
+"""
+
         replan_prompt = f"""A task has failed {task.retry_count} times. Generate a REVISED approach.
 
 ## Task
 {task.title}: {task.description[:1000]}
-
-## Latest Error
+{original_plan_section}
+## Latest Error{error_type_str}
 {error[:500]}
 
 ## Previous Attempts{attempts_text if attempts_text else ' (first replan)'}
@@ -1612,8 +1628,9 @@ Verdict:"""
 {memory_section}
 ## Instructions
 Provide a revised approach in 3-5 bullet points. Focus on what to do DIFFERENTLY.
-Do NOT repeat the same approach. Consider: different implementation strategy,
-breaking the task into smaller steps, or working around the root cause."""
+Do NOT repeat the same approach that failed. Consider: different implementation strategy,
+breaking the task into smaller steps, or working around the root cause.
+Pay attention to the error type and previous approaches tried."""
 
         try:
             replan_response = await self.llm.complete(LLMRequest(
@@ -1624,10 +1641,25 @@ breaking the task into smaller steps, or working around the root cause."""
             if replan_response.success and replan_response.content:
                 revised_plan = replan_response.content.strip()[:2000]
 
-                # Store in replan history
+                # Extract approach_tried from task.plan or description
+                approach_tried = "unknown"
+                if task.plan and task.plan.approach:
+                    approach_tried = " | ".join(task.plan.approach[:3])  # First 3 steps
+                elif task.description:
+                    approach_tried = task.description[:500]
+
+                # Extract files_involved from task.plan if available
+                files_involved = []
+                if task.plan and task.plan.files_to_modify:
+                    files_involved = task.plan.files_to_modify
+
+                # Store in replan history (error_type already calculated above)
                 history_entry = {
                     "attempt": task.retry_count,
                     "error": error[:500],
+                    "error_type": error_type,
+                    "approach_tried": approach_tried,
+                    "files_involved": files_involved,
                     "revised_plan": revised_plan,
                 }
                 task.replan_history.append(history_entry)
@@ -1682,9 +1714,12 @@ Previous attempts failed. Use this revised approach:
         if task.replan_history:
             replan_section += "\n## Previous Attempt History\n"
             for entry in task.replan_history[:-1]:  # Skip current, already shown above
+                error_type_str = f" [{entry.get('error_type', 'unknown')}]" if entry.get('error_type') else ""
+                approach_str = entry.get('approach_tried', 'unknown')
                 replan_section += (
-                    f"- Attempt {entry.get('attempt', '?')}: "
-                    f"Failed with: {entry.get('error', 'unknown')[:100]}\n"
+                    f"- Attempt {entry.get('attempt', '?')}{error_type_str}:\n"
+                    f"  Approach tried: {approach_str[:150]}\n"
+                    f"  Failed with: {entry.get('error', 'unknown')[:100]}\n"
                 )
 
         return prompt + replan_section
