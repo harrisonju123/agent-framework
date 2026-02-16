@@ -67,6 +67,21 @@ export async function queueTaskForAgent(
 
   ensureDirectory(agentQueuePath);
 
+  // Inherit trusted context fields (github_repo, jira_project, workflow) from the
+  // parent task so the LLM can't hallucinate wrong values like the wrong org name.
+  const parentTaskId = process.env.AGENT_TASK_ID;
+  let inheritedContext: Record<string, unknown> = {};
+  if (parentTaskId) {
+    const parentTask = getTaskDetails(workspace, parentTaskId);
+    if (parentTask?.context) {
+      for (const key of ["github_repo", "jira_project", "jira_key", "epic_key", "workflow"]) {
+        if (parentTask.context[key] !== undefined) {
+          inheritedContext[key] = parentTask.context[key];
+        }
+      }
+    }
+  }
+
   const task: Task = {
     id: taskId,
     type: input.task_type,
@@ -82,7 +97,7 @@ export async function queueTaskForAgent(
     acceptance_criteria: input.acceptance_criteria ?? [],
     deliverables: [],
     notes: [],
-    context: input.context ?? {},
+    context: { ...(input.context ?? {}), ...inheritedContext },
     retry_count: 0,
     plan: input.plan,
   };
