@@ -300,3 +300,82 @@ class TestContextWindowManager:
         assert "priority_breakdown" in metadata
         assert "CRITICAL" in metadata["priority_breakdown"]
         assert "HIGH" in metadata["priority_breakdown"]
+
+    def test_compute_memory_budget_healthy(self, manager):
+        """Verify full memory budget when utilization is healthy (<70%)."""
+        # No usage yet — 0% utilization
+        assert manager.compute_memory_budget() == 3000
+
+        # 50% utilization
+        manager.update_token_usage(2500, 2500)
+        assert manager.compute_memory_budget() == 3000
+
+        # Right at 69% boundary
+        manager.budget.peak_input_tokens = 3450
+        manager.budget.cumulative_output_tokens = 3450
+        assert manager.budget.utilization_percent == 69.0
+        assert manager.compute_memory_budget() == 3000
+
+    def test_compute_memory_budget_tight(self, manager):
+        """Verify reduced memory budget when utilization is tight (70-90%)."""
+        # Exactly 70% utilization
+        manager.update_token_usage(3500, 3500)
+        assert manager.budget.utilization_percent == 70.0
+        assert manager.compute_memory_budget() == 1000
+
+        # 80% utilization
+        manager.budget.peak_input_tokens = 4000
+        manager.budget.cumulative_output_tokens = 4000
+        assert manager.budget.utilization_percent == 80.0
+        assert manager.compute_memory_budget() == 1000
+
+        # Right below 90% boundary
+        manager.budget.peak_input_tokens = 4499
+        manager.budget.cumulative_output_tokens = 4499
+        assert manager.budget.utilization_percent == 89.98
+        assert manager.compute_memory_budget() == 1000
+
+    def test_compute_memory_budget_critical(self, manager):
+        """Verify memory budget is zero when utilization is critical (>=90%)."""
+        # Exactly 90% utilization
+        manager.update_token_usage(4500, 4500)
+        assert manager.budget.utilization_percent == 90.0
+        assert manager.compute_memory_budget() == 0
+
+        # 95% utilization
+        manager.budget.peak_input_tokens = 4750
+        manager.budget.cumulative_output_tokens = 4750
+        assert manager.budget.utilization_percent == 95.0
+        assert manager.compute_memory_budget() == 0
+
+        # 100% utilization
+        manager.budget.peak_input_tokens = 5000
+        manager.budget.cumulative_output_tokens = 5000
+        assert manager.budget.utilization_percent == 100.0
+        assert manager.compute_memory_budget() == 0
+
+    def test_compute_memory_budget_edge_cases(self, manager):
+        """Verify memory budget at critical boundaries."""
+        # Just below 70% threshold (69.99%)
+        manager.budget.peak_input_tokens = 3499
+        manager.budget.cumulative_output_tokens = 3500
+        assert 69.9 <= manager.budget.utilization_percent < 70.0
+        assert manager.compute_memory_budget() == 3000
+
+        # Exactly 70% threshold
+        manager.budget.peak_input_tokens = 3500
+        manager.budget.cumulative_output_tokens = 3500
+        assert manager.budget.utilization_percent == 70.0
+        assert manager.compute_memory_budget() == 1000
+
+        # Just below 90% threshold (89.99%)
+        manager.budget.peak_input_tokens = 4499
+        manager.budget.cumulative_output_tokens = 4500
+        assert 89.9 <= manager.budget.utilization_percent < 90.0
+        assert manager.compute_memory_budget() == 1000
+
+        # Exactly 90% threshold
+        manager.budget.peak_input_tokens = 4500
+        manager.budget.cumulative_output_tokens = 4500
+        assert manager.budget.utilization_percent == 90.0
+        assert manager.compute_memory_budget() == 0

@@ -71,8 +71,16 @@ class MemoryRetriever:
         agent_type: str,
         task_tags: Optional[List[str]] = None,
         limit: int = 10,
+        max_chars: Optional[int] = None,
     ) -> str:
         """Build a prompt section with relevant memories.
+
+        Args:
+            repo_slug: Repository identifier
+            agent_type: Type of agent requesting memories
+            task_tags: Optional tags for relevance filtering
+            limit: Maximum number of memory entries to retrieve
+            max_chars: Maximum characters for memory context (overrides default 3000)
 
         Returns empty string if no memories or memory system disabled.
         """
@@ -80,12 +88,15 @@ class MemoryRetriever:
         if not memories:
             return ""
 
+        # Use provided max_chars or fall back to default
+        char_limit = max_chars if max_chars is not None else MAX_MEMORY_PROMPT_CHARS
+
         lines = ["## Memories from Previous Tasks\n"]
         total_chars = 0
 
         for mem in memories:
             line = f"- [{mem.category}] {mem.content}"
-            if total_chars + len(line) > MAX_MEMORY_PROMPT_CHARS:
+            if total_chars + len(line) > char_limit:
                 break
             lines.append(line)
             total_chars += len(line)

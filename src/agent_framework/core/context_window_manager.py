@@ -373,3 +373,20 @@ class ContextWindowManager:
             self._checkpoint_triggered = True
             return True
         return False
+
+    def compute_memory_budget(self) -> int:
+        """Compute memory budget based on current context utilization.
+
+        Returns character limit for memory injection based on utilization tiers:
+        - < 70% used: 3000 chars (full memory context)
+        - 70-90% used: 1000 chars (summarized memory context)
+        - >= 90% used: 0 chars (omit memories to preserve critical context)
+        """
+        utilization = self.budget.utilization_percent
+
+        if utilization < 70.0:
+            return 3000
+        elif utilization < 90.0:
+            return 1000
+        else:
+            return 0

@@ -1388,6 +1388,14 @@ class Agent:
         if not repo_slug:
             return prompt
 
+        # Query context window manager for memory budget
+        max_chars = None
+        if self._context_window_manager:
+            max_chars = self._context_window_manager.compute_memory_budget()
+            if max_chars == 0:
+                self.logger.debug("Skipping memory injection: context budget critical (>90% used)")
+                return prompt
+
         # Build tag hints from task context
         task_tags = []
         if task.type:
@@ -1400,10 +1408,11 @@ class Agent:
             repo_slug=repo_slug,
             agent_type=self.config.base_id,
             task_tags=task_tags,
+            max_chars=max_chars,
         )
 
         if memory_section:
-            self.logger.debug(f"Injected {len(memory_section)} chars of memory context")
+            self.logger.debug(f"Injected {len(memory_section)} chars of memory context (max={max_chars or 3000})")
             self._session_logger.log(
                 "memory_recall",
                 repo=repo_slug,
