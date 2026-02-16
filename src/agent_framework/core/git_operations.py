@@ -7,7 +7,6 @@ we achieve better separation of concerns and make the Agent class more focused.
 
 import hashlib
 import json
-import subprocess
 from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING
 
@@ -393,8 +392,8 @@ class GitOperationsManager:
         if self.multi_repo_manager:
             try:
                 cwd = self.multi_repo_manager.ensure_repo(github_repo)
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Failed to ensure shared repo for {github_repo}, falling back to workspace: {e}")
 
         self._create_pr_via_gh(task, github_repo, branch, cwd=cwd)
 
@@ -581,12 +580,20 @@ class GitOperationsManager:
         workflow_def = self._workflows_config[workflow_name]
         try:
             dag = workflow_def.to_dag(workflow_name)
-        except Exception as e:
-            self.logger.warning(f"Failed to check terminal workflow step: {e}")
+        except Exception:
             return True
 
-        # Check if current agent is a terminal node
-        return dag.is_terminal_step(self.config.id)
+        # Prefer explicit workflow_step from chain context
+        step_id = task.context.get("workflow_step")
+        if step_id and step_id in dag.steps:
+            return dag.is_terminal_step(step_id)
+
+        # Fallback: find the step for this agent's base_id
+        for step in dag.steps.values():
+            if step.agent == self.config.base_id:
+                return dag.is_terminal_step(step.id)
+
+        return True
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
         """Transition a JIRA ticket to target_status if all preconditions are met.
@@ -609,11 +616,11 @@ class GitOperationsManager:
 
         try:
             self.jira_client.transition_ticket(jira_key, target_status)
+            self.logger.info(f"JIRA {jira_key} → {target_status}")
             if comment:
                 self.jira_client.add_comment(jira_key, comment)
-            self.logger.info(f"Synced JIRA status: {jira_key} → {target_status}")
         except Exception as e:
-            self.logger.warning(f"Failed to sync JIRA status for {jira_key}: {e}")
+            self.logger.warning(f"Failed to transition JIRA {jira_key} to '{target_status}': {e}")
 
     @property
     def active_worktree(self) -> Optional[Path]:
