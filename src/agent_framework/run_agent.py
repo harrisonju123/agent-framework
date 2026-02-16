@@ -137,6 +137,7 @@ def main():
                 mcp_config_path=mcp_config_path,
                 logs_dir=Path(framework_config.workspace) / "logs",
                 proxy_env=proxy_env,
+                use_max_account=framework_config.llm.use_max_account,
             )
 
         # Create queue

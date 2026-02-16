@@ -172,11 +172,13 @@ class ClaudeCLIBackend(LLMBackend):
         timeout_simple: int = 900,
         logs_dir: Optional[Path] = None,
         proxy_env: Optional[dict] = None,
+        use_max_account: bool = False,
     ):
         self.executable = executable
         self.max_turns = max_turns
         self.timeout = timeout  # Fallback timeout when task_type not specified
         self.proxy_env = proxy_env or {}
+        self.use_max_account = use_max_account
         self.model_selector = ModelSelector(
             cheap_model, default_model, premium_model,
             timeout_large=timeout_large,
@@ -277,6 +279,8 @@ class ClaudeCLIBackend(LLMBackend):
 
             # Prepare clean environment (disable experimental betas for AWS Bedrock compatibility)
             env = os.environ.copy()
+            if self.use_max_account:
+                env.pop('ANTHROPIC_API_KEY', None)
             env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1'
             env.update(self.proxy_env)
             if task_id:

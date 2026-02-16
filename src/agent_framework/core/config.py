@@ -16,6 +16,9 @@ class LLMConfig(BaseModel):
     """LLM configuration."""
     mode: Literal["claude_cli", "litellm"] = "claude_cli"
 
+    # Use Claude Max OAuth account instead of API key billing
+    use_max_account: bool = False
+
     # Proxy passthrough: route Claude CLI API calls through LiteLLM proxy
     proxy_url: Optional[str] = None
     proxy_auth_token: Optional[str] = None
