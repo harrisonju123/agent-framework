@@ -89,3 +89,55 @@ class TestErrorTruncation:
         escalation = handler.create_escalation(task, "engineer")
 
         assert escalation.context["error"] == "short error"
+
+
+class TestBudgetErrorCategorization:
+    def test_categorize_budget_exceeded_error(self):
+        handler = EscalationHandler()
+        assert handler.categorize_error("budget exceeded") == "budget"
+
+    def test_categorize_max_budget_error(self):
+        handler = EscalationHandler()
+        assert handler.categorize_error("max budget reached") == "budget"
+
+    def test_categorize_quota_exceeded_error(self):
+        handler = EscalationHandler()
+        assert handler.categorize_error("quota exceeded") == "budget"
+
+    def test_categorize_insufficient_credits_error(self):
+        handler = EscalationHandler()
+        assert handler.categorize_error("insufficient credits") == "budget"
+
+    def test_categorize_usage_limit_exceeded_error(self):
+        handler = EscalationHandler()
+        assert handler.categorize_error("usage limit exceeded") == "budget"
+
+    def test_budget_error_case_insensitive(self):
+        handler = EscalationHandler()
+        assert handler.categorize_error("BUDGET EXCEEDED") == "budget"
+        assert handler.categorize_error("Budget Exceeded") == "budget"
+
+    def test_escalation_includes_budget_intervention(self):
+        """Test that budget errors get appropriate interventions in escalation."""
+        handler = EscalationHandler()
+        from agent_framework.core.task import RetryAttempt
+
+        task = _make_failed_task(last_error="budget exceeded")
+        task.retry_attempts = [
+            RetryAttempt(
+                attempt_number=1,
+                timestamp=datetime.now(timezone.utc),
+                error_message="budget exceeded",
+                agent_id="engineer",
+                error_type="budget",
+                context_snapshot={},
+            )
+        ]
+
+        escalation = handler.create_escalation(task, "engineer")
+
+        # Check that budget-specific interventions are present
+        interventions = escalation.escalation_report.suggested_interventions
+        budget_related = any("budget" in intervention.lower() or "credits" in intervention.lower()
+                           for intervention in interventions)
+        assert budget_related, f"Budget interventions not found in: {interventions}"

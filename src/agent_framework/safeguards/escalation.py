@@ -54,6 +54,13 @@ class EscalationHandler:
                 r"too many.*open files",
                 r"resource.*exhausted",
             ],
+            "budget": [
+                r"budget.*exceed",
+                r"max budget",
+                r"quota.*exceed",
+                r"insufficient.*credits",
+                r"usage.*limit.*exceed",
+            ],
             "logic": [
                 r"null.*reference",
                 r"index.*out of.*range",
@@ -127,7 +134,7 @@ class EscalationHandler:
     def categorize_error(self, error_message: str) -> Optional[str]:
         """Categorize error message by pattern matching.
 
-        Returns one of: network, authentication, validation, resource, logic, unknown.
+        Returns one of: network, authentication, validation, resource, budget, logic, unknown.
         Returns None for empty input.
         """
         if not error_message:
@@ -222,6 +229,12 @@ class EscalationHandler:
                 "Review resource limits and quotas",
                 "Consider scaling infrastructure",
                 "Look for resource leaks or cleanup issues",
+            ],
+            "budget": [
+                "Review account spending and budget limits",
+                "Check available credits or quota",
+                "Consider upgrading account tier or plan",
+                "Optimize usage to reduce costs",
             ],
             "logic": [
                 "Review code logic for edge cases",

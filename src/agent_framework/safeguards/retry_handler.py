@@ -16,7 +16,11 @@ class RetryHandler:
     - After max_retries, task is marked failed
     - Failed tasks create escalation (unless already an escalation)
     - CRITICAL: Escalations CANNOT create more escalations
+    - Non-retriable errors (budget, authentication) skip retries immediately
     """
+
+    # Error types that should never be retried
+    NON_RETRIABLE_CATEGORIES = {"budget", "authentication"}
 
     def __init__(
         self,
@@ -40,7 +44,18 @@ class RetryHandler:
         return min(backoff, self.max_backoff)
 
     def should_retry(self, task: Task) -> bool:
-        """Check if task should be retried."""
+        """
+        Check if task should be retried.
+
+        Non-retriable error types (budget, authentication) are never retried
+        regardless of retry count.
+        """
+        # Check for non-retriable error types first
+        if task.retry_attempts:
+            last_attempt = task.retry_attempts[-1]
+            if last_attempt.error_type in self.NON_RETRIABLE_CATEGORIES:
+                return False
+
         if task.retry_count >= self.max_retries:
             return False
 
