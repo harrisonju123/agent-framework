@@ -193,17 +193,26 @@ class PromptBuilder:
         """Check if optimization strategies should be used for this task.
 
         Uses canary rollout to gradually enable optimizations.
+        Task-level overrides take precedence over canary selection.
         """
-        canary_enabled = self.ctx.optimization_config.get("canary_enabled", False)
-        if not canary_enabled:
+        # Check for task-level override first
+        if hasattr(task, 'optimization_override') and task.optimization_override is not None:
+            reason = getattr(task, 'optimization_override_reason', 'no reason given')
+            self.logger.info(
+                f"Task {task.id} optimization override: {task.optimization_override} ({reason})"
+            )
+            return task.optimization_override
+
+        canary_pct = self.ctx.optimization_config.get("canary_percentage", 0)
+
+        if canary_pct == 0:
             return False
-
-        # Use task ID hash for deterministic rollout
-        task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
-        rollout_pct = self.ctx.optimization_config.get("canary_rollout_percent", 0)
-
-        # Enable for this task if hash falls within rollout percentage
-        return (task_hash % 100) < rollout_pct
+        elif canary_pct >= 100:
+            return True
+        else:
+            # Use deterministic hash for consistent selection
+            task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
+            return (task_hash % 100) < canary_pct
 
     def _build_prompt_legacy(self, task: Task, prompt_override: str = None) -> str:
         """Build prompt using legacy format (original implementation)."""
