@@ -39,6 +39,8 @@ from ..memory.tool_pattern_store import ToolPatternStore
 from .session_logger import SessionLogger, noop_logger
 from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
+from .error_recovery import ErrorRecoveryManager
+from .budget_manager import BudgetManager
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -389,6 +391,32 @@ class Agent:
         # Note: tests don't pass sync_jira_status_callback, so we use a no-op
         return self._review_cycle.queue_review_fix_if_needed(task, response, lambda *args, **kwargs: None)
 
+
+        # Error recovery and budget management — extracted from Agent
+        self._error_recovery = ErrorRecoveryManager(
+            config=config,
+            queue=queue,
+            llm=llm,
+            logger=self.logger,
+            session_logger=self._session_logger,
+            retry_handler=self.retry_handler,
+            escalation_handler=self.escalation_handler,
+            workspace=workspace,
+            jira_client=jira_client,
+            memory_store=self._memory_store,
+            replan_config=replan_config,
+            self_eval_config=self_eval_config,
+        )
+
+        self._budget = BudgetManager(
+            optimization_config=dict(self._optimization_config),
+            logger=self.logger,
+            session_logger=self._session_logger,
+            llm=llm,
+            workspace=workspace,
+            activity_manager=self.activity_manager,
+        )
+
     async def run(self) -> None:
         """
         Main polling loop.
@@ -646,55 +674,11 @@ class Agent:
         self._log_task_completion_metrics(task, response, task_start_time)
 
     def _log_task_completion_metrics(self, task: Task, response, task_start_time) -> None:
-        """Log token usage, cost, and completion events."""
-        from datetime import datetime
+        """Log token usage, cost, and completion events.
 
-        total_tokens = response.input_tokens + response.output_tokens
-        budget = self._get_token_budget(task.type)
-        cost = self._estimate_cost(response)
-
-        duration = (datetime.now(timezone.utc) - task_start_time).total_seconds()
-        self.logger.token_usage(response.input_tokens, response.output_tokens, cost)
-        self.logger.task_completed(duration, tokens_used=total_tokens)
-
-        # Budget warning
-        if self._optimization_config.get("enable_token_budget_warnings", False):
-            threshold = self._optimization_config.get("budget_warning_threshold", BUDGET_WARNING_THRESHOLD)
-            if total_tokens > budget * threshold:
-                self.logger.warning(
-                    f"Task {task.id} EXCEEDED TOKEN BUDGET: "
-                    f"{total_tokens} tokens (budget: {budget}, "
-                    f"{int(threshold * 100)}% threshold: {budget * threshold:.0f})"
-                )
-                self.activity_manager.append_event(ActivityEvent(
-                    type="token_budget_exceeded",
-                    agent=self.config.id,
-                    task_id=task.id,
-                    title=f"Token budget exceeded: {total_tokens} > {budget}",
-                    timestamp=datetime.now(timezone.utc)
-                ))
-
-        # Append complete event
-        duration_ms = int((datetime.now(timezone.utc) - task_start_time).total_seconds() * 1000)
-        pr_url = task.context.get("pr_url")
-        self.activity_manager.append_event(ActivityEvent(
-            type="complete",
-            agent=self.config.id,
-            task_id=task.id,
-            title=task.title,
-            timestamp=datetime.now(timezone.utc),
-            duration_ms=duration_ms,
-            pr_url=pr_url,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            cost=cost
-        ))
-
-        self._session_logger.log(
-            "task_complete",
-            status="completed",
-            duration_ms=duration_ms,
-        )
+        Delegated to BudgetManager.
+        """
+        self._budget.log_task_completion_metrics(task, response, task_start_time)
 
     async def _handle_failed_response(self, task: Task, response) -> None:
         """Handle failed LLM response."""
@@ -1078,97 +1062,10 @@ class Agent:
         """
         Handle task failure with retry/escalation logic.
 
-        Ported from scripts/async-agent-runner.sh lines 374-394.
+        Delegated to ErrorRecoveryManager.
         """
-        # Re-read from disk to detect external status changes (e.g. `agent cancel`)
-        refreshed = self.queue.find_task(task.id)
-        if refreshed and refreshed.status == TaskStatus.CANCELLED:
-            self.logger.info(f"Task {task.id} was cancelled, skipping retry")
-            # Preserve CANCELLED status — mark_completed would overwrite it
-            self.queue.move_to_completed(refreshed)
-            return
+        await self._error_recovery.handle_failure(task)
 
-        if task.retry_count >= self.retry_handler.max_retries:
-            # Max retries exceeded - mark as failed
-            self.logger.error(
-                f"Task {task.id} has failed {task.retry_count} times "
-                f"(max: {self.retry_handler.max_retries})"
-            )
-            error_type = self._categorize_error(task.last_error or "")
-            task.mark_failed(self.config.id, error_message=task.last_error, error_type=error_type)
-            self.queue.mark_failed(task)
-
-            # Notify JIRA about permanent failure (no status change, just a comment)
-            jira_key = task.context.get("jira_key")
-            if jira_key and self.jira_client:
-                try:
-                    self.jira_client.add_comment(
-                        jira_key,
-                        f"Agent {self.config.id} failed after {task.retry_count} retries: {task.last_error}",
-                    )
-                except Exception:
-                    pass
-
-            # CRITICAL: Prevent infinite loop - escalations should NOT create more escalations
-            if self.retry_handler.can_create_escalation(task):
-                escalation = self.escalation_handler.create_escalation(
-                    task, self.config.id
-                )
-                self.queue.push(escalation, escalation.assigned_to)
-                self.logger.warning(
-                    f"Created escalation task {escalation.id} for failed task {task.id}"
-                )
-            else:
-                # Escalation failed - log to escalations directory for human review
-                self.logger.error(
-                    f"Escalation task {task.id} failed after {task.retry_count} retries - "
-                    "NOT creating another escalation (would cause infinite loop). "
-                    "Logging to escalations directory for human intervention."
-                )
-                self._log_failed_escalation(task)
-        else:
-            # Dynamic replanning: generate revised approach on retry 2+
-            if self._replan_enabled and task.retry_count >= self._replan_min_retry:
-                await self._request_replan(task)
-
-            # Reset task to pending so it can be retried
-            self.logger.warning(
-                f"Resetting task {task.id} to pending status "
-                f"(retry {task.retry_count + 1}/{self.retry_handler.max_retries})"
-            )
-            task.reset_to_pending()
-            self.queue.update(task)
-
-    def _log_failed_escalation(self, task: Task) -> None:
-        """
-        Log a failed escalation to the escalations directory for human review.
-
-        When an escalation task itself fails, we cannot create another escalation
-        (infinite loop). Instead, write it to a dedicated directory where humans
-        can review and resolve it.
-        """
-        escalations_dir = self.workspace / ".agent-communication" / "escalations"
-        escalations_dir.mkdir(parents=True, exist_ok=True)
-
-        escalation_file = escalations_dir / f"{task.id}.json"
-
-        # Add metadata for human review
-        task_dict = task.model_dump()
-        task_dict["logged_at"] = datetime.now(timezone.utc).isoformat()
-        task_dict["logged_by"] = self.config.id
-        task_dict["requires_human_intervention"] = True
-        task_dict["escalation_failed"] = True
-
-        try:
-            escalation_file.write_text(json.dumps(task_dict, indent=2, default=str))
-            self.logger.info(
-                f"Logged failed escalation to {escalation_file}. "
-                f"Run 'bash scripts/review-escalations.sh' to review."
-            )
-        except Exception as e:
-            self.logger.error(f"Failed to log escalation to file: {e}")
-            # Last resort: at least log the full task details to the log file
-            self.logger.error(f"Failed escalation details: {json.dumps(task_dict, indent=2, default=str)}")
 
     def _sanitize_optimization_config(self, config: dict) -> dict:
         """
@@ -1234,37 +1131,11 @@ class Agent:
             return (task_hash % 100) < canary_pct
 
     def _get_token_budget(self, task_type: TaskType) -> int:
+        """Get expected token budget for task type.
+
+        Delegated to BudgetManager.
         """
-        Get expected token budget for task type.
-
-        Implements Strategy 6 (Token Tracking) from the optimization plan.
-
-        Budgets can be configured via optimization.token_budgets in config,
-        otherwise uses sensible defaults.
-        """
-        # Default budgets
-        default_budgets = {
-            "planning": 30000,
-            "implementation": 50000,
-            "testing": 20000,
-            "escalation": 80000,
-            "review": 25000,
-            "architecture": 40000,
-            "coordination": 15000,
-            "documentation": 15000,
-            "fix": 30000,
-            "bugfix": 30000,
-            "bug-fix": 30000,
-            "verification": 20000,
-            "status_report": 10000,
-            "enhancement": 40000,
-        }
-
-        # Get budget from config or use default
-        budget_key = get_type_str(task_type).lower().replace("-", "_")
-        configured_budgets = self._optimization_config.get("token_budgets", {})
-
-        return configured_budgets.get(budget_key, default_budgets.get(budget_key, 40000))
+        return self._budget.get_token_budget(task_type)
 
     async def _extract_summary(self, response: str, task: Task, _recursion_depth: int = 0) -> str:
         """
@@ -1481,169 +1352,18 @@ class Agent:
     async def _self_evaluate(self, task: Task, response) -> bool:
         """Review agent's own output against acceptance criteria.
 
-        Uses a cheap model to check for obvious gaps. If gaps found,
-        resets task with critique context for retry — without consuming
-        a queue-level retry.
-
-        Returns True if evaluation passed (or disabled/skipped).
-        Returns False if task was reset for retry.
+        Delegated to ErrorRecoveryManager.
         """
-        eval_retries = task.context.get("_self_eval_count", 0)
-        if eval_retries >= self._self_eval_max_retries:
-            self.logger.debug(
-                f"Self-eval retry limit reached ({eval_retries}), proceeding"
-            )
-            return True
-
-        # Build evaluation prompt from acceptance criteria
-        criteria = task.acceptance_criteria
-        if not criteria:
-            return True
-
-        criteria_text = "\n".join(f"- {c}" for c in criteria)
-        response_preview = response.content[:4000] if response.content else ""
-
-        eval_prompt = f"""Review this agent's output against the acceptance criteria.
-Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
-
-## Acceptance Criteria
-{criteria_text}
-
-## Agent Output (preview)
-{response_preview}
-
-Verdict:"""
-
-        try:
-            eval_response = await self.llm.complete(LLMRequest(
-                prompt=eval_prompt,
-                model=self._self_eval_model,
-            ))
-
-            if not eval_response.success or not eval_response.content:
-                self.logger.warning("Self-eval LLM call failed, proceeding without eval")
-                return True
-
-            verdict = eval_response.content.strip()
-            passed = verdict.upper().startswith("PASS")
-
-            self._session_logger.log(
-                "self_eval",
-                verdict="PASS" if passed else "FAIL",
-                model=self._self_eval_model,
-                criteria_count=len(criteria),
-                eval_attempt=eval_retries + 1,
-            )
-
-            if passed:
-                self.logger.info(f"Self-evaluation PASSED for task {task.id}")
-                return True
-
-            # Failed self-eval — reset for retry with critique
-            self.logger.warning(
-                f"Self-evaluation FAILED for task {task.id} "
-                f"(attempt {eval_retries + 1}/{self._self_eval_max_retries}): "
-                f"{verdict[:200]}"
-            )
-
-            task.context["_self_eval_count"] = eval_retries + 1
-            task.context["_self_eval_critique"] = verdict[:1000]
-            task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:200]}")
-
-            # Reset without consuming queue retry
-            task.status = TaskStatus.PENDING
-            task.started_at = None
-            task.started_by = None
-            self.queue.update(task)
-
-            return False
-
-        except Exception as e:
-            self.logger.warning(f"Self-evaluation error (non-fatal): {e}")
-            return True
+        return await self._error_recovery.self_evaluate(task, response)
 
     # -- Dynamic Replanning --
 
     async def _request_replan(self, task: Task) -> None:
         """Generate a revised approach based on what failed.
 
-        Called on retry 2+ to avoid repeating the same failing approach.
-        Stores the revised plan in task.replan_history and task.context
-        so the next prompt attempt sees what was tried and the new approach.
-
-        Injects relevant memories (conventions, test commands, repo structure)
-        to give context about what's been learned from previous work on this repo.
+        Delegated to ErrorRecoveryManager.
         """
-        error = task.last_error or "Unknown error"
-        previous_attempts = task.replan_history or []
-
-        attempts_text = ""
-        if previous_attempts:
-            for attempt in previous_attempts:
-                attempts_text += (
-                    f"\n- Attempt {attempt.get('attempt', '?')}: "
-                    f"{attempt.get('error', 'no error recorded')}"
-                )
-
-        # Build memory context for replanning — prioritize categories that help with recovery
-        memory_context = self._build_replan_memory_context(task)
-
-        replan_prompt = f"""A task has failed {task.retry_count} times. Generate a REVISED approach.
-
-## Task
-{task.title}: {task.description[:1000]}
-
-## Latest Error
-{error[:500]}
-
-## Previous Attempts{attempts_text if attempts_text else ' (first replan)'}
-{memory_context}
-## Instructions
-Provide a revised approach in 3-5 bullet points. Focus on what to do DIFFERENTLY.
-Do NOT repeat the same approach. Consider: different implementation strategy,
-breaking the task into smaller steps, or working around the root cause."""
-
-        try:
-            replan_response = await self.llm.complete(LLMRequest(
-                prompt=replan_prompt,
-                model=self._replan_model,
-            ))
-
-            if replan_response.success and replan_response.content:
-                revised_plan = replan_response.content.strip()[:2000]
-
-                # Store in replan history
-                history_entry = {
-                    "attempt": task.retry_count,
-                    "error": error[:500],
-                    "revised_plan": revised_plan,
-                }
-                task.replan_history.append(history_entry)
-
-                # Store in context for prompt injection
-                task.context["_revised_plan"] = revised_plan
-                task.context["_replan_attempt"] = task.retry_count
-
-                self._session_logger.log(
-                    "replan",
-                    retry=task.retry_count,
-                    previous_error=error[:500],
-                    revised_plan=revised_plan,
-                    model=self._replan_model,
-                )
-
-                self.logger.info(
-                    f"Generated revised plan for task {task.id} "
-                    f"(retry {task.retry_count}): {revised_plan[:100]}..."
-                )
-            else:
-                self.logger.warning(
-                    f"Replan LLM call failed for task {task.id}: "
-                    f"{replan_response.error}"
-                )
-
-        except Exception as e:
-            self.logger.warning(f"Replanning error (non-fatal): {e}")
+        await self._error_recovery.request_replan(task)
 
     def _categorize_error(self, error_message: str) -> Optional[str]:
         """Categorize error message for better diagnostics.
@@ -1652,6 +1372,58 @@ breaking the task into smaller steps, or working around the root cause."""
         pattern matching across the codebase.
         """
         return self.escalation_handler.categorize_error(error_message)
+    def _inject_replan_context(self, prompt: str, task: Task) -> str:
+        """Append revised plan and attempt history to prompt if available.
+
+        Delegated to ErrorRecoveryManager.
+        """
+        return self._error_recovery.inject_replan_context(prompt, task)
+
+    def _inject_preview_mode(self, prompt: str, task: Task) -> str:
+        """Inject preview mode constraints when task is a preview."""
+        preview_section = """
+## PREVIEW MODE — READ-ONLY EXECUTION
+You are in PREVIEW MODE. You must plan your implementation WITHOUT writing any files.
+
+CONSTRAINTS:
+- Do NOT use Write, Edit, or NotebookEdit tools
+- Do NOT use Bash to create, modify, or delete files
+- DO use Read, Glob, Grep, and Bash (read-only commands like git log, git diff, ls) to explore
+- DO read every file you plan to modify to understand current state
+
+REQUIRED OUTPUT — Produce a structured execution preview:
+
+### Files to Modify
+For each file, list:
+- File path
+- What changes will be made (specific, not vague)
+- Estimated lines added/removed
+
+### New Files to Create
+For each new file:
+- File path
+- Purpose
+- Key contents/structure
+- Estimated line count
+
+### Implementation Approach
+- Step-by-step plan with ordering
+- Which patterns from existing code will be followed
+- Any dependencies between changes
+
+### Risks and Edge Cases
+- What could go wrong
+- Edge cases to handle
+- Backward compatibility concerns
+
+### Estimated Total Change Size
+- Total lines added/removed
+- Number of files affected
+
+This preview will be reviewed by the architect before implementation is authorized.
+"""
+        return preview_section + "\n\n" + prompt
+
 
     def _record_optimization_metrics(
         self,
@@ -1698,38 +1470,11 @@ breaking the task into smaller steps, or working around the root cause."""
             self.logger.debug(f"Unexpected error recording optimization metrics: {e}")
 
     def _estimate_cost(self, response: LLMResponse) -> float:
+        """Estimate cost based on model and token usage.
+
+        Delegated to BudgetManager.
         """
-        Estimate cost based on model and token usage.
-
-        Prefers CLI-reported cost when available (accounts for prompt caching
-        discounts). Falls back to static MODEL_PRICING calculation for other
-        backends or when reported cost is unavailable.
-        """
-        if response.reported_cost_usd is not None:
-            return response.reported_cost_usd
-
-        model_name_lower = response.model_used.lower()
-
-        # Detect model family
-        if "haiku" in model_name_lower:
-            model_type = "haiku"
-        elif "opus" in model_name_lower:
-            model_type = "opus"
-        elif "sonnet" in model_name_lower:
-            model_type = "sonnet"
-        else:
-            # Unknown model, assume sonnet pricing as conservative estimate
-            self.logger.warning(
-                f"Unknown model '{response.model_used}', assuming Sonnet pricing for cost estimate"
-            )
-            model_type = "sonnet"
-
-        prices = MODEL_PRICING.get(model_type, MODEL_PRICING["sonnet"])
-        cost = (
-            response.input_tokens / 1_000_000 * prices["input"] +
-            response.output_tokens / 1_000_000 * prices["output"]
-        )
-        return cost
+        return self._budget.estimate_cost(response)
 
 
     def _update_phase(self, phase: TaskPhase):
