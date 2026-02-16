@@ -3780,7 +3780,7 @@ IMPORTANT:
         if task.type in (TaskType.REVIEW, TaskType.FIX):
             self.logger.debug(
                 f"Skipping workflow chain for {task.id}: "
-                f"task type {task.type.value} handled by dedicated review routing"
+                f"task type {task.type} handled by dedicated review routing"
             )
             return
 
