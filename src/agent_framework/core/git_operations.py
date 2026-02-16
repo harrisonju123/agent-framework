@@ -279,7 +279,7 @@ class GitOperationsManager:
         Intermediate workflow steps push their branch but skip PR creation —
         the terminal step (or pr_creator) handles that.
         """
-        from ..utils.subprocess_utils import run_git_command, run_command, SubprocessError
+        from ..utils.subprocess_utils import run_git_command, SubprocessError
 
         # Already has a PR (created by the LLM via MCP or _handle_success)
         if task.context.get("pr_url"):
