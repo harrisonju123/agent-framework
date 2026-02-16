@@ -485,7 +485,7 @@ class TestPRCreation:
 
     def test_last_agent_queues_pr_creation(self, pr_agent, queue):
         """QA (last agent) completes → PR_REQUEST queued to architect."""
-        task = _make_task(workflow="pr_workflow")
+        task = _make_task(workflow="pr_workflow", implementation_branch="feature/test")
         response = _make_response()
 
         pr_agent._enforce_workflow_chain(task, response)
