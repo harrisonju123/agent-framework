@@ -15,6 +15,10 @@ try:
 except ImportError:
     pass  # dotenv not installed, rely on shell environment
 
+# Strip CLAUDECODE early so no subprocess (LLM backend, profile generator, etc.)
+# inherits it and triggers the "nested session" guard in Claude CLI.
+os.environ.pop("CLAUDECODE", None)
+
 from .core.agent import Agent, AgentConfig
 from .core.config import load_agents, load_config, load_jira_config, load_github_config
 from .llm.claude_cli_backend import ClaudeCLIBackend

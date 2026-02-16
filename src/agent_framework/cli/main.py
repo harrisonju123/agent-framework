@@ -13,6 +13,10 @@ try:
 except ImportError:
     pass  # dotenv not installed, rely on shell environment
 
+# Strip CLAUDECODE early so no subprocess (LLM backend, profile generator, etc.)
+# inherits it and triggers the "nested session" guard in Claude CLI.
+os.environ.pop("CLAUDECODE", None)
+
 import click
 from rich.console import Console
 from rich.table import Table
