@@ -59,6 +59,14 @@ class WorkflowRouter:
         self._agents_config = agents_config
         self.multi_repo_manager = multi_repo_manager
 
+    def set_session_logger(self, session_logger) -> None:
+        """Update the session logger for this router.
+
+        Args:
+            session_logger: SessionLogger instance to use for metrics logging
+        """
+        self._session_logger = session_logger
+
     def check_and_create_fan_in_task(self, task: Task) -> None:
         """Check if this subtask completion triggers fan-in task creation.
 
@@ -232,7 +240,7 @@ class WorkflowRouter:
                 )
 
             # Session logging
-            if routed:
+            if routed and self._session_logger:
                 self._session_logger.log(
                     "workflow_routing",
                     workflow=workflow_name,
@@ -339,11 +347,12 @@ class WorkflowRouter:
         try:
             self.queue.push(chain_task, target_agent)
             self.logger.info(f"🔗 Routed to {target_agent} (signal): {reason}")
-            self._session_logger.log(
-                "workflow_chain",
-                next_agent=target_agent,
-                reason=reason,
-            )
+            if self._session_logger:
+                self._session_logger.log(
+                    "workflow_chain",
+                    next_agent=target_agent,
+                    reason=reason,
+                )
         except Exception as e:
             self.logger.error(f"Failed to route task to {target_agent}: {e}")
 
@@ -361,6 +370,11 @@ class WorkflowRouter:
             return
 
         if task.context.get("pr_url"):
+            return
+
+        # No code changes = no PR needed (e.g., architect planning-only tasks)
+        if not task.context.get("implementation_branch") and not task.context.get("pr_number"):
+            self.logger.debug(f"No implementation branch or PR for {task.id}, skipping PR creation")
             return
 
         # Deterministic ID with -pr suffix to avoid collision with normal chain tasks
@@ -394,10 +408,11 @@ class WorkflowRouter:
         try:
             self.queue.push(pr_task, pr_creator)
             self.logger.info(f"📦 Queued PR creation for {pr_creator} from task {task.id}")
-            self._session_logger.log(
-                "pr_creation_queued",
-                pr_creator=pr_creator,
-                source_task=task.id,
-            )
+            if self._session_logger:
+                self._session_logger.log(
+                    "pr_creation_queued",
+                    pr_creator=pr_creator,
+                    source_task=task.id,
+                )
         except Exception as e:
             self.logger.error(f"Failed to queue PR creation: {e}")

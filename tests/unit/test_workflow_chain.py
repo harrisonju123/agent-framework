@@ -130,6 +130,20 @@ def agent(queue, tmp_path):
     prompt_builder = PromptBuilder(prompt_ctx)
     a._prompt_builder = prompt_builder
 
+    # Initialize workflow router (required after extraction)
+    from agent_framework.core.workflow_router import WorkflowRouter
+    a._workflow_router = WorkflowRouter(
+        config=config,
+        queue=queue,
+        workspace=tmp_path,
+        logger=a.logger,
+        session_logger=a._session_logger,
+        workflows_config=a._workflows_config,
+        workflow_executor=a._workflow_executor,
+        agents_config=a._agents_config,
+        multi_repo_manager=None,
+    )
+
     return a
 
 
@@ -303,10 +317,13 @@ class TestEnforceWorkflowChain:
         task = _make_task(workflow="default")
         response = _make_response()
         queue.push.side_effect = OSError("disk full")
+
+        # Mock executor's logger to verify error logging
         agent._workflow_executor.logger = MagicMock()
 
         agent._enforce_workflow_chain(task, response)
 
+        # Error is caught and logged by the executor (called from router.enforce_chain)
         agent._workflow_executor.logger.error.assert_called_once()
 
 
@@ -479,6 +496,20 @@ class TestPRCreation:
             logger=a.logger,
             session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
             workflows_config=a._workflows_config,
+        )
+
+        # Initialize workflow router (required after extraction)
+        from agent_framework.core.workflow_router import WorkflowRouter
+        a._workflow_router = WorkflowRouter(
+            config=config,
+            queue=queue,
+            workspace=tmp_path,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            workflows_config=a._workflows_config,
+            workflow_executor=a._workflow_executor,
+            agents_config=a._agents_config,
+            multi_repo_manager=None,
         )
 
         return a

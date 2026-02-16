@@ -806,7 +806,7 @@ class Agent:
             log_tool_inputs=self._session_log_tool_inputs,
         )
         # Update workflow router's session logger for this task
-        self._workflow_router._session_logger = self._session_logger
+        self._workflow_router.set_session_logger(self._session_logger)
         self._session_logger.log(
             "task_start",
             agent=self.config.id,
