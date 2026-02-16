@@ -26,21 +26,35 @@ class ModelSelector:
         self.timeout_bounded = timeout_bounded
         self.timeout_simple = timeout_simple
 
-    def select(self, task_type: TaskType, retry_count: int = 0) -> str:
+    def select(
+        self,
+        task_type: TaskType,
+        retry_count: int = 0,
+        specialization_profile: str = None,
+        file_count: int = 0,
+    ) -> str:
         """
-        Select model based on task type and retry count.
+        Select model based on task type, retry count, and specialization.
 
-        Logic:
-        1. If retry_count >= 3, use premium model (task is difficult)
-        2. If task_type is cheap (testing, fix, docs), use cheap model
-        3. If task_type is escalation, use premium model
-        4. Otherwise use default model
+        Routing priority:
+        1. retry_count >= 3 → premium (task is difficult)
+        2. task_type in premium_types → premium (fixed premium tasks)
+        3. IMPLEMENTATION + backend/infra + high file count → premium
+        4. IMPLEMENTATION + frontend + low file count → cheap
+        5. task_type in cheap_types → cheap (fixed cheap tasks)
+        6. Default → sonnet
+
+        Args:
+            task_type: Type of task being performed
+            retry_count: Number of times task has been retried
+            specialization_profile: Specialization ID (backend, frontend, infrastructure)
+            file_count: Number of files involved in the task
         """
-        # Escalate to stronger model if task keeps failing
+        # Priority 1: Escalate to stronger model if task keeps failing
         if retry_count >= 3:
             return self.premium_model
 
-        # High-stakes tasks where quality matters most
+        # Priority 2: High-stakes tasks where quality matters most (fixed premium)
         premium_types = {
             TaskType.ESCALATION,
             TaskType.PLANNING,
@@ -51,7 +65,16 @@ class ModelSelector:
         if task_type in premium_types:
             return self.premium_model
 
-        # Cheap tasks
+        # Priority 3-4: Specialization-aware routing (IMPLEMENTATION tasks only)
+        if task_type == TaskType.IMPLEMENTATION and specialization_profile:
+            # Backend/infra with high file count → premium
+            if specialization_profile in {"backend", "infrastructure"} and file_count >= 8:
+                return self.premium_model
+            # Frontend with low file count → cheap
+            if specialization_profile == "frontend" and file_count <= 5:
+                return self.cheap_model
+
+        # Priority 5: Cheap tasks (fixed cheap)
         cheap_types = {
             TaskType.TESTING,
             TaskType.VERIFICATION,
@@ -65,7 +88,7 @@ class ModelSelector:
         if task_type in cheap_types:
             return self.cheap_model
 
-        # Default for implementation, architecture, planning, etc.
+        # Priority 6: Default for implementation, architecture, planning, etc.
         return self.default_model
 
     def select_timeout(self, task_type: TaskType) -> int:

@@ -90,3 +90,108 @@ def test_preview_uses_bounded_timeout(selector):
     """PREVIEW tasks get bounded timeout (30min) since they're planning-only."""
     timeout = selector.select_timeout(TaskType.PREVIEW)
     assert timeout == selector.timeout_bounded
+
+
+class TestSpecializationRouting:
+    """Specialization-aware model routing for IMPLEMENTATION tasks."""
+
+    def test_backend_high_file_count_uses_premium(self, selector):
+        """Backend with >=8 files routes to premium model."""
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=0,
+            specialization_profile="backend",
+            file_count=8,
+        )
+        assert model == "opus"
+
+    def test_backend_low_file_count_uses_default(self, selector):
+        """Backend with <8 files uses default model."""
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=0,
+            specialization_profile="backend",
+            file_count=7,
+        )
+        assert model == "sonnet"
+
+    def test_infrastructure_high_file_count_uses_premium(self, selector):
+        """Infrastructure with >=8 files routes to premium model."""
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=0,
+            specialization_profile="infrastructure",
+            file_count=10,
+        )
+        assert model == "opus"
+
+    def test_frontend_low_file_count_uses_cheap(self, selector):
+        """Frontend with <=5 files routes to cheap model."""
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=0,
+            specialization_profile="frontend",
+            file_count=3,
+        )
+        assert model == "haiku"
+
+    def test_frontend_high_file_count_uses_default(self, selector):
+        """Frontend with >5 files uses default model."""
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=0,
+            specialization_profile="frontend",
+            file_count=8,
+        )
+        assert model == "sonnet"
+
+    def test_unknown_specialization_uses_default(self, selector):
+        """Unknown specialization falls through to default."""
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=0,
+            specialization_profile="unknown-spec",
+            file_count=10,
+        )
+        assert model == "sonnet"
+
+    def test_no_specialization_uses_default(self, selector):
+        """Implementation without specialization uses default."""
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=0,
+            specialization_profile=None,
+            file_count=10,
+        )
+        assert model == "sonnet"
+
+    def test_retry_escalation_overrides_specialization(self, selector):
+        """Retry count >= 3 takes priority over specialization routing."""
+        # Frontend with low file count would normally be cheap, but retry wins
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            retry_count=3,
+            specialization_profile="frontend",
+            file_count=3,
+        )
+        assert model == "opus"
+
+    def test_specialization_only_affects_implementation(self, selector):
+        """Specialization routing only applies to IMPLEMENTATION tasks."""
+        # Planning is always premium regardless of specialization
+        model = selector.select(
+            TaskType.PLANNING,
+            retry_count=0,
+            specialization_profile="frontend",
+            file_count=3,
+        )
+        assert model == "opus"
+
+        # Testing is always cheap regardless of specialization
+        model = selector.select(
+            TaskType.TESTING,
+            retry_count=0,
+            specialization_profile="backend",
+            file_count=10,
+        )
+        assert model == "haiku"

@@ -74,7 +74,12 @@ class LiteLLMBackend(LLMBackend):
         if request.model:
             model = request.model
         elif request.task_type:
-            model = self.select_model(request.task_type, request.retry_count)
+            model = self.select_model(
+                request.task_type,
+                request.retry_count,
+                request.specialization_profile,
+                request.file_count,
+            )
         else:
             model = self.model_selector.default_model
 
@@ -182,6 +187,17 @@ class LiteLLMBackend(LLMBackend):
             if log_file:
                 log_file.close()
 
-    def select_model(self, task_type: TaskType, retry_count: int) -> str:
-        """Select appropriate model based on task type and retry count."""
-        return self.model_selector.select(task_type, retry_count)
+    def select_model(
+        self,
+        task_type: TaskType,
+        retry_count: int,
+        specialization_profile: str = None,
+        file_count: int = 0,
+    ) -> str:
+        """Select appropriate model based on task type, retry count, and specialization."""
+        return self.model_selector.select(
+            task_type,
+            retry_count,
+            specialization_profile,
+            file_count,
+        )

@@ -251,6 +251,7 @@ class Agent:
         self._workflow_team_cache: Dict[str, Optional[dict]] = {}
         # Set per-task by _build_prompt, consumed by team composition
         self._current_specialization = None
+        self._current_file_count = 0
 
         # Pause signal cache (avoid 2x exists() calls every 2s)
         self._pause_signal_cache: Optional[bool] = None
@@ -865,6 +866,8 @@ class Agent:
                     context=task.context,
                     working_dir=str(working_dir),
                     agents=team_agents,
+                    specialization_profile=self._current_specialization.id if self._current_specialization else None,
+                    file_count=self._current_file_count,
                 ),
                 task_id=task.id,
                 on_tool_activity=_on_tool_activity,
@@ -1975,9 +1978,12 @@ Fix the failing tests and ensure all tests pass.
         use_optimizations = self._should_use_optimization(task)
 
         # Detect specialization once — reused for both prompt and team composition
-        from .engineer_specialization import apply_specialization_to_prompt
+        from .engineer_specialization import apply_specialization_to_prompt, detect_file_patterns
         profile = self._detect_engineer_specialization(task)
         self._current_specialization = profile
+        # Extract file count for model routing (specialization-aware routing uses this)
+        files = detect_file_patterns(task)
+        self._current_file_count = len(files)
         prompt_text = apply_specialization_to_prompt(self.config.prompt, profile)
 
         # Update activity with specialization (if detected)
