@@ -888,7 +888,7 @@ class Agent:
             self.logger.info(f"Team mode: {list(team_agents.keys())}")
         return team_agents
 
-    async def _execute_llm_with_interruption_watch(self, task: Task, prompt: str, working_dir: Path, team_agents: Optional[dict]):
+    async def _execute_llm_with_interruption_watch(self, task: Task, prompt: str, working_dir: Path, team_agents: Optional[dict]) -> Optional[LLMResponse]:
         """Execute LLM with interruption watching, return response or None if interrupted."""
         from datetime import datetime
 
