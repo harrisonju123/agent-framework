@@ -271,8 +271,8 @@ class TestPromptInjections:
             error_category="test",
             total_attempts=3,
             attempt_history=[],
-            root_cause_hypothesis="Test hypothesis",
-            suggested_interventions=[],
+            root_cause_hypothesis="The issue is caused by synchronous blocking calls in async context",
+            suggested_interventions=["Use asyncio.to_thread for blocking operations", "Replace sync API with async variant"],
             human_guidance="Try using async/await instead of callbacks"
         )
 
@@ -281,6 +281,22 @@ class TestPromptInjections:
 
         assert "async/await" in result
         assert "CRITICAL" in result
+        assert "Previous Failure Context" in result
+        assert "synchronous blocking calls" in result
+        assert "Suggested interventions:" in result
+        assert "1. Use asyncio.to_thread" in result
+        assert "2. Replace sync API" in result
+
+    def test_inject_human_guidance_legacy_fallback(self, prompt_builder, sample_task):
+        """Verify legacy context-based guidance still works."""
+        sample_task.context["human_guidance"] = "Use feature flags for gradual rollout"
+
+        prompt = "Base prompt"
+        result = prompt_builder._inject_human_guidance(prompt, sample_task)
+
+        assert "feature flags" in result
+        assert "CRITICAL" in result
+        assert "human expert" in result.lower()
 
     def test_inject_replan_context(self, prompt_builder, sample_task):
         """Verify replan context is injected when present."""

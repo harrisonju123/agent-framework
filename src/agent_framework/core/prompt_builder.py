@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 if TYPE_CHECKING:
-    from .config import AgentConfig, AgentDefinition
+    from .config import AgentConfig, AgentDefinition, WorkflowDefinition
     from .context_window_manager import ContextWindowManager
     from ..memory.memory_retriever import MemoryRetriever
     from ..memory.tool_pattern_store import ToolPatternStore
@@ -61,6 +61,9 @@ class PromptContext:
 
     # Agent reference (for callbacks like metrics recording)
     agent: Optional[Any] = None
+
+    # Workflow definitions (for terminal step detection)
+    workflows_config: Optional[Dict[str, "WorkflowDefinition"]] = None
 
     def __post_init__(self):
         """Initialize default values."""
@@ -157,7 +160,7 @@ class PromptBuilder:
 
         # Session log: capture what was sent to the LLM
         if self.ctx.session_logger:
-            prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:12]
+            prompt_hash = hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
             has_replan = "_revised_plan" in task.context
             self.ctx.session_logger.log(
                 "prompt_built",
@@ -196,7 +199,7 @@ class PromptBuilder:
             return False
 
         # Use task ID hash for deterministic rollout
-        task_hash = int(hashlib.md5(task.id.encode()).hexdigest()[:8], 16)
+        task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
         rollout_pct = self.ctx.optimization_config.get("canary_rollout_percent", 0)
 
         # Enable for this task if hash falls within rollout percentage
@@ -352,19 +355,33 @@ IMPORTANT:
         return legacy_prompt
 
     def _is_at_terminal_workflow_step(self, task: Task) -> bool:
-        """Check if task is at the terminal workflow step.
+        """Check if the current agent is at the last step in the workflow DAG.
 
-        Terminal steps are allowed to create PRs. Intermediate steps are not.
+        Returns True for standalone tasks (no workflow) to preserve backward
+        compatibility — standalone agents should always be allowed to create PRs.
         """
-        # If no workflow context, assume terminal (single-step workflow)
         workflow_name = task.context.get("workflow")
-        if not workflow_name or not self.ctx.config:
+        if not workflow_name or not self.ctx.workflows_config or workflow_name not in self.ctx.workflows_config:
             return True
 
-        # Check if this is the last step in the workflow
-        # This requires access to workflow definitions, which we don't have here
-        # For now, assume non-terminal if chain_step is set
-        return False
+        workflow_def = self.ctx.workflows_config[workflow_name]
+        try:
+            dag = workflow_def.to_dag(workflow_name)
+        except Exception:
+            return True
+
+        # Prefer explicit workflow_step from chain context
+        step_id = task.context.get("workflow_step")
+        if step_id and step_id in dag.steps:
+            return dag.is_terminal_step(step_id)
+
+        # Fallback: find the step for this agent's base_id
+        for step in dag.steps.values():
+            if step.agent == self.ctx.config.base_id:
+                return dag.is_terminal_step(step.id)
+
+        # If we can't determine the step, assume terminal (safer default)
+        return True
 
     def _get_minimal_task_dict(self, task: Task) -> Dict[str, Any]:
         """Extract only prompt-relevant task fields.
@@ -702,8 +719,31 @@ A human expert has reviewed this task and provided the following guidance to hel
 
 Please carefully consider this guidance when approaching the task. This information may help you avoid the previous failures.
 
+## Previous Failure Context
+
+{task.escalation_report.root_cause_hypothesis}
+
+Suggested interventions:
 """
+            for i, intervention in enumerate(task.escalation_report.suggested_interventions, 1):
+                guidance_section += f"{i}. {intervention}\n"
+
             return prompt + guidance_section
+
+        # Fall back to context-based guidance (legacy support)
+        context_guidance = task.context.get("human_guidance")
+        if context_guidance:
+            return prompt + f"""
+
+## CRITICAL: Human Guidance Provided
+
+A human expert has provided guidance for this task:
+
+{context_guidance}
+
+Please carefully consider this guidance when approaching the task.
+"""
+
         return prompt
 
     def _append_test_failure_context(self, prompt: str, task: Task) -> str:

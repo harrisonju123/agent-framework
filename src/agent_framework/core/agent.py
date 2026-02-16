@@ -57,8 +57,6 @@ PAUSE_SIGNAL_FILE = ".agent-communication/pause"
 # Constants for optimization strategies
 SUMMARY_CONTEXT_MAX_CHARS = 2000
 SUMMARY_MAX_LENGTH = 500
-ERROR_HEAD_LINES = 20
-ERROR_TAIL_LINES = 10
 BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
 
 # Model pricing (per 1M tokens, as of 2025-01)
@@ -310,6 +308,7 @@ class Agent:
             llm=llm,
             queue=queue,
             agent=self,
+            workflows_config=workflows_config,
         )
         self._prompt_builder = PromptBuilder(prompt_ctx)
 
