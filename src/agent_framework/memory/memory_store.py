@@ -26,7 +26,7 @@ MAX_CONTENT_LENGTH = 2000
 @dataclass
 class MemoryEntry:
     """Single memory item stored by an agent."""
-    category: str          # e.g. "repo_structure", "test_commands", "conventions", "tool_patterns"
+    category: str          # e.g. "repo_structure", "test_commands", "conventions", "tool_patterns", "architectural_decisions"
     content: str           # The actual learned information
     created_at: float = field(default_factory=time.time)
     last_accessed: float = field(default_factory=time.time)

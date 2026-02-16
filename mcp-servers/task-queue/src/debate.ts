@@ -14,6 +14,7 @@ import { writeFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
 import { createLogger } from "./logger.js";
 import { buildConsultationEnv } from "./consultation.js";
+import { agentRemember } from "./agent-memory.js";
 import type { PerspectiveArgument, DebateResult } from "./types.js";
 
 const logger = createLogger();
@@ -288,6 +289,64 @@ async function synthesizeArguments(
 }
 
 /**
+ * Store debate synthesis as a persistent memory with category "architectural_decisions".
+ * Memory failures are logged but don't break the debate flow.
+ */
+function storeDebateMemory(
+  workspace: string,
+  debateId: string,
+  topic: string,
+  synthesis: {
+    recommendation: string;
+    confidence: "high" | "medium" | "low";
+    trade_offs: string[];
+    reasoning: string;
+  },
+): void {
+  try {
+    const repoSlug = process.env.GITHUB_REPOSITORY || "unknown";
+    const agentType = process.env.AGENT_TYPE || "architect";
+
+    // Extract topic keywords for tagging (first 3-4 meaningful words)
+    // Include short technical terms like API, CI, DB, etc.
+    const topicKeywords = topic
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 0)
+      .slice(0, 4);
+
+    // Format memory content with structured information
+    const content = [
+      `Topic: ${topic}`,
+      `Recommendation: ${synthesis.recommendation}`,
+      `Confidence: ${synthesis.confidence}`,
+      `Trade-offs: ${synthesis.trade_offs.join("; ")}`,
+      `Reasoning: ${synthesis.reasoning}`,
+    ].join("\n");
+
+    const tags = ["debate", debateId, ...topicKeywords];
+
+    const result = agentRemember(workspace, {
+      repo_slug: repoSlug,
+      agent_type: agentType,
+      category: "architectural_decisions",
+      content,
+      tags,
+    });
+
+    if (result.success) {
+      logger.info(`Debate memory stored: ${topic}`, { debate_id: debateId });
+    } else {
+      logger.warn(`Failed to store debate memory: ${result.message}`, { debate_id: debateId });
+    }
+  } catch (error: unknown) {
+    const err = error as Error;
+    logger.warn(`Error storing debate memory: ${err.message}`, { debate_id: debateId });
+  }
+}
+
+/**
  * Main debate function - coordinates advocate, critic, and arbiter.
  * Runs advocate and critic in parallel, then arbiter synthesis sequentially.
  */
@@ -426,6 +485,9 @@ export async function debateTopic(
     debate_id: debateId,
     confidence: synthesis.confidence,
   });
+
+  // Store debate synthesis as a persistent memory
+  storeDebateMemory(workspace, debateId, topic, synthesis);
 
   return {
     success: true,
