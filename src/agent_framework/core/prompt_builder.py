@@ -637,36 +637,18 @@ If a tool call fails:
         return prompt + "\n\n" + tips_section
 
     def _inject_replan_context(self, prompt: str, task: Task) -> str:
-        """Append revised plan and attempt history to prompt if available."""
+        """Append revised plan and attempt history to prompt if available.
+
+        Delegates to ErrorRecoveryManager to avoid duplicating formatting logic.
+        """
+        if self.ctx.agent and hasattr(self.ctx.agent, '_error_recovery'):
+            return self.ctx.agent._error_recovery.inject_replan_context(prompt, task)
+
+        # Fallback for tests or standalone usage without agent reference
         revised_plan = task.context.get("_revised_plan")
         if not revised_plan:
             return prompt
-
-        self_eval_critique = task.context.get("_self_eval_critique", "")
-
-        replan_section = f"""
-
-## REVISED APPROACH (retry {task.retry_count})
-
-Previous attempts failed. Use this revised approach:
-
-{revised_plan}
-"""
-        if self_eval_critique:
-            replan_section += f"""
-## Self-Evaluation Feedback
-{self_eval_critique}
-"""
-
-        if task.replan_history:
-            replan_section += "\n## Previous Attempt History\n"
-            for entry in task.replan_history[:-1]:  # Skip current, already shown above
-                replan_section += (
-                    f"- Attempt {entry.get('attempt', '?')}: "
-                    f"Failed with: {entry.get('error', 'unknown')[:100]}\n"
-                )
-
-        return prompt + replan_section
+        return prompt + f"\n\n## REVISED APPROACH (retry {task.retry_count})\n\n{revised_plan}"
 
     def _inject_preview_mode(self, prompt: str, _task: Task) -> str:
         """Inject preview mode constraints when task is a preview."""
