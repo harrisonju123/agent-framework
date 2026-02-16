@@ -135,11 +135,14 @@ class TestEnforceWorkflowChain:
         chain_task = queue.push.call_args[0][0]
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "qa"
-        assert chain_task.id == f"chain-{task.id}-qa"
+        # Stable format: chain-{root_task_id}-{step_id}-d{depth}
+        assert chain_task.id == f"chain-{task.id}-qa-d1"
         assert chain_task.assigned_to == "qa"
         assert chain_task.context["source_task_id"] == task.id
         assert chain_task.context["chain_step"] is True
         assert chain_task.context["workflow_step"] == "qa"
+        assert chain_task.context["_root_task_id"] == task.id
+        assert chain_task.context["_global_cycle_count"] == 1
 
     def test_continues_chain_when_pr_created_at_non_terminal_step(self, agent, queue):
         """PR on intermediate agent (engineer) doesn't kill the chain — QA still runs."""
@@ -192,8 +195,8 @@ class TestEnforceWorkflowChain:
         task = _make_task(workflow="default")
         response = _make_response()
 
-        # Pre-create the chain task file
-        chain_id = f"chain-{task.id}-qa"
+        # Pre-create the chain task file with stable format
+        chain_id = f"chain-{task.id}-qa-d1"
         qa_dir = queue.queue_dir / "qa"
         qa_dir.mkdir()
         (qa_dir / f"{chain_id}.json").write_text("{}")
@@ -450,6 +453,7 @@ class TestPRCreation:
         assert pr_task.type == TaskType.PR_REQUEST
         assert pr_task.context["pr_creation_step"] is True
         assert pr_task.title.startswith("[pr]")
+        # PR creation still uses the old deterministic format (not DAG chain)
         assert pr_task.id == f"chain-{task.id}-architect-pr"
 
     def test_last_agent_no_pr_creator_configured(self, pr_agent, queue):
@@ -801,6 +805,7 @@ class TestChainIdCollision:
         chain_b = queue.push.call_args[0][0]
 
         assert chain_a.id != chain_b.id
+        # Root task IDs are embedded in the chain ID
         assert "planning-s6-auth-login" in chain_a.id
         assert "planning-s6-auth-signup" in chain_b.id
 
@@ -831,10 +836,11 @@ class TestExecutorCompletedCheck:
         executor = WorkflowExecutor(queue, queue.queue_dir)
 
         # Place a completed chain task in the correct completed_dir
-        chain_id = "chain-task-abc-engineer"
+        chain_id = "chain-task-abc-engineer-d1"
         (completed_dir / f"{chain_id}.json").write_text("{}")
 
-        assert executor._is_chain_task_already_queued("engineer", "task-abc") is True
+        # Use explicit chain_id param (the new stable format)
+        assert executor._is_chain_task_already_queued("engineer", "task-abc", chain_id=chain_id) is True
 
     def test_executor_completed_check_ignores_wrong_directory(self, queue, tmp_path):
         """Completed tasks in queue_dir/completed (wrong path) are NOT found."""
@@ -850,8 +856,137 @@ class TestExecutorCompletedCheck:
         # Place a file in the WRONG directory (queue_dir/completed)
         wrong_dir = queue.queue_dir / "completed"
         wrong_dir.mkdir(parents=True)
-        chain_id = "chain-task-abc-engineer"
+        chain_id = "chain-task-abc-engineer-d1"
         (wrong_dir / f"{chain_id}.json").write_text("{}")
 
         # Should NOT find it — the bug was checking the wrong path
-        assert executor._is_chain_task_already_queued("engineer", "task-abc") is False
+        assert executor._is_chain_task_already_queued("engineer", "task-abc", chain_id=chain_id) is False
+
+
+# -- Bounce loop prevention --
+
+class TestBounceLoopPrevention:
+    """Tests for root task identity, global cycle cap, and chain ID stability."""
+
+    def test_root_task_id_propagated_through_chain(self, agent, queue):
+        """_root_task_id is stamped on first hop and preserved in subsequent hops."""
+        task = _make_task(workflow="default")
+        agent._enforce_workflow_chain(task, _make_response())
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.context["_root_task_id"] == task.id
+
+        # Simulate second hop: QA → (would route further if there were a next step)
+        # Root ID should carry forward, not re-stamp with chain task ID
+        assert chain_task.context["_root_task_id"] == task.id
+        assert chain_task.context["_chain_depth"] == 1
+        assert chain_task.context["_global_cycle_count"] == 1
+
+    def test_chain_ids_are_bounded_no_nesting(self, agent, queue):
+        """Chain IDs use root_task_id, not task.id, so they never nest chain-chain-chain-..."""
+        task = _make_task(workflow="default")
+        agent._enforce_workflow_chain(task, _make_response())
+
+        chain_task = queue.push.call_args[0][0]
+        # New format: chain-{root_id}-{step_id}-d{depth}
+        assert chain_task.id == f"chain-{task.id}-qa-d1"
+        assert chain_task.id.count("chain-") == 1, "chain ID should not nest 'chain-' prefixes"
+
+    def test_global_cycle_count_increments_across_hops(self, agent, queue):
+        """Each chain hop increments _global_cycle_count."""
+        task = _make_task(workflow="default", _global_cycle_count=5)
+        agent._enforce_workflow_chain(task, _make_response())
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.context["_global_cycle_count"] == 6
+
+    def test_global_cycle_cap_halts_workflow(self, queue, tmp_path):
+        """When _global_cycle_count reaches MAX_GLOBAL_CYCLES, no chain task is created."""
+        from agent_framework.workflow.executor import WorkflowExecutor, MAX_GLOBAL_CYCLES
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+        executor.logger = MagicMock()
+
+        task = _make_task(
+            workflow="default",
+            _global_cycle_count=MAX_GLOBAL_CYCLES,
+            _chain_depth=2,
+        )
+
+        from agent_framework.workflow.dag import WorkflowStep
+        target_step = WorkflowStep(id="qa", agent="qa")
+
+        executor._route_to_step(task, target_step, MagicMock(), "engineer", None)
+
+        queue.push.assert_not_called()
+        executor.logger.warning.assert_called_once()
+        assert "Global cycle count" in executor.logger.warning.call_args[0][0]
+
+    def test_escalation_propagates_root_task_id(self, agent, queue):
+        """_escalate_review_to_architect carries _root_task_id from the source task."""
+        from agent_framework.core.agent import Agent
+
+        agent._escalate_review_to_architect = Agent._escalate_review_to_architect.__get__(agent)
+
+        task = _make_task(
+            workflow="default",
+            _root_task_id="original-root-123",
+            _global_cycle_count=4,
+            _chain_depth=3,
+        )
+        outcome = SimpleNamespace(
+            approved=False,
+            findings_summary="Tests still failing",
+        )
+
+        agent._escalate_review_to_architect(task, outcome, cycle_count=3)
+
+        queue.push.assert_called_once()
+        escalation = queue.push.call_args[0][0]
+        assert escalation.context["_root_task_id"] == "original-root-123"
+        assert escalation.context["_global_cycle_count"] == 4
+        assert escalation.context["_chain_depth"] == 3
+        # Escalation ID uses root_task_id, not task.id
+        assert escalation.id == "review-escalation-original-root-123"
+
+    def test_escalation_stamps_root_when_missing(self, agent, queue):
+        """If _root_task_id is missing, escalation stamps task.id as root."""
+        from agent_framework.core.agent import Agent
+
+        agent._escalate_review_to_architect = Agent._escalate_review_to_architect.__get__(agent)
+
+        task = _make_task(workflow="default")
+        outcome = SimpleNamespace(
+            approved=False,
+            findings_summary="Tests still failing",
+        )
+
+        agent._escalate_review_to_architect(task, outcome, cycle_count=3)
+
+        escalation = queue.push.call_args[0][0]
+        assert escalation.context["_root_task_id"] == task.id
+
+    def test_second_hop_chain_id_uses_root_not_chain_id(self, queue, tmp_path):
+        """Second chain hop uses root_task_id in chain ID, not the intermediate chain task ID."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        # Simulate a first-hop chain task
+        first_hop = _make_task(
+            task_id="chain-original-task-qa-d1",
+            workflow="default",
+            _root_task_id="original-task",
+            _chain_depth=1,
+            _global_cycle_count=1,
+        )
+
+        target_step = WorkflowStep(id="engineer", agent="engineer")
+        chain_task = executor._build_chain_task(first_hop, target_step, "qa")
+
+        # Chain ID should reference the original root, not the intermediate chain task
+        assert chain_task.id == "chain-original-task-engineer-d2"
+        assert chain_task.context["_root_task_id"] == "original-task"
+        assert chain_task.context["_chain_depth"] == 2
+        assert chain_task.context["_global_cycle_count"] == 2

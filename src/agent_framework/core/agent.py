@@ -2778,7 +2778,8 @@ IMPORTANT:
         from ..utils.subprocess_utils import run_command, SubprocessError
 
         # Build a clean PR title — strip workflow prefixes
-        pr_title = self._strip_chain_prefixes(task.title)[:70]
+        from ..workflow.executor import _strip_chain_prefixes
+        pr_title = _strip_chain_prefixes(task.title)[:70]
 
         pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
 
@@ -3681,8 +3682,9 @@ IMPORTANT:
 
         jira_key = task.context.get("jira_key", "UNKNOWN")
 
+        root_task_id = task.context.get("_root_task_id", task.id)
         escalation_task = Task(
-            id=f"review-escalation-{task.id[:12]}",
+            id=f"review-escalation-{root_task_id[:20]}",
             type=TaskType.ESCALATION,
             status=TaskStatus.PENDING,
             priority=max(1, task.priority - 1),  # Lower number = higher priority
@@ -3706,6 +3708,9 @@ IMPORTANT:
                 "source_agent": self.config.id,
                 "_review_cycle_count": cycle_count,
                 "escalation_reason": f"Review loop exceeded {MAX_REVIEW_CYCLES} cycles",
+                "_root_task_id": root_task_id,
+                "_global_cycle_count": task.context.get("_global_cycle_count", 0),
+                "_chain_depth": task.context.get("_chain_depth", 0),
             },
         )
 
@@ -3967,11 +3972,32 @@ IMPORTANT:
         return context
 
     def _route_to_agent(self, task: Task, target_agent: str, reason: str) -> None:
-        if self._is_chain_task_already_queued(target_agent, task.id):
+        """Route task to another agent using the workflow executor's chain builder."""
+        from .task import TaskType
+        from ..workflow.dag import WorkflowStep
+        from ..workflow.executor import AGENT_TASK_TYPES
+
+        # Build a synthetic WorkflowStep so executor._build_chain_task works
+        task_type_override = None
+        if target_agent in AGENT_TASK_TYPES:
+            task_type_override = AGENT_TASK_TYPES[target_agent].name.lower()
+
+        step = WorkflowStep(
+            id=target_agent,
+            agent=target_agent,
+            task_type_override=task_type_override,
+        )
+
+        chain_task = self._workflow_executor._build_chain_task(
+            task, step, self.config.id
+        )
+
+        if self._workflow_executor._is_chain_task_already_queued(
+            target_agent, task.id, chain_id=chain_task.id
+        ):
             self.logger.debug(f"Chain task for {target_agent} already queued from {task.id}")
             return
 
-        chain_task = self._build_chain_task(task, target_agent)
         try:
             self.queue.push(chain_task, target_agent)
             self.logger.info(f"🔗 Routed to {target_agent} (signal): {reason}")
@@ -3982,49 +4008,6 @@ IMPORTANT:
             )
         except Exception as e:
             self.logger.error(f"Failed to route task to {target_agent}: {e}")
-
-    def _is_chain_task_already_queued(self, next_agent: str, source_task_id: str) -> bool:
-        """O(1) file existence check using deterministic chain task ID.
-
-        Only checks the pending queue directory. If the task was already picked
-        up (moved to completed/in-progress), this won't detect it — acceptable
-        because _handle_successful_response only runs once per task lifecycle.
-        """
-        chain_id = f"chain-{source_task_id}-{next_agent}"
-        queue_path = self.queue.queue_dir / next_agent / f"{chain_id}.json"
-        return queue_path.exists()
-
-    @staticmethod
-    def _strip_chain_prefixes(title: str) -> str:
-        """Remove accumulated [chain]/[pr] prefixes so re-wrapping adds exactly one."""
-        while title.startswith(("[chain] ", "[pr] ")):
-            title = title[len("[chain] "):] if title.startswith("[chain] ") else title[len("[pr] "):]
-        return title
-
-    def _build_chain_task(self, task: Task, next_agent: str) -> Task:
-        """Create a continuation task for the next agent in the chain."""
-        from datetime import datetime
-
-        chain_id = f"chain-{task.id}-{next_agent}"
-        task_type = CHAIN_TASK_TYPES.get(next_agent, task.type)
-
-        return Task(
-            id=chain_id,
-            type=task_type,
-            status=TaskStatus.PENDING,
-            priority=task.priority,
-            created_by=self.config.id,
-            assigned_to=next_agent,
-            created_at=datetime.now(timezone.utc),
-            title=f"[chain] {self._strip_chain_prefixes(task.title)}",
-            description=task.description,
-            context={
-                **task.context,
-                "source_task_id": task.id,
-                "source_agent": self.config.id,
-                "chain_step": True,
-            },
-        )
 
     def _queue_pr_creation_if_needed(self, task: Task, workflow) -> None:
         """Queue a PR creation task when the last agent in the chain completes.
@@ -4050,6 +4033,7 @@ IMPORTANT:
             return
 
         from datetime import datetime
+        from ..workflow.executor import _strip_chain_prefixes
 
         pr_task = Task(
             id=pr_task_id,
@@ -4059,7 +4043,7 @@ IMPORTANT:
             created_by=self.config.id,
             assigned_to=pr_creator,
             created_at=datetime.now(timezone.utc),
-            title=f"[pr] {self._strip_chain_prefixes(task.title)}",
+            title=f"[pr] {_strip_chain_prefixes(task.title)}",
             description=task.description,
             context={
                 **task.context,

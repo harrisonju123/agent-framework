@@ -25,6 +25,9 @@ MAX_CHAIN_DEPTH = 10
 # Cap QA↔engineer review cycles within DAG workflows (mirrors MAX_REVIEW_CYCLES in agent.py)
 MAX_DAG_REVIEW_CYCLES = 3
 
+# Absolute ceiling on total chain hops — survives escalation and re-planning resets
+MAX_GLOBAL_CYCLES = 15
+
 
 @dataclass
 class WorkflowExecutionState:
@@ -276,6 +279,15 @@ class WorkflowExecutor:
             )
             return
 
+        # Absolute ceiling that survives escalation/re-planning resets
+        global_cycles = task.context.get("_global_cycle_count", 0)
+        if global_cycles >= MAX_GLOBAL_CYCLES:
+            self.logger.warning(
+                f"Global cycle count {global_cycles} reached max ({MAX_GLOBAL_CYCLES}) "
+                f"for task {task.id} — halting workflow to prevent runaway loop"
+            )
+            return
+
         # Cap QA→engineer review cycles to prevent infinite bounce loops.
         # QA routing back to engineer (needs_fix) increments the counter.
         qa_cycles = task.context.get("_dag_review_cycles", 0)
@@ -298,11 +310,12 @@ class WorkflowExecutor:
                 else:
                     return
 
-        if self._is_chain_task_already_queued(next_agent, task.id):
+        chain_task = self._build_chain_task(task, target_step, current_agent_id)
+
+        if self._is_chain_task_already_queued(next_agent, task.id, chain_id=chain_task.id):
             self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
 
-        chain_task = self._build_chain_task(task, target_step, current_agent_id)
         if is_qa_to_engineer:
             chain_task.context["_dag_review_cycles"] = qa_cycles
 
@@ -313,14 +326,16 @@ class WorkflowExecutor:
         except Exception as e:
             self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
 
-    def _is_chain_task_already_queued(self, next_agent: str, source_task_id: str) -> bool:
+    def _is_chain_task_already_queued(
+        self, next_agent: str, source_task_id: str, *, chain_id: Optional[str] = None
+    ) -> bool:
         """Check if chain task already exists in target queue or completed."""
-        chain_id = f"chain-{source_task_id}-{next_agent}"
-        queue_path = self.queue_dir / next_agent / f"{chain_id}.json"
+        cid = chain_id or f"chain-{source_task_id}-{next_agent}"
+        queue_path = self.queue_dir / next_agent / f"{cid}.json"
         if queue_path.exists():
             return True
         # Also check completed to prevent re-queuing tasks that already ran
-        completed_path = self.queue.completed_dir / f"{chain_id}.json"
+        completed_path = self.queue.completed_dir / f"{cid}.json"
         return completed_path.exists()
 
     def _build_chain_task(
@@ -330,7 +345,11 @@ class WorkflowExecutor:
         from ..core.task import Task
 
         next_agent = target_step.agent
-        chain_id = f"chain-{task.id}-{next_agent}"
+        chain_depth = task.context.get("_chain_depth", 0) + 1
+
+        # Stable root identity — stamped on first hop, propagated forever
+        root_task_id = task.context.get("_root_task_id", task.id)
+        chain_id = f"chain-{root_task_id}-{target_step.id}-d{chain_depth}"
 
         if target_step.task_type_override:
             task_type = TaskType[target_step.task_type_override.upper()]
@@ -344,7 +363,9 @@ class WorkflowExecutor:
             "source_agent": current_agent_id,
             "chain_step": True,
             "workflow_step": target_step.id,
-            "_chain_depth": task.context.get("_chain_depth", 0) + 1,
+            "_chain_depth": chain_depth,
+            "_root_task_id": root_task_id,
+            "_global_cycle_count": task.context.get("_global_cycle_count", 0) + 1,
         }
         if task.context.get("fan_in"):
             context["fan_in"] = True
