@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from .config import AgentDefinition, WorkflowDefinition
+    from .config import AgentDefinition, RepositoryConfig, WorkflowDefinition
 
 from .task import Task, TaskStatus, TaskType
 from .task_validator import validate_task, ValidationResult
@@ -179,6 +179,8 @@ class Agent:
         self_eval_config: Optional[dict] = None,
         replan_config: Optional[dict] = None,
         session_logging_config: Optional[dict] = None,
+        repositories_config: Optional[List["RepositoryConfig"]] = None,
+        pr_lifecycle_config: Optional[dict] = None,
     ):
         self.config = config
         self.llm = llm
@@ -306,6 +308,21 @@ class Agent:
                     self.logger.warning(f"Docker not available, sandbox disabled for {config.id}")
             except Exception as e:
                 self.logger.warning(f"Failed to initialize sandbox for {config.id}: {e}")
+
+        # PR lifecycle management: autonomous CI poll → fix → merge
+        self._pr_lifecycle_manager = None
+        if repositories_config:
+            from .pr_lifecycle import PRLifecycleManager
+            repo_lookup = {rc.github_repo: rc.model_dump() for rc in repositories_config}
+            if repo_lookup:
+                self._pr_lifecycle_manager = PRLifecycleManager(
+                    queue=queue,
+                    workspace=workspace,
+                    repo_configs=repo_lookup,
+                    pr_lifecycle_config=pr_lifecycle_config,
+                    logger_instance=self.logger,
+                    multi_repo_manager=multi_repo_manager,
+                )
 
     async def run(self) -> None:
         """
@@ -551,6 +568,9 @@ class Agent:
             # Safety net: create PR if LLM pushed but didn't create one.
             # Runs AFTER workflow chain so pr_url doesn't short-circuit the executor.
             self._push_and_create_pr_if_needed(task)
+
+            # Autonomous PR lifecycle: poll CI, fix failures, merge
+            self._manage_pr_lifecycle(task)
 
         self._extract_and_store_memories(task, response)
         self._analyze_tool_patterns(task)
@@ -2664,6 +2684,23 @@ IMPORTANT:
             self.logger.error(f"Subprocess error during PR creation: {e}")
         except Exception as e:
             self.logger.error(f"Error creating PR: {e}")
+
+    def _manage_pr_lifecycle(self, task: Task) -> None:
+        """Autonomously monitor CI, fix failures, and merge PR if repo opts in."""
+        if not self._pr_lifecycle_manager:
+            return
+        if not self._pr_lifecycle_manager.should_manage(task):
+            return
+
+        try:
+            merged = self._pr_lifecycle_manager.manage(task, self.config.id)
+            if merged:
+                self._sync_jira_status(
+                    task, "Done",
+                    comment=f"PR merged automatically: {task.context.get('pr_url')}",
+                )
+        except Exception as e:
+            self.logger.error(f"PR lifecycle error for {task.id}: {e}")
 
     def _create_pr_from_branch(self, task: Task, branch: str) -> None:
         """Create a PR from an existing pushed branch (used by pr_creation_step tasks).

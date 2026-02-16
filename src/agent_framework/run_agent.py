@@ -228,6 +228,8 @@ def main():
             self_eval_config=self_eval_config,
             replan_config=replan_config,
             session_logging_config=session_logging_config,
+            repositories_config=framework_config.repositories,
+            pr_lifecycle_config=framework_config.pr_lifecycle.model_dump(),
         )
 
         # Let SIGTERM trigger a clean exit through the polling loop

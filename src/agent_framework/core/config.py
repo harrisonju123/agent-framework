@@ -361,6 +361,15 @@ class WorkflowDefinition(BaseModel):
         return dag
 
 
+class PRLifecycleConfig(BaseModel):
+    """Configuration for autonomous PR lifecycle management (CI polling, merge)."""
+    ci_poll_interval: int = 30  # Seconds between CI status checks
+    ci_poll_max_wait: int = 1200  # Max seconds to wait for CI (20 min)
+    max_ci_fix_attempts: int = 3  # Default cap on engineer CI fix loops
+    auto_approve: bool = True  # QA-approve via gh pr review --approve
+    delete_branch_on_merge: bool = True  # Pass --delete-branch to gh pr merge
+
+
 class MultiRepoConfig(BaseModel):
     """Multi-repository configuration."""
     workspace_root: Path = Field(default=Path("~/.agent-workspaces"))
@@ -372,6 +381,9 @@ class RepositoryConfig(BaseModel):
     github_repo: str  # owner/repo format (e.g., "justworkshr/pto")
     jira_project: Optional[str] = None  # JIRA project key (e.g., "PTO"), None for local-only
     display_name: Optional[str] = None  # Display name (defaults to repo name)
+    auto_merge: bool = False  # Opt-in: autonomously merge PRs after CI passes
+    merge_strategy: Literal["squash", "merge", "rebase"] = "squash"
+    max_ci_fix_attempts: int = 3  # Per-repo override for CI fix retry limit
 
     @property
     def name(self) -> str:
@@ -461,6 +473,7 @@ class FrameworkConfig(BaseSettings):
     workflows: Dict[str, WorkflowDefinition] = Field(default_factory=dict)
     multi_repo: MultiRepoConfig = Field(default_factory=MultiRepoConfig)
     repositories: List[RepositoryConfig] = Field(default_factory=list)
+    pr_lifecycle: PRLifecycleConfig = Field(default_factory=PRLifecycleConfig)
 
     class Config:
         env_prefix = "AGENT_"
