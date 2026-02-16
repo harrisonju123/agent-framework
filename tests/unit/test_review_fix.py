@@ -69,6 +69,7 @@ def queue(tmp_path):
 @pytest.fixture
 def qa_agent(queue):
     """QA agent for testing review fix logic."""
+    from agent_framework.core.review_cycle import ReviewCycleManager
     config = AgentConfig(
         id="qa",
         name="QA Engineer",
@@ -81,12 +82,21 @@ def qa_agent(queue):
     a.logger = MagicMock()
     a.jira_client = None
     a._agent_definition = None
+    a._review_cycle = ReviewCycleManager(
+        config=config,
+        queue=queue,
+        logger=a.logger,
+        agent_definition=None,
+        session_logger=MagicMock(),
+        activity_manager=MagicMock(),
+    )
     return a
 
 
 @pytest.fixture
 def engineer_agent(queue):
     """Engineer agent — should never trigger review fix logic."""
+    from agent_framework.core.review_cycle import ReviewCycleManager
     config = AgentConfig(
         id="engineer",
         name="Engineer",
@@ -97,6 +107,14 @@ def engineer_agent(queue):
     a.config = config
     a.queue = queue
     a.logger = MagicMock()
+    a._review_cycle = ReviewCycleManager(
+        config=config,
+        queue=queue,
+        logger=a.logger,
+        agent_definition=None,
+        session_logger=MagicMock(),
+        activity_manager=MagicMock(),
+    )
     return a
 
 
@@ -474,6 +492,7 @@ class TestReviewTaskCycleCountPropagation:
 class TestQaReplicaAgent:
     def test_qa_replica_fires_review_fix(self, queue):
         """qa-2 (replica) should also trigger review fix logic."""
+        from agent_framework.core.review_cycle import ReviewCycleManager
         config = AgentConfig(
             id="qa-2",
             name="QA Replica",
@@ -484,6 +503,14 @@ class TestQaReplicaAgent:
         a.config = config
         a.queue = queue
         a.logger = MagicMock()
+        a._review_cycle = ReviewCycleManager(
+            config=config,
+            queue=queue,
+            logger=a.logger,
+            agent_definition=None,
+            session_logger=MagicMock(),
+            activity_manager=MagicMock(),
+        )
 
         task = _make_task()
         response = _make_response("REQUEST_CHANGES\nFix the bug")
@@ -495,6 +522,7 @@ class TestQaReplicaAgent:
 
     def test_qa_replica_skips_code_review_queue(self, queue):
         """qa-2 (replica) should skip _queue_code_review_if_needed just like qa."""
+        from agent_framework.core.review_cycle import ReviewCycleManager
         config = AgentConfig(
             id="qa-2",
             name="QA Replica",
@@ -505,6 +533,14 @@ class TestQaReplicaAgent:
         a.config = config
         a.queue = queue
         a.logger = MagicMock()
+        a._review_cycle = ReviewCycleManager(
+            config=config,
+            queue=queue,
+            logger=a.logger,
+            agent_definition=None,
+            session_logger=MagicMock(),
+            activity_manager=MagicMock(),
+        )
 
         task = _make_task(task_type=TaskType.IMPLEMENTATION, assigned_to="qa-2")
         response = _make_response(
@@ -568,6 +604,7 @@ class TestEscalationGuard:
 
     @pytest.fixture
     def architect_agent(self, queue):
+        from agent_framework.core.review_cycle import ReviewCycleManager
         config = AgentConfig(
             id="architect",
             name="Architect",
@@ -578,6 +615,14 @@ class TestEscalationGuard:
         a.config = config
         a.queue = queue
         a.logger = MagicMock()
+        a._review_cycle = ReviewCycleManager(
+            config=config,
+            queue=queue,
+            logger=a.logger,
+            agent_definition=None,
+            session_logger=MagicMock(),
+            activity_manager=MagicMock(),
+        )
         return a
 
     def test_escalation_task_skips_code_review_queue(self, architect_agent):
@@ -697,6 +742,15 @@ class TestPurgeOrphanedReviewTasks:
         a.config = config
         a.queue = q
         a.logger = MagicMock()
+        from agent_framework.core.review_cycle import ReviewCycleManager
+        a._review_cycle = ReviewCycleManager(
+            config=config,
+            queue=q,
+            logger=a.logger,
+            agent_definition=None,
+            session_logger=MagicMock(),
+            activity_manager=MagicMock(),
+        )
         return a
 
     def test_purges_review_task_for_escalated_pr(self, purge_agent):

@@ -23,7 +23,7 @@ from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, 
 from .routing import read_routing_signal, validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
 from .team_composer import compose_default_team, compose_team
 from .context_window_manager import ContextWindowManager
-from .review_cycle import ReviewCycleManager, QAFinding, ReviewOutcome
+from .review_cycle import ReviewCycleManager, QAFinding, ReviewOutcome, MAX_REVIEW_CYCLES
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
@@ -291,6 +291,57 @@ class Agent:
             session_logger=self._session_logger,
             activity_manager=self.activity_manager,
         )
+
+    # Backward-compatibility delegation shims for tests that call Agent._* methods
+    # These delegate to ReviewCycleManager for cleaner architecture
+    def _parse_review_outcome(self, content: str) -> ReviewOutcome:
+        """Delegate to ReviewCycleManager.parse_review_outcome."""
+        return self._review_cycle.parse_review_outcome(content)
+
+    def _extract_review_findings(self, content: str):
+        """Delegate to ReviewCycleManager.extract_review_findings."""
+        return self._review_cycle.extract_review_findings(content)
+
+    def _parse_structured_findings(self, content: str):
+        """Delegate to ReviewCycleManager.parse_structured_findings."""
+        return self._review_cycle.parse_structured_findings(content)
+
+    def _format_findings_checklist(self, findings):
+        """Delegate to ReviewCycleManager.format_findings_checklist."""
+        return self._review_cycle.format_findings_checklist(findings)
+
+    def _build_review_task(self, task: Task, pr_info: dict) -> Task:
+        """Delegate to ReviewCycleManager.build_review_task."""
+        return self._review_cycle.build_review_task(task, pr_info)
+
+    def _build_review_fix_task(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> Task:
+        """Delegate to ReviewCycleManager.build_review_fix_task."""
+        return self._review_cycle.build_review_fix_task(task, outcome, cycle_count)
+
+    def _escalate_review_to_architect(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> None:
+        """Delegate to ReviewCycleManager.escalate_review_to_architect."""
+        return self._review_cycle.escalate_review_to_architect(task, outcome, cycle_count)
+
+    def _purge_orphaned_review_tasks(self) -> None:
+        """Delegate to ReviewCycleManager.purge_orphaned_review_tasks."""
+        return self._review_cycle.purge_orphaned_review_tasks()
+
+    def _get_pr_info(self, task: Task, response):
+        """Delegate to ReviewCycleManager.get_pr_info."""
+        return self._review_cycle.get_pr_info(task, response)
+
+    def _extract_pr_info_from_response(self, response_content: str):
+        """Delegate to ReviewCycleManager.extract_pr_info_from_response."""
+        return self._review_cycle.extract_pr_info_from_response(response_content)
+
+    def _queue_code_review_if_needed(self, task: Task, response) -> None:
+        """Delegate to ReviewCycleManager.queue_code_review_if_needed."""
+        return self._review_cycle.queue_code_review_if_needed(task, response)
+
+    def _queue_review_fix_if_needed(self, task: Task, response) -> None:
+        """Delegate to ReviewCycleManager.queue_review_fix_if_needed (without sync callback)."""
+        # Note: tests don't pass sync_jira_status_callback, so we use a no-op
+        return self._review_cycle.queue_review_fix_if_needed(task, response, lambda *args, **kwargs: None)
 
     async def run(self) -> None:
         """
@@ -3158,9 +3209,9 @@ IMPORTANT:
             self._route_to_agent(task, 'architect', 'preview_review')
             return
 
-        # REVIEW/FIX tasks are routed by _queue_code_review_if_needed and
-        # _queue_review_fix_if_needed respectively — letting them also route
-        # through the DAG creates a duplicate-routing feedback loop.
+        # REVIEW/FIX tasks are routed by self._review_cycle.queue_code_review_if_needed
+        # and self._review_cycle.queue_review_fix_if_needed respectively — letting
+        # them also route through the DAG creates a duplicate-routing feedback loop.
         if task.type in (TaskType.REVIEW, TaskType.FIX):
             self.logger.debug(
                 f"Skipping workflow chain for {task.id}: "
