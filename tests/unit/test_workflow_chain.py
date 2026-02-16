@@ -130,6 +130,20 @@ def agent(queue, tmp_path):
     prompt_builder = PromptBuilder(prompt_ctx)
     a._prompt_builder = prompt_builder
 
+    # Initialize workflow router (required after extraction)
+    from agent_framework.core.workflow_router import WorkflowRouter
+    a._workflow_router = WorkflowRouter(
+        config=config,
+        queue=queue,
+        workspace=tmp_path,
+        logger=a.logger,
+        session_logger=a._session_logger,
+        workflows_config=a._workflows_config,
+        workflow_executor=a._workflow_executor,
+        agents_config=a._agents_config,
+        multi_repo_manager=None,
+    )
+
     return a
 
 
@@ -241,6 +255,7 @@ class TestEnforceWorkflowChain:
     def test_skips_last_agent_in_chain(self, agent, queue):
         """Last agent in the chain has nobody to forward to."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         response = _make_response()
 
@@ -259,6 +274,7 @@ class TestEnforceWorkflowChain:
     def test_skips_single_agent_workflow(self, agent, queue):
         """Single-agent workflows (like analysis) have no chain to enforce."""
         agent.config = AgentConfig(id="architect", name="A", queue="a", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="analysis")
         response = _make_response()
 
@@ -270,6 +286,7 @@ class TestEnforceWorkflowChain:
         """Engineer tasks get IMPLEMENTATION type."""
         # architect -> engineer chain
         agent.config = AgentConfig(id="architect", name="A", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         response = _make_response()
 
@@ -303,10 +320,13 @@ class TestEnforceWorkflowChain:
         task = _make_task(workflow="default")
         response = _make_response()
         queue.push.side_effect = OSError("disk full")
+
+        # Mock executor's logger to verify error logging
         agent._workflow_executor.logger = MagicMock()
 
         agent._enforce_workflow_chain(task, response)
 
+        # Error is caught and logged by the executor (called from router.enforce_chain)
         agent._workflow_executor.logger.error.assert_called_once()
 
 
@@ -481,6 +501,20 @@ class TestPRCreation:
             workflows_config=a._workflows_config,
         )
 
+        # Initialize workflow router (required after extraction)
+        from agent_framework.core.workflow_router import WorkflowRouter
+        a._workflow_router = WorkflowRouter(
+            config=config,
+            queue=queue,
+            workspace=tmp_path,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            workflows_config=a._workflows_config,
+            workflow_executor=a._workflow_executor,
+            agents_config=a._agents_config,
+            multi_repo_manager=None,
+        )
+
         return a
 
     def test_last_agent_queues_pr_creation(self, pr_agent, queue):
@@ -514,6 +548,7 @@ class TestPRCreation:
         pr_agent.config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="p",
         )
+        pr_agent._workflow_router.config = pr_agent.config
         task = _make_task(workflow="pr_workflow", pr_creation_step=True)
         response = _make_response()
 
@@ -573,18 +608,21 @@ class TestTerminalStepDetection:
     def test_last_agent_is_terminal(self, agent):
         """QA (last in architect→engineer→qa) is terminal."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         assert agent._is_at_terminal_workflow_step(task) is True
 
     def test_first_agent_is_not_terminal(self, agent):
         """Architect (first in architect→engineer→qa) is not terminal."""
         agent.config = AgentConfig(id="architect", name="A", queue="a", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         assert agent._is_at_terminal_workflow_step(task) is False
 
     def test_single_agent_workflow_is_terminal(self, agent):
         """Single-agent workflow (analysis: [architect]) — architect is terminal."""
         agent.config = AgentConfig(id="architect", name="A", queue="a", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="analysis")
         assert agent._is_at_terminal_workflow_step(task) is True
 
@@ -608,6 +646,7 @@ class TestTerminalStepDetection:
     def test_explicit_workflow_step_intermediate(self, agent):
         """workflow_step pointing to engineer (intermediate) returns False."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="engineer")
         assert agent._is_at_terminal_workflow_step(task) is False
 
@@ -647,7 +686,8 @@ class TestIntermediateStepPRSuppression:
     def test_terminal_step_creates_pr(self, agent, tmp_path):
         """QA (terminal) creates a PR normally."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
-        agent._git_ops.config = agent.config  # Update git_ops config too
+        agent._git_ops.config = agent.config
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", github_repo="org/repo")
 
         worktree_dir = tmp_path / "worktree"
@@ -798,6 +838,7 @@ class TestPreviewMode:
         agent.config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="You are an architect.",
         )
+        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         task.type = TaskType.PREVIEW
         response = _make_response()
@@ -1029,3 +1070,291 @@ class TestBounceLoopPrevention:
         assert chain_task.context["_root_task_id"] == "original-task"
         assert chain_task.context["_chain_depth"] == 2
         assert chain_task.context["_global_cycle_count"] == 2
+
+
+# -- Fix 2: MAX_DAG_REVIEW_CYCLES lowered to 2 --
+
+class TestDAGReviewCycleCap:
+    """Verify QA->engineer fix cycles cap at MAX_DAG_REVIEW_CYCLES=2."""
+
+    def test_dag_review_cycles_cap_is_two(self):
+        from agent_framework.workflow.executor import MAX_DAG_REVIEW_CYCLES
+        assert MAX_DAG_REVIEW_CYCLES == 2
+
+    def test_qa_routes_to_pr_after_two_fix_cycles(self, queue, tmp_path):
+        """After 2 fix cycles, QA->engineer route redirects to create_pr step."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            _dag_review_cycles=2,
+            _chain_depth=4,
+            _root_task_id="root-1",
+            _global_cycle_count=4,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        workflow = MagicMock()
+        workflow.steps = {"engineer": engineer_step, "create_pr": pr_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        target_queue = queue.push.call_args[0][1]
+        # Redirected to PR step instead of back to engineer
+        assert target_queue == "architect"
+
+    def test_qa_allows_first_two_fix_cycles(self, queue, tmp_path):
+        """First 2 fix cycles route normally to engineer."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            _dag_review_cycles=1,
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"engineer": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "engineer"
+        assert chain_task.context["_dag_review_cycles"] == 2
+
+
+# -- Fix 3: QA findings injected in chain task description --
+
+class TestUpstreamSummaryInChainTask:
+    """Verify QA findings get embedded in fix-cycle chain task descriptions."""
+
+    def test_qa_to_engineer_injects_upstream_summary(self, queue, tmp_path):
+        """When QA routes to engineer, upstream_summary is prepended to description."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            upstream_summary="Tests failing in module X",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"engineer": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.description.startswith("## QA FINDINGS TO ADDRESS")
+        assert "Tests failing in module X" in chain_task.description
+        assert "## ORIGINAL TASK" in chain_task.description
+        assert "Build the thing." in chain_task.description
+
+    def test_non_qa_route_preserves_original_description(self, agent, queue):
+        """Engineer->QA route keeps the original description unchanged."""
+        task = _make_task(workflow="default")
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response)
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.description == "Build the thing."
+
+    def test_qa_to_engineer_without_summary_preserves_description(self, queue, tmp_path):
+        """QA->engineer without upstream_summary keeps original description."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"engineer": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.description == "Build the thing."
+
+
+# -- Fix 4: PR creation skipped for planning-only tasks --
+
+class TestPRCreationPlanningSkip:
+    """Verify planning-only tasks (no implementation_branch) skip PR creation."""
+
+    @pytest.fixture
+    def pr_agent(self, queue, tmp_path):
+        config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.queue = queue
+        a.workspace = tmp_path
+        a._workflows_config = {
+            "default": DEFAULT_WORKFLOW,
+            "pr_workflow": PR_WORKFLOW,
+        }
+        a._agents_config = [
+            SimpleNamespace(id="architect"),
+            SimpleNamespace(id="engineer"),
+            SimpleNamespace(id="qa"),
+        ]
+        a._team_mode_enabled = False
+        a.logger = MagicMock()
+        a._session_logger = MagicMock()
+
+        from agent_framework.workflow.executor import WorkflowExecutor
+        a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        from agent_framework.core.git_operations import GitOperationsManager
+        a._git_ops = GitOperationsManager(
+            config=a.config,
+            workspace=a.workspace,
+            queue=a.queue,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            workflows_config=a._workflows_config,
+        )
+        return a
+
+    def test_no_branch_no_pr_skips_creation(self, pr_agent, queue):
+        """Task without implementation_branch or pr_number skips PR creation."""
+        task = _make_task(workflow="pr_workflow")
+        pr_agent._queue_pr_creation_if_needed(task, PR_WORKFLOW)
+        queue.push.assert_not_called()
+
+    def test_with_implementation_branch_creates_pr(self, pr_agent, queue):
+        """Task with implementation_branch proceeds to queue PR creation."""
+        task = _make_task(
+            workflow="pr_workflow",
+            implementation_branch="agent/engineer/PROJ-123-abc12345",
+        )
+        pr_agent._queue_pr_creation_if_needed(task, PR_WORKFLOW)
+        queue.push.assert_called_once()
+        pr_task = queue.push.call_args[0][0]
+        assert pr_task.type == TaskType.PR_REQUEST
+
+    def test_with_pr_number_creates_pr(self, pr_agent, queue):
+        """Task with pr_number proceeds to queue PR creation."""
+        task = _make_task(workflow="pr_workflow", pr_number=42)
+        pr_agent._queue_pr_creation_if_needed(task, PR_WORKFLOW)
+        queue.push.assert_called_once()
+
+
+# -- Fix 5: Title-based dedup --
+
+class TestTitleBasedDedup:
+    """Verify title-based dedup catches same work queued under different IDs."""
+
+    def test_title_dedup_blocks_duplicate(self, queue, tmp_path):
+        """Existing task with same title (after stripping prefixes) blocks new task."""
+        import json
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        engineer_dir = queue.queue_dir / "engineer"
+        engineer_dir.mkdir()
+        existing_task = {"title": "[chain] Implement feature X", "id": "impl-1"}
+        (engineer_dir / "impl-1.json").write_text(json.dumps(existing_task))
+
+        result = executor._is_chain_task_already_queued(
+            "engineer", "other-source",
+            chain_id="chain-other-engineer-d1",
+            title="[chain] Implement feature X",
+        )
+        assert result is True
+
+    def test_title_dedup_allows_different_titles(self, queue, tmp_path):
+        """Different titles are not blocked by dedup."""
+        import json
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        engineer_dir = queue.queue_dir / "engineer"
+        engineer_dir.mkdir()
+        existing_task = {"title": "[chain] Implement feature Y", "id": "impl-1"}
+        (engineer_dir / "impl-1.json").write_text(json.dumps(existing_task))
+
+        result = executor._is_chain_task_already_queued(
+            "engineer", "other-source",
+            chain_id="chain-other-engineer-d1",
+            title="[chain] Implement feature X",
+        )
+        assert result is False
+
+    def test_title_dedup_strips_chain_prefixes(self, queue, tmp_path):
+        """Prefix stripping normalizes '[chain] [chain] X' to match '[chain] X'."""
+        import json
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        engineer_dir = queue.queue_dir / "engineer"
+        engineer_dir.mkdir()
+        existing_task = {"title": "Implement feature X", "id": "impl-plan-1"}
+        (engineer_dir / "impl-plan-1.json").write_text(json.dumps(existing_task))
+
+        result = executor._is_chain_task_already_queued(
+            "engineer", "other-source",
+            chain_id="chain-other-engineer-d1",
+            title="[chain] Implement feature X",
+        )
+        assert result is True
+
+    def test_title_dedup_case_insensitive(self, queue, tmp_path):
+        """Title comparison is case-insensitive."""
+        import json
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        engineer_dir = queue.queue_dir / "engineer"
+        engineer_dir.mkdir()
+        existing_task = {"title": "[chain] IMPLEMENT FEATURE X", "id": "impl-1"}
+        (engineer_dir / "impl-1.json").write_text(json.dumps(existing_task))
+
+        result = executor._is_chain_task_already_queued(
+            "engineer", "other-source",
+            chain_id="chain-other-engineer-d1",
+            title="[chain] implement feature x",
+        )
+        assert result is True
+
+    def test_no_title_skips_dedup(self, queue, tmp_path):
+        """When title is None, only ID-based check is performed."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        result = executor._is_chain_task_already_queued(
+            "engineer", "task-1",
+            chain_id="chain-task-1-engineer-d1",
+        )
+        assert result is False

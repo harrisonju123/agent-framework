@@ -91,6 +91,21 @@ def agent(queue, tmp_path):
         session_logger=a._session_logger if hasattr(a, '_session_logger') else None,
         workflows_config=a._workflows_config,
     )
+
+    # Initialize workflow router (required after extraction)
+    from agent_framework.core.workflow_router import WorkflowRouter
+    a._workflow_router = WorkflowRouter(
+        config=config,
+        queue=queue,
+        workspace=tmp_path,
+        logger=a.logger,
+        session_logger=a._session_logger,
+        workflows_config=a._workflows_config,
+        workflow_executor=a._workflow_executor,
+        agents_config=a._agents_config,
+        multi_repo_manager=None,
+    )
+
     return a
 
 
