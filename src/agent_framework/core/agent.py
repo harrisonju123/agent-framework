@@ -409,6 +409,7 @@ class Agent:
         )
 
         self._budget = BudgetManager(
+            agent_id=config.id,
             optimization_config=dict(self._optimization_config),
             logger=self.logger,
             session_logger=self._session_logger,

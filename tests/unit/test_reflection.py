@@ -29,15 +29,39 @@ def _make_task(**overrides):
     return Task(**defaults)
 
 
+class _AgentMock:
+    """Custom mock that forwards llm to _error_recovery."""
+
+    def __init__(self, error_recovery):
+        self._error_recovery = error_recovery
+        self._session_logger = error_recovery.session_logger
+        self.logger = error_recovery.logger
+        self.queue = error_recovery.queue
+        self._self_evaluate = Agent._self_evaluate.__get__(self)
+
+    def __setattr__(self, name, value):
+        if name == "llm":
+            # Forward to error_recovery
+            self._error_recovery.llm = value
+        object.__setattr__(self, name, value)
+
+
 def _make_agent(**overrides):
     """Build a mock agent with _self_evaluate bound from the real class."""
-    agent = MagicMock()
-    agent._self_evaluate = Agent._self_evaluate.__get__(agent)
-    agent._self_eval_max_retries = overrides.get("max_retries", 2)
-    agent._self_eval_model = overrides.get("model", "haiku")
-    agent._session_logger = MagicMock()
-    agent.logger = MagicMock()
-    agent.queue = MagicMock()
+    from agent_framework.core.error_recovery import ErrorRecoveryManager
+
+    # The Agent._self_evaluate now delegates to _error_recovery.self_evaluate()
+    # So we bind the ErrorRecoveryManager.self_evaluate method instead
+    error_recovery = MagicMock()
+    error_recovery.self_evaluate = ErrorRecoveryManager.self_evaluate.__get__(error_recovery)
+    error_recovery._self_eval_max_retries = overrides.get("max_retries", 2)
+    error_recovery._self_eval_model = overrides.get("model", "haiku")
+    error_recovery.session_logger = MagicMock()
+    error_recovery.logger = MagicMock()
+    error_recovery.queue = MagicMock()
+    error_recovery.llm = AsyncMock()
+
+    agent = _AgentMock(error_recovery)
     return agent
 
 

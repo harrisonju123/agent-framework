@@ -30,6 +30,7 @@ class BudgetManager:
 
     def __init__(
         self,
+        agent_id: str,
         optimization_config: dict,
         logger: "ContextLogger",
         session_logger: "SessionLogger",
@@ -37,6 +38,7 @@ class BudgetManager:
         workspace: Path,
         activity_manager: "ActivityManager",
     ):
+        self.agent_id = agent_id
         self.optimization_config = optimization_config
         self.logger = logger
         self.session_logger = session_logger
@@ -80,7 +82,11 @@ class BudgetManager:
         else:
             task_type_str = task_type.value.lower()
 
-        return configured_budgets.get(task_type_str, default_budgets.get(task_type_str, 50000))
+        # Normalize hyphens to underscores for backward compatibility
+        # (e.g., "bug-fix" → "bug_fix" to match config keys)
+        task_type_str = task_type_str.replace("-", "_")
+
+        return configured_budgets.get(task_type_str, default_budgets.get(task_type_str, 40000))
 
     def estimate_cost(self, response: "LLMResponse") -> float:
         """
@@ -137,7 +143,7 @@ class BudgetManager:
                 )
                 self.activity_manager.append_event(ActivityEvent(
                     type="token_budget_exceeded",
-                    agent=task.assigned_to or "unknown",
+                    agent=self.agent_id,
                     task_id=task.id,
                     title=f"Token budget exceeded: {total_tokens} > {budget}",
                     timestamp=datetime.now(timezone.utc)
@@ -148,7 +154,7 @@ class BudgetManager:
         pr_url = task.context.get("pr_url")
         self.activity_manager.append_event(ActivityEvent(
             type="complete",
-            agent=task.assigned_to or "unknown",
+            agent=self.agent_id,
             task_id=task.id,
             title=task.title,
             timestamp=datetime.now(timezone.utc),

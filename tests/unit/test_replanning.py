@@ -31,19 +31,50 @@ def _make_task(**overrides):
     return Task(**defaults)
 
 
+class _AgentMock:
+    """Custom mock that forwards llm and memory_store to _error_recovery."""
+
+    def __init__(self, error_recovery):
+        self._error_recovery = error_recovery
+        self._session_logger = error_recovery.session_logger
+        self.logger = error_recovery.logger
+        self._request_replan = Agent._request_replan.__get__(self)
+        self._inject_replan_context = Agent._inject_replan_context.__get__(self)
+        self._build_replan_memory_context = lambda task: error_recovery._build_replan_memory_context(task)
+        self._replan_model = "haiku"
+
+    def __setattr__(self, name, value):
+        if name == "llm":
+            # Forward to error_recovery
+            self._error_recovery.llm = value
+        elif name == "_memory_store":
+            self._error_recovery.memory_store = value
+        elif name == "_memory_enabled":
+            self._error_recovery.memory_store = MagicMock() if value else None
+            if value:
+                self._error_recovery.memory_store.enabled = True
+        elif name == "config":
+            self._error_recovery.config = value
+        object.__setattr__(self, name, value)
+
+
 def _make_agent():
-    agent = MagicMock()
-    agent._request_replan = Agent._request_replan.__get__(agent)
-    agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
-    agent._replan_model = "haiku"
-    agent._session_logger = MagicMock()
-    agent.logger = MagicMock()
-    # Create mock prompt builder with _inject_replan_context
-    prompt_builder = MagicMock()
-    prompt_builder._inject_replan_context = PromptBuilder._inject_replan_context.__get__(prompt_builder)
-    prompt_builder.ctx = MagicMock()
-    prompt_builder.logger = MagicMock()
-    agent._prompt_builder = prompt_builder
+    from agent_framework.core.error_recovery import ErrorRecoveryManager
+
+    # The Agent._request_replan and _inject_replan_context now delegate to ErrorRecoveryManager
+    # So we bind the ErrorRecoveryManager methods instead
+    error_recovery = MagicMock()
+    error_recovery.request_replan = ErrorRecoveryManager.request_replan.__get__(error_recovery)
+    error_recovery.inject_replan_context = ErrorRecoveryManager.inject_replan_context.__get__(error_recovery)
+    error_recovery._build_replan_memory_context = ErrorRecoveryManager._build_replan_memory_context.__get__(error_recovery)
+    error_recovery._get_repo_slug = ErrorRecoveryManager._get_repo_slug.__get__(error_recovery)
+    error_recovery._replan_model = "haiku"
+    error_recovery.session_logger = MagicMock()
+    error_recovery.logger = MagicMock()
+    error_recovery.llm = AsyncMock()
+    error_recovery.memory_store = None
+
+    agent = _AgentMock(error_recovery)
     return agent
 
 
@@ -204,7 +235,8 @@ class TestBuildReplanMemoryContext:
     def test_returns_empty_when_memory_disabled(self):
         agent = _make_agent()
         agent._memory_enabled = False
-        agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
+        # _build_replan_memory_context is now in ErrorRecoveryManager
+        # It's already bound in _make_agent()
 
         task = _make_task(context={"github_repo": "owner/repo"})
         result = agent._build_replan_memory_context(task)
@@ -214,7 +246,8 @@ class TestBuildReplanMemoryContext:
     def test_returns_empty_when_no_repo_slug(self):
         agent = _make_agent()
         agent._memory_enabled = True
-        agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
+        # _build_replan_memory_context is now in ErrorRecoveryManager
+        # It's already bound in _make_agent()
 
         task = _make_task(context={})
         result = agent._build_replan_memory_context(task)
@@ -226,7 +259,8 @@ class TestBuildReplanMemoryContext:
         agent._memory_enabled = True
         agent._memory_store = MagicMock()
         agent._memory_store.recall = MagicMock(return_value=[])
-        agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
+        # _build_replan_memory_context is now in ErrorRecoveryManager
+        # It's already bound in _make_agent()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
 
@@ -241,7 +275,8 @@ class TestBuildReplanMemoryContext:
         agent = _make_agent()
         agent._memory_enabled = True
         agent._memory_store = MagicMock()
-        agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
+        # _build_replan_memory_context is now in ErrorRecoveryManager
+        # It's already bound in _make_agent()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
 
@@ -272,7 +307,8 @@ class TestBuildReplanMemoryContext:
         agent = _make_agent()
         agent._memory_enabled = True
         agent._memory_store = MagicMock()
-        agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
+        # _build_replan_memory_context is now in ErrorRecoveryManager
+        # It's already bound in _make_agent()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
 
@@ -298,7 +334,8 @@ class TestReplanWithMemoryIntegration:
         agent = _make_agent()
         agent._memory_enabled = True
         agent._memory_store = MagicMock()
-        agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
+        # _build_replan_memory_context is now in ErrorRecoveryManager
+        # It's already bound in _make_agent()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
         agent.llm = AsyncMock()
@@ -327,7 +364,8 @@ class TestReplanWithMemoryIntegration:
     async def test_replan_graceful_when_memory_disabled(self):
         agent = _make_agent()
         agent._memory_enabled = False
-        agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
+        # _build_replan_memory_context is now in ErrorRecoveryManager
+        # It's already bound in _make_agent()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
         agent.llm = AsyncMock()

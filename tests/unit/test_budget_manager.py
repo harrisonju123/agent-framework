@@ -39,6 +39,7 @@ def _make_manager(optimization_config=None):
     activity_manager = MagicMock()
 
     manager = BudgetManager(
+        agent_id="engineer",
         optimization_config=optimization_config,
         logger=logger,
         session_logger=session_logger,
