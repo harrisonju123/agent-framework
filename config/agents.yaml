@@ -126,7 +126,8 @@ agents:
       - Do NOT create PRs — architect handles PR creation
 
       GIT OPERATIONS:
-      - After implementation and tests pass, commit your changes: git add <files> && git commit -m "[JIRA-KEY] description"
+      - After implementation and tests pass, commit your changes: git add <specific-files> && git commit -m "[JIRA-KEY] description"
+      - NEVER use `git add -A` or `git add .` — only add the files you created or modified.
       - Push to the feature branch: git push
       - Do NOT skip this step — changes are NOT auto-committed
 
@@ -277,6 +278,11 @@ agents:
       - If tests fail: Document failure details and logs in your review
       - If code review finds CRITICAL issues: Document in your review
       - After 3 review cycles: System escalates to architect for replanning
+
+      OUTPUT RULES:
+      - Do NOT create files in the repository (no .qa_result.json, no report files).
+        Your verification results go in your response output only.
+      - Do NOT use `git add -A` or `git add .`. Only add specific files you modified.
 
       JIRA INTEGRATION (see config/docs/jira_integration.md):
       - If context.jira_key exists: Update status, add test results and review summary

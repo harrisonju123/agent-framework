@@ -3810,19 +3810,26 @@ IMPORTANT:
 
         subtasks = decomposer.decompose(task, task.plan, estimated_lines)
 
-        # Queue each subtask to engineer
+        # Queue each subtask to engineer (skip duplicates)
+        queued_count = 0
         for subtask in subtasks:
+            task_file = self.queue.queue_dir / "engineer" / f"{subtask.id}.json"
+            completed_file = self.queue.completed_dir / f"{subtask.id}.json"
+            if task_file.exists() or completed_file.exists():
+                self.logger.info(f"  ⏭️  Subtask {subtask.id} already exists, skipping")
+                continue
             self.queue.push(subtask, "engineer")
+            queued_count += 1
             self.logger.info(f"  ✅ Queued subtask: {subtask.id} ({subtask.title})")
 
         # Update parent task with subtask IDs and save to completed
         # (parent is now just a container for subtasks)
         task.subtask_ids = [st.id for st in subtasks]
-        task.result_summary = f"Decomposed into {len(subtasks)} subtasks"
+        task.result_summary = f"Decomposed into {len(subtasks)} subtasks ({queued_count} newly queued)"
         self.queue.update(task)
 
         self.logger.info(
-            f"🔀 Task {task.id} decomposed into {len(subtasks)} parallel subtasks"
+            f"🔀 Task {task.id} decomposed into {len(subtasks)} subtasks ({queued_count} newly queued)"
         )
 
     # -- Workflow chain enforcement --

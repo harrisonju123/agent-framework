@@ -76,6 +76,10 @@ docs/_build/
 # agent stuff
 task_results/*
 
+# QA verification artifacts (workspace-local, not for commit)
+.qa_result.json
+QA_VERIFICATION_*.md
+
 # User-specific config (contains private repo references and credentials)
 config/agent-framework.yaml
 config/jira.yaml
