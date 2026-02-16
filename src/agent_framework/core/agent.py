@@ -1599,6 +1599,32 @@ Verdict:"""
                     f"{attempt.get('error', 'no error recorded')}"
                 )
 
+        # Inject relevant memories for context
+        memory_section = ""
+        if self._memory_enabled:
+            repo_slug = self._get_repo_slug(task)
+            if repo_slug:
+                task_tags = []
+                if task.type:
+                    task_tags.append(get_type_str(task.type))
+                jira_project = task.context.get("jira_project")
+                if jira_project:
+                    task_tags.append(jira_project)
+
+                memory_section = self._memory_retriever.format_for_replan(
+                    repo_slug=repo_slug,
+                    agent_type=self.config.base_id,
+                    task_tags=task_tags,
+                )
+
+                if memory_section:
+                    self.logger.debug(f"Injected {len(memory_section)} chars of memory context into replan")
+                    self._session_logger.log(
+                        "memory_replan_recall",
+                        repo=repo_slug,
+                        chars_injected=len(memory_section),
+                    )
+
         replan_prompt = f"""A task has failed {task.retry_count} times. Generate a REVISED approach.
 
 ## Task
@@ -1609,6 +1635,7 @@ Verdict:"""
 
 ## Previous Attempts{attempts_text if attempts_text else ' (first replan)'}
 
+{memory_section}
 ## Instructions
 Provide a revised approach in 3-5 bullet points. Focus on what to do DIFFERENTLY.
 Do NOT repeat the same approach. Consider: different implementation strategy,

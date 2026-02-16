@@ -18,6 +18,9 @@ RECENCY_HALF_LIFE_SECONDS = 7 * 24 * 3600  # 1 week
 # Maximum characters of memory context injected into prompts
 MAX_MEMORY_PROMPT_CHARS = 3000
 
+# Maximum characters for replan context (should be more concise)
+MAX_REPLAN_MEMORY_CHARS = 1500
+
 
 def _recency_score(entry: MemoryEntry) -> float:
     """Exponential decay based on time since last access."""
@@ -89,6 +92,56 @@ class MemoryRetriever:
                 break
             lines.append(line)
             total_chars += len(line)
+
+        lines.append("")  # trailing newline
+        return "\n".join(lines)
+
+    def format_for_replan(
+        self,
+        repo_slug: str,
+        agent_type: str,
+        task_tags: Optional[List[str]] = None,
+        limit: int = 10,
+    ) -> str:
+        """Build a replan-specific prompt section with relevant memories.
+
+        Applies 2x boost to priority categories (conventions, test_commands, repo_structure)
+        which are most actionable during replanning. Uses a lower character limit to keep
+        replan prompts concise.
+
+        Returns empty string if no memories or memory system disabled.
+        """
+        all_memories = self._store.recall_all(repo_slug, agent_type)
+        if not all_memories:
+            return ""
+
+        # Priority categories for replanning — these are most actionable
+        priority_categories = {"conventions", "test_commands", "repo_structure"}
+
+        # Score with category boost
+        scored = []
+        for mem in all_memories:
+            score = _relevance_score(mem, task_tags)
+            if mem.category in priority_categories:
+                score *= 2.0
+            scored.append((mem, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        top_memories = [m for m, _ in scored[:limit]]
+
+        lines = ["## Repository Knowledge (from previous tasks)\n"]
+        lines.append("You've worked on this repo before. Here's what you know:\n")
+        total_chars = 0
+
+        for mem in top_memories:
+            line = f"- [{mem.category}] {mem.content}"
+            if total_chars + len(line) > MAX_REPLAN_MEMORY_CHARS:
+                break
+            lines.append(line)
+            total_chars += len(line)
+
+        if len(lines) == 2:  # Only header, no actual memories added
+            return ""
 
         lines.append("")  # trailing newline
         return "\n".join(lines)
