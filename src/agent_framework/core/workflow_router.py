@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .config import AgentDefinition, WorkflowDefinition
@@ -312,7 +312,6 @@ class WorkflowRouter:
 
     def route_to_agent(self, task: Task, target_agent: str, reason: str) -> None:
         """Route task to another agent using the workflow executor's chain builder."""
-        from .task import TaskType
         from ..workflow.dag import WorkflowStep
         from ..workflow.executor import AGENT_TASK_TYPES
 
