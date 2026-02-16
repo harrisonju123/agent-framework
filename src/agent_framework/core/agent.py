@@ -1599,6 +1599,20 @@ Verdict:"""
                     f"{attempt.get('error', 'no error recorded')}"
                 )
 
+        # Retrieve relevant memories for replan context
+        memory_context = ""
+        if self._memory_enabled:
+            repo_slug = self._get_repo_slug(task)
+            if repo_slug:
+                task_tags = []
+                if task.type:
+                    task_tags.append(get_type_str(task.type))
+                memory_context = self._memory_retriever.format_for_replan(
+                    repo_slug=repo_slug,
+                    agent_type=self.config.base_id,
+                    task_tags=task_tags,
+                )
+
         replan_prompt = f"""A task has failed {task.retry_count} times. Generate a REVISED approach.
 
 ## Task
@@ -1608,11 +1622,12 @@ Verdict:"""
 {error[:500]}
 
 ## Previous Attempts{attempts_text if attempts_text else ' (first replan)'}
-
+{memory_context}
 ## Instructions
 Provide a revised approach in 3-5 bullet points. Focus on what to do DIFFERENTLY.
 Do NOT repeat the same approach. Consider: different implementation strategy,
-breaking the task into smaller steps, or working around the root cause."""
+breaking the task into smaller steps, or working around the root cause.
+{('Use the repo knowledge above to inform your revised approach.' if memory_context else '')}"""
 
         try:
             replan_response = await self.llm.complete(LLMRequest(
@@ -1635,13 +1650,19 @@ breaking the task into smaller steps, or working around the root cause."""
                 task.context["_revised_plan"] = revised_plan
                 task.context["_replan_attempt"] = task.retry_count
 
-                self._session_logger.log(
-                    "replan",
-                    retry=task.retry_count,
-                    previous_error=error[:500],
-                    revised_plan=revised_plan,
-                    model=self._replan_model,
-                )
+                log_data = {
+                    "retry": task.retry_count,
+                    "previous_error": error[:500],
+                    "revised_plan": revised_plan,
+                    "model": self._replan_model,
+                }
+                if memory_context:
+                    log_data["memory_chars_injected"] = len(memory_context)
+                    repo_slug = self._get_repo_slug(task)
+                    if repo_slug:
+                        log_data["repo"] = repo_slug
+
+                self._session_logger.log("replan", **log_data)
 
                 self.logger.info(
                     f"Generated revised plan for task {task.id} "

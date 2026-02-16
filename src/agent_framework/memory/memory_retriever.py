@@ -93,6 +93,49 @@ class MemoryRetriever:
         lines.append("")  # trailing newline
         return "\n".join(lines)
 
+    def format_for_replan(
+        self,
+        repo_slug: str,
+        agent_type: str,
+        task_tags: Optional[List[str]] = None,
+        max_chars: int = 1500,
+    ) -> str:
+        """Build a memory section for replan context.
+
+        Prioritizes categories most useful for recovering from failures:
+        conventions, test_commands, repo_structure.
+
+        Returns empty string if no memories exist.
+        """
+        PRIORITY_CATEGORIES = {"conventions", "test_commands", "repo_structure"}
+
+        memories = self.get_relevant_memories(
+            repo_slug, agent_type, task_tags, limit=20,
+        )
+        if not memories:
+            return ""
+
+        # Sort: priority categories first, then by existing relevance order
+        priority = [m for m in memories if m.category in PRIORITY_CATEGORIES]
+        others = [m for m in memories if m.category not in PRIORITY_CATEGORIES]
+        ordered = priority + others
+
+        lines = ["## Relevant Memories from This Repo\n"]
+        total_chars = 0
+
+        for mem in ordered:
+            line = f"- [{mem.category}] {mem.content}"
+            if total_chars + len(line) > max_chars:
+                break
+            lines.append(line)
+            total_chars += len(line)
+
+        if len(lines) == 1:  # only header
+            return ""
+
+        lines.append("")
+        return "\n".join(lines)
+
     def extract_memories_from_response(
         self,
         response_content: str,
