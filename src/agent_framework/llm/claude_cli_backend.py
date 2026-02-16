@@ -280,9 +280,13 @@ class ClaudeCLIBackend(LLMBackend):
             # Prepare clean environment (disable experimental betas for AWS Bedrock compatibility)
             env = os.environ.copy()
             if self.use_max_account:
-                env.pop('ANTHROPIC_API_KEY', None)
+                # Strip all proxy/API vars so Claude CLI uses the OAuth/Max account directly
+                for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'):
+                    env.pop(key, None)
+                logger.debug("Stripped Anthropic env vars for Max account mode")
+            else:
+                env.update(self.proxy_env)
             env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1'
-            env.update(self.proxy_env)
             if task_id:
                 env['AGENT_TASK_ID'] = task_id
 
