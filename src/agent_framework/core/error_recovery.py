@@ -56,7 +56,7 @@ class ErrorRecoveryManager:
 
         # Dynamic replanning configuration
         replan_cfg = replan_config or {}
-        self._replan_enabled = replan_cfg.get("enabled", False)
+        self._replan_enabled = replan_cfg.get("enabled", True)
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
         self._replan_model = replan_cfg.get("model", "haiku")
 
@@ -259,14 +259,28 @@ Verdict:"""
         to give context about what's been learned from previous work on this repo.
         """
         error = task.last_error or "Unknown error"
+        error_type = self._categorize_error(error)
         previous_attempts = task.replan_history or []
+
+        # Extract original plan context if available
+        original_plan = ""
+        if task.plan:
+            # Format PlanDocument if available
+            original_plan = f"\n## Original Plan\nApproach: {', '.join(task.plan.approach[:3])}\n"
+        elif task.context.get("plan"):
+            # Fallback to context-based plan
+            plan_ctx = task.context["plan"]
+            if isinstance(plan_ctx, dict) and "approach" in plan_ctx:
+                original_plan = f"\n## Original Plan\nApproach: {', '.join(plan_ctx['approach'][:3])}\n"
 
         attempts_text = ""
         if previous_attempts:
             for attempt in previous_attempts:
+                approach = attempt.get('approach_tried', 'not recorded')
                 attempts_text += (
                     f"\n- Attempt {attempt.get('attempt', '?')}: "
-                    f"{attempt.get('error', 'no error recorded')}"
+                    f"{attempt.get('error', 'no error recorded')} "
+                    f"(tried: {approach})"
                 )
 
         # Build memory context for replanning — prioritize categories that help with recovery
@@ -276,9 +290,10 @@ Verdict:"""
 
 ## Task
 {task.title}: {task.description[:1000]}
-
+{original_plan}
 ## Latest Error
-{error[:500]}
+Type: {error_type or 'unknown'}
+Details: {error[:500]}
 
 ## Previous Attempts{attempts_text if attempts_text else ' (first replan)'}
 {memory_context}
@@ -296,10 +311,30 @@ breaking the task into smaller steps, or working around the root cause."""
             if replan_response.success and replan_response.content:
                 revised_plan = replan_response.content.strip()[:2000]
 
-                # Store in replan history
+                # Extract approach summary from the revised plan (first bullet point)
+                approach_tried = "previous approach"
+                if task.replan_history:
+                    # Use the previous attempt's revised plan as the approach tried
+                    prev_plan = task.replan_history[-1].get("revised_plan", "")
+                    if prev_plan:
+                        # Extract first line/bullet as summary
+                        first_line = prev_plan.split('\n')[0].strip('- •*').strip()
+                        approach_tried = first_line[:100] if first_line else "previous approach"
+
+                # Determine files involved from context or error
+                files_involved = []
+                if "files_to_modify" in task.context:
+                    files_involved = task.context["files_to_modify"][:5]
+                elif task.plan and task.plan.files_to_modify:
+                    files_involved = task.plan.files_to_modify[:5]
+
+                # Store in replan history with enriched context
                 history_entry = {
                     "attempt": task.retry_count,
                     "error": error[:500],
+                    "error_type": error_type,
+                    "approach_tried": approach_tried,
+                    "files_involved": files_involved,
                     "revised_plan": revised_plan,
                 }
                 task.replan_history.append(history_entry)
@@ -401,9 +436,15 @@ Previous attempts failed. Use this revised approach:
         if task.replan_history:
             replan_section += "\n## Previous Attempt History\n"
             for entry in task.replan_history[:-1]:  # Skip current, already shown above
+                error_type = entry.get('error_type', 'unknown')
+                approach = entry.get('approach_tried', 'not recorded')
+                files = entry.get('files_involved', [])
+                files_str = f" (files: {', '.join(files[:3])})" if files else ""
+
                 replan_section += (
                     f"- Attempt {entry.get('attempt', '?')}: "
-                    f"Failed with: {entry.get('error', 'unknown')[:100]}\n"
+                    f"Tried '{approach}' → {error_type} error{files_str}\n"
+                    f"  Error: {entry.get('error', 'unknown')[:100]}\n"
                 )
 
         return prompt + replan_section

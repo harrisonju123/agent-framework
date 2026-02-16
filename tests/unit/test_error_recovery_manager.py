@@ -44,6 +44,7 @@ def _make_manager():
     retry_handler = MagicMock()
     retry_handler.max_retries = 3
     escalation_handler = MagicMock()
+    escalation_handler.categorize_error = MagicMock(return_value="logic_error")
     workspace = MagicMock()
     jira_client = None
     memory_store = None
@@ -261,6 +262,10 @@ class TestRequestReplan:
         assert entry["attempt"] == 2
         assert "TypeError" in entry["error"]
         assert entry["revised_plan"] == "New approach"
+        # Verify enriched fields are present
+        assert "error_type" in entry
+        assert "approach_tried" in entry
+        assert "files_involved" in entry
 
     @pytest.mark.asyncio
     async def test_includes_previous_attempts_in_prompt(self):
@@ -329,3 +334,38 @@ class TestInjectReplanContext:
 
         assert "Self-Evaluation Feedback" in result
         assert "Missing test coverage" in result
+
+    def test_displays_enriched_attempt_history(self):
+        """Test that inject_replan_context shows error_type, approach_tried, and files."""
+        manager = _make_manager()
+        task = _make_task(
+            context={"_revised_plan": "Latest plan"},
+            replan_history=[
+                {
+                    "attempt": 2,
+                    "error": "Import error: module not found",
+                    "error_type": "dependency",
+                    "approach_tried": "Install package directly",
+                    "files_involved": ["setup.py", "requirements.txt"],
+                    "revised_plan": "Use pip install",
+                },
+                {
+                    "attempt": 3,
+                    "error": "Test failure",
+                    "error_type": "test_failure",
+                    "approach_tried": "Use pip install",
+                    "files_involved": ["test_foo.py"],
+                    "revised_plan": "Latest plan",
+                },
+            ],
+        )
+
+        result = manager.inject_replan_context("prompt", task)
+
+        # Should show the first attempt (second is current, gets skipped)
+        assert "Attempt 2:" in result
+        assert "Install package directly" in result  # approach_tried
+        assert "dependency error" in result  # error_type
+        assert "setup.py" in result or "requirements.txt" in result  # files_involved
+        # Should not duplicate current attempt
+        assert result.count("Latest plan") == 1

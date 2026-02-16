@@ -661,9 +661,15 @@ Previous attempts failed. Use this revised approach:
         if task.replan_history:
             replan_section += "\n## Previous Attempt History\n"
             for entry in task.replan_history[:-1]:  # Skip current, already shown above
+                error_type = entry.get('error_type', 'unknown')
+                approach = entry.get('approach_tried', 'not recorded')
+                files = entry.get('files_involved', [])
+                files_str = f" (files: {', '.join(files[:3])})" if files else ""
+
                 replan_section += (
                     f"- Attempt {entry.get('attempt', '?')}: "
-                    f"Failed with: {entry.get('error', 'unknown')[:100]}\n"
+                    f"Tried '{approach}' → {error_type} error{files_str}\n"
+                    f"  Error: {entry.get('error', 'unknown')[:100]}\n"
                 )
 
         return prompt + replan_section
