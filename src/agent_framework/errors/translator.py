@@ -90,7 +90,7 @@ class ErrorTranslator:
                 "Upgrade your account plan or increase budget",
                 "Optimize resource usage to reduce costs"
             ],
-            "documentation": "docs/BUDGET.md"
+            "documentation": "docs/TROUBLESHOOTING.md#budget"
         },
 
         # LLM proxy errors (must precede generic network pattern)

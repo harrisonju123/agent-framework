@@ -22,6 +22,16 @@ Run `agent doctor` first — it catches most configuration issues automatically.
 
 **Agent stuck** — Check logs: `tail -f workspace/logs/engineer.log`. If truly stuck, restart: `agent stop && agent start`.
 
+## Budget
+
+**Budget or quota exceeded** — The account has reached its usage limit. The system will NOT retry budget-exceeded errors to avoid wasting resources. Actions:
+1. Review your account usage and spending in the API provider's dashboard
+2. Check available credits or quota in your account settings
+3. Upgrade your account plan or increase budget limits
+4. Optimize resource usage (reduce model sizes, limit concurrent tasks) to reduce costs
+
+Budget errors are detected by patterns like "budget exceeded", "max budget", "quota exceeded", "insufficient credits", or "usage limit exceeded". These errors skip retries and immediately escalate for human review.
+
 ## Performance
 
 **Slow task processing** — Usually network latency or large repos. Try `agent start --replicas 2` for parallelism.
