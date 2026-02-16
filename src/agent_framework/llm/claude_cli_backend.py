@@ -279,6 +279,8 @@ class ClaudeCLIBackend(LLMBackend):
 
             # Prepare clean environment (disable experimental betas for AWS Bedrock compatibility)
             env = os.environ.copy()
+            # Prevent "nested session" error when parent process is also Claude Code
+            env.pop('CLAUDECODE', None)
             if self.use_max_account:
                 # Strip all proxy/API vars so Claude CLI uses the OAuth/Max account directly
                 for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'):
