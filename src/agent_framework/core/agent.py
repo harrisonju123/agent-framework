@@ -1411,6 +1411,49 @@ class Agent:
 
         return prompt
 
+    def _build_replan_memory_context(self, task: Task) -> str:
+        """Build memory context specifically for replanning.
+
+        Prioritizes categories that help with task recovery:
+        - conventions: coding standards, patterns to follow
+        - test_commands: how to run/fix tests
+        - repo_structure: where key files live
+
+        Returns empty string if memory disabled or no relevant memories found.
+        """
+        if not self._memory_enabled:
+            return ""
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return ""
+
+        # Prioritize categories useful for recovery
+        priority_categories = ["conventions", "test_commands", "repo_structure"]
+        memories = []
+
+        for category in priority_categories:
+            category_memories = self._memory_store.recall(
+                repo_slug=repo_slug,
+                agent_type=self.config.base_id,
+                category=category,
+                limit=5,
+            )
+            memories.extend(category_memories)
+
+        if not memories:
+            return ""
+
+        # Format as a context section
+        lines = ["\n## Relevant Context from Previous Work"]
+        lines.append("You've worked on this repo before. Here's what you know:\n")
+
+        for mem in memories[:10]:  # Cap at 10 total memories
+            lines.append(f"- [{mem.category}] {mem.content}")
+
+        lines.append("")  # trailing newline
+        return "\n".join(lines)
+
     def _extract_and_store_memories(self, task: Task, response) -> None:
         """Extract learnings from successful response and store as memories."""
         if not self._memory_enabled:
@@ -1587,6 +1630,9 @@ Verdict:"""
         Called on retry 2+ to avoid repeating the same failing approach.
         Stores the revised plan in task.replan_history and task.context
         so the next prompt attempt sees what was tried and the new approach.
+
+        Injects relevant memories (conventions, test commands, repo structure)
+        to give context about what's been learned from previous work on this repo.
         """
         error = task.last_error or "Unknown error"
         previous_attempts = task.replan_history or []
@@ -1599,6 +1645,9 @@ Verdict:"""
                     f"{attempt.get('error', 'no error recorded')}"
                 )
 
+        # Build memory context for replanning — prioritize categories that help with recovery
+        memory_context = self._build_replan_memory_context(task)
+
         replan_prompt = f"""A task has failed {task.retry_count} times. Generate a REVISED approach.
 
 ## Task
@@ -1608,7 +1657,7 @@ Verdict:"""
 {error[:500]}
 
 ## Previous Attempts{attempts_text if attempts_text else ' (first replan)'}
-
+{memory_context}
 ## Instructions
 Provide a revised approach in 3-5 bullet points. Focus on what to do DIFFERENTLY.
 Do NOT repeat the same approach. Consider: different implementation strategy,
