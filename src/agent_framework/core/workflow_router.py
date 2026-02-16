@@ -13,13 +13,6 @@ from .task import Task, TaskStatus, TaskType
 from .routing import validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
 from ..utils.type_helpers import get_type_str
 
-# Downstream agents get the correct task type for model selection
-CHAIN_TASK_TYPES = {
-    "engineer": TaskType.IMPLEMENTATION,
-    "qa": TaskType.QA_VERIFICATION,
-    "architect": TaskType.REVIEW,
-}
-
 
 class WorkflowRouter:
     """Handles workflow chain enforcement, task decomposition, and agent routing."""
@@ -384,7 +377,6 @@ class WorkflowRouter:
             self.logger.debug(f"PR creation task {pr_task_id} already queued, skipping")
             return
 
-        from datetime import datetime
         from ..workflow.executor import _strip_chain_prefixes
 
         pr_task = Task(

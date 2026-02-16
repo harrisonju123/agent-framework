@@ -40,7 +40,7 @@ class WorkflowExecutionState:
     timestamp: str
 
 
-# Aligned with CHAIN_TASK_TYPES in agent.py
+# Maps agent IDs to their default task types for workflow routing
 AGENT_TASK_TYPES = {
     "architect": TaskType.REVIEW,
     "engineer": TaskType.IMPLEMENTATION,

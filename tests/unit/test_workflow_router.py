@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_framework.core.workflow_router import WorkflowRouter, CHAIN_TASK_TYPES
+from agent_framework.core.workflow_router import WorkflowRouter
 from agent_framework.core.config import WorkflowDefinition
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
@@ -108,18 +108,6 @@ def router(config, queue, tmp_path):
         agents_config=agents_config,
         multi_repo_manager=None,
     )
-
-
-# -- CHAIN_TASK_TYPES constant --
-
-class TestChainTaskTypes:
-    def test_chain_task_types_defined(self):
-        """CHAIN_TASK_TYPES constant is defined with correct mappings."""
-        assert CHAIN_TASK_TYPES == {
-            "engineer": TaskType.IMPLEMENTATION,
-            "qa": TaskType.QA_VERIFICATION,
-            "architect": TaskType.REVIEW,
-        }
 
 
 # -- Fan-in task creation --
