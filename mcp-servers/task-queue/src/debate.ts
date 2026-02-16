@@ -308,11 +308,12 @@ function storeDebateMemory(
     const agentType = process.env.AGENT_TYPE || "architect";
 
     // Extract topic keywords for tagging (first 3-4 meaningful words)
+    // Include short technical terms like API, CI, DB, etc.
     const topicKeywords = topic
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, " ")
       .split(/\s+/)
-      .filter(w => w.length > 3)
+      .filter(w => w.length > 0)
       .slice(0, 4);
 
     // Format memory content with structured information
