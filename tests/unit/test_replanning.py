@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_framework.core.agent import Agent
+from agent_framework.core.prompt_builder import PromptBuilder
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
 
@@ -33,10 +34,16 @@ def _make_task(**overrides):
 def _make_agent():
     agent = MagicMock()
     agent._request_replan = Agent._request_replan.__get__(agent)
-    agent._inject_replan_context = Agent._inject_replan_context.__get__(agent)
+    agent._build_replan_memory_context = Agent._build_replan_memory_context.__get__(agent)
     agent._replan_model = "haiku"
     agent._session_logger = MagicMock()
     agent.logger = MagicMock()
+    # Create mock prompt builder with _inject_replan_context
+    prompt_builder = MagicMock()
+    prompt_builder._inject_replan_context = PromptBuilder._inject_replan_context.__get__(prompt_builder)
+    prompt_builder.ctx = MagicMock()
+    prompt_builder.logger = MagicMock()
+    agent._prompt_builder = prompt_builder
     return agent
 
 
@@ -149,14 +156,14 @@ class TestInjectReplanContext:
         agent = _make_agent()
         task = _make_task()
 
-        result = agent._inject_replan_context("original prompt", task)
+        result = agent._prompt_builder._inject_replan_context("original prompt", task)
         assert result == "original prompt"
 
     def test_appends_revised_approach(self):
         agent = _make_agent()
         task = _make_task(context={"_revised_plan": "Try approach B"})
 
-        result = agent._inject_replan_context("original prompt", task)
+        result = agent._prompt_builder._inject_replan_context("original prompt", task)
 
         assert "original prompt" in result
         assert "REVISED APPROACH" in result
@@ -171,7 +178,7 @@ class TestInjectReplanContext:
             }
         )
 
-        result = agent._inject_replan_context("prompt", task)
+        result = agent._prompt_builder._inject_replan_context("prompt", task)
 
         assert "Self-Evaluation Feedback" in result
         assert "Missing test coverage" in result
@@ -186,7 +193,7 @@ class TestInjectReplanContext:
             ],
         )
 
-        result = agent._inject_replan_context("prompt", task)
+        result = agent._prompt_builder._inject_replan_context("prompt", task)
 
         assert "Previous Attempt History" in result
         assert "first error" in result

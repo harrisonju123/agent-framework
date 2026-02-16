@@ -6,7 +6,6 @@ Extracts prompt construction logic from the monolithic Agent class.
 import hashlib
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -22,13 +21,6 @@ if TYPE_CHECKING:
 
 from .task import Task, TaskType
 from ..utils.type_helpers import get_type_str
-
-# Constants for optimization strategies
-SUMMARY_CONTEXT_MAX_CHARS = 2000
-SUMMARY_MAX_LENGTH = 500
-ERROR_HEAD_LINES = 20
-ERROR_TAIL_LINES = 10
-BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
 
 
 @dataclass
@@ -52,7 +44,7 @@ class PromptContext:
     agent_definition: Optional["AgentDefinition"] = None
 
     # Optimization and memory
-    optimization_config: Dict[str, Any] = None
+    optimization_config: Optional[Dict[str, Any]] = None
     memory_retriever: Optional["MemoryRetriever"] = None
     tool_pattern_store: Optional["ToolPatternStore"] = None
     context_window_manager: Optional["ContextWindowManager"] = None
@@ -66,6 +58,9 @@ class PromptContext:
 
     # Queue (for loading dependency tasks in optimized mode)
     queue: Optional["FileQueue"] = None
+
+    # Agent reference (for callbacks like metrics recording)
+    agent: Optional[Any] = None
 
     def __post_init__(self):
         """Initialize default values."""
@@ -349,6 +344,10 @@ IMPORTANT:
             f"savings={savings} chars ({savings_pct:.1f}%)"
         )
 
+        # Record metrics for analysis (if agent callback is available)
+        if self.ctx.agent and hasattr(self.ctx.agent, '_record_optimization_metrics'):
+            self.ctx.agent._record_optimization_metrics(task, legacy_len, optimized_len)
+
         # Return legacy prompt (no behavioral change in shadow mode)
         return legacy_prompt
 
@@ -501,10 +500,16 @@ If a tool call fails:
         return self._error_handling_guidance
 
     def _load_upstream_context(self, task: Task) -> str:
-        """Load upstream agent's findings from disk if available.
+        """Load upstream agent's findings from inline context or disk.
 
+        Prefers inline context (works across worktrees) over file path.
         Returns formatted section string or empty string.
         """
+        # Prefer inline context — works across worktrees where file path may not resolve
+        inline = task.context.get("upstream_summary")
+        if inline:
+            return f"\n## UPSTREAM AGENT FINDINGS\n{inline}\n"
+
         context_file = task.context.get("upstream_context_file")
         if not context_file:
             return ""
@@ -521,7 +526,7 @@ If a tool call fails:
             if not context_path.exists():
                 return ""
 
-            content = context_path.read_text()
+            content = context_path.read_text(encoding="utf-8")
             if not content.strip():
                 return ""
 
@@ -637,7 +642,7 @@ Previous attempts failed. Use this revised approach:
 
         return prompt + replan_section
 
-    def _inject_preview_mode(self, prompt: str, task: Task) -> str:
+    def _inject_preview_mode(self, prompt: str, _task: Task) -> str:
         """Inject preview mode constraints when task is a preview."""
         preview_section = """
 ## PREVIEW MODE — READ-ONLY EXECUTION

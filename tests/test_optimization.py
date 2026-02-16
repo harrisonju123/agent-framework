@@ -90,7 +90,7 @@ class TestMinimalTaskPrompts:
         # Create agent without optimizations
         queue = FileQueue(tmp_path)
         agent_legacy = Agent(agent_config, mock_llm, queue, tmp_path, optimization_config={})
-        legacy_prompt = agent_legacy._build_prompt_legacy(sample_task)
+        legacy_prompt = agent_legacy._prompt_builder._build_prompt_legacy(sample_task)
 
         # Create agent with optimizations
         agent_optimized = Agent(
@@ -100,7 +100,7 @@ class TestMinimalTaskPrompts:
             tmp_path,
             optimization_config={"enable_minimal_prompts": True, "enable_compact_json": True}
         )
-        optimized_prompt = agent_optimized._build_prompt_optimized(sample_task)
+        optimized_prompt = agent_optimized._prompt_builder._build_prompt_optimized(sample_task)
 
         # Should be significantly smaller (at least 30%)
         assert len(optimized_prompt) < len(legacy_prompt) * 0.7, \
@@ -108,7 +108,7 @@ class TestMinimalTaskPrompts:
 
     def test_minimal_task_includes_essential_fields(self, agent, sample_task):
         """Verify minimal task includes required fields."""
-        minimal = agent._get_minimal_task_dict(sample_task)
+        minimal = agent._prompt_builder._get_minimal_task_dict(sample_task)
 
         # Essential fields must be present
         assert "title" in minimal
@@ -130,7 +130,7 @@ class TestMinimalTaskPrompts:
         """Verify fallback to full dict when essential fields missing."""
         sample_task.title = ""  # Empty title
 
-        minimal = agent._get_minimal_task_dict(sample_task)
+        minimal = agent._prompt_builder._get_minimal_task_dict(sample_task)
 
         # Should fall back to full dict
         assert "created_at" in minimal  # Metadata present = full dict
@@ -144,7 +144,7 @@ class TestCompactJSON:
         import json
 
         # Get task dict and serialize both ways
-        task_dict = agent._get_minimal_task_dict(sample_task)
+        task_dict = agent._prompt_builder._get_minimal_task_dict(sample_task)
         compact = json.dumps(task_dict, separators=(',', ':'))
         pretty = json.dumps(task_dict, indent=2)
 
@@ -393,8 +393,8 @@ class TestShadowMode:
             }
         )
 
-        legacy_prompt = agent._build_prompt_legacy(sample_task)
-        shadow_prompt = agent._build_prompt(sample_task)
+        legacy_prompt = agent._prompt_builder._build_prompt_legacy(sample_task)
+        shadow_prompt = agent._prompt_builder.build(sample_task)
 
         # Shadow mode should use legacy
         assert shadow_prompt == legacy_prompt
@@ -410,7 +410,7 @@ class TestShadowMode:
             optimization_config={"shadow_mode": True}
         )
 
-        agent._build_prompt(sample_task)
+        agent._prompt_builder.build(sample_task)
 
         # Check metrics file was created
         metrics_file = tmp_path / ".agent-communication" / "metrics" / "optimization.jsonl"

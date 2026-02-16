@@ -309,6 +309,7 @@ class Agent:
             logger=self.logger,
             llm=llm,
             queue=queue,
+            agent=self,
         )
         self._prompt_builder = PromptBuilder(prompt_ctx)
 
