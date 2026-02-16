@@ -20,6 +20,8 @@ class LLMRequest:
     context: dict = None  # Task context (github_repo, jira_project, etc.)
     working_dir: Optional[str] = None  # Working directory for subprocess execution
     agents: Optional[dict] = None  # Teammate definitions for Claude Agent Teams (--agents flag)
+    specialization_profile: Optional[str] = None  # Specialization ID (backend, frontend, infrastructure)
+    file_count: int = 0  # Number of files involved (for complexity-based routing)
 
 
 @dataclass
@@ -66,13 +68,21 @@ class LLMBackend(ABC):
         pass
 
     @abstractmethod
-    def select_model(self, task_type: TaskType, retry_count: int) -> str:
+    def select_model(
+        self,
+        task_type: TaskType,
+        retry_count: int,
+        specialization_profile: str = None,
+        file_count: int = 0,
+    ) -> str:
         """
-        Select appropriate model based on task type and retry count.
+        Select appropriate model based on task type, retry count, and specialization.
 
-        Ported logic from scripts/async-agent-runner.sh:
+        Ported logic from scripts/async-agent-runner.sh with specialization routing:
         - retry_count >= 3 -> opus (premium)
         - task_type in [testing, fix, etc.] -> haiku (cheap)
+        - IMPLEMENTATION + backend/infra + high file count -> opus (premium)
+        - IMPLEMENTATION + frontend + low file count -> haiku (cheap)
         - default -> sonnet
         """
         pass
