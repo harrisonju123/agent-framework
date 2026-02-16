@@ -348,7 +348,7 @@ class Agent:
             jira_config=jira_config,
             github_config=github_config,
             agent_definition=agent_definition,
-            optimization_config=sanitized_config,
+            optimization_config=self._optimization_config,
             memory_retriever=self._memory_retriever,
             tool_pattern_store=self._tool_pattern_store,
             context_window_manager=None,  # Set per-task
