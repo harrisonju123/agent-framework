@@ -69,6 +69,9 @@ class Orchestrator:
 
         # Merge environment variables
         env = os.environ.copy()
+        # Strip CLAUDECODE so agent subprocesses (and their claude CLI children)
+        # don't trigger the "nested session" guard
+        env.pop("CLAUDECODE", None)
         if env_vars:
             env.update(env_vars)
 
