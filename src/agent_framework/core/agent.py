@@ -36,6 +36,7 @@ from ..memory.memory_retriever import MemoryRetriever
 from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer
 from ..memory.tool_pattern_store import ToolPatternStore
 from .session_logger import SessionLogger, noop_logger
+from .prompt_builder import PromptBuilder, PromptContext
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -292,6 +293,25 @@ class Agent:
             activity_manager=self.activity_manager,
         )
 
+        # Prompt builder: extracted prompt construction logic
+        prompt_ctx = PromptContext(
+            config=config,
+            workspace=workspace,
+            mcp_enabled=mcp_enabled,
+            jira_config=jira_config,
+            github_config=github_config,
+            agent_definition=agent_definition,
+            optimization_config=sanitized_config,
+            memory_retriever=self._memory_retriever,
+            tool_pattern_store=self._tool_pattern_store,
+            context_window_manager=None,  # Set per-task
+            session_logger=None,  # Set per-task
+            logger=self.logger,
+            llm=llm,
+            queue=queue,
+        )
+        self._prompt_builder = PromptBuilder(prompt_ctx)
+
     # Backward-compatibility delegation shims for tests that call Agent._* methods
     # These delegate to ReviewCycleManager for cleaner architecture
     def _parse_review_outcome(self, content: str) -> ReviewOutcome:
@@ -342,7 +362,6 @@ class Agent:
         """Delegate to ReviewCycleManager.queue_review_fix_if_needed (without sync callback)."""
         # Note: tests don't pass sync_jira_status_callback, so we use a no-op
         return self._review_cycle.queue_review_fix_if_needed(task, response, lambda *args, **kwargs: None)
-
     async def run(self) -> None:
         """
         Main polling loop.
@@ -789,7 +808,20 @@ class Agent:
 
             # Build prompt and execute LLM
             self.logger.phase_change("analyzing")
-            prompt = self._build_prompt(task)
+            # Update prompt builder with per-task context
+            self._prompt_builder.ctx.session_logger = self._session_logger
+            self._prompt_builder.ctx.context_window_manager = self._context_window_manager
+            prompt = self._prompt_builder.build(task)
+            # Get specialization data from prompt builder (set during build)
+            self._current_specialization = self._prompt_builder.get_current_specialization()
+            self._current_file_count = self._prompt_builder.get_current_file_count()
+
+            # Update activity with specialization (if detected)
+            if self._current_specialization:
+                activity = self.activity_manager.get_activity(self.config.id)
+                if activity:
+                    activity.specialization = self._current_specialization.id
+                    self.activity_manager.update_activity(activity)
 
             self._update_phase(TaskPhase.EXECUTING_LLM)
             self.logger.phase_change("executing_llm")
@@ -1168,56 +1200,6 @@ class Agent:
             task_hash = int(hashlib.md5(task.id.encode()).hexdigest()[:8], 16)
             return (task_hash % 100) < canary_pct
 
-    def _get_minimal_task_dict(self, task: Task) -> Dict[str, Any]:
-        """
-        Extract only prompt-relevant task fields.
-
-        Implements Strategy 1 (Minimal Task Prompts) from the optimization plan.
-        See OPTIMIZATION_IMPLEMENTATION_SUMMARY.md for details.
-
-        Omits metadata fields that don't contribute to task execution:
-        - Timestamps (created_at, started_at, completed_at)
-        - Internal tracking (created_by, assigned_to, retry_count)
-        - Dependency arrays (depends_on, blocks)
-
-        Expected savings: 3-8KB per task (40-50% reduction).
-        """
-        # Validate essential fields
-        if not task.title or not task.description:
-            self.logger.warning(
-                f"Task {task.id} missing essential fields: "
-                f"title={bool(task.title)}, description={bool(task.description)}. "
-                f"Falling back to full task dict."
-            )
-            return task.model_dump()
-
-        minimal = {
-            "title": task.title.strip(),
-            "description": task.description.strip(),
-            "type": get_type_str(task.type),
-        }
-
-        # Include acceptance criteria and deliverables if present
-        if task.acceptance_criteria:
-            minimal["acceptance_criteria"] = task.acceptance_criteria
-        if task.deliverables:
-            minimal["deliverables"] = task.deliverables
-
-        # Include notes if non-empty (can contain important context)
-        if task.notes:
-            minimal["notes"] = task.notes
-
-        # Include only relevant context keys
-        relevant_context = {}
-        for key in ["jira_key", "jira_project", "github_repo", "mode", "user_goal", "repository_name", "epic_key"]:
-            if key in task.context:
-                relevant_context[key] = task.context[key]
-
-        if relevant_context:
-            minimal["context"] = relevant_context
-
-        return minimal
-
     def _get_token_budget(self, task_type: TaskType) -> int:
         """
         Get expected token budget for task type.
@@ -1357,89 +1339,15 @@ class Agent:
 
             # Store path in task context for chain propagation
             task.context["upstream_context_file"] = str(context_file)
+            # Store inline for cross-worktree portability (file path may not resolve)
+            task.context["upstream_summary"] = content[:4000]
             self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
 
-    def _load_upstream_context(self, task: Task) -> str:
-        """Load upstream agent's findings from disk if available.
-
-        Returns formatted section string or empty string.
-        """
-        context_file = task.context.get("upstream_context_file")
-        if not context_file:
-            return ""
-
-        try:
-            context_path = Path(context_file).resolve()
-            summaries_dir = (self.workspace / ".agent-context" / "summaries").resolve()
-
-            # Only read files inside our summaries directory
-            if not str(context_path).startswith(str(summaries_dir)):
-                self.logger.warning(f"Upstream context path outside summaries dir: {context_file}")
-                return ""
-
-            if not context_path.exists():
-                return ""
-
-            content = context_path.read_text()
-            if not content.strip():
-                return ""
-
-            return f"\n## UPSTREAM AGENT FINDINGS\n{content}\n"
-        except Exception as e:
-            self.logger.debug(f"Failed to load upstream context: {e}")
-            return ""
-
-    # -- Agent Memory Integration --
-
     def _get_repo_slug(self, task: Task) -> Optional[str]:
         """Extract repo slug from task context."""
         return task.context.get("github_repo")
-
-    def _inject_memories(self, prompt: str, task: Task) -> str:
-        """Append relevant memories from previous tasks to the prompt."""
-        if not self._memory_enabled:
-            return prompt
-
-        repo_slug = self._get_repo_slug(task)
-        if not repo_slug:
-            return prompt
-
-        # Query context window manager for memory budget
-        max_chars = None
-        if self._context_window_manager:
-            max_chars = self._context_window_manager.compute_memory_budget()
-            if max_chars == 0:
-                self.logger.debug("Skipping memory injection: context budget critical (>90% used)")
-                return prompt
-
-        # Build tag hints from task context
-        task_tags = []
-        if task.type:
-            task_tags.append(get_type_str(task.type))
-        jira_project = task.context.get("jira_project")
-        if jira_project:
-            task_tags.append(jira_project)
-
-        memory_section = self._memory_retriever.format_for_prompt(
-            repo_slug=repo_slug,
-            agent_type=self.config.base_id,
-            task_tags=task_tags,
-            max_chars=max_chars,
-        )
-
-        if memory_section:
-            self.logger.debug(f"Injected {len(memory_section)} chars of memory context (max={max_chars or 3000})")
-            self._session_logger.log(
-                "memory_recall",
-                repo=repo_slug,
-                chars_injected=len(memory_section),
-                categories=task_tags,
-            )
-            return prompt + "\n" + memory_section
-
-        return prompt
 
     def _build_replan_memory_context(self, task: Task) -> str:
         """Build memory context specifically for replanning.
@@ -1536,37 +1444,6 @@ class Agent:
                 )
         except Exception as e:
             self.logger.debug(f"Tool pattern analysis failed (non-fatal): {e}")
-
-    def _inject_tool_tips(self, prompt: str, task: Task) -> str:
-        """Append tool efficiency tips from previous session analysis."""
-        if not self._tool_tips_enabled:
-            return prompt
-
-        repo_slug = self._get_repo_slug(task)
-        if not repo_slug:
-            return prompt
-
-        max_count = self._optimization_config.get("tool_tips_max_count", 5)
-        max_chars = self._optimization_config.get("tool_tips_max_chars", 1500)
-        patterns = self._tool_pattern_store.get_top_patterns(
-            repo_slug, limit=max_count, max_chars=max_chars,
-        )
-        if not patterns:
-            return prompt
-
-        tips_lines = [f"- {p.tip}" for p in patterns]
-        tips_section = "## Tool Efficiency Tips\n\n" + "\n".join(tips_lines)
-
-        self.logger.debug(f"Injected {len(patterns)} tool tips ({len(tips_section)} chars)")
-        self._session_logger.log(
-            "tool_tips_injected",
-            repo=repo_slug,
-            count=len(patterns),
-            chars=len(tips_section),
-        )
-        return prompt + "\n\n" + tips_section
-
-    # -- Self-Evaluation Loop --
 
     async def _self_evaluate(self, task: Task, response) -> bool:
         """Review agent's own output against acceptance criteria.
@@ -1735,83 +1612,6 @@ breaking the task into smaller steps, or working around the root cause."""
         except Exception as e:
             self.logger.warning(f"Replanning error (non-fatal): {e}")
 
-    def _inject_replan_context(self, prompt: str, task: Task) -> str:
-        """Append revised plan and attempt history to prompt if available."""
-        revised_plan = task.context.get("_revised_plan")
-        if not revised_plan:
-            return prompt
-
-        self_eval_critique = task.context.get("_self_eval_critique", "")
-
-        replan_section = f"""
-
-## REVISED APPROACH (retry {task.retry_count})
-
-Previous attempts failed. Use this revised approach:
-
-{revised_plan}
-"""
-        if self_eval_critique:
-            replan_section += f"""
-## Self-Evaluation Feedback
-{self_eval_critique}
-"""
-
-        if task.replan_history:
-            replan_section += "\n## Previous Attempt History\n"
-            for entry in task.replan_history[:-1]:  # Skip current, already shown above
-                replan_section += (
-                    f"- Attempt {entry.get('attempt', '?')}: "
-                    f"Failed with: {entry.get('error', 'unknown')[:100]}\n"
-                )
-
-        return prompt + replan_section
-
-    def _inject_preview_mode(self, prompt: str, task: Task) -> str:
-        """Inject preview mode constraints when task is a preview."""
-        preview_section = """
-## PREVIEW MODE — READ-ONLY EXECUTION
-You are in PREVIEW MODE. You must plan your implementation WITHOUT writing any files.
-
-CONSTRAINTS:
-- Do NOT use Write, Edit, or NotebookEdit tools
-- Do NOT use Bash to create, modify, or delete files
-- DO use Read, Glob, Grep, and Bash (read-only commands like git log, git diff, ls) to explore
-- DO read every file you plan to modify to understand current state
-
-REQUIRED OUTPUT — Produce a structured execution preview:
-
-### Files to Modify
-For each file, list:
-- File path
-- What changes will be made (specific, not vague)
-- Estimated lines added/removed
-
-### New Files to Create
-For each new file:
-- File path
-- Purpose
-- Key contents/structure
-- Estimated line count
-
-### Implementation Approach
-- Step-by-step plan with ordering
-- Which patterns from existing code will be followed
-- Any dependencies between changes
-
-### Risks and Edge Cases
-- What could go wrong
-- Edge cases to handle
-- Backward compatibility concerns
-
-### Estimated Total Change Size
-- Total lines added/removed
-- Number of files affected
-
-This preview will be reviewed by the architect before implementation is authorized.
-"""
-        return preview_section + "\n\n" + prompt
-
     def _categorize_error(self, error_message: str) -> Optional[str]:
         """Categorize error message for better diagnostics.
 
@@ -1819,254 +1619,6 @@ This preview will be reviewed by the architect before implementation is authoriz
         pattern matching across the codebase.
         """
         return self.escalation_handler.categorize_error(error_message)
-
-    def _inject_human_guidance(self, prompt: str, task: Task) -> str:
-        """Inject human guidance from escalation report if available."""
-        # Check for human guidance in escalation report
-        if task.escalation_report and task.escalation_report.human_guidance:
-            guidance = task.escalation_report.human_guidance
-            guidance_section = f"""
-
-## CRITICAL: Human Guidance Provided
-
-A human expert has reviewed this task and provided the following guidance to help you succeed:
-
-{guidance}
-
-Please carefully consider this guidance when approaching the task. This information may help you avoid the previous failures.
-
-## Previous Failure Context
-
-{task.escalation_report.root_cause_hypothesis}
-
-Suggested interventions:
-"""
-            for i, intervention in enumerate(task.escalation_report.suggested_interventions, 1):
-                guidance_section += f"{i}. {intervention}\n"
-
-            return prompt + guidance_section
-
-        # Fall back to context-based guidance (legacy support)
-        context_guidance = task.context.get("human_guidance")
-        if context_guidance:
-            return prompt + f"""
-
-## CRITICAL: Human Guidance Provided
-
-A human expert has provided guidance for this task:
-
-{context_guidance}
-
-Please carefully consider this guidance when approaching the task.
-"""
-
-        return prompt
-
-    def _handle_shadow_mode_comparison(self, task: Task, prompt_override: str = None) -> str:
-        """Generate and compare both prompts in shadow mode, return legacy prompt."""
-        legacy_prompt = self._build_prompt_legacy(task, prompt_override=prompt_override)
-        optimized_prompt = self._build_prompt_optimized(task, prompt_override=prompt_override)
-
-        # Log comparison
-        legacy_len = len(legacy_prompt)
-        optimized_len = len(optimized_prompt)
-        savings = legacy_len - optimized_len
-        savings_pct = (savings / legacy_len * 100) if legacy_len > 0 else 0
-
-        # Truncate task ID for security
-        task_id_short = task.id[:8] + "..." if len(task.id) > 8 else task.id
-
-        self.logger.debug(
-            f"[SHADOW MODE] Task {task_id_short} prompt comparison: "
-            f"legacy={legacy_len} chars, optimized={optimized_len} chars, "
-            f"savings={savings} chars ({savings_pct:.1f}%)"
-        )
-
-        # Record metrics for analysis
-        self._record_optimization_metrics(task, legacy_len, optimized_len)
-
-        # Return legacy prompt (no behavioral change in shadow mode)
-        return legacy_prompt
-
-    def _append_test_failure_context(self, prompt: str, task: Task) -> str:
-        """Append test failure report to prompt if present."""
-        test_failure_report = task.context.get("_test_failure_report")
-        if not test_failure_report:
-            return prompt
-
-        return prompt + f"""
-
-## IMPORTANT: Previous Tests Failed
-
-Your previous implementation had test failures. Please fix the issues below:
-
-{test_failure_report}
-
-Fix the failing tests and ensure all tests pass.
-"""
-
-    def _detect_engineer_specialization(self, task: Task) -> Optional['SpecializationProfile']:
-        """Detect engineer specialization profile for this task.
-
-        Returns the profile if this is an engineer agent with a clear match, else None.
-        Respects both per-agent and global enable/disable toggles.
-        Falls back to LLM-generated profiles when static detection returns None.
-        """
-        if self.config.base_id != "engineer":
-            return None
-
-        # Per-agent toggle from agents.yaml
-        if self._agent_definition and not self._agent_definition.specialization_enabled:
-            self.logger.debug("Specialization disabled for this agent via agents.yaml")
-            return None
-
-        # Global toggle from specializations.yaml
-        from .engineer_specialization import (
-            detect_specialization,
-            get_specialization_enabled,
-            get_auto_profile_config,
-            detect_file_patterns,
-            _load_profiles,
-        )
-
-        if not get_specialization_enabled():
-            self.logger.debug("Specialization disabled globally via specializations.yaml")
-            return None
-
-        # Extract files once — reused for both static detection and auto-profile fallback
-        files = detect_file_patterns(task)
-
-        profile = detect_specialization(task, files=files)
-        if profile:
-            return profile
-
-        # Auto-profile fallback: check registry, then generate
-        auto_config = get_auto_profile_config()
-        if auto_config is None or not auto_config.enabled:
-            return None
-
-        if not files:
-            return None
-
-        import time
-        from .profile_registry import ProfileRegistry, GeneratedProfileEntry
-        from .profile_generator import ProfileGenerator
-
-        registry = ProfileRegistry(
-            self.workspace,
-            max_profiles=auto_config.max_cached_profiles,
-            staleness_days=auto_config.staleness_days,
-        )
-
-        # Try cache first
-        cached = registry.find_matching_profile(
-            files,
-            f"{task.title} {task.description}",
-            min_score=auto_config.min_match_score,
-        )
-        if cached:
-            self.logger.info("Matched cached generated profile '%s'", cached.id)
-            return cached
-
-        # Generate new profile
-        generator = ProfileGenerator(self.workspace, model=auto_config.model)
-        existing_ids = [p.id for p in _load_profiles()]
-        generated = generator.generate_profile(task, files, existing_ids)
-        if generated:
-            now = time.time()
-            registry.store_profile(GeneratedProfileEntry(
-                profile=generated.profile,
-                created_at=now,
-                last_matched_at=now,
-                match_count=1,
-                source_task_id=task.id,
-                tags=generated.tags,
-                file_extensions=generated.file_extensions,
-            ))
-            self.logger.info("Generated new profile '%s'", generated.profile.id)
-            return generated.profile
-
-        return None
-
-    def _build_prompt(self, task: Task) -> str:
-        """
-        Build prompt from task.
-
-        Supports optimization strategies:
-        - Strategy 1: Minimal task prompts
-        - Strategy 3: Context deduplication
-        - Strategy 4: Compact JSON
-        - Strategy 5: Result summarization
-        - Shadow mode: Generate both for comparison
-
-        Ported from scripts/async-agent-runner.sh lines 268-294.
-        """
-        shadow_mode = self._optimization_config.get("shadow_mode", False)
-        use_optimizations = self._should_use_optimization(task)
-
-        # Detect specialization once — reused for both prompt and team composition
-        from .engineer_specialization import apply_specialization_to_prompt, detect_file_patterns
-        profile = self._detect_engineer_specialization(task)
-        self._current_specialization = profile
-        # Extract file count for model routing (specialization-aware routing uses this)
-        files = detect_file_patterns(task)
-        self._current_file_count = len(files)
-        prompt_text = apply_specialization_to_prompt(self.config.prompt, profile)
-
-        # Update activity with specialization (if detected)
-        if profile:
-            activity = self.activity_manager.get_activity(self.config.id)
-            if activity:
-                activity.specialization = profile.id
-                self.activity_manager.update_activity(activity)
-
-        # Determine which prompt to use
-        if shadow_mode:
-            prompt = self._handle_shadow_mode_comparison(task, prompt_override=prompt_text)
-        elif use_optimizations:
-            prompt = self._build_prompt_optimized(task, prompt_override=prompt_text)
-        else:
-            prompt = self._build_prompt_legacy(task, prompt_override=prompt_text)
-
-        # Inject preview mode constraints when task is a preview
-        if task.type == TaskType.PREVIEW:
-            prompt = self._inject_preview_mode(prompt, task)
-
-        # Log prompt preview for debugging (sanitized)
-        if self.logger.isEnabledFor(logging.DEBUG):
-            prompt_preview = prompt[:500].replace(task.id, "TASK_ID")
-            if hasattr(task, 'context') and task.context.get('jira_key'):
-                prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
-            self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
-
-        # Append test failure context if present
-        prompt = self._append_test_failure_context(prompt, task)
-
-        # Inject relevant memories from previous tasks
-        prompt = self._inject_memories(prompt, task)
-
-        # Inject tool efficiency tips from session analysis
-        prompt = self._inject_tool_tips(prompt, task)
-
-        # Inject replan history if retrying with revised approach
-        prompt = self._inject_replan_context(prompt, task)
-
-        # Inject human guidance if provided via `agent guide` command
-        prompt = self._inject_human_guidance(prompt, task)
-
-        # Session log: capture what was sent to the LLM
-        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()[:12]
-        has_replan = "_revised_plan" in task.context
-        self._session_logger.log(
-            "prompt_built",
-            prompt_length=len(prompt),
-            prompt_hash=prompt_hash,
-            replan_injected=has_replan,
-            retry=task.retry_count,
-        )
-        self._session_logger.log_prompt(prompt)
-
-        return prompt
 
     def _record_optimization_metrics(
         self,
@@ -2145,223 +1697,6 @@ Fix the failing tests and ensure all tests pass.
             response.output_tokens / 1_000_000 * prices["output"]
         )
         return cost
-
-    def _build_jira_guidance(self, jira_key: str, jira_project: str) -> str:
-        """Build JIRA integration guidance for MCP."""
-        cache_key = f"jira:{jira_key}:{jira_project}"
-        if cache_key in self._guidance_cache:
-            return self._guidance_cache[cache_key]
-
-        jira_server = self.jira_config.server if self.jira_config else "jira.example.com"
-
-        result = f"""
-JIRA INTEGRATION (via MCP):
-You have access to JIRA via MCP tools:
-- Search issues: jira_search_issues(jql="project = {jira_project or 'PROJ'}")
-- Get issue: jira_get_issue(issueKey="{jira_key or 'PROJ-123'}")
-- Create ticket: jira_create_issue(project="{jira_project or 'PROJ'}", summary="...", description="...", issueType="Story")
-- Create epic: jira_create_epic(project="{jira_project or 'PROJ'}", title="...", description="...")
-- Create subtask: jira_create_subtask(parentKey="{jira_key or 'PROJ-123'}", summary="...", description="...")
-- Update status: jira_transition_issue(issueKey="{jira_key or 'PROJ-123'}", transitionName="In Progress")
-- Add comment: jira_add_comment(issueKey="{jira_key or 'PROJ-123'}", comment="...")
-
-Current context:
-- JIRA Server: {jira_server}
-- Ticket: {jira_key or 'N/A'}
-- Project: {jira_project or 'N/A'}
-
-"""
-        self._guidance_cache[cache_key] = result
-        return result
-
-    def _build_github_guidance(self, github_repo: str, jira_key: str) -> str:
-        """Build GitHub integration guidance for MCP."""
-        cache_key = f"github:{github_repo}:{jira_key}"
-        if cache_key in self._guidance_cache:
-            return self._guidance_cache[cache_key]
-
-        owner, repo = github_repo.split("/")
-
-        # Get formatting patterns from config
-        branch_pattern = "{type}/{ticket_id}-{slug}"
-        pr_title_pattern = "[{ticket_id}] {title}"
-        if self.github_config:
-            branch_pattern = self.github_config.branch_pattern
-            pr_title_pattern = self.github_config.pr_title_pattern
-
-        result = f"""
-GITHUB INTEGRATION (via MCP):
-Repository: {github_repo}
-Branch naming: Use pattern "{branch_pattern}"
-  Example: feature/{jira_key or 'PROJ-123'}-add-authentication
-PR title: Use pattern "{pr_title_pattern}"
-  Example: [{jira_key or 'PROJ-123'}] Add authentication feature
-
-Available tools:
-- github_create_pr(owner="{owner}", repo="{repo}",
-                   title="[{jira_key or 'PROJ-123'}] Your Title",
-                   body="...",
-                   head="feature/{jira_key or 'PROJ-123'}-slug")
-- github_add_pr_comment(owner="{owner}", repo="{repo}", prNumber=123, body="...")
-- github_link_pr_to_jira(owner="{owner}", repo="{repo}", prNumber=123, jiraKey="{jira_key or 'PROJ-123'}")
-
-NOTE: You are responsible for committing and pushing your changes.
-
-Workflow coordination:
-1. Make your code changes
-2. Commit changes: git add <files> && git commit -m "[TICKET] description"
-3. Push to feature branch: git push
-4. Create a PR using github_create_pr (if your workflow requires it)
-5. Update JIRA using jira_transition_issue and jira_add_comment
-
-"""
-        self._guidance_cache[cache_key] = result
-        return result
-
-    def _build_error_handling_guidance(self) -> str:
-        """Build error handling guidance for MCP tools."""
-        if self._error_handling_guidance is not None:
-            return self._error_handling_guidance
-        self._error_handling_guidance = """
-ERROR HANDLING:
-If a tool call fails:
-1. Read the error message carefully
-2. If rate limited, wait and retry
-3. If authentication failed, report failure
-4. If invalid input, correct and retry
-5. For partial failures (e.g., PR created but JIRA update failed):
-   - Retry the failed operation
-   - If still fails, leave completed operations and report the failure
-   - Do NOT try to undo successful operations
-
-"""
-        return self._error_handling_guidance
-
-    def _build_prompt_legacy(self, task: Task, prompt_override: str = None) -> str:
-        """Build prompt using legacy format (original implementation)."""
-        task_json = task.model_dump_json(indent=2)
-        agent_prompt = prompt_override or self.config.prompt
-
-        # Extract integration context
-        jira_key = task.context.get("jira_key")
-        github_repo = task.context.get("github_repo")
-        jira_project = task.context.get("jira_project")
-
-        mcp_guidance = ""
-
-        # Build MCP guidance sections
-        if self._mcp_enabled:
-            if jira_key or jira_project:
-                mcp_guidance += self._build_jira_guidance(jira_key, jira_project)
-            if github_repo:
-                mcp_guidance += self._build_github_guidance(github_repo, jira_key)
-            mcp_guidance += self._build_error_handling_guidance()
-
-        # Intermediate chain steps must not create PRs — the terminal step handles that
-        if task.context.get("chain_step") and not self._is_at_terminal_workflow_step(task):
-            mcp_guidance += """
-IMPORTANT: You are an intermediate step in the workflow chain.
-Push your commits but do NOT create a pull request.
-The PR will be created by a downstream agent after all steps complete.
-
-"""
-
-        # Subtasks must not create PRs — the fan-in task creates a single PR
-        if task.parent_task_id is not None:
-            mcp_guidance += """
-IMPORTANT: You are a SUBTASK of a decomposed task.
-Commit and push your changes, but do NOT create a pull request.
-A fan-in task will aggregate all subtask results and create a single PR.
-
-"""
-
-        # Load upstream context from previous agent if available
-        upstream_context = self._load_upstream_context(task)
-
-        return f"""You are {self.config.id}.
-
-TASK DETAILS:
-{task_json}
-
-{mcp_guidance}{upstream_context}
-YOUR RESPONSIBILITIES:
-{agent_prompt}
-
-IMPORTANT:
-- Complete the task described above
-- This task will be automatically marked as completed when you're done
-"""
-
-    def _build_prompt_optimized(self, task: Task, prompt_override: str = None) -> str:
-        """
-        Build prompt using optimized format.
-
-        This method should only be called when optimizations are enabled.
-        All enable checks happen in _build_prompt(), not here.
-
-        Applies:
-        - Strategy 1: Minimal task prompts (only essential fields)
-        - Strategy 3: Context deduplication (no redundant info)
-        - Strategy 4: Compact JSON (no whitespace)
-        - Strategy 5: Result summarization (include dep summaries)
-        """
-        # Always use minimal fields in optimized prompts (Strategy 1)
-        task_dict = self._get_minimal_task_dict(task)
-
-        # Always use compact JSON in optimized prompts (Strategy 4)
-        task_json = json.dumps(task_dict, separators=(',', ':'))
-
-        # Extract integration context (only dynamic values, not boilerplate)
-        jira_key = task.context.get("jira_key")
-        github_repo = task.context.get("github_repo")
-        jira_project = task.context.get("jira_project")
-
-        # Build minimal MCP context (just dynamic values, no boilerplate)
-        context_note = ""
-        if self._mcp_enabled:
-            if jira_key:
-                context_note += f"JIRA Ticket: {jira_key}\n"
-            if jira_project:
-                context_note += f"JIRA Project: {jira_project}\n"
-            if github_repo:
-                context_note += f"GitHub Repository: {github_repo}\n"
-
-        # Include dependency results (Strategy 5: Result Summarization)
-        dep_context = ""
-        enable_summarization = self._optimization_config.get("enable_result_summarization", False)
-        if enable_summarization and task.depends_on:
-            dep_context = "\nPREVIOUS WORK:\n"
-            for dep_id in task.depends_on:
-                dep_task = self.queue.get_completed(dep_id)
-                if dep_task and dep_task.result_summary:
-                    dep_context += f"- {dep_task.title}: {dep_task.result_summary}\n"
-
-        # Intermediate chain steps must not create PRs
-        chain_note = ""
-        if task.context.get("chain_step") and not self._is_at_terminal_workflow_step(task):
-            chain_note = "\nIMPORTANT: You are an intermediate step in the workflow chain.\nPush your commits but do NOT create a pull request.\n"
-
-        # Subtasks must not create PRs — fan-in handles it
-        if task.parent_task_id is not None:
-            chain_note += "\nIMPORTANT: You are a SUBTASK of a decomposed task.\nCommit and push your changes, but do NOT create a pull request.\nA fan-in task will aggregate all subtask results and create a single PR.\n"
-
-        # Load upstream context from previous agent if available
-        upstream_context = self._load_upstream_context(task)
-
-        # Build optimized prompt (shorter, focused on essentials)
-        agent_prompt = prompt_override or self.config.prompt
-        return f"""You are {self.config.id}.
-
-TASK:
-{task_json}
-
-{context_note}{dep_context}{chain_note}{upstream_context}
-{agent_prompt}
-
-IMPORTANT:
-- Complete the task described above
-- This task will be automatically marked as completed when you're done
-"""
 
     def _get_working_directory(self, task: Task) -> Path:
         """Get working directory for task (worktree, target repo, or framework workspace).
