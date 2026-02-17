@@ -11,6 +11,7 @@ from agent_framework.workspace.worktree_manager import (
     WorktreeManager,
     WorktreeConfig,
     WorktreeInfo,
+    STALE_ACTIVE_THRESHOLD_SECONDS,
 )
 
 
@@ -423,3 +424,143 @@ class TestPhantomWorktreeCleanup:
 
         assert result["registered"] == 1
         assert "phantom-key" not in manager._registry
+
+
+class TestActiveWorktreeProtection:
+    """Tests for active worktree eviction protection."""
+
+    def test_worktree_info_active_defaults_false(self):
+        """Active flag defaults to False for backwards compatibility."""
+        info = WorktreeInfo(
+            path="/p", branch="b", agent_id="a", task_id="t",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo="/base",
+        )
+        assert info.active is False
+
+    def test_worktree_info_from_dict_without_active_field(self):
+        """from_dict handles registries that predate the active field."""
+        data = {
+            "path": "/p", "branch": "b", "agent_id": "a", "task_id": "t",
+            "created_at": "2025-01-01T00:00:00", "last_accessed": "2025-01-01T00:00:00",
+            "base_repo": "/base",
+        }
+        info = WorktreeInfo.from_dict(data)
+        assert info.active is False
+
+    def test_worktree_info_active_serializes(self):
+        """Active flag round-trips through to_dict/from_dict."""
+        info = WorktreeInfo(
+            path="/p", branch="b", agent_id="a", task_id="t",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo="/base", active=True,
+        )
+        data = info.to_dict()
+        assert data["active"] is True
+        restored = WorktreeInfo.from_dict(data)
+        assert restored.active is True
+
+    def test_enforce_capacity_skips_active_worktrees(self, tmp_path):
+        """Active worktrees are not evicted even when they're the oldest."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_worktrees=2)
+        manager = WorktreeManager(config=config)
+
+        now = datetime.now(timezone.utc)
+        # 30 min old — older than the inactive entry, but well within the 2h stale threshold
+        old_ts = (now - timedelta(minutes=30)).isoformat()
+        recent_ts = (now - timedelta(minutes=5)).isoformat()
+
+        # Oldest entry — but active
+        manager._registry["active-old"] = WorktreeInfo(
+            path=str(tmp_path / "wt-active"), branch="b1", agent_id="a1", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+            active=True,
+        )
+        # Recent entry — inactive
+        manager._registry["inactive-recent"] = WorktreeInfo(
+            path=str(tmp_path / "wt-inactive"), branch="b2", agent_id="a2", task_id="t2",
+            created_at=recent_ts, last_accessed=recent_ts, base_repo=str(tmp_path),
+            active=False,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory', return_value=True):
+            with patch.object(manager, '_load_registry'):
+                manager._enforce_capacity_limit()
+
+        # Active worktree survives, inactive one evicted
+        assert "active-old" in manager._registry
+        assert "inactive-recent" not in manager._registry
+
+    def test_enforce_capacity_evicts_stale_active_worktrees(self, tmp_path):
+        """Active worktrees past the staleness threshold are evicted."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_worktrees=1)
+        manager = WorktreeManager(config=config)
+
+        stale_ts = (
+            datetime.now(timezone.utc) - timedelta(seconds=STALE_ACTIVE_THRESHOLD_SECONDS + 60)
+        ).isoformat()
+
+        manager._registry["stale-active"] = WorktreeInfo(
+            path=str(tmp_path / "wt-stale"), branch="b1", agent_id="a1", task_id="t1",
+            created_at=stale_ts, last_accessed=stale_ts, base_repo=str(tmp_path),
+            active=True,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory', return_value=True):
+            with patch.object(manager, '_load_registry'):
+                manager._enforce_capacity_limit()
+
+        assert "stale-active" not in manager._registry
+
+    def test_cleanup_orphaned_skips_active_worktrees(self, tmp_path):
+        """cleanup_orphaned_worktrees skips worktrees that are actively in use."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
+        manager = WorktreeManager(config=config)
+
+        # Create a worktree directory so it's not a phantom
+        wt_path = tmp_path / "wt-active"
+        wt_path.mkdir()
+
+        # 30 min old — past max_age_hours=0 but within the 2h stale-active threshold
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        manager._registry["active-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="a1", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+            active=True,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory', return_value=True) as mock_remove:
+            result = manager.cleanup_orphaned_worktrees()
+
+        # Active worktree should not be removed
+        assert "active-key" in manager._registry
+        mock_remove.assert_not_called()
+        assert result["registered"] == 0
+
+    def test_mark_worktree_inactive(self, tmp_path):
+        """mark_worktree_inactive clears the active flag and saves."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt"
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="a1", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo="/base", active=True,
+        )
+
+        with patch.object(manager, '_save_registry') as mock_save:
+            manager.mark_worktree_inactive(wt_path)
+
+        assert manager._registry["key1"].active is False
+        mock_save.assert_called_once()
+
+    def test_mark_worktree_inactive_nonexistent_path(self, tmp_path):
+        """mark_worktree_inactive is a no-op for unknown paths."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        with patch.object(manager, '_save_registry') as mock_save:
+            manager.mark_worktree_inactive(tmp_path / "does-not-exist")
+
+        mock_save.assert_not_called()

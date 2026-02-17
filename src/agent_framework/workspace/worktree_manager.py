@@ -30,6 +30,9 @@ REGISTRY_FILENAME = ".worktree-registry.json"
 DEFAULT_MAX_WORKTREES = 20
 DEFAULT_MAX_AGE_HOURS = 24
 
+# Active worktrees older than this are considered stale (crashed agent) and eligible for eviction
+STALE_ACTIVE_THRESHOLD_SECONDS = 2 * 3600
+
 
 @dataclass
 class WorktreeInfo:
@@ -41,6 +44,7 @@ class WorktreeInfo:
     created_at: str
     last_accessed: str
     base_repo: str
+    active: bool = False
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
@@ -49,7 +53,11 @@ class WorktreeInfo:
     @classmethod
     def from_dict(cls, data: Dict) -> "WorktreeInfo":
         """Create from dictionary."""
-        return cls(**data)
+        # Filter to known fields for backwards compatibility with registries
+        # that don't yet have the 'active' field
+        valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered)
 
 
 @dataclass
@@ -230,7 +238,9 @@ class WorktreeManager:
         if worktree_path.exists():
             if worktree_key in self._registry:
                 logger.info(f"Reusing existing worktree: {worktree_path}")
-                self._update_last_accessed(worktree_key)
+                self._registry[worktree_key].active = True
+                self._registry[worktree_key].last_accessed = datetime.now(timezone.utc).isoformat()
+                self._save_registry()
                 return worktree_path
             else:
                 # Orphaned worktree, remove it first
@@ -284,6 +294,7 @@ class WorktreeManager:
                 created_at=now,
                 last_accessed=now,
                 base_repo=str(base_repo),
+                active=True,
             )
             self._save_registry()
 
@@ -390,7 +401,9 @@ class WorktreeManager:
             if info.task_id.startswith(task_id_short):
                 path = Path(info.path)
                 if path.exists():
-                    self._update_last_accessed(key)
+                    info.active = True
+                    info.last_accessed = datetime.now(timezone.utc).isoformat()
+                    self._save_registry()
                     return path
         return None
 
@@ -400,7 +413,9 @@ class WorktreeManager:
             if info.branch == branch_name:
                 path = Path(info.path)
                 if path.exists():
-                    self._update_last_accessed(key)
+                    info.active = True
+                    info.last_accessed = datetime.now(timezone.utc).isoformat()
+                    self._save_registry()
                     return path
         return None
 
@@ -426,6 +441,10 @@ class WorktreeManager:
                 age_seconds = (now - last_accessed).total_seconds()
 
                 if age_seconds > max_age_seconds:
+                    # Don't evict worktrees actively in use (unless stale)
+                    if info.active and not self._is_stale_active(info):
+                        continue
+
                     path = Path(info.path)
                     base_repo = Path(info.base_repo) if info.base_repo else None
 
@@ -504,26 +523,66 @@ class WorktreeManager:
         return removed
 
     def _enforce_capacity_limit(self) -> None:
-        """Remove oldest worktrees if over capacity."""
+        """Remove oldest worktrees if over capacity, skipping active ones."""
+        # Reload from disk so we see active flags set by other agent processes
+        self._load_registry()
+
         if len(self._registry) < self.config.max_worktrees:
             return
 
+        # Only consider inactive or stale-active worktrees for eviction
+        evictable = [
+            (key, info) for key, info in self._registry.items()
+            if not info.active or self._is_stale_active(info)
+        ]
+
         # Sort by last_accessed (oldest first)
-        sorted_entries = sorted(
-            self._registry.items(),
-            key=lambda x: x[1].last_accessed,
-        )
+        evictable.sort(key=lambda x: x[1].last_accessed)
 
         # Remove oldest until under limit
         to_remove = len(self._registry) - self.config.max_worktrees + 1
-        for key, info in sorted_entries[:to_remove]:
+        removed = 0
+        for key, info in evictable[:to_remove]:
             path = Path(info.path)
             base_repo = Path(info.base_repo) if info.base_repo else None
             if self._remove_worktree_directory(path, base_repo, force=True):
                 del self._registry[key]
                 logger.info(f"Removed oldest worktree (LRU): {path}")
+                removed += 1
 
-        self._save_registry()
+        if removed:
+            self._save_registry()
+
+    def mark_worktree_inactive(self, path: Path) -> None:
+        """Mark a worktree as no longer actively used by an agent.
+
+        Called when the agent finishes (success or failure) so the worktree
+        becomes eligible for eviction again.
+        """
+        path = Path(path).resolve()
+        for key, info in self._registry.items():
+            if Path(info.path).resolve() == path:
+                info.active = False
+                self._save_registry()
+                logger.debug(f"Marked worktree inactive: {path}")
+                return
+
+    def _is_stale_active(self, info: WorktreeInfo) -> bool:
+        """Check if an active worktree is stale (likely from a crashed agent).
+
+        Returns True if the worktree is marked active but hasn't been accessed
+        within STALE_ACTIVE_THRESHOLD_SECONDS.
+        """
+        if not info.active:
+            return False
+        try:
+            last_accessed = datetime.fromisoformat(info.last_accessed)
+            if last_accessed.tzinfo is None:
+                last_accessed = last_accessed.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - last_accessed).total_seconds()
+            return age > STALE_ACTIVE_THRESHOLD_SECONDS
+        except (ValueError, OSError):
+            return False
 
     def _update_last_accessed(self, key: str) -> None:
         """Update last_accessed timestamp for a worktree.
@@ -704,10 +763,12 @@ class WorktreeManager:
         """Get worktree statistics."""
         total = len(self._registry)
         active = sum(1 for info in self._registry.values() if Path(info.path).exists())
+        in_use = sum(1 for info in self._registry.values() if info.active)
 
         return {
             "total_registered": total,
             "active": active,
+            "in_use": in_use,
             "orphaned": total - active,
             "max_worktrees": self.config.max_worktrees,
             "max_age_hours": self.config.max_age_hours,

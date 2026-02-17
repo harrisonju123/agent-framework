@@ -239,6 +239,10 @@ class GitOperationsManager:
         if not self._active_worktree or not self.worktree_manager:
             return
 
+        # Unprotect from eviction immediately, regardless of whether
+        # the directory itself gets removed below
+        self.worktree_manager.mark_worktree_inactive(self._active_worktree)
+
         worktree_config = self.worktree_manager.config
         should_cleanup = (
             (success and worktree_config.cleanup_on_complete) or
