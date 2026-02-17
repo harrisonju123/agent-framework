@@ -223,6 +223,73 @@ class TestMCPGuidance:
         assert "owner/repo" in guidance
         assert "github" in guidance.lower()
 
+    def test_jira_guidance_excludes_creation_tools_when_not_allowed(self, agent_config, tmp_path):
+        """Engineer (jira_can_create_tickets=False) sees no create tools and sees prohibition."""
+        from agent_framework.core.config import AgentDefinition
+
+        agent_def = AgentDefinition(
+            id="engineer", name="Engineer", queue="engineer",
+            prompt="test", jira_can_create_tickets=False,
+        )
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=True,
+            optimization_config={},
+            agent_definition=agent_def,
+        )
+        builder = PromptBuilder(ctx)
+        guidance = builder._build_jira_guidance("PROJ-123", "PROJ")
+
+        assert "jira_create_issue" not in guidance
+        assert "jira_create_epic" not in guidance
+        assert "jira_create_subtask" not in guidance
+        assert "jira_search_issues" in guidance
+        assert "jira_add_comment" in guidance
+        assert "Do NOT create JIRA tickets" in guidance
+        assert "Do NOT use Bash, curl, or urllib" in guidance
+
+    def test_jira_guidance_includes_creation_tools_when_allowed(self, agent_config, tmp_path):
+        """Architect (jira_can_create_tickets=True) sees all tools, no prohibition."""
+        from agent_framework.core.config import AgentDefinition
+
+        agent_def = AgentDefinition(
+            id="architect", name="Architect", queue="architect",
+            prompt="test", jira_can_create_tickets=True,
+        )
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=True,
+            optimization_config={},
+            agent_definition=agent_def,
+        )
+        builder = PromptBuilder(ctx)
+        guidance = builder._build_jira_guidance("PROJ-123", "PROJ")
+
+        assert "jira_create_issue" in guidance
+        assert "jira_create_epic" in guidance
+        assert "jira_create_subtask" in guidance
+        assert "jira_search_issues" in guidance
+        assert "jira_add_comment" in guidance
+        assert "Do NOT create JIRA tickets" not in guidance
+
+    def test_jira_guidance_excludes_creation_when_no_definition(self, agent_config, tmp_path):
+        """No agent_definition defaults to no create tools (safe default)."""
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=True,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        guidance = builder._build_jira_guidance("PROJ-123", "PROJ")
+
+        assert "jira_create_issue" not in guidance
+        assert "jira_create_epic" not in guidance
+        assert "jira_create_subtask" not in guidance
+        assert "Do NOT create JIRA tickets" in guidance
+
     def test_error_handling_guidance_is_cached(self, agent_config, tmp_path):
         """Verify error handling guidance is cached."""
         ctx = PromptContext(

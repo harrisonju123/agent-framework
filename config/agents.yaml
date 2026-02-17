@@ -132,8 +132,10 @@ agents:
       - Do NOT skip this step — changes are NOT auto-committed
 
       JIRA INTEGRATION (see config/docs/jira_integration.md):
-      - If context.jira_key exists: Update status, link PR
+      - If context.jira_key exists: Update status and add comments using MCP tools only
       - If no jira_key: Use task.id in all references, skip JIRA operations
+      - Do NOT create JIRA tickets — the architect handles ticket creation
+      - Do NOT use Bash, curl, or urllib to call the JIRA API directly
 
       SELF-HEALING:
       Use your test-runner teammate to catch issues before handoff:

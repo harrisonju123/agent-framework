@@ -458,28 +458,53 @@ IMPORTANT:
 
     def _build_jira_guidance(self, jira_key: str, jira_project: str) -> str:
         """Build JIRA integration guidance for MCP."""
-        cache_key = f"jira:{jira_key}:{jira_project}"
+        can_create = (
+            self.ctx.agent_definition is not None
+            and self.ctx.agent_definition.jira_can_create_tickets
+        )
+        cache_key = f"jira:{jira_key}:{jira_project}:{can_create}"
         if cache_key in self._guidance_cache:
             return self._guidance_cache[cache_key]
 
         jira_server = self.ctx.jira_config.server if self.ctx.jira_config else "jira.example.com"
 
+        tools = [
+            f'- Search issues: jira_search_issues(jql="project = {jira_project or "PROJ"}")',
+            f'- Get issue: jira_get_issue(issueKey="{jira_key or "PROJ-123"}")',
+        ]
+
+        if can_create:
+            tools.extend([
+                f'- Create ticket: jira_create_issue(project="{jira_project or "PROJ"}", summary="...", description="...", issueType="Story")',
+                f'- Create epic: jira_create_epic(project="{jira_project or "PROJ"}", title="...", description="...")',
+                f'- Create subtask: jira_create_subtask(parentKey="{jira_key or "PROJ-123"}", summary="...", description="...")',
+            ])
+
+        tools.extend([
+            f'- Update status: jira_transition_issue(issueKey="{jira_key or "PROJ-123"}", transitionName="In Progress")',
+            f'- Add comment: jira_add_comment(issueKey="{jira_key or "PROJ-123"}", comment="...")',
+        ])
+
+        tools_block = "\n".join(tools)
+
+        restriction = ""
+        if not can_create:
+            restriction = (
+                "\nIMPORTANT RESTRICTIONS:\n"
+                "- Do NOT create JIRA tickets — the architect handles ticket creation\n"
+                "- Do NOT use Bash, curl, or urllib to call the JIRA API directly\n"
+            )
+
         result = f"""
 JIRA INTEGRATION (via MCP):
 You have access to JIRA via MCP tools:
-- Search issues: jira_search_issues(jql="project = {jira_project or 'PROJ'}")
-- Get issue: jira_get_issue(issueKey="{jira_key or 'PROJ-123'}")
-- Create ticket: jira_create_issue(project="{jira_project or 'PROJ'}", summary="...", description="...", issueType="Story")
-- Create epic: jira_create_epic(project="{jira_project or 'PROJ'}", title="...", description="...")
-- Create subtask: jira_create_subtask(parentKey="{jira_key or 'PROJ-123'}", summary="...", description="...")
-- Update status: jira_transition_issue(issueKey="{jira_key or 'PROJ-123'}", transitionName="In Progress")
-- Add comment: jira_add_comment(issueKey="{jira_key or 'PROJ-123'}", comment="...")
+{tools_block}
 
 Current context:
 - JIRA Server: {jira_server}
 - Ticket: {jira_key or 'N/A'}
 - Project: {jira_project or 'N/A'}
-
+{restriction}
 """
         self._guidance_cache[cache_key] = result
         return result
