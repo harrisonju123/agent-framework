@@ -7,12 +7,38 @@ around LLM calls — prompts sent, tool parameters, retries, memory ops, etc.
 
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Patterns that may leak credentials in Bash tool inputs logged to session files
+_REDACTION_PATTERNS = [
+    # curl -u user:password → curl -u user:***
+    (re.compile(r'(-u\s+\S+?:)\S+'), r'\1***'),
+    # Authorization: Bearer/Basic/Token <value>
+    (re.compile(r'(Authorization:\s*(?:Bearer|Basic|Token)\s+)\S+', re.IGNORECASE), r'\1***'),
+    # JIRA_API_TOKEN=value or JIRA_EMAIL=value in shell commands
+    (re.compile(r'((?:JIRA_API_TOKEN|JIRA_EMAIL|ANTHROPIC_API_KEY|GITHUB_TOKEN)=)\S+'), r'\1***'),
+]
+
+_PLACEHOLDER = '***'
+
+
+def _redact_sensitive_values(tool_input: Optional[dict]) -> Optional[dict]:
+    """Scrub known credential patterns from tool input before logging."""
+    if not tool_input:
+        return tool_input
+    result = {}
+    for k, v in tool_input.items():
+        if isinstance(v, str):
+            for pattern, replacement in _REDACTION_PATTERNS:
+                v = pattern.sub(replacement, v)
+        result[k] = v
+    return result
 
 
 class SessionLogger:
@@ -62,7 +88,7 @@ class SessionLogger:
         self._sequence += 1
         data = {"tool": tool_name, "sequence": self._sequence}
         if self._log_tool_inputs and tool_input:
-            data["input"] = tool_input
+            data["input"] = _redact_sensitive_values(tool_input)
         self.log("tool_call", **data)
 
     def log_prompt(self, prompt: str, **extra: Any) -> None:

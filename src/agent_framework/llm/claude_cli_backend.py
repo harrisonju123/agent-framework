@@ -16,6 +16,11 @@ from ..core.task import TaskType
 
 logger = logging.getLogger(__name__)
 
+# Env vars stripped from the Claude CLI subprocess to prevent the LLM's Bash tool
+# from accessing credentials. MCP servers get tokens from the expanded config file's
+# env block, not from the parent process environment.
+_SENSITIVE_ENV_VARS = frozenset({'JIRA_API_TOKEN', 'JIRA_EMAIL'})
+
 
 def _summarize_tool_input(tool_name: str, tool_input: dict) -> Optional[str]:
     """Extract a short human-readable summary from tool input."""
@@ -295,6 +300,8 @@ class ClaudeCLIBackend(LLMBackend):
             else:
                 env.update(self.proxy_env)
             env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1'
+            for key in _SENSITIVE_ENV_VARS:
+                env.pop(key, None)
             if task_id:
                 env['AGENT_TASK_ID'] = task_id
 
@@ -604,10 +611,12 @@ class ClaudeCLIBackend(LLMBackend):
         # Write to process-specific file
         temp_dir = Path.home() / ".cache" / "agent-framework"
         temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_dir.chmod(0o700)
         temp_path = temp_dir / f"mcp-config-{os.getpid()}-{env_hash}.json"
 
         with open(temp_path, 'w') as f:
             json.dump(expanded, f, indent=2)
+        temp_path.chmod(0o600)
 
         logger.debug(f"Expanded MCP config to process-specific file: {temp_path}")
         return temp_path

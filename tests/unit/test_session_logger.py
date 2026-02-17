@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_framework.core.session_logger import SessionLogger, noop_logger
+from agent_framework.core.session_logger import (
+    SessionLogger,
+    _redact_sensitive_values,
+    noop_logger,
+)
 
 
 @pytest.fixture
@@ -231,3 +235,52 @@ class TestCleanupOldSessions:
 
         assert SessionLogger.cleanup_old_sessions(logs_dir, retention_days=30) == 0
         assert recent.exists()
+
+
+# -- Redaction --
+
+
+class TestRedaction:
+    def test_curl_password_redacted(self):
+        result = _redact_sensitive_values({"command": "curl -u admin:s3cret https://jira.example.com/api"})
+        assert "s3cret" not in result["command"]
+        assert "-u admin:***" in result["command"]
+
+    def test_authorization_bearer_redacted(self):
+        result = _redact_sensitive_values({"command": 'curl -H "Authorization: Bearer tok_abc123" https://api.example.com'})
+        assert "tok_abc123" not in result["command"]
+        assert "Authorization: Bearer ***" in result["command"]
+
+    def test_authorization_basic_redacted(self):
+        result = _redact_sensitive_values({"command": 'curl -H "Authorization: Basic dXNlcjpwYXNz" https://api.example.com'})
+        assert "dXNlcjpwYXNz" not in result["command"]
+        assert "Authorization: Basic ***" in result["command"]
+
+    def test_env_var_assignment_redacted(self):
+        result = _redact_sensitive_values({"command": "JIRA_API_TOKEN=abc123 python script.py"})
+        assert "abc123" not in result["command"]
+        assert "JIRA_API_TOKEN=***" in result["command"]
+
+    def test_safe_command_unchanged(self):
+        cmd = "git status && pytest tests/ -v"
+        result = _redact_sensitive_values({"command": cmd})
+        assert result["command"] == cmd
+
+    def test_none_input_returns_none(self):
+        assert _redact_sensitive_values(None) is None
+
+    def test_empty_dict_returns_empty(self):
+        assert _redact_sensitive_values({}) == {}
+
+    def test_non_string_values_pass_through(self):
+        result = _redact_sensitive_values({"timeout": 30, "verbose": True})
+        assert result == {"timeout": 30, "verbose": True}
+
+    def test_redaction_applied_in_log_tool_call(self, logs_dir, session_log_path):
+        """End-to-end: redacted values don't appear in JSONL output."""
+        sl = SessionLogger(logs_dir, "test-task-123", log_tool_inputs=True)
+        sl.log_tool_call("Bash", {"command": "curl -u user:hunter2 https://jira.example.com"})
+        sl.close()
+        event = json.loads(session_log_path.read_text().strip())
+        assert "hunter2" not in json.dumps(event)
+        assert "-u user:***" in event["input"]["command"]
