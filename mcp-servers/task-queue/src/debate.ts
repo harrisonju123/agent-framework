@@ -305,7 +305,9 @@ function storeDebateMemory(
 ): void {
   try {
     const repoSlug = process.env.GITHUB_REPOSITORY || "unknown";
-    const agentType = process.env.AGENT_TYPE || "architect";
+    // Use AGENT_ID (set by run_agent.py) to attribute the debate to the originating agent,
+    // but store under "shared" so all agents can recall architectural decisions via recall.
+    const _originAgent = process.env.AGENT_ID || "unknown";
 
     // Extract topic keywords for tagging (first 3-4 meaningful words)
     // Include short technical terms like API, CI, DB, etc.
@@ -325,11 +327,14 @@ function storeDebateMemory(
       `Reasoning: ${synthesis.reasoning}`,
     ].join("\n");
 
-    const tags = ["debate", debateId, ...topicKeywords];
+    // Tag with origin agent so consumers can filter by who debated the topic
+    const tags = ["debate", debateId, `origin:${_originAgent}`, ...topicKeywords];
 
+    // Store under agent_type "shared" so any agent (engineer, qa, architect, etc.)
+    // can recall these architectural decisions without knowing who first ran the debate.
     const result = agentRemember(workspace, {
       repo_slug: repoSlug,
-      agent_type: agentType,
+      agent_type: "shared",
       category: "architectural_decisions",
       content,
       tags,
