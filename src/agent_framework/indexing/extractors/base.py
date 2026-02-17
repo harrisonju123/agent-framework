@@ -106,3 +106,27 @@ class BaseExtractor(ABC):
         if len(docstring) <= DOCSTRING_MAX_LEN:
             return docstring
         return docstring[: DOCSTRING_MAX_LEN - 3] + "..."
+
+    def _extract_line_comments(
+        self, lines: list[str], decl_line: int, prefix: str
+    ) -> str | None:
+        """Walk backwards collecting single-line comments above a declaration.
+
+        Args:
+            prefix: The comment prefix to match, e.g. '//' or '#'.
+        """
+        comment_lines: list[str] = []
+        i = decl_line - 1
+        while i >= 0:
+            stripped = lines[i].strip()
+            if stripped.startswith(prefix):
+                comment_lines.append(stripped[len(prefix):].strip())
+                i -= 1
+            else:
+                break
+
+        if not comment_lines:
+            return None
+
+        comment_lines.reverse()
+        return " ".join(comment_lines)
