@@ -30,6 +30,7 @@ from .models import (
     AgentActionResponse,
     TaskActionResponse,
     CheckpointRejectRequest,
+    CreateTaskRequest,
     WorkRequest,
     AnalyzeRequest,
     RunTicketRequest,
@@ -231,6 +232,73 @@ def register_routes(app: FastAPI):
                 status_code=404,
                 detail=f"Task {task_id} not found or not cancellable",
             )
+
+    @app.delete("/api/tasks/{task_id}", response_model=TaskActionResponse)
+    async def delete_task(task_id: str):
+        """Permanently delete a task from disk (only PENDING/FAILED/CANCELLED)."""
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
+            raise HTTPException(status_code=400, detail=f"Invalid task_id: {task_id}")
+
+        error = app.state.data_provider.delete_task(task_id)
+        if error is None:
+            return TaskActionResponse(
+                success=True,
+                task_id=task_id,
+                action="delete",
+                message=f"Task {task_id} deleted",
+            )
+        elif error == "not_deletable":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Task {task_id} is not deletable (cancel in-progress tasks first)",
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task {task_id} not found",
+            )
+
+    @app.post("/api/tasks", response_model=OperationResponse)
+    async def create_task(request: CreateTaskRequest):
+        """Create a task directly in a queue."""
+        from ..core.task import TaskType
+
+        # Validate task_type against enum
+        try:
+            TaskType(request.task_type)
+        except ValueError:
+            valid = [t.value for t in TaskType]
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid task_type '{request.task_type}'. Valid: {valid}",
+            )
+
+        # Validate assigned_to against configured agent queues
+        agents_config = app.state.data_provider._get_agents_config()
+        valid_queues = {a.queue for a in agents_config if a.enabled}
+        if request.assigned_to not in valid_queues:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid queue '{request.assigned_to}'. Valid: {sorted(valid_queues)}",
+            )
+
+        try:
+            task = app.state.data_provider.create_task(
+                title=request.title,
+                description=request.description,
+                task_type=request.task_type,
+                assigned_to=request.assigned_to,
+                repository=request.repository,
+                priority=request.priority,
+            )
+            return OperationResponse(
+                success=True,
+                task_id=task.id,
+                message=f"Task created and queued to {request.assigned_to}",
+            )
+        except Exception as e:
+            logger.exception(f"Error creating task: {e}")
+            raise HTTPException(status_code=500, detail="Failed to create task")
 
     # ============== Checkpoint API ==============
 

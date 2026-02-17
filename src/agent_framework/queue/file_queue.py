@@ -2,6 +2,7 @@
 
 import json
 import logging
+import shutil
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -488,28 +489,22 @@ class FileQueue:
         Returns:
             Task if found, None otherwise
         """
-        # Check queue directories first (active tasks)
-        if self.queue_dir.exists():
-            for queue_dir in self.queue_dir.iterdir():
-                if not queue_dir.is_dir():
-                    continue
-                for task_file in queue_dir.glob("*.json"):
-                    try:
-                        task = self._load_task(task_file)
-                        if task.id == identifier or task.context.get("jira_key") == identifier:
-                            return task
-                    except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
-                        continue
+        # Fast path: try direct file lookup by ID
+        task_file = self._find_task_file(identifier)
+        if task_file:
+            try:
+                return self._load_task(task_file)
+            except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                pass
 
-        # Check completed directory
-        if self.completed_dir.exists():
-            for task_file in self.completed_dir.glob("*.json"):
-                try:
-                    task = self._load_task(task_file)
-                    if task.id == identifier or task.context.get("jira_key") == identifier:
-                        return task
-                except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
-                    continue
+        # Slow path: scan all files for JIRA key match
+        for task_file in self._iter_all_task_files():
+            try:
+                task = self._load_task(task_file)
+                if task.context.get("jira_key") == identifier:
+                    return task
+            except (json.JSONDecodeError, FileNotFoundError, ValueError, KeyError):
+                continue
 
         return None
 
@@ -706,6 +701,66 @@ class FileQueue:
             result_summary="\n".join(aggregated_results) if aggregated_results else None,
         )
         return fan_in_task
+
+    def delete_task(self, task_id: str) -> bool:
+        """Permanently delete a task file from disk.
+
+        Searches queue directories and completed directory. Also cleans up
+        the associated lock directory and cache entries.
+
+        Returns True if the task was found and deleted.
+        """
+        task_file = self._find_task_file(task_id)
+        if not task_file:
+            return False
+
+        # Remove the JSON file
+        queue_name = task_file.parent.name
+        task_file.unlink()
+
+        # Clean up lock directory
+        lock_path = self.lock_dir / f"{task_id}.lock"
+        if lock_path.exists() and lock_path.is_dir():
+            shutil.rmtree(lock_path, ignore_errors=True)
+
+        # Invalidate caches
+        non_pending = self._non_pending_files.get(queue_name)
+        if non_pending:
+            non_pending.discard(f"{task_id}.json")
+        self._completed_cache.pop(task_id, None)
+        # Force directory mtime re-check on next pop/claim
+        self._queue_dir_mtime.pop(queue_name, None)
+
+        return True
+
+    def _find_task_file(self, task_id: str) -> Optional[Path]:
+        """Locate a task's JSON file by ID across queue and completed directories."""
+        filename = f"{task_id}.json"
+
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if not queue_dir.is_dir():
+                    continue
+                candidate = queue_dir / filename
+                if candidate.exists():
+                    return candidate
+
+        candidate = self.completed_dir / filename
+        if candidate.exists():
+            return candidate
+
+        return None
+
+    def _iter_all_task_files(self):
+        """Yield all task JSON file paths across queues and completed."""
+        if self.queue_dir.exists():
+            for queue_dir in self.queue_dir.iterdir():
+                if not queue_dir.is_dir():
+                    continue
+                yield from queue_dir.glob("*.json")
+
+        if self.completed_dir.exists():
+            yield from self.completed_dir.glob("*.json")
 
     def _fan_in_already_created(self, parent_task_id: str) -> bool:
         """Check if fan-in task already exists (prevent duplicate creation)."""

@@ -11,9 +11,14 @@ import TabPanels from 'primevue/tabpanels'
 import TabPanel from 'primevue/tabpanel'
 import Button from 'primevue/button'
 import CheckpointDetailDialog from '../components/dialogs/CheckpointDetailDialog.vue'
+import CreateTaskDialog from '../components/dialogs/CreateTaskDialog.vue'
 import type { CheckpointData, ActiveTask } from '../types'
 
-const { failedTasks, pendingCheckpoints, queues, handleRetryTask, handleCancelTask, getActiveTasks } = useAppState()
+const {
+  failedTasks, pendingCheckpoints, queues,
+  handleRetryTask, handleCancelTask, handleDeleteTask,
+  getActiveTasks, showConfirm, showCreateTaskDialog,
+} = useAppState()
 
 const selectedCheckpoint = ref<CheckpointData | null>(null)
 const showCheckpointDialog = ref(false)
@@ -35,6 +40,19 @@ async function pollLoop() {
 async function onCancelTask(taskId: string) {
   await handleCancelTask(taskId)
   await fetchActiveTasks()
+}
+
+function onDeleteActiveTask(taskId: string) {
+  showConfirm('Delete Task', `Permanently delete task ${taskId}?`, async () => {
+    await handleDeleteTask(taskId)
+    await fetchActiveTasks()
+  }, true)
+}
+
+function onDeleteFailedTask(taskId: string) {
+  showConfirm('Delete Task', `Permanently delete failed task ${taskId}?`, async () => {
+    await handleDeleteTask(taskId)
+  }, true)
 }
 
 onMounted(() => {
@@ -82,6 +100,9 @@ function statusLabel(status: string): string {
       <TabPanels>
         <!-- Active Tasks Tab -->
         <TabPanel value="active">
+          <div class="flex justify-end mb-2">
+            <Button label="Add Task" icon="pi pi-plus" size="small" @click="showCreateTaskDialog = true" />
+          </div>
           <DataTable :value="activeTasks" stripedRows :paginator="activeTasks.length > 10" :rows="10" class="text-sm">
             <template #empty>
               <div class="text-center py-6 text-slate-400">No active tasks</div>
@@ -103,9 +124,18 @@ function statusLabel(status: string): string {
             </Column>
             <Column field="assigned_to" header="Agent" style="width: 100px" />
             <Column field="task_type" header="Type" style="width: 120px" />
-            <Column header="Actions" style="width: 90px">
+            <Column header="Actions" style="width: 150px">
               <template #body="{ data }">
-                <Button label="Cancel" severity="danger" size="small" @click="onCancelTask(data.id)" />
+                <div class="flex gap-1">
+                  <Button label="Cancel" severity="danger" size="small" @click="onCancelTask(data.id)" />
+                  <Button
+                    v-if="data.status === 'pending'"
+                    label="Delete"
+                    severity="secondary"
+                    size="small"
+                    @click="onDeleteActiveTask(data.id)"
+                  />
+                </div>
               </template>
             </Column>
           </DataTable>
@@ -138,9 +168,12 @@ function statusLabel(status: string): string {
                 <span class="text-red-500 text-xs" :title="data.last_error">{{ truncateError(data.last_error) }}</span>
               </template>
             </Column>
-            <Column header="Actions" style="width: 80px">
+            <Column header="Actions" style="width: 150px">
               <template #body="{ data }">
-                <Button label="Retry" severity="danger" size="small" @click="handleRetryTask(data.id)" />
+                <div class="flex gap-1">
+                  <Button label="Retry" severity="danger" size="small" @click="handleRetryTask(data.id)" />
+                  <Button label="Delete" severity="secondary" size="small" @click="onDeleteFailedTask(data.id)" />
+                </div>
               </template>
             </Column>
           </DataTable>
@@ -211,5 +244,7 @@ function statusLabel(status: string): string {
       :checkpoint="selectedCheckpoint"
       @close="selectedCheckpoint = null"
     />
+
+    <CreateTaskDialog v-model:visible="showCreateTaskDialog" />
   </div>
 </template>

@@ -25,6 +25,8 @@ export interface AppState {
   restartAgent: ReturnType<typeof useApi>['restartAgent']
   retryTask: ReturnType<typeof useApi>['retryTask']
   cancelTask: ReturnType<typeof useApi>['cancelTask']
+  deleteTask: ReturnType<typeof useApi>['deleteTask']
+  createTask: ReturnType<typeof useApi>['createTask']
   getActiveTasks: ReturnType<typeof useApi>['getActiveTasks']
   approveCheckpoint: ReturnType<typeof useApi>['approveCheckpoint']
   rejectCheckpoint: ReturnType<typeof useApi>['rejectCheckpoint']
@@ -67,11 +69,13 @@ export interface AppState {
   handleApproveAll: () => Promise<void>
   handleRetryTask: (taskId: string) => Promise<void>
   handleCancelTask: (taskId: string) => Promise<void>
+  handleDeleteTask: (taskId: string) => Promise<void>
 
   // Dialog visibility (shared so keyboard shortcuts + TopBar can both toggle)
   showWorkDialog: Ref<boolean>
   showAnalyzeDialog: Ref<boolean>
   showTicketDialog: Ref<boolean>
+  showCreateTaskDialog: Ref<boolean>
 
   // Dialog helpers
   showToast: (message: string, type: 'success' | 'error' | 'info') => void
@@ -84,7 +88,7 @@ export function provideAppState(): AppState {
   const { state, connected, error: wsError, reconnect, reconnecting, reconnectAttempt } = useWebSocket()
   const { logs, connected: logsConnected, clear: logsClear, reconnect: logsReconnect } = useLogStream()
   const {
-    restartAgent, retryTask, cancelTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
+    restartAgent, retryTask, cancelTask, deleteTask, createTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, error: apiError,
   } = useApi()
@@ -100,6 +104,7 @@ export function provideAppState(): AppState {
   const showWorkDialog = ref(false)
   const showAnalyzeDialog = ref(false)
   const showTicketDialog = ref(false)
+  const showCreateTaskDialog = ref(false)
 
   // Computed dashboard values
   const isPaused = computed(() => state.value?.is_paused ?? false)
@@ -265,17 +270,26 @@ export function provideAppState(): AppState {
     }
   }
 
+  async function handleDeleteTask(taskId: string) {
+    const result = await deleteTask(taskId)
+    if (result?.success) {
+      showToast(`Task ${taskId} deleted`, 'success')
+    } else if (apiError.value) {
+      showToast(apiError.value, 'error')
+    }
+  }
+
   const appState: AppState = {
     state, connected, wsError, reconnect, reconnecting, reconnectAttempt,
     logs, logsConnected, logsClear, logsReconnect,
-    restartAgent, retryTask, cancelTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
+    restartAgent, retryTask, cancelTask, deleteTask, createTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, apiError,
     isPaused, uptime, agents, queues, events, failedTasks, pendingCheckpoints,
     health, agentIds, uptimeDisplay, queueSummary,
     setupComplete, showSetupPrompt, checkSetupStatus, handleSetupComplete, dismissSetupPrompt,
-    handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleApproveAll, handleRetryTask, handleCancelTask,
-    showWorkDialog, showAnalyzeDialog, showTicketDialog,
+    handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleApproveAll, handleRetryTask, handleCancelTask, handleDeleteTask,
+    showWorkDialog, showAnalyzeDialog, showTicketDialog, showCreateTaskDialog,
     showToast, showConfirm,
   }
 

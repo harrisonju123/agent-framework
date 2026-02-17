@@ -143,6 +143,15 @@ export interface RunTicketRequest {
   agent?: string
 }
 
+export interface CreateTaskRequest {
+  title: string
+  description: string
+  task_type: string
+  assigned_to: string
+  repository?: string
+  priority?: number
+}
+
 export interface OperationResponse {
   success: boolean
   task_id: string | null

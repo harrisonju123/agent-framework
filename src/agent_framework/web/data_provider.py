@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -12,7 +13,7 @@ from ..core.activity import ActivityManager, AgentStatus, TaskPhase
 from ..core.config import load_agents, AgentDefinition
 from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
-from ..core.task import TaskStatus
+from ..core.task import Task, TaskStatus, TaskType
 from .models import (
     ActiveTaskData,
     AgentData,
@@ -407,6 +408,58 @@ class DashboardDataProvider:
         self._teams_cache = sessions
         self._teams_cache_time = now
         return sessions
+
+    def delete_task(self, task_id: str) -> Optional[str]:
+        """Permanently delete a task from disk.
+
+        Only allows deletion of terminal/idle tasks (PENDING, FAILED, CANCELLED).
+        IN_PROGRESS tasks must be cancelled first.
+
+        Returns:
+            None on success, or an error reason string.
+        """
+        task = self.queue.find_task(task_id)
+        if not task:
+            return "not_found"
+
+        deletable = {TaskStatus.PENDING, TaskStatus.FAILED, TaskStatus.CANCELLED}
+        if task.status not in deletable:
+            return "not_deletable"
+
+        self.queue.delete_task(task_id)
+        return None
+
+    def create_task(
+        self,
+        title: str,
+        description: str,
+        task_type: str,
+        assigned_to: str,
+        repository: Optional[str] = None,
+        priority: int = 1,
+    ) -> Task:
+        """Create a task directly and push it to the specified queue."""
+        task_id = f"manual-{int(datetime.now(timezone.utc).timestamp())}-{uuid.uuid4().hex[:6]}"
+
+        context: Dict[str, str] = {}
+        if repository:
+            context["github_repo"] = repository
+
+        task = Task(
+            id=task_id,
+            type=TaskType(task_type),
+            status=TaskStatus.PENDING,
+            priority=priority,
+            created_by="web-dashboard",
+            assigned_to=assigned_to,
+            created_at=datetime.now(timezone.utc),
+            title=title,
+            description=description,
+            context=context,
+        )
+
+        self.queue.push(task, assigned_to)
+        return task
 
     # ============== Checkpoint Methods ==============
 

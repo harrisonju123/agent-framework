@@ -7,6 +7,7 @@ import type {
   WorkRequest,
   AnalyzeRequest,
   RunTicketRequest,
+  CreateTaskRequest,
   OperationResponse,
 } from '../types'
 
@@ -76,6 +77,21 @@ export function useApi() {
       fetchJson<TaskActionResponse>(`/tasks/${taskId}/cancel`, {
         method: 'POST',
         ...(reason ? { body: JSON.stringify({ reason }) } : {}),
+      })
+    )
+  }
+
+  async function deleteTask(taskId: string): Promise<TaskActionResponse | null> {
+    return withLoading(() =>
+      fetchJson<TaskActionResponse>(`/tasks/${taskId}`, { method: 'DELETE' })
+    )
+  }
+
+  async function createTask(request: CreateTaskRequest): Promise<OperationResponse | null> {
+    return withLoading(() =>
+      fetchJson<OperationResponse>('/tasks', {
+        method: 'POST',
+        body: JSON.stringify(request),
       })
     )
   }
@@ -170,6 +186,8 @@ export function useApi() {
     restartAgent,
     retryTask,
     cancelTask,
+    deleteTask,
+    createTask,
     getActiveTasks,
     approveCheckpoint,
     rejectCheckpoint,

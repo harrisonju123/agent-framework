@@ -223,6 +223,16 @@ class RunTicketRequest(BaseModel):
     agent: Optional[str] = Field(default=None, pattern=r'^[a-z0-9_-]+$')
 
 
+class CreateTaskRequest(BaseModel):
+    """Request to create a task directly in a queue."""
+    title: str = Field(..., min_length=1, max_length=500)
+    description: str = Field(..., min_length=1, max_length=10000)
+    task_type: str = Field(default="implementation")
+    assigned_to: str = Field(default="engineer", pattern=r'^[a-z0-9_-]+$')
+    repository: Optional[str] = Field(default=None, pattern=r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$')
+    priority: int = Field(default=1, ge=1, le=10)
+
+
 class CheckpointRejectRequest(BaseModel):
     """Request to reject a checkpoint with feedback."""
     feedback: str = Field(..., min_length=1, max_length=5000)
