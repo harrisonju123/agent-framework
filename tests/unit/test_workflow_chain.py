@@ -1651,3 +1651,76 @@ class TestNoChangesRouting:
                 break
 
         assert matched_target == "implement"
+
+
+# -- Same-agent upstream context clearing --
+
+class TestSameAgentUpstreamClearing:
+    """Prevent self-referential upstream context when chain routes back to same agent."""
+
+    def test_chain_to_same_agent_clears_upstream_summary(self, queue):
+        """Chain task targeting the same agent that produced upstream clears it."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            upstream_summary="Previous architect analysis...",
+            upstream_context_file="/tmp/ctx.md",
+            upstream_source_agent="architect",
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        # Route back to architect — same agent that produced the upstream
+        architect_step = WorkflowStep(id="code_review", agent="architect")
+        chain_task = executor._build_chain_task(task, architect_step, "qa")
+
+        assert "upstream_summary" not in chain_task.context
+        assert "upstream_context_file" not in chain_task.context
+        assert "upstream_source_agent" not in chain_task.context
+
+    def test_chain_to_different_agent_preserves_upstream_summary(self, queue):
+        """Chain task targeting a different agent keeps upstream context intact."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            upstream_summary="QA findings: tests failing",
+            upstream_context_file="/tmp/qa-ctx.md",
+            upstream_source_agent="qa",
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        # Route to engineer — different from qa who produced the upstream
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        chain_task = executor._build_chain_task(task, engineer_step, "qa")
+
+        assert chain_task.context["upstream_summary"] == "QA findings: tests failing"
+        assert chain_task.context["upstream_context_file"] == "/tmp/qa-ctx.md"
+        assert chain_task.context["upstream_source_agent"] == "qa"
+
+    def test_upstream_source_agent_stored_on_save(self, tmp_path):
+        """_save_upstream_context stores upstream_source_agent in task.context."""
+        agent = MagicMock()
+        agent.config = AgentConfig(
+            id="architect", name="Architect", queue="architect", prompt="p",
+        )
+        agent.workspace = tmp_path
+        agent.UPSTREAM_CONTEXT_MAX_CHARS = Agent.UPSTREAM_CONTEXT_MAX_CHARS
+        agent.logger = MagicMock()
+
+        task = _make_task()
+        response = _make_response("Analysis complete: all looks good.")
+
+        Agent._save_upstream_context(agent, task, response)
+
+        assert task.context["upstream_source_agent"] == "architect"

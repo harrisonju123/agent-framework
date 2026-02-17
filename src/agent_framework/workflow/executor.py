@@ -397,6 +397,13 @@ class WorkflowExecutor:
         }
         # Clear stale verdict so the next agent's output is evaluated fresh
         context.pop("verdict", None)
+        # Prevent same-agent self-referential upstream context — an agent
+        # should never see its own output labeled as "UPSTREAM AGENT FINDINGS"
+        upstream_source = context.get("upstream_source_agent")
+        if upstream_source and upstream_source == target_step.agent:
+            context.pop("upstream_summary", None)
+            context.pop("upstream_context_file", None)
+            context.pop("upstream_source_agent", None)
         if task.context.get("fan_in"):
             context["fan_in"] = True
             context["parent_task_id"] = task.context.get("parent_task_id")
