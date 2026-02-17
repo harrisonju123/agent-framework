@@ -3,7 +3,7 @@ import type { CheckpointData } from '../types'
 
 const props = defineProps<{
   checkpoints: CheckpointData[]
-  onApprove: (taskId: string) => void
+  onSelect: (checkpoint: CheckpointData) => void
 }>()
 
 function truncateText(text: string, maxLen: number = 50): string {
@@ -21,19 +21,14 @@ function truncateText(text: string, maxLen: number = 50): string {
       <div
         v-for="cp in checkpoints"
         :key="cp.id"
-        class="px-4 py-2 border-b border-gray-800/50 last:border-b-0 hover:bg-gray-800/30"
+        class="px-4 py-2 border-b border-gray-800/50 last:border-b-0 hover:bg-gray-800/30 cursor-pointer"
+        @click="onSelect(cp)"
       >
         <div class="flex items-center justify-between mb-1">
           <span class="font-mono text-yellow-400 font-medium text-xs">
             {{ cp.checkpoint_id }}
           </span>
-          <button
-            @click="onApprove(cp.id)"
-            class="px-2 py-0.5 text-xs bg-yellow-600/80 hover:bg-yellow-600 rounded transition-colors"
-            :aria-label="`Approve checkpoint for ${cp.id}`"
-          >
-            Approve
-          </button>
+          <span class="text-xs text-gray-600">click to review</span>
         </div>
 
         <p class="text-xs text-gray-400 truncate" :title="cp.title">

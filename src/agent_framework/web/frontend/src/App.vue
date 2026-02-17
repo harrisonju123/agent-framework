@@ -15,7 +15,7 @@ import Modal from './components/Modal.vue'
 import Toast from './components/Toast.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import SetupWizard from './components/SetupWizard.vue'
-import type { ModalType } from './types'
+import type { ModalType, CheckpointData } from './types'
 
 const { state, connected, error: wsError, reconnect, reconnecting, reconnectAttempt } = useWebSocket()
 const { logs, connected: logsConnected } = useLogStream()
@@ -69,6 +69,9 @@ const toast = ref<{
 
 // Log panel collapsed state
 const logsExpanded = ref(false)
+
+// Selected checkpoint for detail modal
+const selectedCheckpoint = ref<CheckpointData | null>(null)
 
 // Form state
 const workForm = ref({
@@ -284,10 +287,18 @@ async function handleRetryTask(taskId: string) {
   }
 }
 
-async function handleApproveCheckpoint(taskId: string) {
-  const result = await approveCheckpoint(taskId)
+function handleSelectCheckpoint(checkpoint: CheckpointData) {
+  selectedCheckpoint.value = checkpoint
+}
+
+async function handleApproveCheckpoint() {
+  const cp = selectedCheckpoint.value
+  if (!cp) return
+
+  const result = await approveCheckpoint(cp.id)
+  selectedCheckpoint.value = null
   if (result?.success) {
-    showToast(`Checkpoint approved for ${taskId}`, 'success')
+    showToast(`Checkpoint approved for ${cp.id}`, 'success')
   } else if (apiError.value) {
     showToast(apiError.value, 'error')
   }
@@ -588,7 +599,7 @@ onMounted(() => {
               <span>({{ pendingCheckpoints.length }})</span>
             </div>
             <div class="max-h-48 overflow-y-auto">
-              <PendingCheckpoints :checkpoints="pendingCheckpoints" :on-approve="handleApproveCheckpoint" />
+              <PendingCheckpoints :checkpoints="pendingCheckpoints" :on-select="handleSelectCheckpoint" />
             </div>
           </div>
         </div>
@@ -763,6 +774,43 @@ onMounted(() => {
     <!-- Setup Wizard Modal -->
     <Modal :open="activeModal === 'setup'" title="Setup Wizard" @close="activeModal = null">
       <SetupWizard @complete="handleSetupComplete" />
+    </Modal>
+
+    <!-- Checkpoint Detail Modal -->
+    <Modal :open="selectedCheckpoint !== null" title="Checkpoint Review" @close="selectedCheckpoint = null">
+      <div v-if="selectedCheckpoint" class="space-y-4">
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Task</label>
+          <p class="text-sm text-gray-300">{{ selectedCheckpoint.title }}</p>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Checkpoint</label>
+          <p class="text-sm text-yellow-400">{{ selectedCheckpoint.checkpoint_id }}</p>
+        </div>
+        <div>
+          <label class="block text-xs text-gray-500 mb-1">Message</label>
+          <p class="text-sm text-gray-300 whitespace-pre-wrap">{{ selectedCheckpoint.checkpoint_message }}</p>
+        </div>
+        <div class="flex items-center gap-3 text-xs text-gray-500">
+          <span>Agent: <span class="text-gray-400">{{ selectedCheckpoint.assigned_to }}</span></span>
+          <span>Task ID: <span class="text-gray-400">{{ selectedCheckpoint.id }}</span></span>
+        </div>
+        <div class="flex justify-end gap-2 pt-2 border-t border-gray-800">
+          <button
+            @click="selectedCheckpoint = null"
+            class="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-300 rounded"
+          >
+            Cancel
+          </button>
+          <button
+            @click="handleApproveCheckpoint"
+            :disabled="loading"
+            class="px-4 py-1.5 text-sm bg-yellow-600 hover:bg-yellow-500 text-white rounded disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Approve
+          </button>
+        </div>
+      </div>
     </Modal>
 
     <!-- Run Ticket Modal -->
