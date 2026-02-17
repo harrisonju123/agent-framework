@@ -368,6 +368,7 @@ class WorkflowExecutor:
 
         if self._is_chain_task_already_queued(
             next_agent, task.id, chain_id=chain_task.id, title=chain_task.title,
+            root_task_id=task.context.get("_root_task_id", task.id),
         ):
             self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
@@ -385,6 +386,7 @@ class WorkflowExecutor:
     def _is_chain_task_already_queued(
         self, next_agent: str, source_task_id: str, *,
         chain_id: Optional[str] = None, title: Optional[str] = None,
+        root_task_id: Optional[str] = None,
     ) -> bool:
         """Check if chain task already exists in target queue or completed."""
         import json
@@ -414,6 +416,25 @@ class WorkflowExecutor:
                             return True
                     except (json.JSONDecodeError, OSError):
                         continue
+
+        # Cross-type dedup: block chain task when subtasks already exist for the
+        # same root task — subtasks handle the work, fan-in aggregates results
+        if root_task_id:
+            for agent_dir in self.queue_dir.iterdir() if self.queue_dir.exists() else []:
+                if not agent_dir.is_dir():
+                    continue
+                for f in agent_dir.glob("*.json"):
+                    try:
+                        data = json.loads(f.read_text())
+                        if (data.get("parent_task_id")
+                                and data.get("context", {}).get("_root_task_id") == root_task_id):
+                            self.logger.debug(
+                                f"Cross-type dedup: subtask {f.name} shares root {root_task_id}"
+                            )
+                            return True
+                    except (json.JSONDecodeError, OSError):
+                        continue
+
         return False
 
     def _build_chain_task(

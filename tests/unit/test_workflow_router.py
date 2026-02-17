@@ -220,12 +220,70 @@ class TestTaskDecomposition:
 
             assert queue.push.call_count == 2
             assert task.subtask_ids == [subtask1.id, subtask2.id]
-            queue.update.assert_called_once_with(task)
+
+    def test_decompose_persists_to_completed_dir(self, router, queue):
+        """subtask_ids are written to the completed copy (not queue.update)."""
+        task = _make_task(task_id="parent-456")
+        task.plan = MagicMock()
+        task.plan.files_to_modify = ["file1.py"]
+
+        subtask1 = _make_task(task_id="parent-456-sub-0")
+
+        # Simulate mark_completed() having already moved task to completed_dir
+        completed_file = queue.completed_dir / f"{task.id}.json"
+        completed_file.write_text(task.model_dump_json(indent=2))
+
+        with patch("agent_framework.core.task_decomposer.TaskDecomposer") as mock_decomposer:
+            decomposer_instance = MagicMock()
+            decomposer_instance.decompose.return_value = [subtask1]
+            mock_decomposer.return_value = decomposer_instance
+
+            router.decompose_and_queue_subtasks(task)
+
+        # queue.update should NOT have been called (completed file existed)
+        queue.update.assert_not_called()
+
+        # Verify subtask_ids were written to completed_dir
+        import json
+        persisted = json.loads(completed_file.read_text())
+        assert persisted["subtask_ids"] == ["parent-456-sub-0"]
+
+    def test_decompose_falls_back_to_queue_update(self, router, queue):
+        """Falls back to queue.update() when completed file doesn't exist."""
+        task = _make_task(task_id="parent-789")
+        task.plan = MagicMock()
+        task.plan.files_to_modify = ["file1.py"]
+
+        subtask1 = _make_task(task_id="parent-789-sub-0")
+
+        # No completed file — simulate task still in queue dir
+        with patch("agent_framework.core.task_decomposer.TaskDecomposer") as mock_decomposer:
+            decomposer_instance = MagicMock()
+            decomposer_instance.decompose.return_value = [subtask1]
+            mock_decomposer.return_value = decomposer_instance
+
+            router.decompose_and_queue_subtasks(task)
+
+        queue.update.assert_called_once_with(task)
 
 
 # -- Workflow chain enforcement --
 
 class TestEnforceChain:
+    def test_skips_when_subtask_ids_set(self, router, queue):
+        """Tasks already decomposed into subtasks skip chain routing entirely."""
+        task = _make_task(workflow="default")
+        task.subtask_ids = ["sub-1", "sub-2"]
+        response = _make_response()
+
+        router.enforce_chain(task, response)
+
+        queue.push.assert_not_called()
+        router.logger.info.assert_any_call(
+            f"Task {task.id} already decomposed into 2 subtasks, "
+            f"skipping chain routing"
+        )
+
     def test_queues_next_agent_no_pr(self, router, queue):
         """When no PR is created, chain task is queued to the next agent."""
         task = _make_task(workflow="default")

@@ -519,11 +519,12 @@ class Agent:
                 self.logger.info(f"Agent {self.config.id} resumed")
                 self._paused = False
 
-            # Poll for next task
-            task = self.queue.pop(self.config.queue)
+            # Poll for next task (atomic claim = pop + lock in one step)
+            claimed = self.queue.claim(self.config.queue, self.config.id)
 
-            if task:
-                await self._handle_task(task)
+            if claimed:
+                task, lock = claimed
+                await self._handle_task(task, lock=lock)
             else:
                 self.logger.debug(
                     f"No tasks available for {self.config.id}, "
@@ -1116,20 +1117,24 @@ class Agent:
         except Exception:
             pass
 
-    async def _handle_task(self, task: Task) -> None:
+    async def _handle_task(self, task: Task, *, lock: Optional["FileLock"] = None) -> None:
         """Handle task execution with retry/escalation logic."""
         from datetime import datetime
+        from ..queue.locks import FileLock
 
         # Normalize legacy workflow names and validate task
         self._normalize_workflow(task)
         if not self._validate_task_or_reject(task):
+            if lock:
+                lock.release()
             return
 
-        # Acquire lock
-        lock = self.queue.acquire_lock(task.id, self.config.id)
-        if not lock:
-            self.logger.warning(f"⏸️  Could not acquire lock, will retry later")
-            return
+        # Use pre-acquired lock from claim(), or fall back to separate acquire
+        if lock is None:
+            lock = self.queue.acquire_lock(task.id, self.config.id)
+            if not lock:
+                self.logger.warning(f"⏸️  Could not acquire lock, will retry later")
+                return
 
         task_start_time = datetime.now(timezone.utc)
 

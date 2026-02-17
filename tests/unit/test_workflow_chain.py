@@ -1373,6 +1373,97 @@ class TestTitleBasedDedup:
         assert result is False
 
 
+# -- Cross-type dedup --
+
+class TestCrossTypeDedup:
+    """Verify chain tasks are blocked when subtasks already exist for the same root."""
+
+    def test_blocks_chain_when_subtasks_exist(self, queue, tmp_path):
+        """Subtask in queue with same root_task_id blocks chain task creation."""
+        import json
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        # Place a subtask in the engineer queue with a matching root
+        engineer_dir = queue.queue_dir / "engineer"
+        engineer_dir.mkdir()
+        subtask_data = {
+            "id": "root-1-sub-0",
+            "parent_task_id": "root-1",
+            "title": "Subtask 0",
+            "context": {"_root_task_id": "root-1"},
+        }
+        (engineer_dir / "root-1-sub-0.json").write_text(json.dumps(subtask_data))
+
+        result = executor._is_chain_task_already_queued(
+            "qa", "some-source",
+            chain_id="chain-root-1-qa-d1",
+            root_task_id="root-1",
+        )
+        assert result is True
+
+    def test_allows_chain_when_no_subtasks(self, queue, tmp_path):
+        """No subtasks in queue → chain task creation is allowed."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        result = executor._is_chain_task_already_queued(
+            "qa", "some-source",
+            chain_id="chain-root-1-qa-d1",
+            root_task_id="root-1",
+        )
+        assert result is False
+
+    def test_ignores_subtasks_with_different_root(self, queue, tmp_path):
+        """Subtasks for a different root don't block the chain task."""
+        import json
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        engineer_dir = queue.queue_dir / "engineer"
+        engineer_dir.mkdir()
+        subtask_data = {
+            "id": "other-root-sub-0",
+            "parent_task_id": "other-root",
+            "title": "Subtask 0",
+            "context": {"_root_task_id": "other-root"},
+        }
+        (engineer_dir / "other-root-sub-0.json").write_text(json.dumps(subtask_data))
+
+        result = executor._is_chain_task_already_queued(
+            "qa", "some-source",
+            chain_id="chain-root-1-qa-d1",
+            root_task_id="root-1",
+        )
+        assert result is False
+
+    def test_no_root_task_id_skips_cross_type_check(self, queue, tmp_path):
+        """When root_task_id is None, cross-type dedup is skipped entirely."""
+        import json
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        engineer_dir = queue.queue_dir / "engineer"
+        engineer_dir.mkdir()
+        subtask_data = {
+            "id": "root-1-sub-0",
+            "parent_task_id": "root-1",
+            "title": "Subtask 0",
+            "context": {"_root_task_id": "root-1"},
+        }
+        (engineer_dir / "root-1-sub-0.json").write_text(json.dumps(subtask_data))
+
+        result = executor._is_chain_task_already_queued(
+            "qa", "some-source",
+            chain_id="chain-root-1-qa-d1",
+        )
+        assert result is False
+
+
 # -- Verdict storage and clearing --
 
 class TestVerdictStorageAndClearing:

@@ -196,6 +196,81 @@ class FileQueue:
         except Exception as move_error:
             logger.error(f"Failed to quarantine malformed task {task_file}: {move_error}")
 
+    def claim(self, queue_id: str, agent_id: str) -> Optional[tuple[Task, FileLock]]:
+        """Atomically pop a task and acquire its lock in one step.
+
+        Eliminates the race window between pop() and acquire_lock() where
+        a second worker could pop the same task before the first locks it.
+
+        Returns (task, lock) if a task was claimed, None if queue is empty
+        or all candidates are locked by other workers.
+        """
+        queue_path = self.queue_dir / queue_id
+        if not queue_path.exists():
+            return None
+
+        # Invalidate non-pending cache when directory changes
+        try:
+            current_mtime = queue_path.stat().st_mtime
+        except OSError:
+            return None
+        if current_mtime != self._queue_dir_mtime.get(queue_id, 0):
+            self._non_pending_files.pop(queue_id, None)
+            self._queue_dir_mtime[queue_id] = current_mtime
+
+        non_pending = self._non_pending_files.setdefault(queue_id, set())
+        task_files = sorted(queue_path.glob("*.json"))
+
+        for task_file in task_files:
+            if not task_file.exists():
+                continue
+
+            if task_file.name in non_pending:
+                continue
+
+            try:
+                task = self._load_task(task_file)
+
+                if task.status == TaskStatus.IN_PROGRESS:
+                    if self._is_orphaned(task):
+                        logger.warning(
+                            f"Recovering orphaned task {task.id} "
+                            f"(was in_progress by {task.started_by})"
+                        )
+                        task.status = TaskStatus.PENDING
+                        task.started_at = None
+                        task.started_by = None
+                        atomic_write_model(task_file, task)
+                    else:
+                        non_pending.add(task_file.name)
+                        continue
+
+                if task.status != TaskStatus.PENDING:
+                    non_pending.add(task_file.name)
+                    continue
+
+                if not self._can_retry(task):
+                    continue
+
+                if not self._dependencies_met(task):
+                    continue
+
+                # Atomic: try to lock before returning the task
+                lock = FileLock(self.lock_dir, task.id)
+                if lock.acquire():
+                    return (task, lock)
+
+                # Another worker claimed it — skip to next candidate
+                continue
+
+            except FileNotFoundError:
+                continue
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                self._quarantine_malformed_task(task_file, e)
+                continue
+
+        return None
+
     def update(self, task: Task) -> None:
         """Update a task's state."""
         queue_path = self.queue_dir / task.assigned_to

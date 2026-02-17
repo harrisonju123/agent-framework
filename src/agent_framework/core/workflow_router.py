@@ -141,11 +141,19 @@ class WorkflowRouter:
             queued_count += 1
             self.logger.info(f"  ✅ Queued subtask: {subtask.id} ({subtask.title})")
 
-        # Update parent task with subtask IDs and save to completed
-        # (parent is now just a container for subtasks)
+        # Update parent task with subtask IDs and persist
         task.subtask_ids = [st.id for st in subtasks]
         task.result_summary = f"Decomposed into {len(subtasks)} subtasks ({queued_count} newly queued)"
-        self.queue.update(task)
+
+        # mark_completed() already moved the task file to completed_dir before
+        # enforce_chain runs, so queue.update() would silently fail (file not in
+        # queue_dir). Write directly to the completed copy instead.
+        completed_file = self.queue.completed_dir / f"{task.id}.json"
+        if completed_file.exists():
+            from ..utils.atomic_io import atomic_write_model
+            atomic_write_model(completed_file, task)
+        else:
+            self.queue.update(task)
 
         self.logger.info(
             f"🔀 Task {task.id} decomposed into {len(subtasks)} subtasks ({queued_count} newly queued)"
@@ -161,6 +169,15 @@ class WorkflowRouter:
             if self.should_decompose_task(task):
                 self.decompose_and_queue_subtasks(task)
                 return
+
+        # If subtasks were already created (by a prior run), skip chain routing —
+        # subtasks handle the work individually, fan-in aggregates at completion
+        if task.subtask_ids:
+            self.logger.info(
+                f"Task {task.id} already decomposed into {len(task.subtask_ids)} subtasks, "
+                f"skipping chain routing"
+            )
+            return
 
         # Preview tasks route back to architect for review, not to QA
         if task.type == TaskType.PREVIEW and self.config.base_id == 'engineer':
