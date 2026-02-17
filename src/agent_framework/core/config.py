@@ -458,6 +458,22 @@ class GitHubConfig(BaseModel):
     labels: List[str] = Field(default_factory=lambda: ["agent-pr"])
 
 
+class CodeIndexingConfig(BaseModel):
+    """Codebase structural indexing configuration."""
+    enabled: bool = True
+    max_symbols: int = 500
+    max_prompt_chars: int = 4000
+    inject_for_agents: List[str] = Field(
+        default_factory=lambda: ["architect", "engineer", "qa"]
+    )
+    exclude_patterns: List[str] = Field(default_factory=lambda: [
+        "vendor/", "node_modules/", "third_party/", ".git/",
+        "dist/", "build/", "__pycache__/", ".tox/",
+        "*.min.js", "*.min.css", "*.generated.*",
+        "*.pb.go", "*_generated.go", "*.pb.rb",
+    ])
+
+
 class FrameworkConfig(BaseSettings):
     """Main framework configuration."""
     workspace: Path = Field(default=Path("."))
@@ -477,6 +493,7 @@ class FrameworkConfig(BaseSettings):
     multi_repo: MultiRepoConfig = Field(default_factory=MultiRepoConfig)
     repositories: List[RepositoryConfig] = Field(default_factory=list)
     pr_lifecycle: PRLifecycleConfig = Field(default_factory=PRLifecycleConfig)
+    indexing: CodeIndexingConfig = Field(default_factory=CodeIndexingConfig)
 
     class Config:
         env_prefix = "AGENT_"
