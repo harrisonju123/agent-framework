@@ -305,7 +305,8 @@ function storeDebateMemory(
 ): void {
   try {
     const repoSlug = process.env.GITHUB_REPOSITORY || "unknown";
-    const agentType = process.env.AGENT_TYPE || "architect";
+    // AGENT_ID is set by run_agent.py; AGENT_TYPE is an alternative fallback
+    const originAgent = process.env.AGENT_ID || process.env.AGENT_TYPE || "unknown";
 
     // Extract topic keywords for tagging (first 3-4 meaningful words)
     // Include short technical terms like API, CI, DB, etc.
@@ -325,11 +326,16 @@ function storeDebateMemory(
       `Reasoning: ${synthesis.reasoning}`,
     ].join("\n");
 
-    const tags = ["debate", debateId, ...topicKeywords];
+    // Store confidence as a structured tag so retrieval code doesn't have to
+    // parse it out of the prose content (avoids fragile regex coupling).
+    const tags = ["debate", debateId, `origin:${originAgent}`, `confidence:${synthesis.confidence}`, ...topicKeywords];
 
+    // Store under agent_type "shared" so any agent (engineer, qa, architect, etc.)
+    // can recall these architectural decisions. The Python MemoryRetriever is
+    // responsible for merging "shared" into each agent's recall results.
     const result = agentRemember(workspace, {
       repo_slug: repoSlug,
-      agent_type: agentType,
+      agent_type: "shared",
       category: "architectural_decisions",
       content,
       tags,
