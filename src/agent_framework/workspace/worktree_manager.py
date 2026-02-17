@@ -354,9 +354,14 @@ class WorktreeManager:
     ) -> bool:
         """Remove worktree directory using git worktree remove."""
         try:
-            # Phantom worktree: both path and base_repo are gone, nothing to remove
-            if not path.exists() and (not base_repo or not base_repo.exists()):
-                logger.debug(f"Phantom worktree (already gone): {path}")
+            # Path already gone — just clean up git's stale worktree refs
+            if not path.exists():
+                if base_repo and base_repo.exists():
+                    try:
+                        self._run_git(["worktree", "prune"], cwd=base_repo, timeout=30)
+                    except subprocess.CalledProcessError:
+                        pass  # Another process may have pruned already
+                logger.debug(f"Worktree already removed: {path}")
                 return True
 
             if base_repo and base_repo.exists():
@@ -448,11 +453,11 @@ class WorktreeManager:
                     path = Path(info.path)
                     base_repo = Path(info.base_repo) if info.base_repo else None
 
-                    # Phantom worktree: both path and base_repo gone — just purge from registry
-                    if not path.exists() and (not base_repo or not base_repo.exists()):
+                    # Worktree path gone — just purge from registry
+                    if not path.exists():
                         keys_to_remove.append(key)
                         registered_removed += 1
-                        logger.debug(f"Purged phantom worktree from registry: {key}")
+                        logger.debug(f"Purged stale worktree from registry: {key}")
                         continue
 
                     if self._remove_worktree_directory(path, base_repo, force=True):

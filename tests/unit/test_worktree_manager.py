@@ -400,13 +400,44 @@ class TestPhantomWorktreeCleanup:
         result = manager._remove_worktree_directory(nonexistent_path, None)
         assert result is True
 
+    def test_remove_worktree_directory_path_gone_base_repo_exists(self, tmp_path):
+        """Path removed by another process but base_repo still exists — prune and return True."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        nonexistent_path = tmp_path / "gone-worktree"
+        base_repo = tmp_path / "base-repo"
+        base_repo.mkdir()
+
+        with patch.object(manager, '_run_git') as mock_git:
+            result = manager._remove_worktree_directory(nonexistent_path, base_repo)
+
+        assert result is True
+        mock_git.assert_called_once_with(["worktree", "prune"], cwd=base_repo, timeout=30)
+
+    def test_remove_worktree_directory_path_gone_prune_fails(self, tmp_path):
+        """Prune failure is swallowed — still returns True since path is already gone."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        nonexistent_path = tmp_path / "gone-worktree"
+        base_repo = tmp_path / "base-repo"
+        base_repo.mkdir()
+
+        with patch.object(manager, '_run_git', side_effect=subprocess.CalledProcessError(1, "git")):
+            result = manager._remove_worktree_directory(nonexistent_path, base_repo)
+
+        assert result is True
+
     def test_cleanup_orphaned_purges_phantom_from_registry(self, tmp_path):
-        """Stale phantom worktrees are purged from registry without subprocess calls."""
+        """Stale worktrees with missing paths are purged from registry without subprocess calls."""
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
         manager = WorktreeManager(config=config)
 
-        # Register a phantom entry (both path and base_repo point nowhere)
+        # Register an entry whose path is gone but base_repo still exists
         old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        base_repo = tmp_path / "base-repo"
+        base_repo.mkdir()
         manager._registry["phantom-key"] = WorktreeInfo(
             path=str(tmp_path / "gone-worktree"),
             branch="feature/gone",
@@ -414,12 +445,12 @@ class TestPhantomWorktreeCleanup:
             task_id="task-phantom",
             created_at=old_ts,
             last_accessed=old_ts,
-            base_repo=str(tmp_path / "gone-base-repo"),
+            base_repo=str(base_repo),
         )
 
         with patch.object(manager, '_run_git') as mock_git:
             result = manager.cleanup_orphaned_worktrees()
-            # Should NOT call git — phantom path is already gone
+            # Path-gone short-circuit in cleanup_orphaned_worktrees bypasses _remove_worktree_directory
             mock_git.assert_not_called()
 
         assert result["registered"] == 1
