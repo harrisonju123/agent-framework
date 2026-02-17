@@ -424,3 +424,85 @@ class TestStructuredFindings:
 
         assert "UPSTREAM AGENT FINDINGS" in result
         assert "Some text summary" in result
+
+
+class TestMemoryBudgetIntegration:
+    """Integration tests: _inject_memories respects ContextWindowManager budget tiers."""
+
+    def _make_builder_with_memory(self, agent_config, tmp_path, utilization_pct):
+        """Build a PromptBuilder with a mock memory retriever and context window manager."""
+        # Mock memory retriever that always returns a section
+        retriever = Mock(spec=MemoryRetriever)
+        retriever.format_for_prompt = Mock(
+            side_effect=lambda **kwargs: (
+                "## Memories from Previous Tasks\n\n- [conventions] Use snake_case\n"
+                if kwargs.get("max_chars", 3000) > 0
+                else ""
+            )
+        )
+
+        # Mock context window manager with controllable utilization
+        cwm = Mock()
+        cwm.compute_memory_budget = Mock(
+            return_value=3000 if utilization_pct < 70 else (1000 if utilization_pct < 90 else 0)
+        )
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+            memory_retriever=retriever,
+            context_window_manager=cwm,
+        )
+        return PromptBuilder(ctx), retriever, cwm
+
+    def test_healthy_budget_passes_full_3000(self, agent_config, tmp_path, sample_task):
+        """< 70% utilization → format_for_prompt called with max_chars=3000."""
+        builder, retriever, _ = self._make_builder_with_memory(agent_config, tmp_path, 50.0)
+
+        result = builder._inject_memories("base prompt", sample_task)
+
+        retriever.format_for_prompt.assert_called_once()
+        assert retriever.format_for_prompt.call_args.kwargs["max_chars"] == 3000
+        assert "Memories" in result
+
+    def test_tight_budget_passes_1000(self, agent_config, tmp_path, sample_task):
+        """70-90% utilization → format_for_prompt called with max_chars=1000."""
+        builder, retriever, _ = self._make_builder_with_memory(agent_config, tmp_path, 80.0)
+
+        result = builder._inject_memories("base prompt", sample_task)
+
+        retriever.format_for_prompt.assert_called_once()
+        assert retriever.format_for_prompt.call_args.kwargs["max_chars"] == 1000
+        assert "Memories" in result
+
+    def test_critical_budget_skips_injection(self, agent_config, tmp_path, sample_task):
+        """>= 90% utilization → memories omitted entirely."""
+        builder, retriever, _ = self._make_builder_with_memory(agent_config, tmp_path, 95.0)
+
+        result = builder._inject_memories("base prompt", sample_task)
+
+        # Should short-circuit before calling format_for_prompt
+        retriever.format_for_prompt.assert_not_called()
+        assert result == "base prompt"
+
+    def test_no_context_manager_passes_none(self, agent_config, tmp_path, sample_task):
+        """Without ContextWindowManager, max_chars=None → retriever uses default 3000."""
+        retriever = Mock(spec=MemoryRetriever)
+        retriever.format_for_prompt = Mock(return_value="## Memories\n- test\n")
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+            memory_retriever=retriever,
+            context_window_manager=None,
+        )
+        builder = PromptBuilder(ctx)
+
+        builder._inject_memories("base prompt", sample_task)
+
+        retriever.format_for_prompt.assert_called_once()
+        assert retriever.format_for_prompt.call_args.kwargs["max_chars"] is None
