@@ -6,10 +6,15 @@ export default {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['ui-monospace', 'SFMono-Regular', 'SF Mono', 'Menlo', 'monospace'],
+      },
       colors: {
-        'agent-idle': '#eab308',
-        'agent-working': '#22c55e',
-        'agent-dead': '#ef4444',
+        'status-idle': '#eab308',
+        'status-working': '#22c55e',
+        'status-dead': '#ef4444',
+        'status-completing': '#3b82f6',
       },
     },
   },

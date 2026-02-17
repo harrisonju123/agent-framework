@@ -1,8 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import type { ActivityEvent } from '../types'
 
-const props = defineProps<{
+defineProps<{
   events: ActivityEvent[]
 }>()
 
@@ -30,8 +29,8 @@ function truncateTitle(title: string, maxLen: number = 40): string {
 </script>
 
 <template>
-  <div class="font-mono text-sm">
-    <div v-if="events.length === 0" class="px-4 py-3 text-gray-500 text-center">
+  <div class="text-sm">
+    <div v-if="events.length === 0" class="px-4 py-3 text-slate-400 text-center">
       No recent activity
     </div>
 
@@ -39,40 +38,35 @@ function truncateTitle(title: string, maxLen: number = 40): string {
       <div
         v-for="(event, index) in events"
         :key="index"
-        class="px-4 py-2 border-b border-gray-800/50 last:border-b-0 hover:bg-gray-800/30 flex items-start gap-2"
+        class="px-4 py-2 border-b border-slate-100 last:border-b-0 hover:bg-slate-50 flex items-start gap-2"
       >
         <!-- Event icon -->
         <span
-          class="flex-shrink-0 mt-0.5 text-xs"
+          class="flex-shrink-0 mt-0.5 pi text-xs"
           :class="{
-            'text-green-500': event.type === 'complete',
-            'text-red-500': event.type === 'fail',
-            'text-cyan-500': event.type === 'start',
-            'text-gray-500': event.type === 'phase',
+            'pi-check-circle text-emerald-500': event.type === 'complete',
+            'pi-times-circle text-red-500': event.type === 'fail',
+            'pi-play text-blue-500': event.type === 'start',
+            'pi-circle text-slate-400': event.type === 'phase',
           }"
           aria-hidden="true"
-        >
-          <template v-if="event.type === 'complete'">+</template>
-          <template v-else-if="event.type === 'fail'">!</template>
-          <template v-else-if="event.type === 'start'">></template>
-          <template v-else>.</template>
-        </span>
+        ></span>
 
         <!-- Event content -->
         <div class="flex-1 min-w-0">
           <div class="flex items-baseline gap-2 text-xs">
-            <span class="text-gray-600">
+            <span class="text-slate-400">
               {{ formatTime(event.timestamp) }}
             </span>
-            <span class="text-cyan-400">{{ event.agent }}</span>
-            <span v-if="event.type === 'complete' && event.duration_ms" class="text-gray-500">
+            <span class="text-blue-600 font-medium">{{ event.agent }}</span>
+            <span v-if="event.type === 'complete' && event.duration_ms" class="text-slate-400">
               {{ formatDuration(event.duration_ms) }}
             </span>
-            <span v-if="event.type === 'fail' && event.retry_count" class="text-red-400">
+            <span v-if="event.type === 'fail' && event.retry_count" class="text-red-500">
               x{{ event.retry_count }}
             </span>
           </div>
-          <p class="text-xs text-gray-400 truncate" :title="event.title">
+          <p class="text-xs text-slate-600 truncate" :title="event.title">
             {{ truncateTitle(event.title) }}
           </p>
         </div>

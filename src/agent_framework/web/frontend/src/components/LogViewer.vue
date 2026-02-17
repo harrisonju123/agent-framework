@@ -128,33 +128,37 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="bg-black font-mono text-sm flex flex-col h-full">
-    <!-- Filter bar -->
-    <div class="flex gap-4 px-2 py-1 text-xs border-b border-gray-800 shrink-0">
+  <div class="bg-slate-900 font-mono text-sm flex flex-col h-full">
+    <!-- Filter bar (light themed) -->
+    <div class="flex gap-4 px-3 py-2 text-xs bg-slate-100 border-b border-slate-200 shrink-0">
       <!-- Source filter -->
       <span
         @click="sourceFilter = 'all'"
-        :class="sourceFilter === 'all' ? 'text-green-500' : 'text-gray-500 cursor-pointer hover:text-gray-300'"
+        class="cursor-pointer transition-colors"
+        :class="sourceFilter === 'all' ? 'text-blue-600 font-medium' : 'text-slate-400 hover:text-slate-700'"
       >
         all
       </span>
       <span
         @click="sourceFilter = 'agent'"
-        :class="sourceFilter === 'agent' ? 'text-cyan-500' : 'text-gray-500 cursor-pointer hover:text-gray-300'"
+        class="cursor-pointer transition-colors"
+        :class="sourceFilter === 'agent' ? 'text-blue-600 font-medium' : 'text-slate-400 hover:text-slate-700'"
       >
         agent
       </span>
       <span
         @click="sourceFilter = 'claude-cli'"
-        :class="sourceFilter === 'claude-cli' ? 'text-indigo-400' : 'text-gray-500 cursor-pointer hover:text-gray-300'"
+        class="cursor-pointer transition-colors"
+        :class="sourceFilter === 'claude-cli' ? 'text-blue-600 font-medium' : 'text-slate-400 hover:text-slate-700'"
       >
         cli
       </span>
-      <span class="text-gray-700">|</span>
+      <span class="text-slate-300">|</span>
       <!-- Agent filter -->
       <span
         @click="filter = 'all'"
-        :class="filter === 'all' ? 'text-green-500' : 'text-gray-500 cursor-pointer hover:text-gray-300'"
+        class="cursor-pointer transition-colors"
+        :class="filter === 'all' ? 'text-blue-600 font-medium' : 'text-slate-400 hover:text-slate-700'"
       >
         all agents
       </span>
@@ -162,13 +166,14 @@ onUnmounted(() => {
         v-for="agent in uniqueAgents"
         :key="agent"
         @click="filter = agent"
-        :class="filter === agent ? 'text-green-500' : 'text-gray-500 cursor-pointer hover:text-gray-300'"
+        class="cursor-pointer transition-colors"
+        :class="filter === agent ? 'text-blue-600 font-medium' : 'text-slate-400 hover:text-slate-700'"
       >
         {{ agent }}
       </span>
     </div>
 
-    <!-- Log output -->
+    <!-- Log output (dark) -->
     <div class="flex-1 overflow-y-auto px-2 py-1 relative" ref="logEl" @scroll="handleScroll">
       <div
         v-for="log in visibleLogs"
@@ -189,7 +194,7 @@ onUnmounted(() => {
       <div
         v-else
         @click="scrollToBottom"
-        class="text-green-500 cursor-pointer"
+        class="text-blue-400 cursor-pointer"
         :class="{ 'animate-pulse': autoScroll }"
       >
         _
@@ -208,7 +213,7 @@ onUnmounted(() => {
 <style scoped>
 .overflow-y-auto {
   scrollbar-width: thin;
-  scrollbar-color: #374151 #000;
+  scrollbar-color: #374151 #0f172a;
 }
 
 .overflow-y-auto::-webkit-scrollbar {
@@ -216,7 +221,7 @@ onUnmounted(() => {
 }
 
 .overflow-y-auto::-webkit-scrollbar-track {
-  background: #000;
+  background: #0f172a;
 }
 
 .overflow-y-auto::-webkit-scrollbar-thumb {
@@ -238,8 +243,8 @@ onUnmounted(() => {
   padding: 4px 12px;
   font-size: 0.75rem;
   line-height: 1rem;
-  color: #000;
-  background: #facc15;
+  color: #fff;
+  background: #3b82f6;
   border-radius: 9999px;
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
@@ -247,6 +252,6 @@ onUnmounted(() => {
 }
 
 .jump-badge:hover {
-  background: #fbbf24;
+  background: #2563eb;
 }
 </style>

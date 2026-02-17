@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import type { Agent } from '../types'
+import Button from 'primevue/button'
 
 const props = defineProps<{
   agent: Agent
@@ -53,48 +54,43 @@ onUnmounted(() => {
   stopTimer()
 })
 
-const statusClass = computed(() => {
+const borderClass = computed(() => {
   switch (props.agent.status) {
-    case 'working':
-      return 'border-green-500 bg-green-500/10'
-    case 'completing':
-      return 'border-blue-500 bg-blue-500/10'
-    case 'idle':
-      return 'border-yellow-500 bg-yellow-500/10'
-    case 'dead':
-      return 'border-red-500 bg-red-500/10'
-    default:
-      return 'border-gray-500'
+    case 'working': return 'border-l-emerald-500'
+    case 'completing': return 'border-l-blue-500'
+    case 'idle': return 'border-l-amber-400'
+    case 'dead': return 'border-l-red-500'
+    default: return 'border-l-slate-300'
   }
 })
 
 const statusDotClass = computed(() => {
   switch (props.agent.status) {
-    case 'working':
-      return 'bg-green-500'
-    case 'completing':
-      return 'bg-blue-500'
-    case 'idle':
-      return 'bg-yellow-500'
-    case 'dead':
-      return 'bg-red-500'
-    default:
-      return 'bg-gray-500'
+    case 'working': return 'bg-emerald-500'
+    case 'completing': return 'bg-blue-500'
+    case 'idle': return 'bg-amber-400'
+    case 'dead': return 'bg-red-500'
+    default: return 'bg-slate-400'
   }
 })
 
 const statusLabel = computed(() => {
   switch (props.agent.status) {
-    case 'working':
-      return 'Working'
-    case 'completing':
-      return 'Completing'
-    case 'idle':
-      return 'Idle'
-    case 'dead':
-      return 'Dead'
-    default:
-      return 'Unknown'
+    case 'working': return 'Working'
+    case 'completing': return 'Completing'
+    case 'idle': return 'Idle'
+    case 'dead': return 'Dead'
+    default: return 'Unknown'
+  }
+})
+
+const statusBadgeClass = computed(() => {
+  switch (props.agent.status) {
+    case 'working': return 'bg-emerald-50 text-emerald-700'
+    case 'completing': return 'bg-blue-50 text-blue-700'
+    case 'idle': return 'bg-amber-50 text-amber-700'
+    case 'dead': return 'bg-red-50 text-red-700'
+    default: return 'bg-slate-100 text-slate-600'
   }
 })
 
@@ -145,8 +141,8 @@ function handleRestart() {
 
 <template>
   <div
-    class="p-4 rounded-lg border-2 transition-all hover:shadow-lg"
-    :class="statusClass"
+    class="bg-white shadow-sm rounded-xl border border-slate-200 border-l-4 p-4 transition-all hover:shadow-md"
+    :class="borderClass"
     role="article"
     :aria-label="`Agent ${agent.name}, status: ${statusLabel}`"
   >
@@ -157,16 +153,11 @@ function handleRestart() {
           :class="[statusDotClass, agent.status === 'working' ? 'animate-pulse' : '']"
           aria-hidden="true"
         ></span>
-        <span class="font-semibold text-lg">{{ agent.name }}</span>
+        <span class="font-semibold text-lg text-slate-800">{{ agent.name }}</span>
       </div>
       <span
-        class="px-2 py-1 text-xs font-medium rounded"
-        :class="{
-          'bg-green-500/20 text-green-400': agent.status === 'working',
-          'bg-blue-500/20 text-blue-400': agent.status === 'completing',
-          'bg-yellow-500/20 text-yellow-400': agent.status === 'idle',
-          'bg-red-500/20 text-red-400': agent.status === 'dead',
-        }"
+        class="px-2 py-1 text-xs font-medium rounded-md"
+        :class="statusBadgeClass"
         role="status"
       >
         {{ statusLabel }}
@@ -175,23 +166,23 @@ function handleRestart() {
     </div>
 
     <div v-if="agent.status === 'working' && agent.current_task" class="mt-3">
-      <p class="text-sm text-gray-300 truncate" :title="agent.current_task.title">
+      <p class="text-sm text-slate-700 truncate" :title="agent.current_task.title">
         {{ agent.current_task.title }}
       </p>
       <div class="flex items-center justify-between mt-2">
-        <span v-if="phaseDisplay" class="text-xs text-cyan-400">
+        <span v-if="phaseDisplay" class="text-xs text-blue-600 font-medium">
           {{ phaseDisplay }}
         </span>
-        <span v-if="elapsedDisplay" class="text-xs text-gray-500">
+        <span v-if="elapsedDisplay" class="text-xs text-slate-400">
           {{ elapsedDisplay }}
         </span>
       </div>
       <div v-if="toolActivityDisplay" class="flex items-center gap-2 mt-1">
-        <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse" aria-hidden="true"></span>
-        <span class="text-xs text-green-300 truncate" :title="toolActivityDisplay.text">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true"></span>
+        <span class="text-xs text-emerald-600 truncate" :title="toolActivityDisplay.text">
           {{ toolActivityDisplay.text }}
         </span>
-        <span class="text-xs text-gray-500 ml-auto whitespace-nowrap">
+        <span class="text-xs text-slate-400 ml-auto whitespace-nowrap">
           {{ toolActivityDisplay.count }} tools
         </span>
       </div>
@@ -199,27 +190,27 @@ function handleRestart() {
         <span
           v-for="i in progressDots.filled"
           :key="'filled-' + i"
-          class="w-2 h-2 rounded-full bg-cyan-500"
+          class="w-2 h-2 rounded-full bg-blue-500"
           aria-hidden="true"
         ></span>
         <span
           v-for="i in progressDots.empty"
           :key="'empty-' + i"
-          class="w-2 h-2 rounded-full bg-gray-600"
+          class="w-2 h-2 rounded-full bg-slate-200"
           aria-hidden="true"
         ></span>
       </div>
     </div>
 
     <div v-else-if="agent.status === 'completing' && agent.current_task" class="mt-3">
-      <p class="text-sm text-gray-300 truncate" :title="agent.current_task.title">
-        ✓ {{ agent.current_task.title }}
+      <p class="text-sm text-slate-700 truncate" :title="agent.current_task.title">
+        {{ agent.current_task.title }}
       </p>
       <div class="flex items-center justify-between mt-2">
-        <span class="text-xs text-blue-400">
+        <span class="text-xs text-blue-600 font-medium">
           Task completed
         </span>
-        <span v-if="elapsedDisplay" class="text-xs text-gray-500">
+        <span v-if="elapsedDisplay" class="text-xs text-slate-400">
           {{ elapsedDisplay }}
         </span>
       </div>
@@ -234,18 +225,18 @@ function handleRestart() {
     </div>
 
     <div v-else-if="agent.status === 'idle'" class="mt-3">
-      <p class="text-sm text-gray-500">Waiting for tasks...</p>
+      <p class="text-sm text-slate-400">Waiting for tasks...</p>
     </div>
 
     <div v-else-if="agent.status === 'dead'" class="mt-3">
-      <p class="text-sm text-red-400 mb-2">No heartbeat detected</p>
-      <button
+      <p class="text-sm text-red-600 mb-2">No heartbeat detected</p>
+      <Button
+        label="Restart"
+        severity="danger"
+        size="small"
         @click="handleRestart"
-        class="px-3 py-1 text-sm bg-red-600 hover:bg-red-700 rounded transition-colors"
         :aria-label="`Restart ${agent.name} agent`"
-      >
-        Restart
-      </button>
+      />
     </div>
   </div>
 </template>

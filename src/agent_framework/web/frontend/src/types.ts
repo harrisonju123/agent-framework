@@ -148,5 +148,3 @@ export interface LogEntry {
   level: string | null
 }
 
-// Modal types
-export type ModalType = 'work' | 'analyze' | 'ticket' | null

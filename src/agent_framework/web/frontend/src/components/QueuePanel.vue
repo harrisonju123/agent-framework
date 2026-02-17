@@ -7,10 +7,10 @@ defineProps<{
 </script>
 
 <template>
-  <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
-    <h2 class="text-lg font-semibold mb-4 text-gray-200">Queue Status</h2>
+  <div class="bg-white shadow-sm border border-slate-200 rounded-xl p-5">
+    <h2 class="text-lg font-semibold text-slate-800 mb-4">Queue Status</h2>
 
-    <div v-if="queues.length === 0" class="text-gray-500 text-sm">
+    <div v-if="queues.length === 0" class="text-slate-400 text-sm">
       No queues configured
     </div>
 
@@ -20,20 +20,20 @@ defineProps<{
         :key="queue.queue_id"
         class="flex items-center justify-between"
       >
-        <span class="text-cyan-400">{{ queue.agent_name }}</span>
+        <span class="text-blue-600 font-medium text-sm">{{ queue.agent_name }}</span>
         <span
           class="font-mono text-sm"
-          :class="queue.pending_count > 0 ? 'text-yellow-400' : 'text-gray-500'"
+          :class="queue.pending_count > 0 ? 'text-amber-600 font-medium' : 'text-slate-400'"
         >
           {{ queue.pending_count }} pending
         </span>
       </div>
     </div>
 
-    <div class="mt-4 pt-3 border-t border-gray-700">
+    <div class="mt-4 pt-3 border-t border-slate-200">
       <div class="flex items-center justify-between text-sm">
-        <span class="text-gray-400">Total</span>
-        <span class="font-mono text-gray-200">
+        <span class="text-slate-500">Total</span>
+        <span class="font-mono text-slate-800 font-medium">
           {{ queues.reduce((sum, q) => sum + q.pending_count, 0) }}
         </span>
       </div>

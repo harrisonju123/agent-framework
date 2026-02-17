@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import InputText from 'primevue/inputtext'
+import Button from 'primevue/button'
 
 const emit = defineEmits<{
   complete: []
@@ -7,9 +9,7 @@ const emit = defineEmits<{
 
 type Step = 'welcome' | 'jira' | 'github' | 'repos' | 'review'
 
-// Keyboard support
 function handleKeydown(e: KeyboardEvent) {
-  // Enter on forms submits/continues
   if (e.key === 'Enter' && !e.shiftKey) {
     if (currentStep.value === 'jira' && canProceedFromJira.value) {
       nextStep()
@@ -67,11 +67,6 @@ const progressPercentage = computed(() => {
 })
 
 // Navigation
-function goToStep(step: Step) {
-  currentStep.value = step
-  error.value = ''
-}
-
 function nextStep() {
   const steps: Step[] = ['welcome', 'jira', 'github', 'repos', 'review']
   const currentIndex = steps.indexOf(currentStep.value)
@@ -215,28 +210,28 @@ async function submitConfiguration() {
 <template>
   <div class="min-h-[500px] flex flex-col">
     <!-- Progress bar -->
-    <div class="h-1 bg-gray-800 mb-6">
+    <div class="h-1.5 bg-slate-200 rounded-full mb-6">
       <div
-        class="h-full bg-cyan-600 transition-all duration-300"
+        class="h-full bg-blue-600 rounded-full transition-all duration-300"
         :style="{ width: `${progressPercentage}%` }"
       ></div>
     </div>
 
     <!-- Error message -->
-    <div v-if="error" class="mb-4 px-3 py-2 bg-red-500/20 border border-red-500 text-red-400 text-sm rounded">
+    <div v-if="error" class="mb-4 px-4 py-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">
       {{ error }}
     </div>
 
     <!-- Welcome Step -->
     <div v-if="currentStep === 'welcome'" class="space-y-6">
       <div>
-        <h3 class="text-lg text-gray-200 mb-2">Agent Framework Setup</h3>
-        <p class="text-sm text-gray-400">
+        <h3 class="text-lg font-semibold text-slate-800 mb-2">Agent Framework Setup</h3>
+        <p class="text-sm text-slate-500">
           Configure JIRA and GitHub credentials, then register repositories.
         </p>
       </div>
 
-      <div class="space-y-3 text-sm text-gray-400">
+      <div class="space-y-3 text-sm text-slate-500">
         <p>Required:</p>
         <ul class="list-disc list-inside space-y-1 ml-2">
           <li>JIRA API token</li>
@@ -245,261 +240,201 @@ async function submitConfiguration() {
         </ul>
       </div>
 
-      <div class="text-xs text-gray-600">
+      <div class="text-xs text-slate-400">
         <p>Takes 5-10 minutes</p>
       </div>
 
       <div class="flex justify-end pt-4">
-        <button
-          @click="nextStep"
-          class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded"
-        >
-          Continue
-        </button>
+        <Button label="Continue" @click="nextStep" />
       </div>
     </div>
 
     <!-- JIRA Configuration Step -->
     <div v-if="currentStep === 'jira'" class="space-y-4" @keydown="handleKeydown">
-      <h3 class="text-lg text-gray-200">JIRA Configuration</h3>
+      <h3 class="text-lg font-semibold text-slate-800">JIRA Configuration</h3>
 
       <div>
-        <label class="block text-xs text-gray-500 mb-1">Server URL</label>
-        <input
+        <label class="block text-sm font-medium text-slate-700 mb-1">Server URL</label>
+        <InputText
           v-model="jiraForm.server"
           type="url"
           placeholder="https://your-domain.atlassian.net"
-          class="w-full bg-black border border-gray-700 px-2 py-1.5 text-sm focus:outline-none focus:border-cyan-500 rounded"
+          class="w-full"
           @input="jiraValid = null"
           autofocus
         />
       </div>
 
       <div>
-        <label class="block text-xs text-gray-500 mb-1">Email</label>
-        <input
+        <label class="block text-sm font-medium text-slate-700 mb-1">Email</label>
+        <InputText
           v-model="jiraForm.email"
           type="email"
           placeholder="you@example.com"
-          class="w-full bg-black border border-gray-700 px-2 py-1.5 text-sm focus:outline-none focus:border-cyan-500 rounded"
+          class="w-full"
           @input="jiraValid = null"
         />
       </div>
 
       <div>
-        <label class="block text-xs text-gray-500 mb-1">API Token</label>
-        <input
+        <label class="block text-sm font-medium text-slate-700 mb-1">API Token</label>
+        <InputText
           v-model="jiraForm.api_token"
           type="password"
           placeholder="Your JIRA API token"
-          class="w-full bg-black border border-gray-700 px-2 py-1.5 text-sm focus:outline-none focus:border-cyan-500 rounded font-mono"
+          class="w-full font-mono"
           @input="jiraValid = null"
         />
         <a
           href="https://id.atlassian.com/manage-profile/security/api-tokens"
           target="_blank"
-          class="text-xs text-cyan-500 hover:text-cyan-400 mt-1 inline-block"
+          class="text-xs text-blue-600 hover:text-blue-700 mt-1 inline-block"
         >
-          How to generate API token →
+          How to generate API token
         </a>
       </div>
 
       <div>
-        <label class="block text-xs text-gray-500 mb-1">Default Project Key (optional)</label>
-        <input
+        <label class="block text-sm font-medium text-slate-700 mb-1">Default Project Key (optional)</label>
+        <InputText
           v-model="jiraForm.project"
           type="text"
           placeholder="PROJ"
-          class="w-full bg-black border border-gray-700 px-2 py-1.5 text-sm focus:outline-none focus:border-cyan-500 rounded uppercase"
+          class="w-full uppercase"
         />
       </div>
 
-      <div>
-        <button
-          @click="validateJira"
+      <div class="flex items-center gap-3">
+        <Button
+          :label="jiraValidating ? 'Testing...' : 'Test Connection'"
+          severity="secondary"
+          outlined
           :disabled="jiraValidating || !jiraForm.server || !jiraForm.email || !jiraForm.api_token"
-          class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {{ jiraValidating ? 'Testing...' : 'Test Connection' }}
-        </button>
-
-        <span v-if="jiraValid === true" class="ml-3 text-green-400 text-sm">✓ Connected</span>
-        <span v-else-if="jiraValid === false" class="ml-3 text-red-400 text-sm">✗ Failed</span>
+          @click="validateJira"
+        />
+        <span v-if="jiraValid === true" class="text-emerald-600 text-sm">Connected</span>
+        <span v-else-if="jiraValid === false" class="text-red-600 text-sm">Failed</span>
       </div>
 
       <div class="flex justify-between pt-4">
-        <button
-          @click="previousStep"
-          class="px-4 py-2 text-sm text-gray-500 hover:text-gray-300"
-        >
-          Back
-        </button>
-        <button
-          @click="nextStep"
-          :disabled="!canProceedFromJira"
-          class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Continue
-        </button>
+        <Button label="Back" severity="secondary" text @click="previousStep" />
+        <Button label="Continue" :disabled="!canProceedFromJira" @click="nextStep" />
       </div>
     </div>
 
     <!-- GitHub Configuration Step -->
     <div v-if="currentStep === 'github'" class="space-y-4" @keydown="handleKeydown">
-      <h3 class="text-lg text-gray-200">GitHub Configuration</h3>
+      <h3 class="text-lg font-semibold text-slate-800">GitHub Configuration</h3>
 
       <div>
-        <label class="block text-xs text-gray-500 mb-1">Personal Access Token</label>
-        <input
+        <label class="block text-sm font-medium text-slate-700 mb-1">Personal Access Token</label>
+        <InputText
           v-model="githubForm.token"
           type="password"
           placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-          class="w-full bg-black border border-gray-700 px-2 py-1.5 text-sm focus:outline-none focus:border-cyan-500 rounded font-mono"
+          class="w-full font-mono"
           @input="githubValid = null"
         />
         <a
           href="https://github.com/settings/tokens"
           target="_blank"
-          class="text-xs text-cyan-500 hover:text-cyan-400 mt-1 inline-block"
+          class="text-xs text-blue-600 hover:text-blue-700 mt-1 inline-block"
         >
-          Generate new token (needs 'repo' scope) →
+          Generate new token (needs 'repo' scope)
         </a>
       </div>
 
-      <div>
-        <button
-          @click="validateGitHub"
+      <div class="flex items-center gap-3">
+        <Button
+          :label="githubValidating ? 'Testing...' : 'Test Connection'"
+          severity="secondary"
+          outlined
           :disabled="githubValidating || !githubForm.token"
-          class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {{ githubValidating ? 'Testing...' : 'Test Connection' }}
-        </button>
-
-        <span v-if="githubValid === true" class="ml-3 text-green-400 text-sm">✓ Connected</span>
-        <span v-else-if="githubValid === false" class="ml-3 text-red-400 text-sm">✗ Failed</span>
+          @click="validateGitHub"
+        />
+        <span v-if="githubValid === true" class="text-emerald-600 text-sm">Connected</span>
+        <span v-else-if="githubValid === false" class="text-red-600 text-sm">Failed</span>
       </div>
 
       <div class="flex justify-between pt-4">
-        <button
-          @click="previousStep"
-          class="px-4 py-2 text-sm text-gray-500 hover:text-gray-300"
-        >
-          Back
-        </button>
-        <button
-          @click="nextStep"
-          :disabled="!canProceedFromGitHub"
-          class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Continue
-        </button>
+        <Button label="Back" severity="secondary" text @click="previousStep" />
+        <Button label="Continue" :disabled="!canProceedFromGitHub" @click="nextStep" />
       </div>
     </div>
 
     <!-- Repository Configuration Step -->
     <div v-if="currentStep === 'repos'" class="space-y-4">
       <div class="flex items-center justify-between">
-        <h3 class="text-lg text-gray-200">Repository Configuration</h3>
-        <button
-          @click="addRepository"
-          class="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm rounded"
-        >
-          + Add Repository
-        </button>
+        <h3 class="text-lg font-semibold text-slate-800">Repository Configuration</h3>
+        <Button label="+ Add Repository" severity="secondary" size="small" @click="addRepository" />
       </div>
 
-      <div v-if="repositories.length === 0" class="text-center py-8 text-gray-600 text-sm">
+      <div v-if="repositories.length === 0" class="text-center py-8 text-slate-400 text-sm">
         No repositories configured. Click "Add Repository" to get started.
       </div>
 
-      <div v-for="(repo, index) in repositories" :key="index" class="p-3 bg-gray-800/50 border border-gray-700 rounded space-y-3">
+      <div v-for="(repo, index) in repositories" :key="index" class="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-xs text-gray-500">Repository {{ index + 1 }}</span>
-          <button
-            @click="removeRepository(index)"
-            class="text-xs text-red-400 hover:text-red-300"
-          >
-            Remove
-          </button>
+          <span class="text-xs text-slate-500 font-medium">Repository {{ index + 1 }}</span>
+          <button @click="removeRepository(index)" class="text-xs text-red-500 hover:text-red-600">Remove</button>
         </div>
 
         <div>
-          <label class="block text-xs text-gray-500 mb-1">GitHub Repository (owner/repo)</label>
-          <input
+          <label class="block text-sm font-medium text-slate-700 mb-1">GitHub Repository (owner/repo)</label>
+          <InputText
             v-model="repo.github_repo"
             type="text"
             placeholder="justworkshr/pto"
-            class="w-full bg-black border px-2 py-1.5 text-sm focus:outline-none rounded"
-            :class="repo.github_repo && !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/.test(repo.github_repo) ? 'border-red-500' : 'border-gray-700 focus:border-cyan-500'"
+            class="w-full"
+            :class="{ 'p-invalid': repo.github_repo && !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/.test(repo.github_repo) }"
           />
-          <span v-if="repo.github_repo && !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/.test(repo.github_repo)" class="text-xs text-red-400">
+          <small v-if="repo.github_repo && !/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_.-]+$/.test(repo.github_repo)" class="text-red-600">
             Must be owner/repo format
-          </span>
+          </small>
         </div>
 
         <div>
-          <label class="block text-xs text-gray-500 mb-1">JIRA Project Key</label>
-          <input
-            v-model="repo.jira_project"
-            type="text"
-            placeholder="PROJ"
-            class="w-full bg-black border border-gray-700 px-2 py-1.5 text-sm focus:outline-none focus:border-cyan-500 rounded uppercase"
-          />
+          <label class="block text-sm font-medium text-slate-700 mb-1">JIRA Project Key</label>
+          <InputText v-model="repo.jira_project" type="text" placeholder="PROJ" class="w-full uppercase" />
         </div>
 
         <div>
-          <label class="block text-xs text-gray-500 mb-1">Name</label>
-          <input
-            v-model="repo.name"
-            type="text"
-            placeholder="pto"
-            class="w-full bg-black border border-gray-700 px-2 py-1.5 text-sm focus:outline-none focus:border-cyan-500 rounded"
-          />
+          <label class="block text-sm font-medium text-slate-700 mb-1">Name</label>
+          <InputText v-model="repo.name" type="text" placeholder="pto" class="w-full" />
         </div>
       </div>
 
       <div class="flex justify-between pt-4">
-        <button
-          @click="previousStep"
-          class="px-4 py-2 text-sm text-gray-500 hover:text-gray-300"
-        >
-          Back
-        </button>
-        <button
-          @click="nextStep"
-          :disabled="!canProceedFromRepos"
-          class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Review
-        </button>
+        <Button label="Back" severity="secondary" text @click="previousStep" />
+        <Button label="Review" :disabled="!canProceedFromRepos" @click="nextStep" />
       </div>
     </div>
 
     <!-- Review Step -->
     <div v-if="currentStep === 'review'" class="space-y-4">
-      <h3 class="text-lg text-gray-200">Review Configuration</h3>
+      <h3 class="text-lg font-semibold text-slate-800">Review Configuration</h3>
 
       <div class="space-y-3 text-sm">
-        <div class="p-3 bg-gray-800/50 border border-gray-700 rounded">
-          <div class="text-xs text-gray-500 mb-2">JIRA</div>
-          <div class="space-y-1 text-gray-300">
+        <div class="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+          <div class="text-xs text-slate-500 font-medium mb-2">JIRA</div>
+          <div class="space-y-1 text-slate-700">
             <div>Server: {{ jiraForm.server }}</div>
             <div>Email: {{ jiraForm.email }}</div>
             <div v-if="jiraForm.project">Project: {{ jiraForm.project }}</div>
           </div>
         </div>
 
-        <div class="p-3 bg-gray-800/50 border border-gray-700 rounded">
-          <div class="text-xs text-gray-500 mb-2">GitHub</div>
-          <div class="text-gray-300">
+        <div class="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+          <div class="text-xs text-slate-500 font-medium mb-2">GitHub</div>
+          <div class="text-slate-700">
             Token: {{ githubForm.token.substring(0, 8) }}...
           </div>
         </div>
 
-        <div class="p-3 bg-gray-800/50 border border-gray-700 rounded">
-          <div class="text-xs text-gray-500 mb-2">Repositories ({{ repositories.length }})</div>
+        <div class="p-4 bg-slate-50 border border-slate-200 rounded-lg">
+          <div class="text-xs text-slate-500 font-medium mb-2">Repositories ({{ repositories.length }})</div>
           <div class="space-y-2">
-            <div v-for="(repo, index) in repositories" :key="index" class="text-gray-300">
+            <div v-for="(repo, index) in repositories" :key="index" class="text-slate-700">
               {{ repo.github_repo }} → {{ repo.jira_project }}
             </div>
           </div>
@@ -507,19 +442,13 @@ async function submitConfiguration() {
       </div>
 
       <div class="flex justify-between pt-4">
-        <button
-          @click="previousStep"
-          class="px-4 py-2 text-sm text-gray-500 hover:text-gray-300"
-        >
-          Back to Edit
-        </button>
-        <button
-          @click="submitConfiguration"
+        <Button label="Back to Edit" severity="secondary" text @click="previousStep" />
+        <Button
+          :label="loading ? 'Saving...' : 'Save Configuration'"
+          severity="success"
           :disabled="loading"
-          class="px-4 py-2 bg-green-600 hover:bg-green-500 text-white text-sm rounded disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {{ loading ? 'Saving...' : 'Save Configuration' }}
-        </button>
+          @click="submitConfiguration"
+        />
       </div>
     </div>
   </div>

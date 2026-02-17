@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue'
 import type { Agent } from '../types'
+import DataTable from 'primevue/datatable'
+import Column from 'primevue/column'
+import Tag from 'primevue/tag'
+import Button from 'primevue/button'
 
-const props = defineProps<{
+defineProps<{
   agents: Agent[]
   onRestart: (agentId: string) => void
 }>()
@@ -19,28 +22,18 @@ function formatPhase(phase: string | null): string {
   return phase.replace(/_/g, ' ')
 }
 
-function getStatusClass(status: string): string {
+function getStatusSeverity(status: string): string {
   switch (status) {
-    case 'working':
-      return 'text-green-400'
-    case 'completing':
-      return 'text-blue-400'
-    case 'idle':
-      return 'text-gray-500'
-    case 'dead':
-      return 'text-red-400'
-    default:
-      return 'text-gray-600'
+    case 'working': return 'success'
+    case 'completing': return 'info'
+    case 'idle': return 'warn'
+    case 'dead': return 'danger'
+    default: return 'secondary'
   }
-}
-
-function getStatusText(status: string): string {
-  return status.toUpperCase()
 }
 
 function getJiraKey(agent: Agent): string {
   if (!agent.current_task) return '-'
-  // Try to extract JIRA key from task context or ID
   const taskId = agent.current_task.id
   const match = taskId.match(/^([A-Z]+-\d+)/)
   return match ? match[1] : '-'
@@ -48,69 +41,52 @@ function getJiraKey(agent: Agent): string {
 </script>
 
 <template>
-  <div class="font-mono text-sm">
-    <!-- Header -->
-    <div class="grid grid-cols-12 gap-2 px-2 py-1 text-gray-500 text-xs border-b border-gray-800">
-      <div class="col-span-2">AGENT</div>
-      <div class="col-span-1">STATUS</div>
-      <div class="col-span-2">PHASE</div>
-      <div class="col-span-4">TASK</div>
-      <div class="col-span-1">JIRA</div>
-      <div class="col-span-1">TIME</div>
-      <div class="col-span-1"></div>
-    </div>
-
-    <!-- Agent rows -->
-    <div
-      v-for="agent in agents"
-      :key="agent.id"
-      class="grid grid-cols-12 gap-2 px-2 py-1 border-b border-gray-800/50 hover:bg-gray-800/30"
-    >
-      <!-- Agent name -->
-      <div class="col-span-2 text-gray-300 truncate">
-        {{ agent.id }}
-      </div>
-
-      <!-- Status -->
-      <div class="col-span-1" :class="getStatusClass(agent.status)">
-        {{ getStatusText(agent.status) }}
-      </div>
-
-      <!-- Phase -->
-      <div class="col-span-2 text-cyan-400 truncate">
-        {{ formatPhase(agent.current_phase) }}
-      </div>
-
-      <!-- Task title -->
-      <div class="col-span-4 text-gray-400 truncate" :title="agent.current_task?.title">
-        {{ agent.current_task?.title || '-' }}
-      </div>
-
-      <!-- JIRA key -->
-      <div class="col-span-1 text-yellow-400">
-        {{ getJiraKey(agent) }}
-      </div>
-
-      <!-- Elapsed time -->
-      <div class="col-span-1 text-gray-500">
-        {{ formatElapsed(agent.elapsed_seconds) }}
-      </div>
-
-      <!-- Actions -->
-      <div class="col-span-1 text-right">
-        <button
-          v-if="agent.status === 'dead'"
-          @click="onRestart(agent.id)"
-          class="text-red-400 hover:text-red-300 text-xs"
-        >
-          restart
-        </button>
-      </div>
-    </div>
-
-    <!-- Empty state -->
-    <div v-if="agents.length === 0" class="px-2 py-4 text-gray-500 text-center">
-      No agents configured
-    </div>
-  </div>
+  <DataTable :value="agents" stripedRows class="text-sm">
+    <template #empty>
+      <div class="text-center py-6 text-slate-400">No agents configured</div>
+    </template>
+    <Column field="id" header="Agent">
+      <template #body="{ data }">
+        <span class="font-medium text-slate-800">{{ data.id }}</span>
+      </template>
+    </Column>
+    <Column header="Status" style="width: 100px">
+      <template #body="{ data }">
+        <Tag :value="data.status.toUpperCase()" :severity="getStatusSeverity(data.status) as any" />
+      </template>
+    </Column>
+    <Column header="Phase" style="width: 140px">
+      <template #body="{ data }">
+        <span class="text-blue-600">{{ formatPhase(data.current_phase) }}</span>
+      </template>
+    </Column>
+    <Column header="Current Task">
+      <template #body="{ data }">
+        <span class="text-slate-600 truncate block max-w-xs" :title="data.current_task?.title">
+          {{ data.current_task?.title || '-' }}
+        </span>
+      </template>
+    </Column>
+    <Column header="JIRA" style="width: 90px">
+      <template #body="{ data }">
+        <span class="text-amber-600 font-mono text-xs">{{ getJiraKey(data) }}</span>
+      </template>
+    </Column>
+    <Column header="Elapsed" style="width: 80px">
+      <template #body="{ data }">
+        <span class="text-slate-400">{{ formatElapsed(data.elapsed_seconds) }}</span>
+      </template>
+    </Column>
+    <Column header="Actions" style="width: 100px">
+      <template #body="{ data }">
+        <Button
+          v-if="data.status === 'dead'"
+          label="Restart"
+          severity="danger"
+          size="small"
+          @click="onRestart(data.id)"
+        />
+      </template>
+    </Column>
+  </DataTable>
 </template>

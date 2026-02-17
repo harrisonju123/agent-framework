@@ -1,5 +1,4 @@
 import { onMounted, onUnmounted, ref } from 'vue'
-import type { ModalType } from '../types'
 
 export interface KeyboardActions {
   onStart: () => void
@@ -11,20 +10,19 @@ export interface KeyboardActions {
   onRetry: () => void
   onApprove: () => void
   onEscape: () => void
+  onNavigate?: (page: number) => void
 }
 
 export function useKeyboard(actions: KeyboardActions) {
   const isInputFocused = ref(false)
 
   function handleKeyDown(event: KeyboardEvent) {
-    // Skip if user is typing in an input/textarea
     const target = event.target as HTMLElement
     if (
       target.tagName === 'INPUT' ||
       target.tagName === 'TEXTAREA' ||
       target.isContentEditable
     ) {
-      // Only handle Escape in inputs
       if (event.key === 'Escape') {
         actions.onEscape()
         ;(target as HTMLInputElement).blur()
@@ -32,7 +30,6 @@ export function useKeyboard(actions: KeyboardActions) {
       return
     }
 
-    // Don't handle if modifier keys are pressed (except for shortcuts)
     if (event.ctrlKey || event.metaKey || event.altKey) {
       return
     }
@@ -73,6 +70,16 @@ export function useKeyboard(actions: KeyboardActions) {
       case 'escape':
         event.preventDefault()
         actions.onEscape()
+        break
+      case '1':
+      case '2':
+      case '3':
+      case '4':
+      case '5':
+        if (actions.onNavigate) {
+          event.preventDefault()
+          actions.onNavigate(parseInt(event.key))
+        }
         break
     }
   }
