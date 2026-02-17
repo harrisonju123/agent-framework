@@ -84,6 +84,10 @@ class PromptBuilder:
     - Human guidance injection
     """
 
+    # Steps where test execution should be suppressed in the LLM prompt.
+    # QA handles testing at qa_review; running tests at review/PR steps wastes budget.
+    _TEST_SUPPRESSED_STEPS = frozenset({"code_review", "create_pr"})
+
     def __init__(self, context: PromptContext):
         """Initialize prompt builder with context.
 
@@ -255,6 +259,16 @@ A fan-in task will aggregate all subtask results and create a single PR.
 
 """
 
+        # Suppress redundant test execution at review/PR steps — QA handles testing
+        workflow_step = task.context.get("workflow_step")
+        if workflow_step in self._TEST_SUPPRESSED_STEPS:
+            mcp_guidance += """
+IMPORTANT: Do NOT run the test suite (pytest, go test, npm test, etc.) during this step.
+Testing is handled by the QA agent at the qa_review step — running tests here wastes time and budget.
+Focus on reviewing the code changes.
+
+"""
+
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
@@ -320,6 +334,11 @@ IMPORTANT:
         # Subtasks must not create PRs — fan-in handles it
         if task.parent_task_id is not None:
             chain_note += "\nIMPORTANT: You are a SUBTASK of a decomposed task.\nCommit and push your changes, but do NOT create a pull request.\nA fan-in task will aggregate all subtask results and create a single PR.\n"
+
+        # Suppress redundant test execution at review/PR steps
+        workflow_step = task.context.get("workflow_step")
+        if workflow_step in self._TEST_SUPPRESSED_STEPS:
+            chain_note += "\nIMPORTANT: Do NOT run the test suite (pytest, go test, npm test, etc.) during this step.\nTesting is handled by the QA agent at the qa_review step — running tests here wastes time and budget.\nFocus on reviewing the code changes.\n"
 
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)

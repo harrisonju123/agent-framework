@@ -506,3 +506,63 @@ class TestMemoryBudgetIntegration:
 
         retriever.format_for_prompt.assert_called_once()
         assert retriever.format_for_prompt.call_args.kwargs["max_chars"] is None
+
+
+class TestTestSuppressionGuidance:
+    """Test that review/PR steps suppress test execution in prompts."""
+
+    def _make_task_with_step(self, sample_task, step_name):
+        """Set up a chain task at the given workflow step."""
+        sample_task.context["chain_step"] = True
+        sample_task.context["workflow_step"] = step_name
+        return sample_task
+
+    def test_code_review_step_suppresses_tests_legacy(self, prompt_builder, sample_task):
+        """code_review step injects test suppression in legacy prompt."""
+        task = self._make_task_with_step(sample_task, "code_review")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "Do NOT run the test suite" in prompt
+        assert "QA agent" in prompt
+
+    def test_create_pr_step_suppresses_tests_legacy(self, prompt_builder, sample_task):
+        """create_pr step injects test suppression in legacy prompt."""
+        task = self._make_task_with_step(sample_task, "create_pr")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "Do NOT run the test suite" in prompt
+
+    def test_qa_review_step_does_not_suppress(self, prompt_builder, sample_task):
+        """qa_review step should NOT suppress tests — QA owns testing."""
+        task = self._make_task_with_step(sample_task, "qa_review")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "Do NOT run the test suite" not in prompt
+
+    def test_implement_step_does_not_suppress(self, prompt_builder, sample_task):
+        """implement step should NOT suppress tests."""
+        task = self._make_task_with_step(sample_task, "implement")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "Do NOT run the test suite" not in prompt
+
+    def test_code_review_step_suppresses_tests_optimized(self, prompt_builder, sample_task):
+        """code_review step injects test suppression in optimized prompt."""
+        task = self._make_task_with_step(sample_task, "code_review")
+        prompt = prompt_builder._build_prompt_optimized(task)
+
+        assert "Do NOT run the test suite" in prompt
+        assert "QA agent" in prompt
+
+    def test_create_pr_step_suppresses_tests_optimized(self, prompt_builder, sample_task):
+        """create_pr step injects test suppression in optimized prompt."""
+        task = self._make_task_with_step(sample_task, "create_pr")
+        prompt = prompt_builder._build_prompt_optimized(task)
+
+        assert "Do NOT run the test suite" in prompt
+
+    def test_standalone_task_no_suppression(self, prompt_builder, sample_task):
+        """Standalone tasks (no workflow_step) should NOT suppress tests."""
+        prompt = prompt_builder._build_prompt_legacy(sample_task)
+
+        assert "Do NOT run the test suite" not in prompt
