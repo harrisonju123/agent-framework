@@ -737,7 +737,7 @@ class Agent:
             # Detect "no changes needed" — architect at plan step determines
             # the work is already done or not applicable
             if (has_workflow and self.config.base_id == "architect"
-                    and task.context.get("workflow_step") == "plan"):
+                    and task.context.get("workflow_step", task.type) in ("plan", "planning")):
                 content = getattr(response, "content", "") or ""
                 if self._is_no_changes_response(content):
                     task.context["verdict"] = "no_changes"

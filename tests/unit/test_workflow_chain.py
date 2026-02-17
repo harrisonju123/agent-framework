@@ -1574,6 +1574,34 @@ class TestNoChangesVerdict:
 
         assert task.context.get("verdict") == "no_changes"
 
+    def test_no_changes_verdict_set_for_original_planning_task(self, agent, queue):
+        """Original planning task (type=PLANNING, no workflow_step) → verdict='no_changes'."""
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
+        # Original planning task: type=PLANNING but no workflow_step in context
+        task = Task(
+            id="task-abc123def456",
+            type=TaskType.PLANNING,
+            status=TaskStatus.COMPLETED,
+            priority=1,
+            created_by="architect",
+            assigned_to="architect",
+            created_at=datetime.now(timezone.utc),
+            title="Plan feature X",
+            description="Evaluate whether feature X needs work.",
+            context={"workflow": "default"},
+        )
+        response = _make_response("The feature already exists in production. No changes needed.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "no_changes"
+
     def test_no_changes_verdict_not_set_at_code_review(self, agent, queue):
         """Architect at code_review step → no 'no_changes' verdict even with matching text."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")

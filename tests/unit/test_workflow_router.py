@@ -373,6 +373,23 @@ class TestBuildWorkflowContext:
 
         assert context["test_result"] == "passed"
 
+    def test_includes_verdict_when_present(self, router):
+        """Passes verdict through so DAG condition evaluators can see it."""
+        task = _make_task()
+        task.context["verdict"] = "no_changes"
+
+        context = router.build_workflow_context(task)
+
+        assert context["verdict"] == "no_changes"
+
+    def test_omits_verdict_when_absent(self, router):
+        """No verdict in task context → no verdict in evaluation context."""
+        task = _make_task()
+
+        context = router.build_workflow_context(task)
+
+        assert "verdict" not in context
+
 
 # -- PR creation --
 

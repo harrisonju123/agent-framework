@@ -293,6 +293,9 @@ class WorkflowRouter:
         """Build context dict for workflow condition evaluation."""
         context = {}
 
+        if task.context and "verdict" in task.context:
+            context["verdict"] = task.context["verdict"]
+
         # Prefer task context, fallback to git diff
         if task.context and "changed_files" in task.context:
             context["changed_files"] = task.context["changed_files"]
