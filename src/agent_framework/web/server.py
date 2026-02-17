@@ -28,6 +28,7 @@ from .models import (
     SuccessResponse,
     AgentActionResponse,
     TaskActionResponse,
+    CheckpointRejectRequest,
     WorkRequest,
     AnalyzeRequest,
     RunTicketRequest,
@@ -225,6 +226,26 @@ def register_routes(app: FastAPI):
                 task_id=task_id,
                 action="approve",
                 message=f"Checkpoint approved for task {task_id}",
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No pending checkpoint found for task {task_id}",
+            )
+
+    @app.post("/api/checkpoints/{task_id}/reject", response_model=TaskActionResponse)
+    async def reject_checkpoint(task_id: str, request: CheckpointRejectRequest):
+        """Reject a checkpoint with feedback and send task back to the agent."""
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
+            raise HTTPException(status_code=400, detail=f"Invalid task_id: {task_id}")
+
+        success = app.state.data_provider.reject_checkpoint(task_id, request.feedback.strip())
+        if success:
+            return TaskActionResponse(
+                success=True,
+                task_id=task_id,
+                action="reject",
+                message=f"Checkpoint rejected for task {task_id}",
             )
         else:
             raise HTTPException(

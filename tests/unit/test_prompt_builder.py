@@ -493,6 +493,51 @@ class TestStructuredFindings:
         assert "Some text summary" in result
 
 
+class TestRejectionFeedback:
+    """Test rejection feedback takes priority in _load_upstream_context."""
+
+    def test_rejection_feedback_in_prompt(self, prompt_builder, sample_task):
+        """Rejection feedback produces a prominent HUMAN FEEDBACK section."""
+        sample_task.context["rejection_feedback"] = "The plan misses error handling for edge cases"
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        assert "HUMAN FEEDBACK" in result
+        assert "CHECKPOINT REJECTED" in result
+        assert "The plan misses error handling for edge cases" in result
+
+    def test_rejection_feedback_takes_priority_over_structured_findings(self, prompt_builder, sample_task):
+        """Rejection feedback wins over structured QA findings."""
+        sample_task.context["rejection_feedback"] = "Redo with different approach"
+        sample_task.context["structured_findings"] = {
+            "findings": [{"file": "a.py", "severity": "MAJOR", "description": "issue"}]
+        }
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        assert "HUMAN FEEDBACK" in result
+        assert "QA FINDINGS" not in result
+
+    def test_rejection_feedback_takes_priority_over_upstream_summary(self, prompt_builder, sample_task):
+        """Rejection feedback wins over upstream_summary."""
+        sample_task.context["rejection_feedback"] = "Not what I asked for"
+        sample_task.context["upstream_summary"] = "Architect said X"
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        assert "HUMAN FEEDBACK" in result
+        assert "UPSTREAM AGENT FINDINGS" not in result
+
+    def test_no_rejection_feedback_falls_through(self, prompt_builder, sample_task):
+        """Without rejection_feedback, normal upstream context flow applies."""
+        sample_task.context["upstream_summary"] = "Normal upstream context"
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        assert "HUMAN FEEDBACK" not in result
+        assert "UPSTREAM AGENT FINDINGS" in result
+
+
 class TestMemoryBudgetIntegration:
     """Integration tests: _inject_memories respects ContextWindowManager budget tiers."""
 

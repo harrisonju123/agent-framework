@@ -430,11 +430,38 @@ class DashboardDataProvider:
                     "re-queuing to same agent"
                 )
                 self.queue.push(task, task.assigned_to)
-            checkpoint_file.unlink()
+            checkpoint_file.unlink(missing_ok=True)
         except Exception as e:
             logger.error(f"Error routing checkpoint task {task_id}: {e}")
             return False
 
+        return True
+
+    def reject_checkpoint(self, task_id: str, feedback: str) -> bool:
+        """Reject a checkpoint with feedback and re-queue to the same agent.
+
+        The agent will see the feedback in its prompt and redo the work.
+        """
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
+            raise ValueError(f"Invalid task_id: {task_id}")
+
+        checkpoint_dir = self.workspace / ".agent-communication" / "queues" / "checkpoints"
+        checkpoint_file = checkpoint_dir / f"{task_id}.json"
+        if not checkpoint_file.exists():
+            return False
+
+        task = FileQueue.load_task_file(checkpoint_file)
+        if task.status != TaskStatus.AWAITING_APPROVAL:
+            return False
+
+        task.context["rejection_feedback"] = feedback
+        task.notes.append(f"Checkpoint rejected: {feedback}")
+        task.reset_to_pending()
+        task.checkpoint_reached = None
+        task.checkpoint_message = None
+
+        self.queue.push(task, task.assigned_to)
+        checkpoint_file.unlink(missing_ok=True)
         return True
 
     # ============== Log Reading Methods ==============

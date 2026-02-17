@@ -211,3 +211,71 @@ class TestApproveCheckpoint:
             assert result is False
             # File should NOT be deleted
             assert checkpoint_file.exists()
+
+
+class TestRejectCheckpoint:
+    def test_reject_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = _make_workspace(tmpdir)
+            queue_dir = workspace / ".agent-communication" / "queues" / "engineer"
+            queue_dir.mkdir(parents=True)
+
+            task = _make_checkpoint_task()
+            checkpoint_file = _write_checkpoint(workspace, task)
+
+            provider = DashboardDataProvider(workspace)
+            result = provider.reject_checkpoint(task.id, "Use a different approach")
+
+            assert result is True
+            assert not checkpoint_file.exists()
+
+            # Task should be re-queued to the same agent
+            queued_files = list(queue_dir.glob("*.json"))
+            assert len(queued_files) == 1
+
+            requeued = json.loads(queued_files[0].read_text())
+            assert requeued["status"] == TaskStatus.PENDING.value
+            assert requeued["context"]["rejection_feedback"] == "Use a different approach"
+            assert any("Checkpoint rejected" in n for n in requeued["notes"])
+            assert requeued["checkpoint_reached"] is None
+            assert requeued["checkpoint_message"] is None
+            assert requeued["retry_count"] == 1
+
+    def test_reject_nonexistent_task(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = _make_workspace(tmpdir)
+            provider = DashboardDataProvider(workspace)
+            result = provider.reject_checkpoint("nonexistent-task", "feedback")
+            assert result is False
+
+    def test_reject_non_awaiting_task(self):
+        """Cannot reject a task that isn't AWAITING_APPROVAL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = _make_workspace(tmpdir)
+            task = _make_checkpoint_task(status=TaskStatus.IN_PROGRESS)
+            checkpoint_file = _write_checkpoint(workspace, task)
+
+            provider = DashboardDataProvider(workspace)
+            result = provider.reject_checkpoint(task.id, "feedback")
+
+            assert result is False
+            assert checkpoint_file.exists()
+
+    def test_reject_preserves_existing_context(self):
+        """Rejection feedback is added to context without clobbering other keys."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = _make_workspace(tmpdir)
+            queue_dir = workspace / ".agent-communication" / "queues" / "engineer"
+            queue_dir.mkdir(parents=True)
+
+            task = _make_checkpoint_task()
+            task.context["github_repo"] = "org/repo"
+            checkpoint_file = _write_checkpoint(workspace, task)
+
+            provider = DashboardDataProvider(workspace)
+            provider.reject_checkpoint(task.id, "Needs tests")
+
+            queued_files = list(queue_dir.glob("*.json"))
+            requeued = json.loads(queued_files[0].read_text())
+            assert requeued["context"]["github_repo"] == "org/repo"
+            assert requeued["context"]["rejection_feedback"] == "Needs tests"

@@ -578,6 +578,16 @@ If a tool call fails:
         When structured QA findings are available, formats them as an actionable
         checklist grouped by file. Otherwise falls back to inline text or disk file.
         """
+        # Rejection feedback takes top priority — human said "redo this"
+        rejection_feedback = task.context.get("rejection_feedback")
+        if rejection_feedback and rejection_feedback.strip():
+            return (
+                "\n## HUMAN FEEDBACK — CHECKPOINT REJECTED\n"
+                "Your previous output at this step was reviewed and rejected. "
+                "Address the following feedback:\n\n"
+                f"{rejection_feedback}\n"
+            )
+
         # Structured findings take priority — they give the engineer precise, actionable items
         structured = task.context.get("structured_findings")
         if structured:

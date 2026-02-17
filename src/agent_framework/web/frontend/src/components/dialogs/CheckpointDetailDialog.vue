@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { useAppState } from '../../composables/useAppState'
 import Dialog from 'primevue/dialog'
 import Button from 'primevue/button'
+import Textarea from 'primevue/textarea'
 import type { CheckpointData } from '../../types'
 
 const props = defineProps<{
@@ -13,10 +14,12 @@ const emit = defineEmits<{
   close: []
 }>()
 
-const { approveCheckpoint, loading, showToast, apiError } = useAppState()
+const { approveCheckpoint, rejectCheckpoint, loading, showToast, apiError } = useAppState()
 
 const visible = defineModel<boolean>('visible', { default: false })
 const expanded = ref(false)
+const rejecting = ref(false)
+const feedback = ref('')
 
 const dialogStyle = computed(() =>
   expanded.value
@@ -25,7 +28,11 @@ const dialogStyle = computed(() =>
 )
 
 watch(visible, (val) => {
-  if (!val) expanded.value = false
+  if (!val) {
+    expanded.value = false
+    rejecting.value = false
+    feedback.value = ''
+  }
 })
 
 async function handleApprove() {
@@ -35,6 +42,18 @@ async function handleApprove() {
     visible.value = false
     emit('close')
     showToast(`Checkpoint approved for ${props.checkpoint.id}`, 'success')
+  } else if (apiError.value) {
+    showToast(apiError.value, 'error')
+  }
+}
+
+async function handleReject() {
+  if (!props.checkpoint || !feedback.value.trim()) return
+  const result = await rejectCheckpoint(props.checkpoint.id, feedback.value.trim())
+  if (result?.success) {
+    visible.value = false
+    emit('close')
+    showToast(`Checkpoint rejected — feedback sent to ${props.checkpoint.assigned_to}`, 'info')
   } else if (apiError.value) {
     showToast(apiError.value, 'error')
   }
@@ -88,8 +107,32 @@ async function handleApprove() {
         <span>Agent: <span class="text-slate-700">{{ checkpoint.assigned_to }}</span></span>
         <span>Task ID: <span class="font-mono text-slate-700">{{ checkpoint.id }}</span></span>
       </div>
-      <div class="flex justify-end gap-2 pt-2 border-t border-slate-200">
-        <Button label="Cancel" severity="secondary" text @click="visible = false" />
+
+      <!-- Reject feedback area -->
+      <div v-if="rejecting" class="space-y-2 pt-2 border-t border-slate-200">
+        <label class="block text-xs font-medium text-slate-500">Feedback for the agent</label>
+        <Textarea
+          v-model="feedback"
+          rows="4"
+          class="w-full"
+          placeholder="Explain what needs to change..."
+          autofocus
+        />
+        <div class="flex justify-end gap-2">
+          <Button label="Cancel" severity="secondary" text size="small" @click="rejecting = false; feedback = ''" />
+          <Button
+            label="Send Back"
+            severity="danger"
+            size="small"
+            :disabled="loading || !feedback.trim()"
+            @click="handleReject"
+          />
+        </div>
+      </div>
+
+      <!-- Default footer -->
+      <div v-else class="flex justify-end gap-2 pt-2 border-t border-slate-200">
+        <Button label="Reject" severity="danger" text @click="rejecting = true" />
         <Button label="Approve" severity="warn" :disabled="loading" @click="handleApprove" />
       </div>
     </div>

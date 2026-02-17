@@ -80,6 +80,15 @@ export function useApi() {
     )
   }
 
+  async function rejectCheckpoint(taskId: string, feedback: string): Promise<TaskActionResponse | null> {
+    return withLoading(() =>
+      fetchJson<TaskActionResponse>(`/checkpoints/${taskId}/reject`, {
+        method: 'POST',
+        body: JSON.stringify({ feedback }),
+      })
+    )
+  }
+
   // System actions
   async function pauseSystem(): Promise<SuccessResponse | null> {
     return withLoading(() =>
@@ -142,6 +151,7 @@ export function useApi() {
     restartAgent,
     retryTask,
     approveCheckpoint,
+    rejectCheckpoint,
     pauseSystem,
     resumeSystem,
     startAllAgents,

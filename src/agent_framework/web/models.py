@@ -210,6 +210,11 @@ class RunTicketRequest(BaseModel):
     agent: Optional[str] = Field(default=None, pattern=r'^[a-z0-9_-]+$')
 
 
+class CheckpointRejectRequest(BaseModel):
+    """Request to reject a checkpoint with feedback."""
+    feedback: str = Field(..., min_length=1, max_length=5000)
+
+
 class OperationResponse(BaseModel):
     """Response for operation endpoints."""
     success: bool
