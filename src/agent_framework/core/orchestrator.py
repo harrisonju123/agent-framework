@@ -147,6 +147,8 @@ class Orchestrator:
             "JIRA_EMAIL",
             "JIRA_API_TOKEN",
             "JIRA_SERVER",
+            "GITHUB_REPOSITORY",
+            "AGENT_TYPE",
         ]
 
         # Environment variables to pass to agents

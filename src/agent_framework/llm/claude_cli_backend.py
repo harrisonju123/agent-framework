@@ -282,6 +282,10 @@ class ClaudeCLIBackend(LLMBackend):
             if task_id:
                 env['AGENT_TASK_ID'] = task_id
 
+            # Propagate task context to MCP server so memories land under the correct repo
+            if request.context and request.context.get("github_repo"):
+                env.setdefault('GITHUB_REPOSITORY', request.context["github_repo"])
+
             # Determine working directory for subprocess
             # Use working_dir from request if provided, otherwise inherit current directory
             cwd = request.working_dir if request.working_dir else None

@@ -4,10 +4,12 @@ import time
 
 import pytest
 
-from agent_framework.memory.memory_store import MemoryStore
+from agent_framework.memory.memory_store import MemoryStore, MemoryEntry
 from agent_framework.memory.memory_retriever import (
     MemoryRetriever,
     MAX_REPLAN_MEMORY_CHARS,
+    _relevance_score,
+    _debate_confidence_boost,
 )
 
 
@@ -270,3 +272,125 @@ class TestFormatForPrompt:
         assert "## Memories from Previous Tasks" in result
         assert "[conventions]" in result
         assert "Use snake_case" in result
+
+
+def _make_entry(category: str, content: str, tags: list = None) -> MemoryEntry:
+    """Build a MemoryEntry with access_count=0 and last_accessed=now."""
+    return MemoryEntry(
+        category=category,
+        content=content,
+        tags=tags or [],
+    )
+
+
+class TestDebateConfidenceBoost:
+    """Tests for relevance boost applied to high-confidence debate decisions."""
+
+    def test_architectural_decision_debate_high_confidence_boost(self):
+        """High-confidence debate decisions should score higher than a plain convention memory.
+
+        Both entries have identical recency so the only score difference comes
+        from the debate confidence multiplier.
+        """
+        convention = _make_entry(
+            category="conventions",
+            content="Always use snake_case for variable names.",
+        )
+        debate_decision = _make_entry(
+            category="architectural_decisions",
+            content=(
+                "Topic: Database choice\n"
+                "Recommendation: Use PostgreSQL over MySQL\n"
+                "Confidence: high\n"
+                "Trade-offs: Better JSON support; slightly larger footprint\n"
+                "Reasoning: Team familiarity and ecosystem"
+            ),
+            tags=["debate", "debate-abc123", "database", "choice"],
+        )
+
+        convention_score = _relevance_score(convention)
+        debate_score = _relevance_score(debate_decision)
+
+        assert debate_score > convention_score, (
+            f"High-confidence debate decision ({debate_score:.4f}) should outscore "
+            f"plain convention ({convention_score:.4f})"
+        )
+
+    def test_debate_medium_confidence_moderate_boost(self):
+        """Medium-confidence debate decisions get a 1.5x boost over low-confidence."""
+        low = _make_entry(
+            category="architectural_decisions",
+            content=(
+                "Topic: Caching strategy\n"
+                "Recommendation: Use Redis\n"
+                "Confidence: low\n"
+                "Trade-offs: Operational complexity\n"
+                "Reasoning: Simple to operate"
+            ),
+            tags=["debate", "debate-xyz789", "caching"],
+        )
+        medium = _make_entry(
+            category="architectural_decisions",
+            content=(
+                "Topic: Caching strategy\n"
+                "Recommendation: Use Redis\n"
+                "Confidence: medium\n"
+                "Trade-offs: Operational complexity\n"
+                "Reasoning: Good performance/cost tradeoff"
+            ),
+            tags=["debate", "debate-xyz789", "caching"],
+        )
+
+        low_score = _relevance_score(low)
+        medium_score = _relevance_score(medium)
+
+        assert medium_score > low_score
+        # Ratio should be exactly 1.5 (medium) / 1.0 (low)
+        assert abs(medium_score / low_score - 1.5) < 0.01
+
+    def test_debate_low_confidence_no_boost(self):
+        """Low-confidence debate decisions receive no additional boost.
+
+        A low-confidence debate entry with the same recency as a plain
+        architectural_decisions entry should score identically.
+        """
+        plain = _make_entry(
+            category="architectural_decisions",
+            content="Use dependency injection for testability.",
+        )
+        low_confidence = _make_entry(
+            category="architectural_decisions",
+            content=(
+                "Topic: DI approach\n"
+                "Recommendation: Use manual DI\n"
+                "Confidence: low\n"
+                "Trade-offs: More boilerplate\n"
+                "Reasoning: Uncertain"
+            ),
+            tags=["debate", "debate-low001", "di"],
+        )
+
+        plain_score = _relevance_score(plain)
+        low_score = _relevance_score(low_confidence)
+
+        assert abs(low_score - plain_score) < 0.001, (
+            f"Low-confidence debate ({low_score:.6f}) should match plain entry "
+            f"({plain_score:.6f})"
+        )
+
+    def test_boost_not_applied_without_debate_tag(self):
+        """architectural_decisions without the 'debate' tag get no boost."""
+        entry = _make_entry(
+            category="architectural_decisions",
+            content="Confidence: high\nUse REST not GraphQL.",
+        )
+        assert _debate_confidence_boost(entry) == 1.0
+
+    def test_boost_not_applied_to_other_categories(self):
+        """Boost is category-scoped: non-architectural_decisions are unaffected."""
+        wrong_cat = _make_entry(
+            category="conventions",
+            content="Confidence: high",
+            tags=["debate", "debate-xyz"],
+        )
+        assert _debate_confidence_boost(wrong_cat) == 1.0

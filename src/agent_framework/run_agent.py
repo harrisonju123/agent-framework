@@ -48,6 +48,11 @@ def main():
     # Expose agent ID to child processes (MCP servers use this for task attribution)
     os.environ["AGENT_ID"] = agent_id
 
+    # Derive base agent type (strip replica suffix) so MCP servers can key
+    # memory stores correctly (e.g. "engineer-2" -> "engineer")
+    base_agent_type = agent_id.rsplit("-", 1)[0] if "-" in agent_id and agent_id.rsplit("-", 1)[-1].isdigit() else agent_id
+    os.environ.setdefault("AGENT_TYPE", base_agent_type)
+
     # Setup logging
     setup_logging(agent_id, workspace)
     logger = logging.getLogger(__name__)

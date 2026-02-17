@@ -327,19 +327,32 @@ function storeDebateMemory(
 
     const tags = ["debate", debateId, ...topicKeywords];
 
-    const result = agentRemember(workspace, {
-      repo_slug: repoSlug,
-      agent_type: agentType,
-      category: "architectural_decisions",
-      content,
-      tags,
-    });
+    // Store for all core agent types so any agent can recall this architectural decision.
+    // The calling agent is always included; others get a best-effort copy.
+    const ALL_CORE_AGENTS = ["architect", "engineer", "qa"];
+    let stored = 0;
 
-    if (result.success) {
-      logger.info(`Debate memory stored: ${topic}`, { debate_id: debateId });
-    } else {
-      logger.warn(`Failed to store debate memory: ${result.message}`, { debate_id: debateId });
+    for (const targetAgent of ALL_CORE_AGENTS) {
+      try {
+        const result = agentRemember(workspace, {
+          repo_slug: repoSlug,
+          agent_type: targetAgent,
+          category: "architectural_decisions",
+          content,
+          tags,
+        });
+        if (result.success) {
+          stored++;
+        } else {
+          logger.warn(`Failed to store debate memory for ${targetAgent}: ${result.message}`, { debate_id: debateId });
+        }
+      } catch (agentError: unknown) {
+        const err = agentError as Error;
+        logger.warn(`Error storing debate memory for ${targetAgent}: ${err.message}`, { debate_id: debateId });
+      }
     }
+
+    logger.info(`Debate memory stored for ${stored}/${ALL_CORE_AGENTS.length} agent types: ${topic}`, { debate_id: debateId });
   } catch (error: unknown) {
     const err = error as Error;
     logger.warn(`Error storing debate memory: ${err.message}`, { debate_id: debateId });

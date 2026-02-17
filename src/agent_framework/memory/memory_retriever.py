@@ -33,14 +33,40 @@ def _frequency_score(entry: MemoryEntry) -> float:
     return math.log1p(entry.access_count)
 
 
+def _debate_confidence_boost(entry: MemoryEntry) -> float:
+    """Multiplier for high-confidence architectural decisions from debates.
+
+    Debates produce structured synthesis with an explicit confidence level.
+    Surfacing high-confidence outcomes above general memories prevents
+    re-litigating settled architectural choices.
+    """
+    if entry.category != "architectural_decisions" or "debate" not in (entry.tags or []):
+        return 1.0
+
+    # Confidence is stored as "Confidence: high|medium|low" in the content string
+    for line in entry.content.splitlines():
+        if line.startswith("Confidence:"):
+            level = line.split(":", 1)[1].strip().lower()
+            if level == "high":
+                return 2.0
+            if level == "medium":
+                return 1.5
+            break  # "low" or unrecognised -> no boost
+
+    return 1.0
+
+
 def _relevance_score(entry: MemoryEntry, task_tags: Optional[List[str]] = None) -> float:
-    """Combined relevance score: recency * frequency * tag overlap."""
+    """Combined relevance score: recency * frequency * tag overlap * debate boost."""
     score = _recency_score(entry) * (1.0 + _frequency_score(entry))
 
     # Boost if tags overlap with current task context
     if task_tags and entry.tags:
         overlap = len(set(entry.tags) & set(task_tags))
         score *= (1.0 + overlap * 0.5)
+
+    # High-confidence architectural decisions from debates rank above general memories
+    score *= _debate_confidence_boost(entry)
 
     return score
 
