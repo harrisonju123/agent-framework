@@ -500,7 +500,7 @@ breaking the task into smaller steps, or working around the root cause."""
             agent_type=self.config.base_id,
             category="past_failures",
             content=content,
-            task_id=task.id,
+            source_task_id=task.id,
             tags=[error_type],
         )
 
