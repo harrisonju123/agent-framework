@@ -9,6 +9,7 @@ import pytest
 from agent_framework.core.error_recovery import ErrorRecoveryManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
+from agent_framework.memory.memory_store import MemoryStore
 
 
 def _make_task(**overrides):
@@ -414,7 +415,8 @@ class TestReplanMemory:
     def test_store_replan_outcome_on_success(self):
         """Verify memory stored with correct category and tags after successful replan."""
         manager = _make_manager()
-        memory_store = MagicMock()
+        # Use spec=MemoryStore so unexpected kwargs (e.g. task_id instead of source_task_id) raise TypeError
+        memory_store = MagicMock(spec=MemoryStore)
         memory_store.enabled = True
         manager.memory_store = memory_store
 
@@ -438,6 +440,7 @@ class TestReplanMemory:
         call_kwargs = memory_store.remember.call_args.kwargs
         assert call_kwargs["category"] == "past_failures"
         assert call_kwargs["repo_slug"] == "owner/repo"
+        assert call_kwargs["source_task_id"] == task.id
         assert "type_error" in call_kwargs["tags"]
         assert "src/handler.py" in call_kwargs["content"]
         assert "resolved" in call_kwargs["content"]
