@@ -155,6 +155,9 @@ class PromptBuilder:
         # Inject replan history if retrying with revised approach
         prompt = self._inject_replan_context(prompt, task)
 
+        # Inject retry context: truncated error + partial progress from previous attempt
+        prompt = self._inject_retry_context(prompt, task)
+
         # Inject human guidance if provided via `agent guide` command
         prompt = self._inject_human_guidance(prompt, task)
 
@@ -649,6 +652,50 @@ If a tool call fails:
         if not revised_plan:
             return prompt
         return prompt + f"\n\n## REVISED APPROACH (retry {task.retry_count})\n\n{revised_plan}"
+
+    def _inject_retry_context(self, prompt: str, task: Task) -> str:
+        """Append error + partial progress from the previous attempt on retries.
+
+        Tells the LLM to continue rather than restart from scratch, and
+        clarifies that upstream_summary is from a previous *agent*, not a
+        previous attempt of the same agent.
+        """
+        if task.retry_count == 0:
+            return prompt
+
+        sections = []
+        sections.append(f"## RETRY CONTEXT (attempt {task.retry_count + 1})")
+        sections.append("")
+
+        # Truncated error from previous attempt
+        if task.last_error:
+            from ..safeguards.escalation import EscalationHandler
+            truncated = EscalationHandler().truncate_error(task.last_error)
+            sections.append("### Previous Error")
+            sections.append(truncated)
+            sections.append("")
+
+        # Partial progress extracted from the previous response
+        prev_summary = task.context.get("_previous_attempt_summary")
+        if prev_summary:
+            sections.append("### Progress From Previous Attempt")
+            sections.append(prev_summary)
+            sections.append("")
+
+        sections.append(
+            "Do NOT restart from scratch. Continue from the progress above, "
+            "fixing the error that caused the previous attempt to fail."
+        )
+
+        # Disambiguate upstream context if present
+        if task.context.get("upstream_summary"):
+            sections.append("")
+            sections.append(
+                "NOTE: The 'UPSTREAM AGENT FINDINGS' section above is from a "
+                "previous agent in the workflow chain, not from your previous attempt."
+            )
+
+        return prompt + "\n\n" + "\n".join(sections)
 
     def _inject_preview_mode(self, prompt: str, _task: Task) -> str:
         """Inject preview mode constraints when task is a preview."""

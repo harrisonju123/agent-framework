@@ -343,6 +343,11 @@ class WorktreeManager:
     ) -> bool:
         """Remove worktree directory using git worktree remove."""
         try:
+            # Phantom worktree: both path and base_repo are gone, nothing to remove
+            if not path.exists() and (not base_repo or not base_repo.exists()):
+                logger.debug(f"Phantom worktree (already gone): {path}")
+                return True
+
             if base_repo and base_repo.exists():
                 # Use git worktree remove for proper cleanup
                 cmd = ["worktree", "remove", str(path)]
@@ -423,6 +428,14 @@ class WorktreeManager:
                 if age_seconds > max_age_seconds:
                     path = Path(info.path)
                     base_repo = Path(info.base_repo) if info.base_repo else None
+
+                    # Phantom worktree: both path and base_repo gone — just purge from registry
+                    if not path.exists() and (not base_repo or not base_repo.exists()):
+                        keys_to_remove.append(key)
+                        registered_removed += 1
+                        logger.debug(f"Purged phantom worktree from registry: {key}")
+                        continue
+
                     if self._remove_worktree_directory(path, base_repo, force=True):
                         keys_to_remove.append(key)
                         registered_removed += 1

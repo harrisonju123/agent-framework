@@ -330,6 +330,19 @@ class Agent:
         # PR lifecycle management
         self._init_pr_lifecycle(repositories_config, pr_lifecycle_config)
 
+        # Workflow routing: chain enforcement, task decomposition, agent handoffs
+        self._workflow_router = WorkflowRouter(
+            config=config,
+            queue=queue,
+            workspace=self.workspace,
+            logger=self.logger,
+            session_logger=self._session_logger,
+            workflows_config=self._workflows_config,
+            workflow_executor=self._workflow_executor,
+            agents_config=self._agents_config,
+            multi_repo_manager=multi_repo_manager,
+        )
+
         # Review cycle management: QA → Engineer feedback loop
         self._review_cycle = ReviewCycleManager(
             config=config,
@@ -717,11 +730,41 @@ class Agent:
         """
         self._budget.log_task_completion_metrics(task, response, task_start_time)
 
+    @staticmethod
+    def _extract_partial_progress(content: str, max_bytes: int = 2048) -> str:
+        """Extract meaningful text blocks from a partial LLM response.
+
+        Filters out [Tool Call: ...] noise and keeps the last few
+        substantive text blocks so retries can pick up where we left off.
+        """
+        if not content:
+            return ""
+
+        # Split on tool-call markers and keep non-marker blocks
+        blocks = re.split(r'\[Tool Call:[^\]]*\]', content)
+        meaningful = [b.strip() for b in blocks if b.strip()]
+
+        # Keep last 5 meaningful blocks
+        meaningful = meaningful[-5:]
+        joined = "\n\n".join(meaningful)
+
+        # Enforce size cap
+        if len(joined.encode("utf-8", errors="replace")) > max_bytes:
+            joined = joined[-max_bytes:]
+
+        return joined
+
     async def _handle_failed_response(self, task: Task, response) -> None:
         """Handle failed LLM response."""
         from datetime import datetime
 
         task.last_error = response.error or "Unknown error"
+
+        # Preserve partial progress so the retry prompt can continue from it
+        if response.content:
+            summary = self._extract_partial_progress(response.content)
+            if summary:
+                task.context["_previous_attempt_summary"] = summary
 
         # Log detailed error information for debugging
         self.logger.error(

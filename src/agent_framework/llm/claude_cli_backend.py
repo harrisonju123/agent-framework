@@ -173,12 +173,14 @@ class ClaudeCLIBackend(LLMBackend):
         logs_dir: Optional[Path] = None,
         proxy_env: Optional[dict] = None,
         use_max_account: bool = False,
+        max_idle_timeouts: int = 5,
     ):
         self.executable = executable
         self.max_turns = max_turns
         self.timeout = timeout  # Fallback timeout when task_type not specified
         self.proxy_env = proxy_env or {}
         self.use_max_account = use_max_account
+        self.max_idle_timeouts = max_idle_timeouts
         self.model_selector = ModelSelector(
             cheap_model, default_model, premium_model,
             timeout_large=timeout_large,
@@ -329,7 +331,7 @@ class ClaudeCLIBackend(LLMBackend):
                 """Read stdout as line-delimited JSON, parse each event."""
                 buffer = b""
                 consecutive_timeouts = 0
-                max_idle_timeouts = 3  # Give up after 180s of no data
+                max_idle_timeouts = self.max_idle_timeouts
                 try:
                     while True:
                         try:
@@ -381,7 +383,7 @@ class ClaudeCLIBackend(LLMBackend):
             async def read_stderr_stream(stream):
                 """Read stderr chunks (unchanged — not JSON formatted)."""
                 consecutive_timeouts = 0
-                max_idle_timeouts = 3
+                max_idle_timeouts = self.max_idle_timeouts
                 try:
                     while True:
                         try:
@@ -514,6 +516,11 @@ class ClaudeCLIBackend(LLMBackend):
                 if content.strip():
                     error_parts.append(f"STDOUT: {content.strip()}")
                 error_msg = " | ".join(error_parts)
+
+                # Truncate bloated errors (e.g. full stack traces from Claude CLI)
+                # so task.last_error stays readable for retries and escalations
+                from ..safeguards.escalation import EscalationHandler
+                error_msg = EscalationHandler().truncate_error(error_msg)
 
                 logger.error(
                     f"Claude CLI failed: returncode={process.returncode}\n"

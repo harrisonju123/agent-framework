@@ -318,3 +318,35 @@ class TestPromptInjections:
         assert "READ-ONLY" in result
         # Preview mode section is prepended, possibly with a newline
         assert "PREVIEW MODE" in result[:100]
+
+    def test_inject_retry_context_skipped_on_first_attempt(self, prompt_builder, sample_task):
+        """No retry context injected on first attempt."""
+        sample_task.retry_count = 0
+        prompt = "Base prompt"
+        result = prompt_builder._inject_retry_context(prompt, sample_task)
+        assert result == prompt
+
+    def test_inject_retry_context_includes_error_and_progress(self, prompt_builder, sample_task):
+        """Retry context includes truncated error and partial progress."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Connection refused at line 42"
+        sample_task.context["_previous_attempt_summary"] = "Created auth module, started writing tests"
+
+        prompt = "Base prompt"
+        result = prompt_builder._inject_retry_context(prompt, sample_task)
+
+        assert "RETRY CONTEXT (attempt 2)" in result
+        assert "Connection refused" in result
+        assert "Created auth module" in result
+        assert "Do NOT restart from scratch" in result
+
+    def test_inject_retry_context_disambiguates_upstream(self, prompt_builder, sample_task):
+        """Retry context clarifies upstream_summary is from a different agent."""
+        sample_task.retry_count = 2
+        sample_task.last_error = "Some error"
+        sample_task.context["upstream_summary"] = "Architect found X"
+
+        prompt = "Base prompt"
+        result = prompt_builder._inject_retry_context(prompt, sample_task)
+
+        assert "previous agent in the workflow chain" in result

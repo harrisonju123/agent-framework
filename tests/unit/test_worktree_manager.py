@@ -374,3 +374,52 @@ class TestOwnerRepoValidation:
         """Test multiple slashes raises error."""
         with pytest.raises(ValueError, match="Invalid repository format"):
             manager._validate_owner_repo("owner/repo/extra")
+
+
+class TestPhantomWorktreeCleanup:
+    """Tests for phantom worktree handling (both path and base_repo gone)."""
+
+    def test_remove_worktree_directory_phantom_returns_true(self, tmp_path):
+        """Phantom worktree (path + base_repo both gone) returns True without shelling out."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        nonexistent_path = tmp_path / "gone-worktree"
+        nonexistent_base = tmp_path / "gone-base-repo"
+
+        result = manager._remove_worktree_directory(nonexistent_path, nonexistent_base)
+        assert result is True
+
+    def test_remove_worktree_directory_phantom_no_base_repo(self, tmp_path):
+        """Phantom worktree with None base_repo returns True."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        nonexistent_path = tmp_path / "gone-worktree"
+        result = manager._remove_worktree_directory(nonexistent_path, None)
+        assert result is True
+
+    def test_cleanup_orphaned_purges_phantom_from_registry(self, tmp_path):
+        """Stale phantom worktrees are purged from registry without subprocess calls."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
+        manager = WorktreeManager(config=config)
+
+        # Register a phantom entry (both path and base_repo point nowhere)
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        manager._registry["phantom-key"] = WorktreeInfo(
+            path=str(tmp_path / "gone-worktree"),
+            branch="feature/gone",
+            agent_id="engineer",
+            task_id="task-phantom",
+            created_at=old_ts,
+            last_accessed=old_ts,
+            base_repo=str(tmp_path / "gone-base-repo"),
+        )
+
+        with patch.object(manager, '_run_git') as mock_git:
+            result = manager.cleanup_orphaned_worktrees()
+            # Should NOT call git — phantom path is already gone
+            mock_git.assert_not_called()
+
+        assert result["registered"] == 1
+        assert "phantom-key" not in manager._registry

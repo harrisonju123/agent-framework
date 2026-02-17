@@ -141,3 +141,63 @@ class TestBudgetErrorCategorization:
         budget_related = any("budget" in intervention.lower() or "credits" in intervention.lower()
                            for intervention in interventions)
         assert budget_related, f"Budget interventions not found in: {interventions}"
+
+
+class TestCLIBackendErrorTruncation:
+    """Verify that ClaudeCLIBackend error path truncates bloated errors."""
+
+    def test_long_cli_error_is_truncated(self):
+        """100+ line error from CLI gets head/tail truncation."""
+        handler = EscalationHandler()
+        long_error = " | ".join([
+            "Exit code 1",
+            "STDERR: " + "\n".join(f"trace line {i}" for i in range(120)),
+        ])
+        result = handler.truncate_error(long_error)
+        assert "lines omitted" in result
+
+    def test_short_cli_error_unchanged(self):
+        """Short error passes through unmodified."""
+        handler = EscalationHandler()
+        short_error = "Exit code 1 | STDERR: auth failed"
+        result = handler.truncate_error(short_error)
+        assert result == short_error
+
+
+class TestExtractPartialProgress:
+    """Tests for Agent._extract_partial_progress static method."""
+
+    def test_empty_content_returns_empty(self):
+        from agent_framework.core.agent import Agent
+        assert Agent._extract_partial_progress("") == ""
+        assert Agent._extract_partial_progress(None) == ""
+
+    def test_filters_tool_call_markers(self):
+        from agent_framework.core.agent import Agent
+        content = (
+            "I'll start by reading the file.\n"
+            "[Tool Call: Read]\n"
+            "Now I see the code structure.\n"
+            "[Tool Call: Edit]\n"
+            "Applied the fix to line 42."
+        )
+        result = Agent._extract_partial_progress(content)
+        assert "[Tool Call:" not in result
+        assert "reading the file" in result
+        assert "Applied the fix" in result
+
+    def test_keeps_last_five_blocks(self):
+        from agent_framework.core.agent import Agent
+        blocks = [f"Block {i} content" for i in range(10)]
+        content = "[Tool Call: X]\n".join(blocks)
+        result = Agent._extract_partial_progress(content)
+        # Should keep last 5
+        assert "Block 9 content" in result
+        assert "Block 5 content" in result
+        assert "Block 0 content" not in result
+
+    def test_enforces_size_cap(self):
+        from agent_framework.core.agent import Agent
+        content = "A" * 5000
+        result = Agent._extract_partial_progress(content, max_bytes=1024)
+        assert len(result.encode("utf-8")) <= 1024
