@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useAppState } from '../composables/useAppState'
 import DataTable from 'primevue/datatable'
 import Column from 'primevue/column'
@@ -11,12 +11,40 @@ import TabPanels from 'primevue/tabpanels'
 import TabPanel from 'primevue/tabpanel'
 import Button from 'primevue/button'
 import CheckpointDetailDialog from '../components/dialogs/CheckpointDetailDialog.vue'
-import type { CheckpointData } from '../types'
+import type { CheckpointData, ActiveTask } from '../types'
 
-const { failedTasks, pendingCheckpoints, queues, handleRetryTask } = useAppState()
+const { failedTasks, pendingCheckpoints, queues, handleRetryTask, handleCancelTask, getActiveTasks } = useAppState()
 
 const selectedCheckpoint = ref<CheckpointData | null>(null)
 const showCheckpointDialog = ref(false)
+const activeTasks = ref<ActiveTask[]>([])
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let polling = true
+
+async function fetchActiveTasks() {
+  activeTasks.value = await getActiveTasks()
+}
+
+async function pollLoop() {
+  await fetchActiveTasks()
+  if (polling) {
+    pollTimer = setTimeout(pollLoop, 5000)
+  }
+}
+
+async function onCancelTask(taskId: string) {
+  await handleCancelTask(taskId)
+  await fetchActiveTasks()
+}
+
+onMounted(() => {
+  pollLoop()
+})
+
+onUnmounted(() => {
+  polling = false
+  if (pollTimer) clearTimeout(pollTimer)
+})
 
 function truncateError(error: string | null, maxLen = 60): string {
   if (!error) return ''
@@ -31,18 +59,58 @@ function reviewCheckpoint(cp: CheckpointData) {
   selectedCheckpoint.value = cp
   showCheckpointDialog.value = true
 }
+
+function statusSeverity(status: string): string {
+  return status === 'in_progress' ? 'info' : 'secondary'
+}
+
+function statusLabel(status: string): string {
+  return status === 'in_progress' ? 'Running' : 'Pending'
+}
 </script>
 
 <template>
   <div class="space-y-4">
-    <Tabs value="failed">
+    <Tabs value="active">
       <TabList>
+        <Tab value="active">Active Tasks</Tab>
         <Tab value="failed">Failed Tasks</Tab>
         <Tab value="checkpoints">Checkpoints</Tab>
         <Tab value="queues">Queues</Tab>
       </TabList>
 
       <TabPanels>
+        <!-- Active Tasks Tab -->
+        <TabPanel value="active">
+          <DataTable :value="activeTasks" stripedRows :paginator="activeTasks.length > 10" :rows="10" class="text-sm">
+            <template #empty>
+              <div class="text-center py-6 text-slate-400">No active tasks</div>
+            </template>
+            <Column header="Key/ID" style="width: 120px">
+              <template #body="{ data }">
+                <span class="font-mono text-blue-600 font-medium text-xs">{{ getTaskKey(data) }}</span>
+              </template>
+            </Column>
+            <Column field="title" header="Title">
+              <template #body="{ data }">
+                <span class="text-slate-700 text-sm" :title="data.title">{{ data.title }}</span>
+              </template>
+            </Column>
+            <Column header="Status" style="width: 100px">
+              <template #body="{ data }">
+                <Tag :value="statusLabel(data.status)" :severity="statusSeverity(data.status)" />
+              </template>
+            </Column>
+            <Column field="assigned_to" header="Agent" style="width: 100px" />
+            <Column field="task_type" header="Type" style="width: 120px" />
+            <Column header="Actions" style="width: 90px">
+              <template #body="{ data }">
+                <Button label="Cancel" severity="danger" size="small" @click="onCancelTask(data.id)" />
+              </template>
+            </Column>
+          </DataTable>
+        </TabPanel>
+
         <!-- Failed Tasks Tab -->
         <TabPanel value="failed">
           <DataTable :value="failedTasks" stripedRows :paginator="failedTasks.length > 10" :rows="10" class="text-sm">

@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Dict, Any
+from typing import Literal, Optional, List, Dict, Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -100,6 +100,19 @@ class FailedTaskData(BaseModel):
     retry_count: int
     last_error: Optional[str] = None
     failed_at: Optional[datetime] = None
+
+
+class ActiveTaskData(BaseModel):
+    """Active task (pending or in-progress) in a queue."""
+    id: str
+    title: str
+    status: Literal["pending", "in_progress"]
+    jira_key: Optional[str] = None
+    assigned_to: str
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    task_type: str
+    parent_task_id: Optional[str] = None
 
 
 class CheckpointData(BaseModel):

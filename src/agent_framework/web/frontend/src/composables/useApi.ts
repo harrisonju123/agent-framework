@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import type {
+  ActiveTask,
   AgentActionResponse,
   TaskActionResponse,
   SuccessResponse,
@@ -68,6 +69,24 @@ export function useApi() {
     return withLoading(() =>
       fetchJson<TaskActionResponse>(`/tasks/${taskId}/retry`, { method: 'POST' })
     )
+  }
+
+  async function cancelTask(taskId: string, reason?: string): Promise<TaskActionResponse | null> {
+    return withLoading(() =>
+      fetchJson<TaskActionResponse>(`/tasks/${taskId}/cancel`, {
+        method: 'POST',
+        ...(reason ? { body: JSON.stringify({ reason }) } : {}),
+      })
+    )
+  }
+
+  // Polling fetches — no loading state to avoid UI flicker
+  async function getActiveTasks(): Promise<ActiveTask[]> {
+    try {
+      return await fetchJson<ActiveTask[]>('/tasks/active')
+    } catch {
+      return []
+    }
   }
 
   // Checkpoint actions
@@ -150,6 +169,8 @@ export function useApi() {
     stopAgent,
     restartAgent,
     retryTask,
+    cancelTask,
+    getActiveTasks,
     approveCheckpoint,
     rejectCheckpoint,
     pauseSystem,

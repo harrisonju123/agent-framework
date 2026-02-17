@@ -24,6 +24,8 @@ export interface AppState {
   // API methods
   restartAgent: ReturnType<typeof useApi>['restartAgent']
   retryTask: ReturnType<typeof useApi>['retryTask']
+  cancelTask: ReturnType<typeof useApi>['cancelTask']
+  getActiveTasks: ReturnType<typeof useApi>['getActiveTasks']
   approveCheckpoint: ReturnType<typeof useApi>['approveCheckpoint']
   rejectCheckpoint: ReturnType<typeof useApi>['rejectCheckpoint']
   pauseSystem: ReturnType<typeof useApi>['pauseSystem']
@@ -64,6 +66,7 @@ export interface AppState {
   handleRetryAll: () => Promise<void>
   handleApproveAll: () => Promise<void>
   handleRetryTask: (taskId: string) => Promise<void>
+  handleCancelTask: (taskId: string) => Promise<void>
 
   // Dialog visibility (shared so keyboard shortcuts + TopBar can both toggle)
   showWorkDialog: Ref<boolean>
@@ -81,7 +84,7 @@ export function provideAppState(): AppState {
   const { state, connected, error: wsError, reconnect, reconnecting, reconnectAttempt } = useWebSocket()
   const { logs, connected: logsConnected, clear: logsClear, reconnect: logsReconnect } = useLogStream()
   const {
-    restartAgent, retryTask, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
+    restartAgent, retryTask, cancelTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, error: apiError,
   } = useApi()
@@ -253,16 +256,25 @@ export function provideAppState(): AppState {
     }
   }
 
+  async function handleCancelTask(taskId: string) {
+    const result = await cancelTask(taskId)
+    if (result?.success) {
+      showToast(`Task ${taskId} cancelled`, 'success')
+    } else if (apiError.value) {
+      showToast(apiError.value, 'error')
+    }
+  }
+
   const appState: AppState = {
     state, connected, wsError, reconnect, reconnecting, reconnectAttempt,
     logs, logsConnected, logsClear, logsReconnect,
-    restartAgent, retryTask, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
+    restartAgent, retryTask, cancelTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, apiError,
     isPaused, uptime, agents, queues, events, failedTasks, pendingCheckpoints,
     health, agentIds, uptimeDisplay, queueSummary,
     setupComplete, showSetupPrompt, checkSetupStatus, handleSetupComplete, dismissSetupPrompt,
-    handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleApproveAll, handleRetryTask,
+    handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleApproveAll, handleRetryTask, handleCancelTask,
     showWorkDialog, showAnalyzeDialog, showTicketDialog,
     showToast, showConfirm,
   }

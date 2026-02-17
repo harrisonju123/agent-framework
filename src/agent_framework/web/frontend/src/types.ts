@@ -59,6 +59,18 @@ export interface FailedTask {
   failed_at: string | null
 }
 
+export interface ActiveTask {
+  id: string
+  title: string
+  status: 'pending' | 'in_progress'
+  jira_key: string | null
+  assigned_to: string
+  created_at: string
+  started_at: string | null
+  task_type: string
+  parent_task_id: string | null
+}
+
 export interface CheckpointData {
   id: string
   title: string

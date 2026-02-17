@@ -14,6 +14,7 @@ from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
 from ..core.task import TaskStatus
 from .models import (
+    ActiveTaskData,
     AgentData,
     AgentStatusEnum,
     CheckpointData,
@@ -312,6 +313,59 @@ class DashboardDataProvider:
             last_error=task.last_error,
             failed_at=task.failed_at,
         )
+
+    def get_active_tasks(self, limit: int = 50) -> List[ActiveTaskData]:
+        """Get all pending and in-progress tasks across queues."""
+        result: List[ActiveTaskData] = []
+
+        if not self.queue.queue_dir.exists():
+            return result
+
+        for queue_dir in self.queue.queue_dir.iterdir():
+            if not queue_dir.is_dir() or queue_dir.name == "checkpoints":
+                continue
+            for task_file in queue_dir.glob("*.json"):
+                try:
+                    task = FileQueue.load_task_file(task_file)
+                    if task.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+                        continue
+                    result.append(
+                        ActiveTaskData(
+                            id=task.id,
+                            title=task.title,
+                            status=str(task.status),
+                            jira_key=task.context.get("jira_key"),
+                            assigned_to=task.assigned_to,
+                            created_at=task.created_at,
+                            started_at=task.started_at,
+                            task_type=str(task.type),
+                            parent_task_id=task.parent_task_id,
+                        )
+                    )
+                except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
+                    logger.warning(f"Error reading task file {task_file}: {e}")
+                    continue
+
+        # IN_PROGRESS first, then PENDING; oldest first within each group
+        result.sort(key=lambda t: (t.status != "in_progress", t.created_at))
+        return result[:limit]
+
+    def cancel_task(self, task_id: str, reason: Optional[str] = None) -> bool:
+        """Cancel a pending or in-progress task.
+
+        Returns:
+            True if task was found and cancelled
+        """
+        task = self.queue.find_task(task_id)
+        if not task:
+            return False
+
+        if task.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
+            return False
+
+        task.mark_cancelled(os.getenv("USER", "dashboard"), reason)
+        self.queue.update(task)
+        return True
 
     def get_active_teams(self) -> List[TeamSessionData]:
         """Get active Agent Team sessions from local workspace."""

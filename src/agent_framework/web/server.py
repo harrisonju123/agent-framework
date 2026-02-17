@@ -18,6 +18,7 @@ from ..core.orchestrator import Orchestrator
 from ..queue.file_queue import FileQueue
 from .data_provider import DashboardDataProvider
 from .models import (
+    ActiveTaskData,
     AgentData,
     CheckpointData,
     QueueStats,
@@ -185,6 +186,11 @@ def register_routes(app: FastAPI):
         """Get failed tasks."""
         return app.state.data_provider.get_failed_tasks(limit=limit)
 
+    @app.get("/api/tasks/active", response_model=list[ActiveTaskData])
+    async def get_active_tasks(limit: int = Query(default=50, ge=1, le=200)):
+        """Get all pending and in-progress tasks."""
+        return app.state.data_provider.get_active_tasks(limit=limit)
+
     @app.post("/api/tasks/{task_id}/retry", response_model=TaskActionResponse)
     async def retry_task(task_id: str):
         """Retry a failed task."""
@@ -198,6 +204,33 @@ def register_routes(app: FastAPI):
             )
         else:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    @app.post("/api/tasks/{task_id}/cancel", response_model=TaskActionResponse)
+    async def cancel_task(task_id: str, request: Request):
+        """Cancel a pending or in-progress task."""
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
+            raise HTTPException(status_code=400, detail=f"Invalid task_id: {task_id}")
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+
+        reason = body.get("reason") if body else None
+        success = app.state.data_provider.cancel_task(task_id, reason)
+        if success:
+            return TaskActionResponse(
+                success=True,
+                task_id=task_id,
+                action="cancel",
+                message=f"Task {task_id} cancelled",
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task {task_id} not found or not cancellable",
+            )
 
     # ============== Checkpoint API ==============
 
