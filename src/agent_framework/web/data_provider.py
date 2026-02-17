@@ -418,12 +418,21 @@ class DashboardDataProvider:
                 f"Checkpoint approved at {datetime.now(timezone.utc).isoformat()}"
             )
 
-        # Re-queue then delete — only delete after successful push
+        # Route directly to next workflow step instead of re-queuing to the
+        # same agent — avoids duplicate LLM execution on the completed work
+        from ..workflow.executor import resume_after_checkpoint
+
         try:
-            self.queue.push(task, task.assigned_to)
+            routed = resume_after_checkpoint(task, self.queue, self.workspace)
+            if not routed:
+                logger.warning(
+                    f"Could not route checkpoint task {task_id} to next step, "
+                    "re-queuing to same agent"
+                )
+                self.queue.push(task, task.assigned_to)
             checkpoint_file.unlink()
         except Exception as e:
-            logger.error(f"Error re-queuing checkpoint task {task_id}: {e}")
+            logger.error(f"Error routing checkpoint task {task_id}: {e}")
             return False
 
         return True

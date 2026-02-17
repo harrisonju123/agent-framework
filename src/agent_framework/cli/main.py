@@ -1,6 +1,7 @@
 """Main CLI for agent framework."""
 
 import asyncio
+import logging
 import os
 import re
 import subprocess
@@ -39,6 +40,7 @@ from .team_commands import team
 
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 @click.group()
@@ -1532,18 +1534,27 @@ def approve(ctx, task_id, message):
     else:
         task.notes.append(f"Checkpoint approved at {datetime.now(UTC).isoformat()}")
 
-    # Re-queue then remove checkpoint file — only delete after successful push
+    # Route directly to next workflow step instead of re-queuing to the
+    # same agent — avoids duplicate LLM execution on the completed work
+    from ..workflow.executor import resume_after_checkpoint
+
     queue = FileQueue(workspace)
     try:
-        queue.push(task, task.assigned_to)
+        routed = resume_after_checkpoint(task, queue, workspace)
+        if not routed:
+            logger.warning("Could not route after checkpoint, re-queuing to agent")
+            queue.push(task, task.assigned_to)
         checkpoint_file.unlink()
     except Exception as e:
-        console.print(f"[red]Error re-queuing task: {e}[/]")
+        console.print(f"[red]Error routing task after approval: {e}[/]")
         console.print("[dim]Checkpoint file preserved — task not lost[/]")
         return
 
     console.print(f"[green]Checkpoint approved for task {task_id}[/]")
-    console.print(f"[dim]Task re-queued to {task.assigned_to} for continuation[/]")
+    if routed:
+        console.print(f"[dim]Task routed to next workflow step[/]")
+    else:
+        console.print(f"[dim]Task re-queued to {task.assigned_to} for continuation[/]")
     console.print(f"[dim]Monitor with: agent status --watch[/]")
 
 

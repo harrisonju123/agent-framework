@@ -19,6 +19,52 @@ from ..core.routing import WORKFLOW_COMPLETE
 
 logger = logging.getLogger(__name__)
 
+
+def resume_after_checkpoint(task: "Task", queue: "FileQueue", workspace: Path) -> bool:
+    """Route task to next workflow step after checkpoint approval.
+
+    Replaces re-queuing to the same agent, which would re-run the LLM
+    from scratch and waste tokens. Instead, creates a chain task for the
+    next step in the workflow DAG.
+
+    Returns True if successfully routed, False if routing couldn't proceed
+    (e.g., no workflow context, missing config).
+    """
+    from ..core.config import load_config
+
+    workflow_name = (task.context or {}).get("workflow")
+    if not workflow_name:
+        logger.warning(f"Task {task.id} has no workflow in context, cannot resume")
+        return False
+
+    try:
+        config = load_config(workspace / "config" / "agent-framework.yaml")
+    except Exception as e:
+        logger.error(f"Failed to load config for checkpoint resume: {e}")
+        return False
+
+    workflow_def = config.workflows.get(workflow_name)
+    if not workflow_def:
+        logger.warning(f"Workflow '{workflow_name}' not found in config")
+        return False
+
+    try:
+        workflow_dag = workflow_def.to_dag(workflow_name)
+    except Exception as e:
+        logger.error(f"Failed to build workflow DAG for '{workflow_name}': {e}")
+        return False
+
+    queue_dir = workspace / ".agent-communication" / "queues"
+    executor = WorkflowExecutor(queue, queue_dir)
+
+    return executor.execute_step(
+        workflow=workflow_dag,
+        task=task,
+        response=None,
+        current_agent_id=task.assigned_to,
+    )
+
+
 # Hard ceiling on chain depth to prevent runaway loops regardless of routing logic
 MAX_CHAIN_DEPTH = 10
 
@@ -133,6 +179,11 @@ class WorkflowExecutor:
             )
             if not already_approved:
                 message = current_step.checkpoint.message
+                # Stamp workflow_step so _find_current_step resolves
+                # unambiguously on resume (initial tasks don't set this)
+                if task.context is None:
+                    task.context = {}
+                task.context["workflow_step"] = current_step.id
                 task.mark_awaiting_approval(checkpoint_id, message)
                 self._save_task_checkpoint(task)
                 self.logger.info(

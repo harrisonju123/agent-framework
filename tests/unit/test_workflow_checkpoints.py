@@ -18,7 +18,7 @@ from agent_framework.workflow.dag import (
     EdgeCondition,
     EdgeConditionType,
 )
-from agent_framework.workflow.executor import WorkflowExecutor
+from agent_framework.workflow.executor import WorkflowExecutor, resume_after_checkpoint
 
 
 def create_test_task(task_id="test-task", status=TaskStatus.IN_PROGRESS):
@@ -130,14 +130,14 @@ def test_task_mark_awaiting_approval_resets_prior_approval():
 
 
 def test_task_approve_checkpoint():
-    """Approve a checkpoint and resume workflow."""
+    """Approve a checkpoint — status becomes COMPLETED (LLM work is done)."""
     task = create_test_task(status=TaskStatus.AWAITING_APPROVAL)
     task.checkpoint_reached = "test-checkpoint"
     task.checkpoint_message = "Review required"
 
     task.approve_checkpoint("admin")
 
-    assert task.status == TaskStatus.IN_PROGRESS
+    assert task.status == TaskStatus.COMPLETED
     assert task.approved_at is not None
     assert task.approved_by == "admin"
     # Checkpoint info preserved for audit trail
@@ -463,3 +463,131 @@ def test_cli_approve_cancelled(tmp_path):
     assert result.exit_code == 0
     assert "cancelled" in result.output
     assert cp_file.exists()
+
+
+# -- resume_after_checkpoint tests --
+
+
+def test_resume_after_checkpoint_routes_to_next_step(tmp_path):
+    """resume_after_checkpoint creates a chain task for the next agent."""
+    # Build a minimal config file with a workflow that has plan → implement
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+
+    config_content = {
+        "workflows": {
+            "test_wf": {
+                "description": "test workflow",
+                "steps": {
+                    "plan": {
+                        "agent": "architect",
+                        "checkpoint": {"message": "Review plan"},
+                        "next": [
+                            {"target": "implement", "condition": "always"}
+                        ],
+                    },
+                    "implement": {
+                        "agent": "engineer",
+                        "next": [],
+                    },
+                },
+                "start_step": "plan",
+            }
+        },
+        "repositories": [],
+    }
+    import yaml
+
+    (config_dir / "agent-framework.yaml").write_text(yaml.dump(config_content))
+
+    # Set up queue dirs
+    queue_dir = tmp_path / ".agent-communication" / "queues"
+    (queue_dir / "engineer").mkdir(parents=True)
+    (tmp_path / ".agent-communication" / "completed").mkdir(parents=True)
+
+    from agent_framework.queue.file_queue import FileQueue
+
+    queue = FileQueue(tmp_path)
+
+    # Task at the plan checkpoint, already approved
+    task = Task(
+        id="task-1",
+        type=TaskType.PLANNING,
+        status=TaskStatus.COMPLETED,
+        priority=1,
+        created_by="cli",
+        assigned_to="architect",
+        created_at=datetime.now(UTC),
+        title="Plan something",
+        description="Planning task",
+        context={
+            "workflow": "test_wf",
+            "workflow_step": "plan",
+        },
+    )
+    task.approved_at = datetime.now(UTC)
+    task.approved_by = "user"
+    task.checkpoint_reached = "test_wf-plan"
+
+    result = resume_after_checkpoint(task, queue, tmp_path)
+
+    assert result is True
+    # Verify a chain task was queued for engineer
+    engineer_files = list((queue_dir / "engineer").glob("*.json"))
+    assert len(engineer_files) == 1
+    chain_data = json.loads(engineer_files[0].read_text())
+    assert chain_data["assigned_to"] == "engineer"
+    assert "chain" in chain_data["id"]
+
+
+def test_resume_after_checkpoint_no_workflow_returns_false(tmp_path):
+    """Task without workflow context returns False."""
+    mock_queue = Mock()
+
+    task = create_test_task()
+    task.context = {}  # No workflow key
+
+    result = resume_after_checkpoint(task, mock_queue, tmp_path)
+
+    assert result is False
+    mock_queue.push.assert_not_called()
+
+
+def test_resume_after_checkpoint_missing_config_returns_false(tmp_path):
+    """Missing config file returns False gracefully."""
+    mock_queue = Mock()
+
+    task = create_test_task()
+    task.context = {"workflow": "nonexistent"}
+
+    result = resume_after_checkpoint(task, mock_queue, tmp_path)
+
+    assert result is False
+    mock_queue.push.assert_not_called()
+
+
+def test_checkpoint_saves_workflow_step(tmp_path):
+    """Checkpoint save stamps workflow_step in task context."""
+    workflow = _build_checkpoint_workflow()
+
+    mock_queue = Mock()
+    queue_dir = tmp_path / ".agent-communication" / "queues"
+    queue_dir.mkdir(parents=True)
+
+    executor = WorkflowExecutor(mock_queue, queue_dir)
+    task = create_test_task()
+    # Task starts without workflow_step (like initial planning tasks)
+    assert "workflow_step" not in task.context
+
+    executor.execute_step(
+        workflow=workflow,
+        task=task,
+        response=Mock(),
+        current_agent_id="engineer",
+    )
+
+    assert task.context["workflow_step"] == "engineer"
+    # Also check the saved checkpoint file has it
+    checkpoint_file = queue_dir / "checkpoints" / f"{task.id}.json"
+    saved = json.loads(checkpoint_file.read_text())
+    assert saved["context"]["workflow_step"] == "engineer"

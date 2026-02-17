@@ -168,9 +168,9 @@ class TestApproveCheckpoint:
             queued_files = list(queue_dir.glob("*.json"))
             assert len(queued_files) == 1
 
-            # Verify re-queued task has IN_PROGRESS status
+            # Verify re-queued task has COMPLETED status (LLM work is done)
             requeued = json.loads(queued_files[0].read_text())
-            assert requeued["status"] == TaskStatus.IN_PROGRESS.value
+            assert requeued["status"] == TaskStatus.COMPLETED.value
             assert requeued["approved_by"] is not None
 
     def test_approve_with_message(self):

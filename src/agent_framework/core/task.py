@@ -235,7 +235,12 @@ class Task(BaseModel):
         self.approved_by = None
 
     def approve_checkpoint(self, approved_by: str) -> None:
-        """Approve a checkpoint and allow workflow to continue."""
+        """Approve a checkpoint and allow workflow to continue.
+
+        Sets status to COMPLETED — the agent's LLM work is done, and the
+        executor will create a chain task for the next workflow step.
+        COMPLETED prevents accidental re-processing if the task lands in a queue.
+        """
         self.approved_at = datetime.now(UTC)
         self.approved_by = approved_by
-        self.status = TaskStatus.IN_PROGRESS
+        self.status = TaskStatus.COMPLETED
