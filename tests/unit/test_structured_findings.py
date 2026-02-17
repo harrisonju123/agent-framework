@@ -180,6 +180,95 @@ Please fix.'''
         assert result[0].line_number is None
         assert result[0].suggested_fix is None
 
+    def test_parses_multi_object_code_fence(self, agent):
+        """Primary bug: verdict + findings as two JSON objects in one fence."""
+        content = '''```json
+{"verdict": "fail"}
+{"findings": [{"file": "auth.py", "line": 42, "severity": "CRITICAL", "category": "security", "description": "SQL injection", "suggested_fix": "Use parameterized queries"}]}
+```'''
+        result = agent.parse_structured_findings(content)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].severity == "CRITICAL"
+        assert result[0].file == "auth.py"
+        assert result[0].line_number == 42
+
+    def test_parses_findings_from_second_code_fence(self, agent):
+        """Findings in the second code fence should be found (re.search missed these)."""
+        content = '''Here's the verdict:
+
+```json
+{"verdict": "fail", "summary": "Issues found"}
+```
+
+And here are the findings:
+
+```json
+{"findings": [{"file": "api.py", "line_number": 10, "severity": "HIGH", "category": "performance", "description": "N+1 query", "suggested_fix": "Use select_related"}]}
+```'''
+        result = agent.parse_structured_findings(content)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].file == "api.py"
+        assert result[0].severity == "HIGH"
+
+    def test_still_finds_first_fence_findings(self, agent):
+        """Regression: findings in the first fence still work."""
+        content = '''```json
+{"findings": [{"file": "a.py", "line": 1, "severity": "LOW", "category": "style", "description": "Naming", "suggested_fix": null}]}
+```
+
+Some other text.
+
+```json
+{"unrelated": true}
+```'''
+        result = agent.parse_structured_findings(content)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].file == "a.py"
+
+    def test_returns_none_when_no_fence_has_findings(self, agent):
+        """Multiple non-findings fences should return None."""
+        content = '''```json
+{"verdict": "pass"}
+```
+
+```json
+{"metadata": {"reviewer": "qa"}}
+```'''
+        result = agent.parse_structured_findings(content)
+        assert result is None
+
+    def test_multi_object_fence_findings_first(self, agent):
+        """Findings object comes before metadata object in the same fence."""
+        content = '''```json
+{"findings": [{"file": "b.py", "line": 5, "severity": "MEDIUM", "category": "correctness", "description": "Off-by-one", "suggested_fix": "Use <="}]}
+{"verdict": "fail"}
+```'''
+        result = agent.parse_structured_findings(content)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].file == "b.py"
+        assert result[0].description == "Off-by-one"
+
+    def test_inline_json_without_code_fence(self, agent):
+        """Inline fallback: JSON object in prose without code fences."""
+        content = 'Review result: {"findings": [{"file": "x.py", "line": 3, "severity": "LOW", "category": "style", "description": "Trailing whitespace", "suggested_fix": "Remove it"}]} end of review.'
+        result = agent.parse_structured_findings(content)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].file == "x.py"
+
+    def test_empty_code_fence(self, agent):
+        """Empty code fence should not crash."""
+        content = '''```json
+```
+
+Some text.'''
+        result = agent.parse_structured_findings(content)
+        assert result is None
+
 
 class TestFormatFindingsChecklist:
     """Tests for format_findings_checklist() method."""
@@ -344,6 +433,22 @@ HIGH: Memory leak in cache.py:100"""
         summary, findings = agent.extract_review_findings(content)
         assert len(findings) == 1
         assert "CRITICAL: SQL injection (auth.py:42)" in summary
+
+    def test_multi_object_fence_through_extract(self, agent):
+        """End-to-end: multi-object fence parsed through extract_review_findings."""
+        content = '''Code review complete.
+
+```json
+{"verdict": "fail", "summary": "Found issues"}
+{"findings": [{"file": "handler.py", "line": 20, "severity": "HIGH", "category": "correctness", "description": "Missing null check", "suggested_fix": "Add guard clause"}]}
+```
+
+Please address these issues.'''
+        summary, findings = agent.extract_review_findings(content)
+        assert len(findings) == 1
+        assert findings[0].file == "handler.py"
+        assert findings[0].severity == "HIGH"
+        assert "handler.py:20" in summary
 
 
 def _make_task(

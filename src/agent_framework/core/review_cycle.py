@@ -434,31 +434,8 @@ class ReviewCycleManager:
         # Try new structured parsing first (handles code fences and inline JSON)
         structured_findings = self.parse_structured_findings(content)
 
-        # If new parser didn't find anything, try legacy JSON block parsing
         if not structured_findings:
             structured_findings = []
-            json_pattern = r'```json\s*\n(.*?)\n```'
-            json_matches = re.findall(json_pattern, content, re.DOTALL)
-
-            for json_block in json_matches:
-                try:
-                    findings_data = json.loads(json_block)
-                    if isinstance(findings_data, list):
-                        for item in findings_data:
-                            if isinstance(item, dict):
-                                # Create QAFinding from JSON object
-                                finding = QAFinding(
-                                    file=item.get('file', ''),
-                                    line_number=item.get('line_number'),
-                                    severity=item.get('severity', 'UNKNOWN'),
-                                    description=item.get('description', ''),
-                                    suggested_fix=item.get('suggested_fix'),
-                                    category=item.get('category', 'general')
-                                )
-                                structured_findings.append(finding)
-                except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    self.logger.debug(f"Failed to parse JSON finding: {e}")
-                    continue
 
         # Extract severity-tagged lines for text summary
         findings_text = []
@@ -491,68 +468,85 @@ class ReviewCycleManager:
 
         Looks for JSON blocks in code fences (```json...```) or inline.
         Supports both array format and object format with 'findings' key.
+        Handles multi-object code fences (e.g. verdict + findings in one block)
+        and findings split across multiple code fences.
         Falls back to None if no structured findings found.
         """
-        # Try to find JSON block in code fence first
-        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', content, re.DOTALL)
-        if json_match:
-            try:
-                findings_data = json.loads(json_match.group(1))
+        # Iterate ALL code fence blocks — re.search only matched the first one
+        for fence_match in re.finditer(r'```json\s*([\s\S]*?)\s*```', content, re.DOTALL):
+            block = fence_match.group(1).strip()
+            if not block:
+                continue
+            findings = self._try_parse_findings_json(block)
+            if findings:
+                return findings
 
-                # Handle object wrapper with 'findings' array
-                if isinstance(findings_data, dict) and 'findings' in findings_data:
-                    findings_list = findings_data['findings']
-                # Handle direct array format
-                elif isinstance(findings_data, list):
-                    findings_list = findings_data
-                else:
-                    self.logger.debug("JSON block doesn't contain findings array")
-                    return None
+        # Inline fallback: scan for JSON objects/arrays using raw_decode
+        findings = self._try_parse_findings_json(content)
+        if findings:
+            return findings
 
-                # Convert to QAFinding objects
-                parsed_findings = []
-                for item in findings_list:
-                    if isinstance(item, dict):
-                        finding = QAFinding(
-                            file=item.get('file', ''),
-                            line_number=item.get('line_number') or item.get('line'),
-                            severity=item.get('severity', 'UNKNOWN'),
-                            description=item.get('description', ''),
-                            suggested_fix=item.get('suggested_fix'),
-                            category=item.get('category', 'general')
-                        )
-                        parsed_findings.append(finding)
+        return None
 
-                return parsed_findings if parsed_findings else None
-            except (json.JSONDecodeError, KeyError, TypeError) as e:
-                self.logger.warning(f"Failed to parse code fence JSON findings: {e}")
+    def _make_qa_finding(self, item: dict) -> Optional[QAFinding]:
+        """Build a QAFinding from a dict, returning None if item is not a dict."""
+        if not isinstance(item, dict):
+            return None
+        return QAFinding(
+            file=item.get('file', ''),
+            line_number=item.get('line_number') or item.get('line'),
+            severity=item.get('severity', 'UNKNOWN'),
+            description=item.get('description', ''),
+            suggested_fix=item.get('suggested_fix'),
+            category=item.get('category', 'general'),
+        )
 
-        # Try to find inline JSON object with "findings" key
+    def _extract_findings_from_data(self, data) -> Optional[List[QAFinding]]:
+        """Convert a parsed JSON value into a list of QAFinding if it contains findings."""
+        if isinstance(data, dict) and 'findings' in data:
+            items = data['findings']
+        elif isinstance(data, list):
+            items = data
+        else:
+            return None
+
+        parsed = [f for f in (self._make_qa_finding(i) for i in items) if f is not None]
+        return parsed if parsed else None
+
+    def _try_parse_findings_json(self, text: str) -> Optional[List[QAFinding]]:
+        """Try to extract findings from a text block that may contain one or more JSON values.
+
+        Fast path: json.loads for single-object blocks.
+        Slow path: json.JSONDecoder().raw_decode() loop for multi-object blocks
+        (e.g. {"verdict":"pass"} followed by {"findings":[...]}).
+        """
+        # Fast path — single JSON value covers the whole block
         try:
-            # Look for complete JSON object with findings array
-            json_pattern = r'\{[^{}]*"findings"\s*:\s*\[[^\]]*\][^{}]*\}'
-            json_match = re.search(json_pattern, content, re.DOTALL)
-            if json_match:
-                findings_data = json.loads(json_match.group(0))
-                if 'findings' in findings_data:
-                    findings_list = findings_data['findings']
-                    parsed_findings = []
-                    for item in findings_list:
-                        if isinstance(item, dict):
-                            finding = QAFinding(
-                                file=item.get('file', ''),
-                                line_number=item.get('line_number') or item.get('line'),
-                                severity=item.get('severity', 'UNKNOWN'),
-                                description=item.get('description', ''),
-                                suggested_fix=item.get('suggested_fix'),
-                                category=item.get('category', 'general')
-                            )
-                            parsed_findings.append(finding)
-                    return parsed_findings if parsed_findings else None
-        except Exception as e:
-            self.logger.debug(f"Inline JSON parse failed: {e}")
+            data = json.loads(text)
+            result = self._extract_findings_from_data(data)
+            if result:
+                return result
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-        return None  # No structured findings found
+        # Slow path — walk through concatenated JSON values
+        decoder = json.JSONDecoder()
+        idx = 0
+        while idx < len(text):
+            # Skip whitespace and non-JSON characters
+            if text[idx] not in ('{', '['):
+                idx += 1
+                continue
+            try:
+                data, end_idx = decoder.raw_decode(text, idx)
+                result = self._extract_findings_from_data(data)
+                if result:
+                    return result
+                idx = end_idx
+            except json.JSONDecodeError:
+                idx += 1
+
+        return None
 
     def format_findings_checklist(self, findings: List[QAFinding]) -> str:
         """Format structured findings as numbered checklist."""
