@@ -55,8 +55,25 @@ class MemoryRetriever:
         task_tags: Optional[List[str]] = None,
         limit: int = 10,
     ) -> List[MemoryEntry]:
-        """Retrieve memories ranked by relevance to current task."""
+        """Retrieve memories ranked by relevance to current task.
+
+        Always merges in the "shared" namespace so architectural decisions
+        from debates are visible to every agent type without duplication.
+        """
         all_memories = self._store.recall_all(repo_slug, agent_type)
+
+        # Merge shared memories (debate architectural decisions) unless we are
+        # already querying the shared namespace to avoid double-counting.
+        if agent_type != "shared":
+            shared_memories = self._store.recall_all(repo_slug, "shared")
+            # Deduplicate by (category, content) — a memory stored under both
+            # agent-specific and shared namespaces should appear only once.
+            seen = {(m.category, m.content) for m in all_memories}
+            for m in shared_memories:
+                if (m.category, m.content) not in seen:
+                    all_memories.append(m)
+                    seen.add((m.category, m.content))
+
         if not all_memories:
             return []
 

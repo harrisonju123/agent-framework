@@ -142,8 +142,20 @@ export function agentRecall(workspace: string, input: RecallInput): MemoryResult
     entries = entries.filter(e => e.tags.some(t => tagSet.has(t)));
   }
 
-  // Sort by recency
-  entries.sort((a, b) => b.last_accessed - a.last_accessed);
+  // Sort by recency, with a confidence boost for architectural_decisions:
+  // high-confidence entries surface above low-confidence ones at the same recency tier.
+  // Confidence is read from the structured "confidence:<level>" tag, not parsed from prose.
+  const CONFIDENCE_WEIGHT: Record<string, number> = { high: 2, medium: 1, low: 0 };
+  entries.sort((a, b) => {
+    // Boost applies only to architectural_decisions so other categories are unaffected.
+    if (a.category === "architectural_decisions" && b.category === "architectural_decisions") {
+      const confA = a.tags.find(t => t.startsWith("confidence:"))?.split(":")[1] ?? "low";
+      const confB = b.tags.find(t => t.startsWith("confidence:"))?.split(":")[1] ?? "low";
+      const boost = (CONFIDENCE_WEIGHT[confB] ?? 0) - (CONFIDENCE_WEIGHT[confA] ?? 0);
+      if (boost !== 0) return boost;
+    }
+    return b.last_accessed - a.last_accessed;
+  });
   entries = entries.slice(0, maxResults);
 
   // Touch accessed entries (update access metadata in the full store)

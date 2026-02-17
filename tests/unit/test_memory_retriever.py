@@ -1,7 +1,7 @@
 """Tests for memory retrieval and prompt formatting."""
 
 import pytest
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 from agent_framework.memory.memory_retriever import (
     MemoryRetriever,
@@ -200,3 +200,72 @@ class TestMemoryRetriever:
         assert len(result_healthy) >= len(result_tight)
         assert len(result_tight) >= len(result_critical)
         assert len(result_critical) > 0  # Should at least have header
+
+
+class TestSharedMemoryMerge:
+    """Test that 'shared' namespace memories are merged for all agent types."""
+
+    @pytest.fixture
+    def mock_store(self):
+        return Mock()
+
+    @pytest.fixture
+    def retriever(self, mock_store):
+        return MemoryRetriever(mock_store)
+
+    @pytest.fixture
+    def agent_memory(self):
+        return MemoryEntry(
+            category="conventions",
+            content="Use snake_case for Python",
+            access_count=1,
+            last_accessed=1000000.0,
+        )
+
+    @pytest.fixture
+    def shared_memory(self):
+        return MemoryEntry(
+            category="architectural_decisions",
+            content="Topic: Use Postgres\nRecommendation: Use Postgres\nConfidence: high\nTrade-offs: speed vs complexity\nReasoning: proven at scale",
+            access_count=0,
+            last_accessed=900000.0,
+            tags=["debate", "debate-123", "origin:architect", "confidence:high", "use", "postgres"],
+        )
+
+    def test_shared_memories_merged_for_agent(self, retriever, mock_store, agent_memory, shared_memory):
+        """Shared namespace is queried and merged when agent_type != 'shared'."""
+        # First call returns agent-specific memories, second returns shared
+        mock_store.recall_all.side_effect = [[agent_memory], [shared_memory]]
+
+        memories = retriever.get_relevant_memories("my/repo", "engineer")
+
+        # Both calls happened: agent-specific then shared
+        assert mock_store.recall_all.call_count == 2
+        mock_store.recall_all.assert_any_call("my/repo", "engineer")
+        mock_store.recall_all.assert_any_call("my/repo", "shared")
+
+        # Both memories are present
+        contents = [m.content for m in memories]
+        assert agent_memory.content in contents
+        assert shared_memory.content in contents
+
+    def test_shared_namespace_not_queried_twice(self, retriever, mock_store, shared_memory):
+        """When agent_type is 'shared', we don't recurse into shared again."""
+        mock_store.recall_all.return_value = [shared_memory]
+
+        retriever.get_relevant_memories("my/repo", "shared")
+
+        # Only one call — no second lookup for shared
+        assert mock_store.recall_all.call_count == 1
+        mock_store.recall_all.assert_called_once_with("my/repo", "shared")
+
+    def test_shared_memories_deduplicated(self, retriever, mock_store, shared_memory):
+        """Memory present in both agent and shared stores is not double-counted."""
+        # Same memory returned for both agent and shared lookup
+        mock_store.recall_all.return_value = [shared_memory]
+
+        memories = retriever.get_relevant_memories("my/repo", "engineer")
+
+        # Should appear exactly once despite being in both namespaces
+        matching = [m for m in memories if m.content == shared_memory.content]
+        assert len(matching) == 1
