@@ -10,7 +10,7 @@ import CheckpointDetailDialog from '../components/dialogs/CheckpointDetailDialog
 import type { CheckpointData } from '../types'
 
 const {
-  agents, queues, events, failedTasks, pendingCheckpoints, uptimeDisplay,
+  agents, queues, events, failedTasks, pendingCheckpoints,
   handleRestart, handleRetryTask,
 } = useAppState()
 
@@ -30,7 +30,6 @@ function handleSelectCheckpoint(checkpoint: CheckpointData) {
       :agents="agents"
       :queues="queues"
       :failed-tasks="failedTasks"
-      :uptime-display="uptimeDisplay"
     />
 
     <!-- Agent Grid -->

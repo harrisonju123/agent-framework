@@ -6,7 +6,6 @@ const props = defineProps<{
   agents: Agent[]
   queues: QueueStats[]
   failedTasks: FailedTask[]
-  uptimeDisplay: string
 }>()
 
 const activeAgents = computed(() => props.agents.filter(a => a.status === 'working').length)
@@ -34,13 +33,6 @@ const cards = computed(() => [
     icon: 'pi-exclamation-triangle',
     color: 'red',
   },
-  {
-    label: 'System Uptime',
-    value: props.uptimeDisplay,
-    subtitle: '',
-    icon: 'pi-clock',
-    color: 'slate',
-  },
 ])
 
 function bgClass(color: string) {
@@ -65,7 +57,7 @@ function iconClass(color: string) {
 </script>
 
 <template>
-  <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+  <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
     <div
       v-for="card in cards"
       :key="card.label"

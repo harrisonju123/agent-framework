@@ -42,7 +42,6 @@ export interface AppState {
 
   // Computed dashboard state
   isPaused: ComputedRef<boolean>
-  uptime: ComputedRef<number>
   agents: ComputedRef<ReturnType<typeof useWebSocket>['state']['value'] extends null ? never[] : NonNullable<ReturnType<typeof useWebSocket>['state']['value']>['agents']>
   queues: ComputedRef<any[]>
   events: ComputedRef<any[]>
@@ -50,7 +49,6 @@ export interface AppState {
   pendingCheckpoints: ComputedRef<CheckpointData[]>
   health: ComputedRef<any>
   agentIds: ComputedRef<string[]>
-  uptimeDisplay: ComputedRef<string>
   queueSummary: ComputedRef<string>
 
   // Setup
@@ -108,7 +106,6 @@ export function provideAppState(): AppState {
 
   // Computed dashboard values
   const isPaused = computed(() => state.value?.is_paused ?? false)
-  const uptime = computed(() => state.value?.uptime_seconds ?? 0)
   const agents = computed(() => state.value?.agents ?? [])
   const queues = computed(() => state.value?.queues ?? [])
   const events = computed(() => state.value?.events ?? [])
@@ -116,12 +113,6 @@ export function provideAppState(): AppState {
   const pendingCheckpoints = computed(() => state.value?.pending_checkpoints ?? [])
   const health = computed(() => state.value?.health ?? { passed: true, checks: [], warnings: [] })
   const agentIds = computed(() => agents.value.map((a: any) => a.id))
-
-  const uptimeDisplay = computed(() => {
-    const minutes = Math.floor(uptime.value / 60)
-    const seconds = uptime.value % 60
-    return `${minutes}m ${seconds}s`
-  })
 
   const queueSummary = computed(() => {
     return queues.value.map((q: any) => `${q.queue_id}(${q.pending_count})`).join(' ')
@@ -285,8 +276,8 @@ export function provideAppState(): AppState {
     restartAgent, retryTask, cancelTask, deleteTask, createTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, apiError,
-    isPaused, uptime, agents, queues, events, failedTasks, pendingCheckpoints,
-    health, agentIds, uptimeDisplay, queueSummary,
+    isPaused, agents, queues, events, failedTasks, pendingCheckpoints,
+    health, agentIds, queueSummary,
     setupComplete, showSetupPrompt, checkSetupStatus, handleSetupComplete, dismissSetupPrompt,
     handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleApproveAll, handleRetryTask, handleCancelTask, handleDeleteTask,
     showWorkDialog, showAnalyzeDialog, showTicketDialog, showCreateTaskDialog,
