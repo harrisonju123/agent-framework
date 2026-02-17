@@ -1747,3 +1747,68 @@ class TestSameAgentUpstreamClearing:
         Agent._save_upstream_context(agent, task, response)
 
         assert task.context["upstream_source_agent"] == "architect"
+
+
+# -- Stale worktree_branch clearing --
+
+class TestWorktreeBranchClearing:
+    """worktree_branch is ephemeral per-agent and must not propagate through the chain."""
+
+    def test_chain_task_clears_worktree_branch(self, queue):
+        """_build_chain_task strips worktree_branch from context."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            worktree_branch="agent/architect/task-184b366e",
+            implementation_branch="agent/engineer/PROJ-123-abc12345",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        chain_task = executor._build_chain_task(task, engineer_step, "architect")
+
+        assert "worktree_branch" not in chain_task.context
+        assert chain_task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc12345"
+
+    def test_pr_creation_task_clears_worktree_branch(self, queue, tmp_path):
+        """queue_pr_creation_if_needed strips worktree_branch from PR task context."""
+        config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+
+        from agent_framework.core.workflow_router import WorkflowRouter
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+        router = WorkflowRouter(
+            config=config,
+            queue=queue,
+            workspace=tmp_path,
+            logger=MagicMock(),
+            session_logger=MagicMock(),
+            workflows_config={"pr_workflow": PR_WORKFLOW},
+            workflow_executor=executor,
+            agents_config=[
+                SimpleNamespace(id="architect"),
+                SimpleNamespace(id="engineer"),
+                SimpleNamespace(id="qa"),
+            ],
+            multi_repo_manager=None,
+        )
+
+        task = _make_task(
+            workflow="pr_workflow",
+            worktree_branch="agent/qa/task-xyz",
+            implementation_branch="agent/engineer/PROJ-123-abc12345",
+        )
+
+        router.queue_pr_creation_if_needed(task, PR_WORKFLOW)
+
+        queue.push.assert_called_once()
+        pr_task = queue.push.call_args[0][0]
+        assert "worktree_branch" not in pr_task.context
+        assert pr_task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc12345"

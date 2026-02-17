@@ -397,6 +397,8 @@ class WorkflowExecutor:
         }
         # Clear stale verdict so the next agent's output is evaluated fresh
         context.pop("verdict", None)
+        # worktree_branch is ephemeral per-agent — each agent creates its own worktree
+        context.pop("worktree_branch", None)
         # Prevent same-agent self-referential upstream context — an agent
         # should never see its own output labeled as "UPSTREAM AGENT FINDINGS"
         upstream_source = context.get("upstream_source_agent")

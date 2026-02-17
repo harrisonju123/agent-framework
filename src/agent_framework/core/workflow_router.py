@@ -380,6 +380,15 @@ class WorkflowRouter:
 
         from ..workflow.executor import _strip_chain_prefixes
 
+        pr_context = {
+            **task.context,
+            "source_task_id": task.id,
+            "source_agent": self.config.id,
+            "pr_creation_step": True,
+        }
+        # worktree_branch is ephemeral per-agent — PR creator gets its own working dir
+        pr_context.pop("worktree_branch", None)
+
         pr_task = Task(
             id=pr_task_id,
             type=TaskType.PR_REQUEST,
@@ -390,12 +399,7 @@ class WorkflowRouter:
             created_at=datetime.now(timezone.utc),
             title=f"[pr] {_strip_chain_prefixes(task.title)}",
             description=task.description,
-            context={
-                **task.context,
-                "source_task_id": task.id,
-                "source_agent": self.config.id,
-                "pr_creation_step": True,
-            },
+            context=pr_context,
         )
 
         try:
