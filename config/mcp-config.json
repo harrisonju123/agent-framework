@@ -25,7 +25,9 @@
       "args": ["mcp-servers/task-queue/build/index.js"],
       "env": {
         "WORKSPACE": ".",
-        "LOG_PATH": "./logs/mcp-task-queue.log"
+        "LOG_PATH": "./logs/mcp-task-queue.log",
+        "GITHUB_REPOSITORY": "${GITHUB_REPOSITORY}",
+        "AGENT_ID": "${AGENT_ID}"
       }
     }
   }
