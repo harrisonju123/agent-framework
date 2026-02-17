@@ -1870,6 +1870,104 @@ class TestSameAgentUpstreamClearing:
 
 # -- Stale worktree_branch clearing --
 
+class TestUpstreamInlineLimit:
+    """Verify UPSTREAM_INLINE_MAX_CHARS is used for inline summary truncation."""
+
+    def test_upstream_inline_uses_12kb_limit(self, tmp_path):
+        """_save_upstream_context uses UPSTREAM_INLINE_MAX_CHARS (12KB) for inline summary."""
+        agent = MagicMock()
+        agent.config = AgentConfig(
+            id="architect", name="Architect", queue="architect", prompt="p",
+        )
+        agent.workspace = tmp_path
+        agent.UPSTREAM_CONTEXT_MAX_CHARS = Agent.UPSTREAM_CONTEXT_MAX_CHARS
+        agent.UPSTREAM_INLINE_MAX_CHARS = Agent.UPSTREAM_INLINE_MAX_CHARS
+        agent.logger = MagicMock()
+
+        task = _make_task()
+        # Content longer than 4KB but shorter than 12KB should be preserved fully
+        content = "x" * 10000
+        response = _make_response(content)
+
+        Agent._save_upstream_context(agent, task, response)
+
+        assert len(task.context["upstream_summary"]) == 10000
+
+    def test_upstream_inline_truncates_at_12kb(self, tmp_path):
+        """Content longer than 12KB is truncated at UPSTREAM_INLINE_MAX_CHARS."""
+        agent = MagicMock()
+        agent.config = AgentConfig(
+            id="architect", name="Architect", queue="architect", prompt="p",
+        )
+        agent.workspace = tmp_path
+        agent.UPSTREAM_CONTEXT_MAX_CHARS = Agent.UPSTREAM_CONTEXT_MAX_CHARS
+        agent.UPSTREAM_INLINE_MAX_CHARS = Agent.UPSTREAM_INLINE_MAX_CHARS
+        agent.logger = MagicMock()
+
+        task = _make_task()
+        content = "y" * 15000
+        response = _make_response(content)
+
+        Agent._save_upstream_context(agent, task, response)
+
+        assert len(task.context["upstream_summary"]) == 12000
+
+
+class TestPlanPropagation:
+    """Verify _build_chain_task propagates task.plan through the workflow chain."""
+
+    def test_chain_task_propagates_plan(self, queue):
+        """_build_chain_task carries task.plan through to the chain task."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+        from agent_framework.core.task import PlanDocument
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        plan = PlanDocument(
+            objectives=["Add auth endpoint"],
+            approach=["Create handler", "Add middleware", "Write tests"],
+            files_to_modify=["src/auth.py", "src/middleware.py"],
+            risks=["Token expiry edge case"],
+            success_criteria=["All tests pass"],
+        )
+
+        task = _make_task(
+            workflow="default",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+        task.plan = plan
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        chain_task = executor._build_chain_task(task, engineer_step, "architect")
+
+        assert chain_task.plan is not None
+        assert chain_task.plan.objectives == ["Add auth endpoint"]
+        assert len(chain_task.plan.approach) == 3
+        assert "src/auth.py" in chain_task.plan.files_to_modify
+
+    def test_chain_task_none_plan_stays_none(self, queue):
+        """_build_chain_task with no plan produces chain task with plan=None."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        chain_task = executor._build_chain_task(task, engineer_step, "architect")
+
+        assert chain_task.plan is None
+
+
 class TestWorktreeBranchClearing:
     """worktree_branch is ephemeral per-agent and must not propagate through the chain."""
 

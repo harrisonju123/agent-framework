@@ -272,12 +272,15 @@ Focus on reviewing the code changes.
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
+        # Render plan as human-readable section (empty string when no plan)
+        plan_section = self._render_plan_section(task)
+
         return f"""You are {self.ctx.config.id}.
 
 TASK DETAILS:
 {task_json}
 
-{mcp_guidance}{upstream_context}
+{mcp_guidance}{upstream_context}{plan_section}
 YOUR RESPONSIBILITIES:
 {agent_prompt}
 
@@ -343,6 +346,9 @@ IMPORTANT:
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
+        # Render plan as human-readable section (empty string when no plan)
+        plan_section = self._render_plan_section(task)
+
         # Build optimized prompt (shorter, focused on essentials)
         agent_prompt = prompt_override or self.ctx.config.prompt
         return f"""You are {self.ctx.config.id}.
@@ -350,7 +356,7 @@ IMPORTANT:
 TASK:
 {task_json}
 
-{context_note}{dep_context}{chain_note}{upstream_context}
+{context_note}{dep_context}{chain_note}{upstream_context}{plan_section}
 {agent_prompt}
 
 IMPORTANT:
@@ -662,6 +668,44 @@ If a tool call fails:
             lines.append("")
 
         lines.append("Address all findings above, then re-run tests.\n")
+        return "\n".join(lines)
+
+    def _render_plan_section(self, task: Task) -> str:
+        """Render task.plan as a human-readable prompt section.
+
+        Returns empty string when plan is None so callers can unconditionally
+        include the result without conditional checks.
+        """
+        if task.plan is None:
+            return ""
+
+        plan = task.plan
+        lines = ["IMPLEMENTATION PLAN:"]
+
+        if plan.objectives:
+            lines.append("Objectives:")
+            for obj in plan.objectives:
+                lines.append(f"- {obj}")
+
+        if plan.approach:
+            lines.append("Approach:")
+            for i, step in enumerate(plan.approach, 1):
+                lines.append(f"{i}. {step}")
+
+        if plan.files_to_modify:
+            lines.append(f"Files to modify: {', '.join(plan.files_to_modify)}")
+
+        if plan.risks:
+            lines.append("Risks:")
+            for risk in plan.risks:
+                lines.append(f"- {risk}")
+
+        if plan.success_criteria:
+            lines.append("Success criteria:")
+            for criterion in plan.success_criteria:
+                lines.append(f"- {criterion}")
+
+        lines.append("")
         return "\n".join(lines)
 
     def _inject_memories(self, prompt: str, task: Task) -> str:

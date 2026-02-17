@@ -678,3 +678,159 @@ class TestTestSuppressionGuidance:
         prompt = prompt_builder._build_prompt_legacy(sample_task)
 
         assert "Do NOT run the test suite" not in prompt
+
+
+class TestPlanRendering:
+    """Test _render_plan_section() formats PlanDocument for prompt injection."""
+
+    def test_render_plan_section_with_full_plan(self, prompt_builder, sample_task):
+        """Full PlanDocument renders all sections."""
+        from agent_framework.core.task import PlanDocument
+
+        sample_task.plan = PlanDocument(
+            objectives=["Add JWT auth"],
+            approach=["Create handler", "Add middleware", "Write tests"],
+            files_to_modify=["src/auth.py", "src/middleware.py"],
+            risks=["Token expiry edge case"],
+            success_criteria=["All tests pass", "No regressions"],
+        )
+
+        result = prompt_builder._render_plan_section(sample_task)
+
+        assert "IMPLEMENTATION PLAN:" in result
+        assert "Objectives:" in result
+        assert "- Add JWT auth" in result
+        assert "Approach:" in result
+        assert "1. Create handler" in result
+        assert "2. Add middleware" in result
+        assert "3. Write tests" in result
+        assert "Files to modify: src/auth.py, src/middleware.py" in result
+        assert "Risks:" in result
+        assert "- Token expiry edge case" in result
+        assert "Success criteria:" in result
+        assert "- All tests pass" in result
+
+    def test_render_plan_section_none_returns_empty(self, prompt_builder, sample_task):
+        """None plan returns empty string."""
+        sample_task.plan = None
+        result = prompt_builder._render_plan_section(sample_task)
+        assert result == ""
+
+    def test_render_plan_section_minimal_plan(self, prompt_builder, sample_task):
+        """Plan with only required fields renders cleanly."""
+        from agent_framework.core.task import PlanDocument
+
+        sample_task.plan = PlanDocument(
+            objectives=["Fix bug"],
+            approach=["Patch handler"],
+            success_criteria=["Tests pass"],
+        )
+
+        result = prompt_builder._render_plan_section(sample_task)
+
+        assert "IMPLEMENTATION PLAN:" in result
+        assert "- Fix bug" in result
+        assert "1. Patch handler" in result
+        assert "- Tests pass" in result
+        # Optional sections with empty defaults should be absent
+        assert "Files to modify:" not in result
+        assert "Risks:" not in result
+
+    def test_plan_section_in_legacy_prompt(self, prompt_builder, sample_task):
+        """Plan section appears in the legacy prompt when plan is set."""
+        from agent_framework.core.task import PlanDocument
+
+        sample_task.plan = PlanDocument(
+            objectives=["Add endpoint"],
+            approach=["Create route"],
+            success_criteria=["Returns 200"],
+        )
+
+        prompt = prompt_builder._build_prompt_legacy(sample_task)
+        assert "IMPLEMENTATION PLAN:" in prompt
+        assert "- Add endpoint" in prompt
+
+    def test_plan_section_in_optimized_prompt(self, prompt_builder, sample_task):
+        """Plan section appears in the optimized prompt when plan is set."""
+        from agent_framework.core.task import PlanDocument
+
+        sample_task.plan = PlanDocument(
+            objectives=["Add endpoint"],
+            approach=["Create route"],
+            success_criteria=["Returns 200"],
+        )
+
+        prompt = prompt_builder._build_prompt_optimized(sample_task)
+        assert "IMPLEMENTATION PLAN:" in prompt
+        assert "- Add endpoint" in prompt
+
+    def test_no_plan_no_section_in_legacy(self, prompt_builder, sample_task):
+        """No plan → no IMPLEMENTATION PLAN section in legacy prompt."""
+        sample_task.plan = None
+        prompt = prompt_builder._build_prompt_legacy(sample_task)
+        assert "IMPLEMENTATION PLAN:" not in prompt
+
+    def test_no_plan_no_section_in_optimized(self, prompt_builder, sample_task):
+        """No plan → no IMPLEMENTATION PLAN section in optimized prompt."""
+        sample_task.plan = None
+        prompt = prompt_builder._build_prompt_optimized(sample_task)
+        assert "IMPLEMENTATION PLAN:" not in prompt
+
+
+class TestPlanningInstructions:
+    """Test _build_planning_instructions() produces goal-directed exploration guidance."""
+
+    def test_contains_keyword_search_guidance(self):
+        """Instructions direct architect to search for keywords, not map entire codebase."""
+        from agent_framework.core.task_builder import _build_planning_instructions
+
+        result = _build_planning_instructions("Add auth", "default", "PROJ")
+
+        assert "Search for keywords" in result
+        assert "do not map the entire codebase" in result
+
+    def test_contains_plan_document_requirement(self):
+        """Instructions require producing a PlanDocument with specific fields."""
+        from agent_framework.core.task_builder import _build_planning_instructions
+
+        result = _build_planning_instructions("Add auth", "default", "PROJ")
+
+        assert "PlanDocument" in result
+        assert "objectives" in result
+        assert "files_to_modify" in result
+        assert "risks" in result
+        assert "success_criteria" in result
+
+    def test_contains_stop_condition(self):
+        """Instructions include explicit termination condition for exploration."""
+        from agent_framework.core.task_builder import _build_planning_instructions
+
+        result = _build_planning_instructions("Add auth", "default", "PROJ")
+
+        assert "Stop exploring" in result
+        assert "enough context" in result
+
+    def test_jira_project_included(self):
+        """With JIRA project, instructions mention creating JIRA ticket."""
+        from agent_framework.core.task_builder import _build_planning_instructions
+
+        result = _build_planning_instructions("Add auth", "default", "PROJ")
+
+        assert "JIRA ticket" in result
+
+    def test_no_jira_project(self):
+        """Without JIRA project, instructions mention local queues."""
+        from agent_framework.core.task_builder import _build_planning_instructions
+
+        result = _build_planning_instructions("Add auth", "default", None)
+
+        assert "local queues" in result
+        assert "JIRA ticket" not in result
+
+    def test_goal_embedded_in_instructions(self):
+        """User goal appears in the instructions."""
+        from agent_framework.core.task_builder import _build_planning_instructions
+
+        result = _build_planning_instructions("Implement SSO login", "default", None)
+
+        assert "Implement SSO login" in result

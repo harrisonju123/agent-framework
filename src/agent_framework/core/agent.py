@@ -1375,6 +1375,7 @@ class Agent:
     # -- Upstream Context Handoff --
 
     UPSTREAM_CONTEXT_MAX_CHARS = 15000
+    UPSTREAM_INLINE_MAX_CHARS = 12000
 
     def _save_upstream_context(self, task: Task, response) -> None:
         """Save agent's response to disk so downstream agents can read it.
@@ -1400,7 +1401,7 @@ class Agent:
             # Store path in task context for chain propagation
             task.context["upstream_context_file"] = str(context_file)
             # Store inline for cross-worktree portability (file path may not resolve)
-            task.context["upstream_summary"] = content[:4000]
+            task.context["upstream_summary"] = content[:self.UPSTREAM_INLINE_MAX_CHARS]
             task.context["upstream_source_agent"] = self.config.base_id
             self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
         except Exception as e:

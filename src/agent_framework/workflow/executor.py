@@ -501,6 +501,7 @@ class WorkflowExecutor:
             title=f"[chain] {_strip_chain_prefixes(task.title)}",
             description=description,
             context=context,
+            plan=task.plan,
         )
 
     def _save_task_checkpoint(self, task: "Task") -> None:

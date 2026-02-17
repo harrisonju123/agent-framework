@@ -126,26 +126,20 @@ def _build_planning_instructions(
     goal: str, workflow: str, jira_project: Optional[str]
 ) -> str:
     """Build instructions for planning task based on JIRA availability."""
-    if jira_project:
-        return f"""User Goal: {goal}
+    jira_note = (
+        "6. Create appropriate JIRA ticket and queue tasks"
+        if jira_project
+        else "6. No JIRA project configured - write tasks directly to local queues"
+    )
+    return f"""User Goal: {goal}
 
 Instructions for Architect Agent:
 1. Clone/update repository (use MultiRepoManager)
-2. Explore the codebase to understand structure
-3. Validate the goal is feasible
-4. Create detailed implementation plan and queue to engineer
-5. Create appropriate JIRA ticket and queue tasks"""
-    else:
-        return f"""User Goal: {goal}
-
-Instructions for Architect Agent:
-1. Clone/update repository (use MultiRepoManager)
-2. Explore the codebase to understand structure
-3. Validate the goal is feasible
-4. Create detailed implementation plan and queue to engineer
-5. No JIRA project configured - write tasks directly to local queues
-6. Generate local task IDs: local-{{timestamp}}
-7. Write task JSON to: .agent-communication/queues/{{agent}}/{{task_id}}.json"""
+2. Search for keywords and concepts from the goal — grep for relevant function names, class names, and config keys
+3. Stop exploring once you have enough context to produce a concrete plan — do not map the entire codebase
+4. Produce a PlanDocument with: objectives, approach (step-by-step), files_to_modify, risks, success_criteria
+5. Create detailed implementation plan and queue to engineer
+{jira_note}"""
 
 
 def _build_analysis_description(
