@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from .session_logger import SessionLogger
     from ..llm.base import LLMBackend
     from ..queue.file_queue import FileQueue
+    from ..indexing.query import IndexQuery
 
 from .task import Task, TaskType
 from ..utils.type_helpers import get_type_str
@@ -64,6 +65,10 @@ class PromptContext:
 
     # Workflow definitions (for terminal step detection)
     workflows_config: Optional[Dict[str, "WorkflowDefinition"]] = None
+
+    # Codebase indexing (structural code context injection)
+    code_index_query: Optional["IndexQuery"] = None
+    code_indexing_config: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         """Initialize default values."""
@@ -155,6 +160,9 @@ class PromptBuilder:
 
         # Inject tool efficiency tips from session analysis
         prompt = self._inject_tool_tips(prompt, task)
+
+        # Inject structural codebase overview and relevant symbols
+        prompt = self._inject_codebase_index(prompt, task)
 
         # Inject replan history if retrying with revised approach
         prompt = self._inject_replan_context(prompt, task)
@@ -782,6 +790,75 @@ If a tool call fails:
                 chars=len(tips_section),
             )
         return prompt + "\n\n" + tips_section
+
+    def _inject_codebase_index(self, prompt: str, task: Task) -> str:
+        """Append structural codebase overview and relevant symbols to the prompt."""
+        if not self.ctx.code_index_query:
+            return prompt
+
+        cfg = self.ctx.code_indexing_config or {}
+        inject_for = cfg.get("inject_for_agents", ["architect", "engineer", "qa"])
+        if self.ctx.config.base_id not in inject_for:
+            return prompt
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return prompt
+
+        # Context-window-aware budget — shrinks index when context is tight
+        max_chars = cfg.get("max_prompt_chars", 4000)
+        if self.ctx.context_window_manager:
+            budget = self.ctx.context_window_manager.compute_memory_budget()
+            if budget == 0:
+                self.logger.debug("Skipping codebase index: context budget critical")
+                return prompt
+            max_chars = min(max_chars, budget)
+
+        # Planning tasks get architectural overview; implementation tasks get scored symbols
+        is_planning = task.type in (TaskType.PLANNING, TaskType.PREVIEW)
+        if is_planning:
+            index_section = self.ctx.code_index_query.format_overview_only(repo_slug)
+        else:
+            task_goal = self._build_index_query_goal(task)
+            index_section = self.ctx.code_index_query.query_for_prompt(
+                repo_slug, task_goal, max_chars=max_chars,
+            )
+
+        if not index_section:
+            return prompt
+
+        self.logger.debug(f"Injected {len(index_section)} chars of codebase index context")
+        if self.ctx.session_logger:
+            self.ctx.session_logger.log(
+                "codebase_index_injected", repo=repo_slug, chars=len(index_section),
+            )
+        return prompt + "\n\n" + index_section
+
+    def _build_index_query_goal(self, task: Task) -> str:
+        """Build a rich query string from all available task context.
+
+        Pulls keywords from multiple sources so symbol scoring
+        matches against the actual problem space, not just the title.
+        """
+        parts = []
+        if task.title:
+            parts.append(task.title)
+        if task.description:
+            parts.append(task.description)
+        # user_goal often has more detail than title
+        user_goal = task.context.get("user_goal")
+        if user_goal and user_goal != task.title:
+            parts.append(user_goal)
+        # Upstream findings mention specific files/classes
+        upstream = task.context.get("upstream_summary", "")
+        if upstream:
+            parts.append(upstream[:1000])
+        # Structured findings have precise file paths
+        findings = task.context.get("structured_findings")
+        if findings and isinstance(findings, dict):
+            for file_path in findings.keys():
+                parts.append(file_path)
+        return " ".join(parts)
 
     def _inject_replan_context(self, prompt: str, task: Task) -> str:
         """Append revised plan and attempt history to prompt if available.

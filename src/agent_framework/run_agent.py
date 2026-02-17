@@ -235,6 +235,7 @@ def main():
             session_logging_config=session_logging_config,
             repositories_config=framework_config.repositories,
             pr_lifecycle_config=framework_config.pr_lifecycle.model_dump(),
+            code_indexing_config=framework_config.indexing.model_dump(),
         )
 
         # Let SIGTERM trigger a clean exit through the polling loop

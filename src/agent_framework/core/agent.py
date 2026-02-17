@@ -280,6 +280,40 @@ class Agent:
                     multi_repo_manager=self.multi_repo_manager,
                 )
 
+    def _init_code_indexing(self, code_indexing_config):
+        """Initialize codebase indexing for structural code context in prompts."""
+        cfg = code_indexing_config or {}
+        self._code_indexing_enabled = cfg.get("enabled", True)
+        self._code_indexing_inject_for = cfg.get("inject_for_agents", ["architect", "engineer", "qa"])
+        self._code_indexer = None
+        self._code_index_query = None
+
+        if not self._code_indexing_enabled:
+            return
+
+        from ..indexing import IndexStore, CodebaseIndexer, IndexQuery
+        store = IndexStore(self.workspace)
+        self._code_indexer = CodebaseIndexer(
+            store=store,
+            max_symbols=cfg.get("max_symbols", 500),
+            exclude_patterns=cfg.get("exclude_patterns", []),
+        )
+        self._code_index_query = IndexQuery(store)
+
+    def _try_index_codebase(self, task: Task, repo_path: Path) -> None:
+        """Trigger indexing after repo checkout, before prompt building."""
+        if not self._code_indexer:
+            return
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return
+        if self.config.base_id not in self._code_indexing_inject_for:
+            return
+        try:
+            self._code_indexer.ensure_indexed(repo_slug, str(repo_path))
+        except Exception:
+            self.logger.debug("Codebase indexing failed, continuing without index", exc_info=True)
+
     def __init__(
         self,
         config: AgentConfig,
@@ -305,6 +339,7 @@ class Agent:
         session_logging_config: Optional[dict] = None,
         repositories_config: Optional[List["RepositoryConfig"]] = None,
         pr_lifecycle_config: Optional[dict] = None,
+        code_indexing_config: Optional[dict] = None,
     ):
         """Initialize Agent with modular subsystem setup."""
         # Core dependencies and basic state
@@ -339,6 +374,9 @@ class Agent:
 
         # PR lifecycle management
         self._init_pr_lifecycle(repositories_config, pr_lifecycle_config)
+
+        # Codebase indexing for structural code context in prompts
+        self._init_code_indexing(code_indexing_config)
 
         # Workflow routing: chain enforcement, task decomposition, agent handoffs
         self._workflow_router = WorkflowRouter(
@@ -381,6 +419,8 @@ class Agent:
             queue=queue,
             agent=self,
             workflows_config=workflows_config,
+            code_index_query=self._code_index_query,
+            code_indexing_config=code_indexing_config,
         )
         self._prompt_builder = PromptBuilder(prompt_ctx)
 
@@ -1151,6 +1191,9 @@ class Agent:
             # Get working directory for task (worktree, target repo, or framework workspace)
             working_dir = self._git_ops.get_working_directory(task)
             self.logger.info(f"Working directory: {working_dir}")
+
+            # Index codebase for structural context (cached by commit SHA)
+            self._try_index_codebase(task, working_dir)
 
             self.logger.phase_change("analyzing")
             # Update prompt builder with per-task context
