@@ -744,6 +744,9 @@ class ReviewCycleManager:
                 "_root_task_id": root_task_id,
                 "_global_cycle_count": task.context.get("_global_cycle_count", 0),
                 "_chain_depth": task.context.get("_chain_depth", 0),
+                # Carry structured findings so architect can see exact QA issues
+                **({"structured_findings": task.context["structured_findings"]}
+                   if "structured_findings" in task.context else {}),
             },
         )
 

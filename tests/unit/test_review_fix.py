@@ -1064,3 +1064,49 @@ class TestQAFindingDataclass:
         assert finding.file == "src/utils.py"
         assert finding.line_number is None
         assert finding.suggested_fix is None
+
+
+class TestEscalationCarriesStructuredFindings:
+    """Verify escalation to architect preserves structured findings."""
+
+    def test_escalation_carries_structured_findings(self, qa_agent, queue):
+        from agent_framework.core.review_cycle import ReviewOutcome
+
+        findings_data = {
+            "findings": [
+                {"file": "src/x.py", "line_number": 1, "severity": "CRITICAL",
+                 "description": "bug", "suggested_fix": None, "category": "correctness"}
+            ],
+            "total_count": 1,
+            "critical_count": 1,
+        }
+        task = _make_task(
+            _review_cycle_count=3,
+            structured_findings=findings_data,
+        )
+        outcome = ReviewOutcome(
+            approved=False, has_critical_issues=True,
+            has_test_failures=False, has_change_requests=False,
+            findings_summary="CRITICAL: bug",
+        )
+
+        qa_agent._review_cycle.escalate_review_to_architect(task, outcome, cycle_count=4)
+
+        pushed_task = queue.push.call_args[0][0]
+        assert "structured_findings" in pushed_task.context
+        assert pushed_task.context["structured_findings"] == findings_data
+
+    def test_escalation_without_structured_findings(self, qa_agent, queue):
+        from agent_framework.core.review_cycle import ReviewOutcome
+
+        task = _make_task(_review_cycle_count=3)
+        outcome = ReviewOutcome(
+            approved=False, has_critical_issues=True,
+            has_test_failures=False, has_change_requests=False,
+            findings_summary="CRITICAL: bug",
+        )
+
+        qa_agent._review_cycle.escalate_review_to_architect(task, outcome, cycle_count=4)
+
+        pushed_task = queue.push.call_args[0][0]
+        assert "structured_findings" not in pushed_task.context

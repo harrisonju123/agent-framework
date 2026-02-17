@@ -434,8 +434,9 @@ breaking the task into smaller steps, or working around the root cause."""
         if not repo_slug:
             return ""
 
-        # Prioritize categories useful for recovery
-        priority_categories = ["conventions", "test_commands", "repo_structure"]
+        # Prioritize categories useful for recovery — past_failures first so
+        # the LLM sees what recovery strategies worked before
+        priority_categories = ["past_failures", "conventions", "test_commands", "repo_structure"]
         memories = []
 
         for category in priority_categories:
@@ -463,6 +464,40 @@ breaking the task into smaller steps, or working around the root cause."""
     def _get_repo_slug(self, task: Task) -> Optional[str]:
         """Extract github_repo from task context."""
         return task.context.get("github_repo")
+
+    def store_replan_outcome(self, task: Task, repo_slug: str) -> None:
+        """Persist successful recovery pattern as a past_failures memory.
+
+        Called after a task that went through replanning completes successfully.
+        Stores the error→resolution pair so future replans can reference it.
+        """
+        if not self.memory_store or not self.memory_store.enabled:
+            return
+
+        if not task.replan_history:
+            return
+
+        last_entry = task.replan_history[-1]
+        error_type = last_entry.get("error_type", "unknown")
+        files = last_entry.get("files_involved", [])
+        files_str = ", ".join(files[:3]) if files else "unknown files"
+        revised_plan = last_entry.get("revised_plan", "")
+
+        # First line of the revised plan as a concise summary
+        plan_summary = revised_plan.split("\n")[0].strip("- *").strip()
+        if not plan_summary:
+            plan_summary = revised_plan[:100]
+
+        content = f"{error_type} in {files_str}: {plan_summary} → resolved"
+
+        self.memory_store.remember(
+            repo_slug=repo_slug,
+            agent_type=self.config.base_id,
+            category="past_failures",
+            content=content,
+            task_id=task.id,
+            tags=[error_type],
+        )
 
     def inject_replan_context(self, prompt: str, task: Task) -> str:
         """Append revised plan and attempt history to prompt if available."""

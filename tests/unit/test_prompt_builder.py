@@ -350,3 +350,77 @@ class TestPromptInjections:
         result = prompt_builder._inject_retry_context(prompt, sample_task)
 
         assert "previous agent in the workflow chain" in result
+
+
+class TestStructuredFindings:
+    """Test structured QA findings formatting for engineer prompts."""
+
+    def test_structured_findings_formatted_for_engineer(self, prompt_builder, sample_task):
+        """Structured findings produce a file-grouped numbered checklist."""
+        sample_task.context["structured_findings"] = {
+            "findings": [
+                {
+                    "file": "src/auth.py",
+                    "line_number": 42,
+                    "severity": "CRITICAL",
+                    "description": "SQL injection via unsanitized input",
+                    "suggested_fix": "Use parameterized queries",
+                    "category": "security",
+                },
+                {
+                    "file": "src/auth.py",
+                    "line_number": 88,
+                    "severity": "MAJOR",
+                    "description": "Missing error handling on token refresh",
+                    "suggested_fix": None,
+                    "category": "correctness",
+                },
+                {
+                    "file": "tests/test_auth.py",
+                    "line_number": 10,
+                    "severity": "MEDIUM",
+                    "description": "Test doesn't cover edge case",
+                    "suggested_fix": "Add test for expired token",
+                    "category": "testing",
+                },
+            ],
+            "total_count": 3,
+            "critical_count": 1,
+        }
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        # Should produce structured checklist, not raw text
+        assert "QA FINDINGS" in result
+        assert "[CRITICAL]" in result
+        assert "[MAJOR]" in result
+        assert "[MEDIUM]" in result
+        assert "src/auth.py:42" in result
+        assert "SQL injection" in result
+        assert "Fix: Use parameterized queries" in result
+        # Grouped by file — src/auth.py should appear as a header
+        assert "### src/auth.py" in result
+        assert "### tests/test_auth.py" in result
+        # Instruction at the end
+        assert "Address all findings above" in result
+
+    def test_falls_back_to_upstream_summary(self, prompt_builder, sample_task):
+        """Without structured findings, uses text summary."""
+        sample_task.context["upstream_summary"] = "Architect reviewed: looks good overall"
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        assert "UPSTREAM AGENT FINDINGS" in result
+        assert "looks good overall" in result
+        # Should NOT have structured format
+        assert "QA FINDINGS" not in result
+
+    def test_structured_findings_empty_list_falls_through(self, prompt_builder, sample_task):
+        """Empty findings list falls through to upstream_summary."""
+        sample_task.context["structured_findings"] = {"findings": []}
+        sample_task.context["upstream_summary"] = "Some text summary"
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        assert "UPSTREAM AGENT FINDINGS" in result
+        assert "Some text summary" in result

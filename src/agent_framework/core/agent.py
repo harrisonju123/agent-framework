@@ -1442,6 +1442,10 @@ class Agent:
                 count=count,
             )
 
+        # Store successful recovery pattern so future replans can reference it
+        if task.replan_history and task.status == TaskStatus.COMPLETED:
+            self._error_recovery.store_replan_outcome(task, repo_slug)
+
     # -- Tool Pattern Analysis --
 
     def _analyze_tool_patterns(self, task: Task) -> None:

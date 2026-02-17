@@ -531,9 +531,16 @@ If a tool call fails:
     def _load_upstream_context(self, task: Task) -> str:
         """Load upstream agent's findings from inline context or disk.
 
-        Prefers inline context (works across worktrees) over file path.
-        Returns formatted section string or empty string.
+        When structured QA findings are available, formats them as an actionable
+        checklist grouped by file. Otherwise falls back to inline text or disk file.
         """
+        # Structured findings take priority — they give the engineer precise, actionable items
+        structured = task.context.get("structured_findings")
+        if structured:
+            formatted = self._format_structured_findings(structured)
+            if formatted:
+                return formatted
+
         # Prefer inline context — works across worktrees where file path may not resolve
         inline = task.context.get("upstream_summary")
         if inline:
@@ -563,6 +570,45 @@ If a tool call fails:
         except Exception as e:
             self.logger.debug(f"Failed to load upstream context: {e}")
             return ""
+
+    def _format_structured_findings(self, structured: dict) -> str:
+        """Format structured QA findings as a file-grouped actionable checklist.
+
+        Args:
+            structured: Dict with 'findings' list and optional summary/counts.
+
+        Returns:
+            Formatted prompt section string.
+        """
+        findings = structured.get("findings", [])
+        if not findings:
+            return ""
+
+        # Group findings by file
+        by_file: Dict[str, list] = {}
+        for f in findings:
+            key = f.get("file", "unknown")
+            by_file.setdefault(key, []).append(f)
+
+        lines = ["\n## QA FINDINGS — ACTION REQUIRED\n"]
+
+        num = 1
+        for filepath, file_findings in by_file.items():
+            lines.append(f"### {filepath}")
+            for f in file_findings:
+                severity = f.get("severity", "UNKNOWN")
+                desc = f.get("description", "")
+                line_no = f.get("line_number")
+                location = f":{line_no}" if line_no else ""
+                lines.append(f"{num}. [{severity}] {filepath}{location} — {desc}")
+                suggested = f.get("suggested_fix")
+                if suggested:
+                    lines.append(f"   Fix: {suggested}")
+                num += 1
+            lines.append("")
+
+        lines.append("Address all findings above, then re-run tests.\n")
+        return "\n".join(lines)
 
     def _inject_memories(self, prompt: str, task: Task) -> str:
         """Append relevant memories from previous tasks to the prompt."""

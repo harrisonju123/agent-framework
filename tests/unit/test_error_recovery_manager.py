@@ -369,3 +369,78 @@ class TestInjectReplanContext:
         assert "setup.py" in result or "requirements.txt" in result  # files_involved
         # Should not duplicate current attempt
         assert result.count("Latest plan") == 1
+
+
+class TestReplanMemory:
+    def test_replan_memory_includes_past_failures(self):
+        """Verify past_failures is in the priority list for replan memory context."""
+        manager = _make_manager()
+        memory_store = MagicMock()
+        memory_store.enabled = True
+        memory_store.recall = MagicMock(return_value=[])
+        manager.memory_store = memory_store
+
+        task = _make_task(context={"github_repo": "owner/repo"})
+        manager._build_replan_memory_context(task)
+
+        # past_failures should be the first category queried
+        recall_calls = memory_store.recall.call_args_list
+        categories_queried = [c.kwargs["category"] for c in recall_calls]
+        assert "past_failures" in categories_queried
+        assert categories_queried[0] == "past_failures"
+
+    def test_store_replan_outcome_on_success(self):
+        """Verify memory stored with correct category and tags after successful replan."""
+        manager = _make_manager()
+        memory_store = MagicMock()
+        memory_store.enabled = True
+        manager.memory_store = memory_store
+
+        task = _make_task(
+            status=TaskStatus.COMPLETED,
+            replan_history=[
+                {
+                    "attempt": 2,
+                    "error": "TypeError in handler",
+                    "error_type": "type_error",
+                    "approach_tried": "cast to str",
+                    "files_involved": ["src/handler.py"],
+                    "revised_plan": "Use explicit type check before assignment\nThen validate",
+                }
+            ],
+        )
+
+        manager.store_replan_outcome(task, "owner/repo")
+
+        memory_store.remember.assert_called_once()
+        call_kwargs = memory_store.remember.call_args.kwargs
+        assert call_kwargs["category"] == "past_failures"
+        assert call_kwargs["repo_slug"] == "owner/repo"
+        assert "type_error" in call_kwargs["tags"]
+        assert "src/handler.py" in call_kwargs["content"]
+        assert "resolved" in call_kwargs["content"]
+
+    def test_store_replan_outcome_skipped_without_history(self):
+        """No-op when replan_history is empty."""
+        manager = _make_manager()
+        memory_store = MagicMock()
+        memory_store.enabled = True
+        manager.memory_store = memory_store
+
+        task = _make_task(replan_history=[])
+
+        manager.store_replan_outcome(task, "owner/repo")
+
+        memory_store.remember.assert_not_called()
+
+    def test_store_replan_outcome_skipped_without_memory_store(self):
+        """No-op when memory store is None."""
+        manager = _make_manager()
+        assert manager.memory_store is None
+
+        task = _make_task(
+            replan_history=[{"attempt": 2, "error": "err", "revised_plan": "fix"}]
+        )
+
+        # Should not raise
+        manager.store_replan_outcome(task, "owner/repo")
