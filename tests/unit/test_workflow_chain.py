@@ -1514,6 +1514,24 @@ class TestNoChangesVerdict:
 
         assert task.context.get("verdict") != "no_changes"
 
+    def test_no_changes_skips_enforce_chain(self, agent, queue):
+        """When verdict is no_changes, _enforce_workflow_chain should NOT be called."""
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="default", workflow_step="plan")
+        response = _make_response("No engineering work needed — the feature already exists.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._enforce_workflow_chain = MagicMock()
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "no_changes"
+        agent._enforce_workflow_chain.assert_not_called()
+
     def test_no_changes_pattern_variants(self):
         """Various 'no changes' phrases are detected by _is_no_changes_response."""
         phrases = [
@@ -1528,6 +1546,10 @@ class TestNoChangesVerdict:
             "Already done in a previous sprint.",
             "Already shipped as part of the v2 release.",
             "Already completed by another engineer.",
+            "No engineering work needed.",
+            "No work required for this ticket.",
+            "Already handled by a previous PR.",
+            "Already resolved in main.",
         ]
 
         for phrase in phrases:
@@ -1540,6 +1562,7 @@ class TestNoChangesVerdict:
             "We need to implement the auth module with JWT tokens.",
             "The approach is to modify the existing handler.",
             "Plan: 1. Create new endpoint 2. Add tests",
+            "The work is progressing well and we should continue.",
         ]
 
         for phrase in normal_plans:
