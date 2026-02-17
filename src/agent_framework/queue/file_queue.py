@@ -665,11 +665,32 @@ class FileQueue:
         - Aggregates result_summary from all completed subtasks
         - Assigned to the next agent in workflow (typically QA)
         """
-        # Aggregate results
+        # Aggregate results and collect implementation branches
         aggregated_results = []
+        subtask_branches = []
         for subtask in completed_subtasks:
             if subtask.result_summary:
                 aggregated_results.append(f"[{subtask.title}]: {subtask.result_summary}")
+            branch = (
+                subtask.context.get("implementation_branch")
+                or subtask.context.get("worktree_branch")
+            )
+            if branch:
+                subtask_branches.append(branch)
+
+        context = {
+            **parent_task.context,
+            "fan_in": True,
+            "parent_task_id": parent_task.id,
+            "subtask_count": len(completed_subtasks),
+            "aggregated_results": "\n".join(aggregated_results),
+        }
+        # Carry subtask branches so needs_fix cycles reuse existing code
+        # instead of reimplementing from scratch
+        if subtask_branches:
+            context["implementation_branch"] = subtask_branches[0]
+            if len(subtask_branches) > 1:
+                context["subtask_branches"] = subtask_branches
 
         fan_in_task = Task(
             id=f"fan-in-{parent_task.id}",
@@ -681,13 +702,7 @@ class FileQueue:
             created_at=datetime.now(UTC),
             title=f"[fan-in] {parent_task.title}",
             description=parent_task.description,
-            context={
-                **parent_task.context,
-                "fan_in": True,
-                "parent_task_id": parent_task.id,
-                "subtask_count": len(completed_subtasks),
-                "aggregated_results": "\n".join(aggregated_results),
-            },
+            context=context,
             result_summary="\n".join(aggregated_results) if aggregated_results else None,
         )
         return fan_in_task

@@ -311,6 +311,85 @@ class TestCreateFanInTask:
 
         assert fan_in.created_by == "system"
 
+    def test_propagates_single_subtask_implementation_branch(self, queue, parent_task):
+        """Fan-in picks up implementation_branch from a single subtask."""
+        subtask = Task(
+            id="parent-123-sub-0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.COMPLETED,
+            priority=1,
+            created_by="decomposer",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Subtask 0",
+            description="Description",
+            parent_task_id="parent-123",
+            result_summary="Done",
+            context={"implementation_branch": "feature/parent-123-sub-0"},
+        )
+
+        fan_in = queue.create_fan_in_task(parent_task, [subtask])
+
+        assert fan_in.context["implementation_branch"] == "feature/parent-123-sub-0"
+        assert "subtask_branches" not in fan_in.context
+
+    def test_propagates_multiple_subtask_branches(self, queue, parent_task):
+        """Fan-in collects all subtask branches when multiple exist."""
+        subtasks = [
+            Task(
+                id=f"parent-123-sub-{i}",
+                type=TaskType.IMPLEMENTATION,
+                status=TaskStatus.COMPLETED,
+                priority=1,
+                created_by="decomposer",
+                assigned_to="engineer",
+                created_at=datetime.now(timezone.utc),
+                title=f"Subtask {i}",
+                description=f"Description {i}",
+                parent_task_id="parent-123",
+                result_summary=f"Done {i}",
+                context={"implementation_branch": f"feature/parent-123-sub-{i}"},
+            )
+            for i in range(3)
+        ]
+
+        fan_in = queue.create_fan_in_task(parent_task, subtasks)
+
+        assert fan_in.context["implementation_branch"] == "feature/parent-123-sub-0"
+        assert fan_in.context["subtask_branches"] == [
+            "feature/parent-123-sub-0",
+            "feature/parent-123-sub-1",
+            "feature/parent-123-sub-2",
+        ]
+
+    def test_no_branches_when_subtasks_lack_them(self, queue, parent_task, completed_subtasks):
+        """Fan-in has no branch keys when subtasks don't have branches."""
+        fan_in = queue.create_fan_in_task(parent_task, completed_subtasks)
+
+        assert "implementation_branch" not in fan_in.context
+        assert "subtask_branches" not in fan_in.context
+
+    def test_falls_back_to_worktree_branch(self, queue, parent_task):
+        """Fan-in falls back to worktree_branch when implementation_branch is absent."""
+        subtask = Task(
+            id="parent-123-sub-0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.COMPLETED,
+            priority=1,
+            created_by="decomposer",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Subtask 0",
+            description="Description",
+            parent_task_id="parent-123",
+            result_summary="Done",
+            context={"worktree_branch": "worktree/parent-123-sub-0"},
+        )
+
+        fan_in = queue.create_fan_in_task(parent_task, [subtask])
+
+        assert fan_in.context["implementation_branch"] == "worktree/parent-123-sub-0"
+
     def test_handles_subtasks_without_result_summary(self, queue, parent_task):
         """Fan-in task handles subtasks without result_summary."""
         subtasks_no_summary = [
