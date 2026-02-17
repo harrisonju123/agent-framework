@@ -12,9 +12,11 @@ from ..core.activity import ActivityManager, AgentStatus, TaskPhase
 from ..core.config import load_agents, AgentDefinition
 from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
+from ..core.task import TaskStatus
 from .models import (
     AgentData,
     AgentStatusEnum,
+    CheckpointData,
     QueueStats,
     EventData,
     FailedTaskData,
@@ -351,6 +353,80 @@ class DashboardDataProvider:
         self._teams_cache = sessions
         self._teams_cache_time = now
         return sessions
+
+    # ============== Checkpoint Methods ==============
+
+    def get_pending_checkpoints(self) -> List[CheckpointData]:
+        """Get all tasks awaiting checkpoint approval."""
+        checkpoint_dir = self.workspace / ".agent-communication" / "queues" / "checkpoints"
+        if not checkpoint_dir.exists():
+            return []
+
+        result: List[CheckpointData] = []
+        for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
+            try:
+                task = FileQueue.load_task_file(checkpoint_file)
+                if task.status != TaskStatus.AWAITING_APPROVAL:
+                    continue
+
+                # Use file mtime as proxy for when checkpoint was reached
+                paused_at = datetime.fromtimestamp(
+                    checkpoint_file.stat().st_mtime, tz=timezone.utc
+                )
+
+                result.append(
+                    CheckpointData(
+                        id=task.id,
+                        title=task.title,
+                        checkpoint_id=task.checkpoint_reached or "unknown",
+                        checkpoint_message=task.checkpoint_message or "",
+                        assigned_to=task.assigned_to,
+                        paused_at=paused_at,
+                    )
+                )
+            except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
+                logger.warning(f"Error reading checkpoint file {checkpoint_file}: {e}")
+                continue
+
+        return result
+
+    def approve_checkpoint(self, task_id: str, message: Optional[str] = None) -> bool:
+        """Approve a checkpoint and re-queue the task.
+
+        Mirrors the CLI `agent approve` logic: load checkpoint file,
+        verify AWAITING_APPROVAL status, approve, re-queue, delete file.
+        """
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
+            raise ValueError(f"Invalid task_id: {task_id}")
+
+        checkpoint_dir = self.workspace / ".agent-communication" / "queues" / "checkpoints"
+        checkpoint_file = checkpoint_dir / f"{task_id}.json"
+        if not checkpoint_file.exists():
+            return False
+
+        task = FileQueue.load_task_file(checkpoint_file)
+        if task.status != TaskStatus.AWAITING_APPROVAL:
+            return False
+
+        approver = os.getenv("USER", "dashboard")
+        task.approve_checkpoint(approver)
+
+        if message:
+            task.notes.append(f"Checkpoint approved: {message}")
+        else:
+            task.notes.append(
+                f"Checkpoint approved at {datetime.now(timezone.utc).isoformat()}"
+            )
+
+        # Re-queue then delete — only delete after successful push
+        try:
+            self.queue.push(task, task.assigned_to)
+            checkpoint_file.unlink()
+        except Exception as e:
+            logger.error(f"Error re-queuing checkpoint task {task_id}: {e}")
+            return False
+
+        return True
 
     # ============== Log Reading Methods ==============
 

@@ -9,6 +9,7 @@ export interface KeyboardActions {
   onAnalyze: () => void
   onTicket: () => void
   onRetry: () => void
+  onApprove: () => void
   onEscape: () => void
 }
 
@@ -64,6 +65,10 @@ export function useKeyboard(actions: KeyboardActions) {
       case 'r':
         event.preventDefault()
         actions.onRetry()
+        break
+      case 'c':
+        event.preventDefault()
+        actions.onApprove()
         break
       case 'escape':
         event.preventDefault()

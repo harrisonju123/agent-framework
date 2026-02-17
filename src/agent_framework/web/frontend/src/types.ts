@@ -59,6 +59,15 @@ export interface FailedTask {
   failed_at: string | null
 }
 
+export interface CheckpointData {
+  id: string
+  title: string
+  checkpoint_id: string
+  checkpoint_message: string
+  assigned_to: string
+  paused_at: string | null
+}
+
 export interface HealthCheck {
   name: string
   passed: boolean
@@ -76,6 +85,7 @@ export interface DashboardState {
   queues: QueueStats[]
   events: ActivityEvent[]
   failed_tasks: FailedTask[]
+  pending_checkpoints: CheckpointData[]
   health: HealthReport
   is_paused: boolean
   uptime_seconds: number

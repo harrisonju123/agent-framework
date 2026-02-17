@@ -102,6 +102,16 @@ class FailedTaskData(BaseModel):
     failed_at: Optional[datetime] = None
 
 
+class CheckpointData(BaseModel):
+    """Task awaiting checkpoint approval."""
+    id: str
+    title: str
+    checkpoint_id: str
+    checkpoint_message: str
+    assigned_to: str
+    paused_at: Optional[datetime] = None
+
+
 class HealthCheck(BaseModel):
     """Individual health check result."""
     name: str
@@ -131,6 +141,7 @@ class DashboardState(BaseModel):
     queues: List[QueueStats]
     events: List[EventData]
     failed_tasks: List[FailedTaskData]
+    pending_checkpoints: List[CheckpointData]
     health: HealthReport
     is_paused: bool
     uptime_seconds: int

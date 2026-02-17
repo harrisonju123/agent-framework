@@ -8,6 +8,7 @@ import AgentCard from './components/AgentCard.vue'
 import QueuePanel from './components/QueuePanel.vue'
 import ActivityFeed from './components/ActivityFeed.vue'
 import FailedTasks from './components/FailedTasks.vue'
+import PendingCheckpoints from './components/PendingCheckpoints.vue'
 import HealthStatus from './components/HealthStatus.vue'
 import LogViewer from './components/LogViewer.vue'
 import Modal from './components/Modal.vue'
@@ -21,6 +22,7 @@ const { logs, connected: logsConnected } = useLogStream()
 const {
   restartAgent,
   retryTask,
+  approveCheckpoint,
   pauseSystem,
   resumeSystem,
   startAllAgents,
@@ -95,6 +97,7 @@ const agents = computed(() => state.value?.agents ?? [])
 const queues = computed(() => state.value?.queues ?? [])
 const events = computed(() => state.value?.events ?? [])
 const failedTasks = computed(() => state.value?.failed_tasks ?? [])
+const pendingCheckpoints = computed(() => state.value?.pending_checkpoints ?? [])
 const health = computed(() => state.value?.health ?? { passed: true, checks: [], warnings: [] })
 const agentIds = computed(() => agents.value.map(a => a.id))
 
@@ -167,6 +170,7 @@ useKeyboard({
   onAnalyze: () => { activeModal.value = 'analyze' },
   onTicket: () => { activeModal.value = 'ticket' },
   onRetry: handleRetryAll,
+  onApprove: handleApproveAll,
   onEscape: () => {
     activeModal.value = null
     confirmDialog.value.open = false
@@ -248,10 +252,42 @@ async function handleRetryAll() {
   }
 }
 
+async function handleApproveAll() {
+  const checkpoints = pendingCheckpoints.value
+  if (checkpoints.length === 0) return
+
+  let succeeded = 0
+  let failed = 0
+
+  for (const cp of checkpoints) {
+    const result = await approveCheckpoint(cp.id)
+    if (result?.success) {
+      succeeded++
+    } else {
+      failed++
+    }
+  }
+
+  if (failed === 0) {
+    showToast(`Approved ${succeeded} checkpoint(s)`, 'success')
+  } else {
+    showToast(`Approved ${succeeded}, failed to approve ${failed} checkpoint(s)`, 'error')
+  }
+}
+
 async function handleRetryTask(taskId: string) {
   const result = await retryTask(taskId)
   if (result?.success) {
     showToast(`Task ${taskId} queued for retry`, 'success')
+  } else if (apiError.value) {
+    showToast(apiError.value, 'error')
+  }
+}
+
+async function handleApproveCheckpoint(taskId: string) {
+  const result = await approveCheckpoint(taskId)
+  if (result?.success) {
+    showToast(`Checkpoint approved for ${taskId}`, 'success')
   } else if (apiError.value) {
     showToast(apiError.value, 'error')
   }
@@ -476,6 +512,15 @@ onMounted(() => {
     <!-- Main content -->
     <template v-else>
       <div class="flex-1 min-h-0 overflow-y-auto">
+        <!-- Checkpoint approval banner -->
+        <div v-if="pendingCheckpoints.length > 0" class="bg-yellow-500/20 border-b border-yellow-500 px-4 py-3">
+          <div class="flex items-center gap-3">
+            <span class="text-yellow-400 font-medium text-sm">
+              {{ pendingCheckpoints.length }} checkpoint{{ pendingCheckpoints.length > 1 ? 's' : '' }} awaiting approval
+            </span>
+          </div>
+        </div>
+
         <!-- Agent Cards -->
         <div class="p-4">
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
@@ -513,8 +558,8 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- Activity and Failed Tasks -->
-        <div class="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <!-- Activity, Failed Tasks, and Checkpoints -->
+        <div class="p-4 grid grid-cols-1 gap-4" :class="pendingCheckpoints.length > 0 ? 'lg:grid-cols-3' : 'lg:grid-cols-2'">
           <!-- Recent Activity -->
           <div class="bg-gray-900/50 border border-gray-800 rounded-lg overflow-hidden">
             <div class="px-4 py-2 border-b border-gray-800 text-sm font-medium text-gray-400">
@@ -533,6 +578,17 @@ onMounted(() => {
             </div>
             <div class="max-h-48 overflow-y-auto">
               <FailedTasks :tasks="failedTasks" :on-retry="handleRetryTask" />
+            </div>
+          </div>
+
+          <!-- Pending Checkpoints -->
+          <div v-if="pendingCheckpoints.length > 0" class="bg-gray-900/50 border border-yellow-500/50 rounded-lg overflow-hidden">
+            <div class="px-4 py-2 border-b border-gray-800 text-sm font-medium text-yellow-400 flex items-center justify-between">
+              <span>Awaiting Approval</span>
+              <span>({{ pendingCheckpoints.length }})</span>
+            </div>
+            <div class="max-h-48 overflow-y-auto">
+              <PendingCheckpoints :checkpoints="pendingCheckpoints" :on-approve="handleApproveCheckpoint" />
             </div>
           </div>
         </div>
@@ -571,6 +627,7 @@ onMounted(() => {
         <span>[a] analyze</span>
         <span>[t] ticket</span>
         <span>[r] retry</span>
+        <span>[c] approve</span>
         <span class="flex-1"></span>
         <span v-if="loading" class="text-cyan-400">Loading...</span>
       </footer>
