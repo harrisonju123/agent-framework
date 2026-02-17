@@ -221,6 +221,22 @@ class SignalTargetCondition(ConditionEvaluator):
         return routing_signal.target_agent == target
 
 
+class NoChangesCondition(ConditionEvaluator):
+    """True if the agent determined no code changes are needed.
+
+    Checks verdict == "no_changes" from task context, set by architect
+    at plan step when work is already done or not applicable.
+    """
+
+    def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
+        verdict = None
+        if context and "verdict" in context:
+            verdict = context["verdict"]
+        elif task.context and "verdict" in task.context:
+            verdict = task.context["verdict"]
+        return str(verdict).lower() == "no_changes" if verdict else False
+
+
 def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
     """Build a fresh evaluator map so ConditionRegistry.register() in tests
     doesn't pollute global state."""
@@ -235,6 +251,7 @@ def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
         EdgeConditionType.FILES_MATCH: FilesMatchCondition(),
         EdgeConditionType.PR_SIZE_UNDER: PRSizeUnderCondition(),
         EdgeConditionType.SIGNAL_TARGET: SignalTargetCondition(),
+        EdgeConditionType.NO_CHANGES: NoChangesCondition(),
     }
 
 

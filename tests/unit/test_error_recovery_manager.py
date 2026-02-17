@@ -155,6 +155,28 @@ class TestHandleFailure:
         manager.queue.move_to_completed.assert_called_once_with(cancelled_task)
         manager.queue.update.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_handle_failure_clears_upstream_context(self):
+        """Stale upstream context from a failed attempt is cleared before retry."""
+        manager = _make_manager()
+        task = _make_task(
+            retry_count=1,
+            context={
+                "upstream_summary": "stale output from previous attempt",
+                "upstream_context_file": "/tmp/stale-context.md",
+                "other_key": "preserved",
+            },
+        )
+
+        manager.queue.find_task.return_value = task
+
+        await manager.handle_failure(task)
+
+        assert "upstream_summary" not in task.context
+        assert "upstream_context_file" not in task.context
+        assert task.context["other_key"] == "preserved"
+        assert task.status == TaskStatus.PENDING
+
 
 class TestSelfEvaluate:
     @pytest.mark.asyncio

@@ -1460,3 +1460,194 @@ class TestVerdictStorageAndClearing:
         agent._run_post_completion_flow(task, response, None, 0)
 
         assert "verdict" not in task.context
+
+
+# -- No-changes verdict detection --
+
+class TestNoChangesVerdict:
+    """Verify no_changes verdict is set at plan step when work is already done."""
+
+    def test_no_changes_verdict_set_at_plan_step(self, agent, queue):
+        """Architect at plan step with 'already exists' response → verdict='no_changes'."""
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="default", workflow_step="plan")
+        response = _make_response("The feature already exists in production. No changes needed.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "no_changes"
+
+    def test_no_changes_verdict_not_set_at_code_review(self, agent, queue):
+        """Architect at code_review step → no 'no_changes' verdict even with matching text."""
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="default", workflow_step="code_review")
+        response = _make_response("Nothing to change, already implemented. Approved.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        # Should get "approved" verdict from review outcome, not "no_changes"
+        assert task.context.get("verdict") != "no_changes"
+
+    def test_no_changes_verdict_not_set_for_engineer(self, agent, queue):
+        """Engineer at plan step (edge case) → no no_changes verdict."""
+        task = _make_task(workflow="default", workflow_step="plan")
+        response = _make_response("Feature already exists. Nothing to implement.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") != "no_changes"
+
+    def test_no_changes_pattern_variants(self):
+        """Various 'no changes' phrases are detected by _is_no_changes_response."""
+        phrases = [
+            "The feature already exists in the codebase.",
+            "This has already been merged into main.",
+            "Already implemented in PR #42.",
+            "No code changes needed for this task.",
+            "No changes required — the config is correct.",
+            "There is nothing to implement here.",
+            "Nothing to do — the endpoint already handles this case.",
+            "The feature is already in production.",
+            "Already done in a previous sprint.",
+            "Already shipped as part of the v2 release.",
+            "Already completed by another engineer.",
+        ]
+
+        for phrase in phrases:
+            assert Agent._is_no_changes_response(phrase), \
+                f"Failed to detect no-changes in: {phrase}"
+
+    def test_normal_plan_not_detected_as_no_changes(self):
+        """Normal planning output should NOT trigger no_changes."""
+        normal_plans = [
+            "We need to implement the auth module with JWT tokens.",
+            "The approach is to modify the existing handler.",
+            "Plan: 1. Create new endpoint 2. Add tests",
+        ]
+
+        for phrase in normal_plans:
+            assert not Agent._is_no_changes_response(phrase), \
+                f"False positive no-changes on: {phrase}"
+
+
+# -- Plan→create_pr routing on no_changes --
+
+class TestNoChangesRouting:
+    """Verify plan step routes to create_pr when verdict is no_changes."""
+
+    def test_plan_routes_to_create_pr_on_no_changes(self, queue, tmp_path):
+        """Plan step with verdict='no_changes' routes to create_pr, skipping implement."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import (
+            WorkflowDAG, WorkflowStep, WorkflowEdge,
+            EdgeCondition, EdgeConditionType,
+        )
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        # Build a DAG matching our config: plan → no_changes → create_pr, plan → implement
+        plan_step = WorkflowStep(
+            id="plan", agent="architect",
+            next=[
+                WorkflowEdge(
+                    target="create_pr",
+                    condition=EdgeCondition(EdgeConditionType.NO_CHANGES),
+                    priority=10,
+                ),
+                WorkflowEdge(
+                    target="implement",
+                    condition=EdgeCondition(EdgeConditionType.ALWAYS),
+                ),
+            ],
+        )
+        implement_step = WorkflowStep(id="implement", agent="engineer")
+        create_pr_step = WorkflowStep(id="create_pr", agent="architect")
+
+        workflow = WorkflowDAG(
+            name="test",
+            description="test workflow",
+            steps={
+                "plan": plan_step,
+                "implement": implement_step,
+                "create_pr": create_pr_step,
+            },
+            start_step="plan",
+        )
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="no_changes",
+            _chain_depth=0,
+            _root_task_id="root-1",
+            _global_cycle_count=0,
+        )
+
+        response = _make_response("Feature already exists. Nothing to implement.")
+
+        from agent_framework.workflow.conditions import ConditionRegistry
+        # Evaluate edges in priority order — no_changes should match
+        matched_step = None
+        for edge in workflow.steps["plan"].next:
+            if ConditionRegistry.evaluate(edge.condition, task, response):
+                matched_step = workflow.steps[edge.target]
+                break
+
+        assert matched_step is not None
+        assert matched_step.id == "create_pr"
+
+    def test_plan_routes_to_implement_without_no_changes(self, queue, tmp_path):
+        """Plan step without no_changes verdict falls through to implement."""
+        from agent_framework.workflow.dag import (
+            WorkflowDAG, WorkflowStep, WorkflowEdge,
+            EdgeCondition, EdgeConditionType,
+        )
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+        )
+
+        response = _make_response("Here is the implementation plan...")
+
+        # Build same DAG edges
+        edges = [
+            WorkflowEdge(
+                target="create_pr",
+                condition=EdgeCondition(EdgeConditionType.NO_CHANGES),
+                priority=10,
+            ),
+            WorkflowEdge(
+                target="implement",
+                condition=EdgeCondition(EdgeConditionType.ALWAYS),
+            ),
+        ]
+        # Edges are sorted by priority (highest first) in WorkflowStep.__post_init__
+        edges.sort(key=lambda e: e.priority, reverse=True)
+
+        from agent_framework.workflow.conditions import ConditionRegistry
+        matched_target = None
+        for edge in edges:
+            if ConditionRegistry.evaluate(edge.condition, task, response):
+                matched_target = edge.target
+                break
+
+        assert matched_target == "implement"

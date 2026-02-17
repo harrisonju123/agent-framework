@@ -118,6 +118,11 @@ class ErrorRecoveryManager:
             if self._replan_enabled and task.retry_count >= self._replan_min_retry:
                 await self.request_replan(task)
 
+            # Clear stale upstream context from failed attempt — prevents the
+            # retried agent from seeing its own previous output as upstream input
+            task.context.pop("upstream_summary", None)
+            task.context.pop("upstream_context_file", None)
+
             # Reset task to pending so it can be retried
             self.logger.warning(
                 f"Resetting task {task.id} to pending status "

@@ -20,6 +20,7 @@ from agent_framework.workflow.conditions import (
     FilesMatchCondition,
     PRSizeUnderCondition,
     SignalTargetCondition,
+    NoChangesCondition,
 )
 
 
@@ -508,3 +509,50 @@ class TestConditionRegistry:
 
         result = ConditionRegistry.evaluate(condition, task, response)
         assert result is False
+
+
+class TestNoChangesCondition:
+    def test_no_changes_verdict_returns_true(self):
+        """verdict='no_changes' in task context → True."""
+        condition = EdgeCondition(EdgeConditionType.NO_CHANGES)
+        task = _make_task(verdict="no_changes")
+        response = _make_response()
+
+        evaluator = NoChangesCondition()
+        assert evaluator.evaluate(condition, task, response) is True
+
+    def test_approved_verdict_returns_false(self):
+        """verdict='approved' → False."""
+        condition = EdgeCondition(EdgeConditionType.NO_CHANGES)
+        task = _make_task(verdict="approved")
+        response = _make_response()
+
+        evaluator = NoChangesCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_no_verdict_returns_false(self):
+        """No verdict in context → False."""
+        condition = EdgeCondition(EdgeConditionType.NO_CHANGES)
+        task = _make_task()
+        response = _make_response()
+
+        evaluator = NoChangesCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_context_verdict_takes_priority(self):
+        """Evaluation context verdict overrides task context."""
+        condition = EdgeCondition(EdgeConditionType.NO_CHANGES)
+        task = _make_task(verdict="approved")
+        response = _make_response()
+        context = {"verdict": "no_changes"}
+
+        evaluator = NoChangesCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is True
+
+    def test_registry_evaluates_no_changes(self):
+        """NO_CHANGES condition evaluates through the registry."""
+        condition = EdgeCondition(EdgeConditionType.NO_CHANGES)
+        task = _make_task(verdict="no_changes")
+        response = _make_response()
+
+        assert ConditionRegistry.evaluate(condition, task, response) is True

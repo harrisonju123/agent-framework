@@ -108,6 +108,14 @@ class AgentConfig:
         return parts[0] if len(parts) == 2 and parts[1].isdigit() else self.id
 
 
+_NO_CHANGES_PATTERNS = [
+    re.compile(r'\balready\s+(\w+\s+)?(exists?|merged|implemented|shipped|completed|done)\b', re.IGNORECASE),
+    re.compile(r'\bno\s+(code\s+)?changes?\s+(needed|required|necessary)\b', re.IGNORECASE),
+    re.compile(r'\bnothing\s+to\s+(implement|do|change)\b', re.IGNORECASE),
+    re.compile(r'\bfeature\s+(is\s+)?(already\s+)?(in\s+)?production\b', re.IGNORECASE),
+]
+
+
 class Agent:
     """
     Agent with polling loop for processing tasks.
@@ -723,6 +731,14 @@ class Agent:
                 elif outcome.needs_fix:
                     task.context["verdict"] = "needs_fix"
 
+            # Detect "no changes needed" — architect at plan step determines
+            # the work is already done or not applicable
+            if (has_workflow and self.config.base_id == "architect"
+                    and task.context.get("workflow_step") == "plan"):
+                content = getattr(response, "content", "") or ""
+                if self._is_no_changes_response(content):
+                    task.context["verdict"] = "no_changes"
+
             self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
             # Safety net: create PR if LLM pushed but didn't create one.
@@ -742,6 +758,11 @@ class Agent:
         Delegated to BudgetManager.
         """
         self._budget.log_task_completion_metrics(task, response, task_start_time)
+
+    @staticmethod
+    def _is_no_changes_response(content: str) -> bool:
+        """Detect if response indicates no code changes are needed."""
+        return any(p.search(content) for p in _NO_CHANGES_PATTERNS)
 
     @staticmethod
     def _extract_partial_progress(content: str, max_bytes: int = 2048) -> str:
