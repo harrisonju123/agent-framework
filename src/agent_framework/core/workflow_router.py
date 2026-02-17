@@ -167,10 +167,12 @@ class WorkflowRouter:
             self.route_to_agent(task, 'architect', 'preview_review')
             return
 
-        # REVIEW/FIX tasks are routed by _queue_code_review_if_needed and
-        # _queue_review_fix_if_needed respectively — letting them also route
-        # through the DAG creates a duplicate-routing feedback loop.
-        if task.type in (TaskType.REVIEW, TaskType.FIX):
+        # Legacy REVIEW/FIX tasks are routed by _queue_code_review_if_needed
+        # and _queue_review_fix_if_needed — letting them also route through
+        # the DAG creates a duplicate-routing feedback loop.
+        # Chain tasks (chain_step=True) with REVIEW type are DAG-routed
+        # (e.g. code_review step) and must pass through.
+        if task.type in (TaskType.REVIEW, TaskType.FIX) and not task.context.get("chain_step"):
             self.logger.debug(
                 f"Skipping workflow chain for {task.id}: "
                 f"task type {task.type} handled by dedicated review routing"

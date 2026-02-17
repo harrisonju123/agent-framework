@@ -23,7 +23,7 @@ workflows:
     auto_review: true
     require_tests: true
 
-  # Production deployment workflow with checkpoint
+  # Production deployment workflow with checkpoint and code review
   production-deploy:
     description: "Production deployment workflow with approval gate"
     steps:
@@ -38,7 +38,17 @@ workflows:
           message: "Review implementation before production deployment"
           reason: "High-risk production changes require manual verification"
         next:
+          - target: code_review
+
+      code_review:
+        agent: architect
+        next:
           - target: qa
+            condition: approved
+            priority: 10
+          - target: engineer
+            condition: needs_fix
+            priority: 5
 
       qa:
         agent: qa

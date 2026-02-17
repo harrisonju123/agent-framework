@@ -176,8 +176,9 @@ class TestApprovedCondition:
 
         rejection_phrases = [
             "Tests failed, needs fix",
-            "Found issues in the code",
-            "Problems detected in implementation",
+            "This needs fixing before merge",
+            "Request changes on the PR",
+            "Changes requested by reviewer",
         ]
 
         evaluator = ApprovedCondition()
@@ -185,6 +186,42 @@ class TestApprovedCondition:
             response = _make_response(phrase)
             assert evaluator.evaluate(condition, task, response) is False, \
                 f"Incorrectly approved: {phrase}"
+
+    def test_negated_rejection_not_matched(self):
+        """Negated phrases like 'No issues found' should NOT trigger rejection."""
+        condition = EdgeCondition(EdgeConditionType.APPROVED)
+        task = _make_task()
+        evaluator = ApprovedCondition()
+
+        # These contain words that look like rejection but are negated/benign
+        safe_phrases = [
+            "No issues found. Code approved",
+            "No blocking issues found, approved",
+            "Zero problems detected. LGTM",
+        ]
+
+        for phrase in safe_phrases:
+            response = _make_response(phrase)
+            assert evaluator.evaluate(condition, task, response) is True, \
+                f"False rejection on negated phrase: {phrase}"
+
+    def test_no_blocking_issues_found(self):
+        """'No blocking issues found' alone (no approval keyword) defaults to False."""
+        condition = EdgeCondition(EdgeConditionType.APPROVED)
+        task = _make_task()
+        evaluator = ApprovedCondition()
+
+        response = _make_response("No blocking issues found")
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_rejection_wins_over_approval_in_same_response(self):
+        """When both rejection and approval keywords appear, rejection takes priority."""
+        condition = EdgeCondition(EdgeConditionType.APPROVED)
+        task = _make_task()
+        evaluator = ApprovedCondition()
+
+        response = _make_response("The code needs fix before it can be approved")
+        assert evaluator.evaluate(condition, task, response) is False
 
     def test_no_clear_verdict(self):
         """Default to False when no clear approval/rejection."""

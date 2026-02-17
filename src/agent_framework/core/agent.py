@@ -710,6 +710,19 @@ class Agent:
                 self.logger.debug(f"Checking if code review needed for {task.id}")
                 self._review_cycle.queue_code_review_if_needed(task, response)
                 self._review_cycle.queue_review_fix_if_needed(task, response, self._sync_jira_status)
+            # Store structured verdict so condition evaluators use it
+            # instead of falling back to fragile keyword matching.
+            # Only for review agents — engineer output may contain
+            # stray keywords ("CRITICAL" in logs) that cause false verdicts.
+            if has_workflow and self.config.base_id in ("qa", "architect"):
+                outcome = self._review_cycle.parse_review_outcome(
+                    getattr(response, "content", "") or ""
+                )
+                if outcome.approved:
+                    task.context["verdict"] = "approved"
+                elif outcome.needs_fix:
+                    task.context["verdict"] = "needs_fix"
+
             self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
             # Safety net: create PR if LLM pushed but didn't create one.

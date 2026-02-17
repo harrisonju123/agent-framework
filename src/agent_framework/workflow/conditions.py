@@ -1,6 +1,7 @@
 """Condition evaluators for workflow edge transitions."""
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
@@ -11,6 +12,23 @@ if TYPE_CHECKING:
 from .dag import EdgeCondition, EdgeConditionType
 
 logger = logging.getLogger(__name__)
+
+# Rejection patterns — specific phrases that indicate actionable issues.
+# Word-boundary anchored to avoid matching negated forms ("No issues found").
+_REJECTION_PATTERNS = [
+    re.compile(r'\bneeds?\s+fix', re.IGNORECASE),
+    re.compile(r'\brequest[_\s]changes?\b', re.IGNORECASE),
+    re.compile(r'\bchanges?\s+requested\b', re.IGNORECASE),
+]
+
+# Approval patterns — explicit positive verdicts.
+_APPROVAL_PATTERNS = [
+    re.compile(r'\bapproved?\b', re.IGNORECASE),
+    re.compile(r'\blgtm\b', re.IGNORECASE),
+    re.compile(r'\bready\s+for\s+merge\b', re.IGNORECASE),
+    re.compile(r'\bpasses?\s+all\s+checks?\b', re.IGNORECASE),
+    re.compile(r'\blooks\s+good\b', re.IGNORECASE),
+]
 
 
 class ConditionEvaluator(ABC):
@@ -80,25 +98,13 @@ class ApprovedCondition(ConditionEvaluator):
 
         # Fall back to keyword heuristic on response content
         if hasattr(response, "content") and response.content:
-            content = str(response.content).lower()
-            rejection_keywords = [
-                "needs fix",
-                "issues found",
-                "problems detected",
-            ]
-            approval_keywords = [
-                "approved",
-                "looks good",
-                "lgtm",
-                "ready for merge",
-                "passes all checks",
-            ]
+            content = str(response.content)
 
-            # Check rejection first — a response mentioning past failures
-            # alongside approval should be treated carefully
-            if any(keyword in content for keyword in rejection_keywords):
+            # Check rejection first — word-boundary patterns avoid matching
+            # negated forms like "No issues found"
+            if any(p.search(content) for p in _REJECTION_PATTERNS):
                 return False
-            if any(keyword in content for keyword in approval_keywords):
+            if any(p.search(content) for p in _APPROVAL_PATTERNS):
                 return True
 
         return False

@@ -375,3 +375,42 @@ class TestRouteToAgent:
         router.route_to_agent(task, "qa", "test failure")
 
         queue.push.assert_not_called()
+
+
+# -- REVIEW/FIX guard for chain tasks --
+
+class TestReviewFixGuard:
+    def test_chain_review_task_passes_through_guard(self, router, queue):
+        """Chain task with type REVIEW and chain_step=True is NOT blocked."""
+        task = _make_task(chain_step=True, workflow_step="code_review")
+        task.type = TaskType.REVIEW
+        response = _make_response()
+
+        router.enforce_chain(task, response)
+
+        # Guard logs "handled by dedicated review routing" only for blocked tasks.
+        blocked_calls = [
+            call for call in router.logger.debug.call_args_list
+            if "handled by dedicated review routing" in str(call)
+        ]
+        assert len(blocked_calls) == 0, "Chain REVIEW task was incorrectly blocked by guard"
+
+    def test_non_chain_review_task_blocked(self, router, queue):
+        """Legacy REVIEW task (no chain_step) IS blocked by the guard."""
+        task = _make_task()
+        task.type = TaskType.REVIEW
+        response = _make_response()
+
+        router.enforce_chain(task, response)
+
+        queue.push.assert_not_called()
+
+    def test_non_chain_fix_task_blocked(self, router, queue):
+        """Legacy FIX task (no chain_step) IS blocked by the guard."""
+        task = _make_task()
+        task.type = TaskType.FIX
+        response = _make_response()
+
+        router.enforce_chain(task, response)
+
+        queue.push.assert_not_called()

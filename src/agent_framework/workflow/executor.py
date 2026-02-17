@@ -395,6 +395,8 @@ class WorkflowExecutor:
             "_root_task_id": root_task_id,
             "_global_cycle_count": task.context.get("_global_cycle_count", 0) + 1,
         }
+        # Clear stale verdict so the next agent's output is evaluated fresh
+        context.pop("verdict", None)
         if task.context.get("fan_in"):
             context["fan_in"] = True
             context["parent_task_id"] = task.context.get("parent_task_id")

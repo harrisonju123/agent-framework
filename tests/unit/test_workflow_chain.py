@@ -1371,3 +1371,92 @@ class TestTitleBasedDedup:
             chain_id="chain-task-1-engineer-d1",
         )
         assert result is False
+
+
+# -- Verdict storage and clearing --
+
+class TestVerdictStorageAndClearing:
+    """Verify verdict is stored before workflow routing and cleared in chain tasks."""
+
+    def test_verdict_stored_before_workflow_routing(self, agent, queue):
+        """_run_post_completion_flow stores verdict in task.context for review agents."""
+        # Verdict only stored for qa/architect — switch from default engineer
+        agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="default")
+        response = _make_response("All checks pass, approved")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "approved"
+
+    def test_needs_fix_verdict_stored(self, agent, queue):
+        """Verdict 'needs_fix' stored when review finds issues."""
+        agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="default")
+        # CRITICAL: (uppercase) triggers parse_review_outcome's critical_issues pattern
+        response = _make_response("CRITICAL: auth module has SQL injection vulnerability")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "needs_fix"
+
+    def test_engineer_does_not_store_verdict(self, agent, queue):
+        """Engineer agent skips verdict storage to avoid false positives from stray keywords."""
+        task = _make_task(workflow="default")
+        response = _make_response("Implemented feature. CRITICAL log line was added.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert "verdict" not in task.context
+
+    def test_verdict_cleared_in_chain_task(self, queue, tmp_path):
+        """Chain task context does NOT inherit verdict from parent task."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            verdict="approved",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        chain_task = executor._build_chain_task(task, engineer_step, "qa")
+
+        assert "verdict" not in chain_task.context
+
+    def test_no_verdict_stored_for_non_workflow_tasks(self, agent, queue):
+        """Tasks without a workflow don't get a verdict stored."""
+        task = _make_task(workflow="default")
+        del task.context["workflow"]
+        response = _make_response("approved")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert "verdict" not in task.context
