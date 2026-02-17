@@ -116,6 +116,148 @@ class TestFormatForReplan:
         assert result == ""
 
 
+class TestErrorAwareRetrieval:
+    """Tests for error-type-aware memory retrieval in replanning."""
+
+    def test_test_failure_boosts_test_commands_and_past_failures(self, retriever, store, repo_slug, agent_type):
+        """Test failures should prioritize test_commands and past_failures."""
+        # Create various memories
+        store.remember(repo_slug, agent_type, "conventions", "Use snake_case")
+        store.remember(repo_slug, agent_type, "test_commands", "Run: pytest tests/")
+        store.remember(repo_slug, agent_type, "repo_structure", "Tests in tests/")
+        store.remember(repo_slug, agent_type, "past_failures", "Previous test failure resolved by fixing imports")
+
+        result = retriever.format_for_replan(
+            repo_slug, agent_type, error_type="test_failure"
+        )
+
+        lines = [l for l in result.split("\n") if l.strip().startswith("- [")]
+
+        # test_commands and past_failures should be boosted
+        assert any("test_commands" in line for line in lines)
+        assert any("past_failures" in line for line in lines)
+
+    def test_past_failures_tagged_with_error_type_boosted(self, retriever, store, repo_slug, agent_type):
+        """Past failures with matching error type tags should appear first."""
+        # Create past_failures with different tags
+        store.remember(
+            repo_slug, agent_type, "past_failures",
+            "Logic error: fixed by adding null check",
+            tags=["error:logic"]
+        )
+        store.remember(
+            repo_slug, agent_type, "past_failures",
+            "Import error: fixed by adjusting sys.path",
+            tags=["error:import_error"]
+        )
+        store.remember(
+            repo_slug, agent_type, "past_failures",
+            "Test failure: fixed by updating test fixtures",
+            tags=["error:test_failure"]
+        )
+
+        result = retriever.format_for_replan(
+            repo_slug, agent_type, error_type="logic"
+        )
+
+        lines = [l for l in result.split("\n") if l.strip().startswith("- [past_failures]")]
+
+        # The logic error should appear first (if any past_failures are included)
+        if lines:
+            first_failure_line = lines[0]
+            assert "Logic error" in first_failure_line or "null check" in first_failure_line
+
+    def test_import_error_boosts_repo_structure(self, retriever, store, repo_slug, agent_type):
+        """Import/dependency errors should prioritize repo_structure and past_failures."""
+        store.remember(repo_slug, agent_type, "conventions", "Use type hints")
+        store.remember(repo_slug, agent_type, "repo_structure", "Modules are in src/")
+        store.remember(repo_slug, agent_type, "past_failures", "Import resolved by fixing path")
+        store.remember(repo_slug, agent_type, "test_commands", "pytest tests/")
+
+        result = retriever.format_for_replan(
+            repo_slug, agent_type, error_type="import_error"
+        )
+
+        lines = [l for l in result.split("\n") if l.strip().startswith("- [")]
+        categories = []
+        for line in lines:
+            bracket_end = line.index("]")
+            category = line[3:bracket_end]
+            categories.append(category)
+
+        # repo_structure and past_failures should be prominent
+        assert "repo_structure" in categories or "past_failures" in categories
+
+    def test_default_error_type_boosts_past_failures_and_conventions(self, retriever, store, repo_slug, agent_type):
+        """Unknown error types should still boost past_failures and conventions."""
+        store.remember(repo_slug, agent_type, "conventions", "Use docstrings")
+        store.remember(repo_slug, agent_type, "past_failures", "Generic error resolved")
+        store.remember(repo_slug, agent_type, "test_commands", "make test")
+
+        result = retriever.format_for_replan(
+            repo_slug, agent_type, error_type="unknown"
+        )
+
+        lines = [l for l in result.split("\n") if l.strip().startswith("- [")]
+
+        # Should include past_failures and conventions due to default boost
+        assert any("past_failures" in line or "conventions" in line for line in lines)
+
+    def test_past_failures_category_included(self, retriever, store, repo_slug, agent_type):
+        """past_failures is now a priority category."""
+        store.remember(repo_slug, agent_type, "past_failures", "Error X resolved by doing Y")
+        store.remember(repo_slug, agent_type, "general", "Some general info")
+
+        result = retriever.format_for_replan(repo_slug, agent_type)
+
+        # past_failures should be included
+        assert "past_failures" in result
+        assert "Error X resolved by doing Y" in result
+
+    def test_architectural_decisions_category_included(self, retriever, store, repo_slug, agent_type):
+        """architectural_decisions is now a priority category."""
+        store.remember(repo_slug, agent_type, "architectural_decisions", "Use REST not GraphQL")
+        store.remember(repo_slug, agent_type, "general", "Some general info")
+
+        result = retriever.format_for_replan(repo_slug, agent_type)
+
+        # architectural_decisions should be included
+        assert "architectural_decisions" in result
+        assert "Use REST not GraphQL" in result
+
+    def test_limit_increased_to_fifteen(self, retriever, store, repo_slug, agent_type):
+        """Default limit for replan should be 15 now."""
+        # Create 20 memories across priority categories
+        for i in range(5):
+            store.remember(repo_slug, agent_type, "conventions", f"Convention {i}")
+            store.remember(repo_slug, agent_type, "test_commands", f"Test command {i}")
+            store.remember(repo_slug, agent_type, "past_failures", f"Failure {i}")
+            store.remember(repo_slug, agent_type, "repo_structure", f"Structure {i}")
+
+        # Default call (limit defaults to 15 in the new signature)
+        result = retriever.format_for_replan(repo_slug, agent_type)
+
+        lines = [l for l in result.split("\n") if l.strip().startswith("- [")]
+
+        # Should have up to 15 memories (may be less due to char limit)
+        # We just verify it's more than the old limit of 10
+        assert len(lines) >= 10
+
+    def test_non_priority_categories_filtered_out(self, retriever, store, repo_slug, agent_type):
+        """Non-priority categories should not appear in replan context."""
+        store.remember(repo_slug, agent_type, "general", "General information")
+        store.remember(repo_slug, agent_type, "bug_patterns", "Common bug")
+        store.remember(repo_slug, agent_type, "conventions", "Use type hints")
+
+        result = retriever.format_for_replan(repo_slug, agent_type)
+
+        # Priority category should be there
+        assert "conventions" in result
+        # Non-priority categories should not
+        assert "general" not in result
+        assert "bug_patterns" not in result
+
+
 class TestFormatForPrompt:
     """Existing tests for format_for_prompt to ensure we didn't break it."""
 

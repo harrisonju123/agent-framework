@@ -101,13 +101,21 @@ class MemoryRetriever:
         repo_slug: str,
         agent_type: str,
         task_tags: Optional[List[str]] = None,
-        limit: int = 10,
+        limit: int = 15,
+        current_error: Optional[str] = None,
+        error_type: Optional[str] = None,
     ) -> str:
         """Build a replan-specific prompt section with relevant memories.
 
-        Applies 2x boost to priority categories (conventions, test_commands, repo_structure)
-        which are most actionable during replanning. Uses a lower character limit to keep
-        replan prompts concise.
+        Queries 5 priority categories with error-type-aware limits:
+        - conventions: coding standards, patterns to follow
+        - test_commands: how to run/fix tests
+        - repo_structure: where key files live
+        - past_failures: what went wrong before and how it was resolved
+        - architectural_decisions: design choices that constrain implementation
+
+        Uses error-type-aware retrieval to prioritize the most relevant memories.
+        For past_failures, boosts memories tagged with the current error type.
 
         Returns empty string if no memories or memory system disabled.
         """
@@ -116,14 +124,49 @@ class MemoryRetriever:
             return ""
 
         # Priority categories for replanning — these are most actionable
-        priority_categories = {"conventions", "test_commands", "repo_structure"}
+        priority_categories = {
+            "conventions",
+            "test_commands",
+            "repo_structure",
+            "past_failures",
+            "architectural_decisions",
+        }
 
-        # Score with category boost
+        # Error-type-aware category boosting: give more weight to relevant categories
+        category_boosts = {cat: 1.0 for cat in priority_categories}
+
+        if error_type == "test_failure":
+            category_boosts["test_commands"] = 3.0
+            category_boosts["past_failures"] = 3.0
+        elif error_type in ("dependency", "import_error"):
+            category_boosts["repo_structure"] = 3.0
+            category_boosts["past_failures"] = 3.0
+        elif error_type in ("logic", "type_error", "validation"):
+            category_boosts["conventions"] = 3.0
+            category_boosts["past_failures"] = 3.0
+        else:
+            # Default: boost past_failures and conventions
+            category_boosts["past_failures"] = 2.0
+            category_boosts["conventions"] = 2.0
+
+        # Score with category and error-type boosts
         scored = []
         for mem in all_memories:
+            # Skip memories not in priority categories
+            if mem.category not in priority_categories:
+                continue
+
             score = _relevance_score(mem, task_tags)
-            if mem.category in priority_categories:
-                score *= 2.0
+
+            # Apply category boost
+            score *= category_boosts.get(mem.category, 1.0)
+
+            # Additional boost for past_failures matching current error type
+            if mem.category == "past_failures" and error_type:
+                error_tag = f"error:{error_type}"
+                if mem.tags and error_tag in mem.tags:
+                    score *= 2.0  # Double score for matching error types
+
             scored.append((mem, score))
 
         scored.sort(key=lambda x: x[1], reverse=True)

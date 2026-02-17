@@ -1576,6 +1576,10 @@ Verdict:"""
                     f"{approach_str}"
                 )
 
+        # Categorize current error first (needed for error-aware memory retrieval)
+        error_type = self._categorize_error(error)
+        error_type_str = f" (Type: {error_type})" if error_type else ""
+
         # Inject relevant memories for context
         memory_section = ""
         if self._memory_enabled:
@@ -1592,6 +1596,8 @@ Verdict:"""
                     repo_slug=repo_slug,
                     agent_type=self.config.base_id,
                     task_tags=task_tags,
+                    current_error=error,
+                    error_type=error_type,
                 )
 
                 if memory_section:
@@ -1601,10 +1607,6 @@ Verdict:"""
                         repo=repo_slug,
                         chars_injected=len(memory_section),
                     )
-
-        # Categorize current error
-        error_type = self._categorize_error(error)
-        error_type_str = f" (Type: {error_type})" if error_type else ""
 
         # Include original plan if available
         original_plan_section = ""
@@ -1664,6 +1666,9 @@ Pay attention to the error type and previous approaches tried."""
                 }
                 task.replan_history.append(history_entry)
 
+                # Store failure pattern as memory for future replans
+                self._store_failure_memory(task, error, error_type, revised_plan)
+
                 # Store in context for prompt injection
                 task.context["_revised_plan"] = revised_plan
                 task.context["_replan_attempt"] = task.retry_count
@@ -1688,6 +1693,41 @@ Pay attention to the error type and previous approaches tried."""
 
         except Exception as e:
             self.logger.warning(f"Replanning error (non-fatal): {e}")
+
+    def _store_failure_memory(self, task: Task, error: str, error_type: Optional[str], revised_plan: str) -> None:
+        """Store the failure→resolution pattern as a memory for future replans.
+
+        Stores a past_failures memory with an error-type tag for later boosting
+        when similar errors occur. Format: error:{error_type}
+        """
+        if not self._memory_enabled:
+            return
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return
+
+        # Summarize the failure pattern
+        error_summary = error[:200] if error else "unknown error"
+        plan_summary = revised_plan[:200] if revised_plan else "no revised plan"
+        content = f"Error type '{error_type or 'unknown'}': {error_summary}. Resolution: {plan_summary}"
+
+        tags = []
+        if error_type:
+            tags.append(f"error:{error_type}")
+
+        try:
+            self._memory_store.remember(
+                repo_slug=repo_slug,
+                agent_type=self.config.base_id,
+                category="past_failures",
+                content=content,
+                source_task_id=task.id,
+                tags=tags,
+            )
+            self.logger.debug(f"Stored failure memory for task {task.id} with error type {error_type}")
+        except Exception as e:
+            self.logger.warning(f"Failed to store failure memory: {e}")
 
     def _inject_replan_context(self, prompt: str, task: Task) -> str:
         """Append revised plan and attempt history to prompt if available."""
