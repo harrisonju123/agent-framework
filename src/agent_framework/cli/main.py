@@ -319,23 +319,18 @@ def pull(ctx, project, max):
 @click.option("--no-dashboard", is_flag=True, help="Skip live dashboard")
 @click.option("--epic", "-e", help="JIRA epic key to process (e.g., PROJ-100)")
 @click.option("--parallel", "-p", is_flag=True, help="Process epic tickets in parallel (requires worktrees)")
-@click.option("--auto-approve", is_flag=True, help="Skip plan checkpoint, run fully autonomous")
 @click.option("--preview", is_flag=True, help="Run engineer in read-only preview mode before implementation")
 @click.pass_context
-def work(ctx, no_dashboard, epic, parallel, auto_approve, preview):
+def work(ctx, no_dashboard, epic, parallel, preview):
     """Interactive mode: describe what to build, delegate to Architect agent.
 
     With --epic: Process all tickets in an existing JIRA epic.
     Without --epic: Describe a new feature to implement.
 
     Use --parallel with --epic to process multiple tickets concurrently.
-    Use --auto-approve to skip the plan review checkpoint.
     Use --preview to have the engineer produce a read-only execution plan for architect approval before writing any code.
     """
     workspace = ctx.obj["workspace"]
-
-    if auto_approve and preview:
-        console.print("[yellow]Warning: --preview is ignored when --auto-approve is set[/]")
 
     console.print("[bold cyan]🤖 Agent Framework - Interactive Mode[/]")
     console.print()
@@ -345,7 +340,7 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve, preview):
 
     # Handle epic processing mode
     if epic:
-        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel, auto_approve, preview)
+        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel, preview)
         return
 
     # Check if repos are registered
@@ -380,12 +375,7 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve, preview):
         console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/]")
         console.print("[dim]No JIRA project configured - using local task tracking[/]")
 
-    if auto_approve:
-        workflow = "default_auto"
-    elif preview:
-        workflow = "preview"
-    else:
-        workflow = "default"
+    workflow = "preview" if preview else "default"
 
     # Step 3: Create planning task for Architect
     from ..core.task_builder import build_planning_task
@@ -404,10 +394,6 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve, preview):
     queue.push(task, "architect")
 
     console.print(f"\n[green]✓[/] Task queued: Analyze goal and create JIRA epic with breakdown")
-
-    if not auto_approve:
-        console.print("[dim]Workflow will pause after architect plans for your review.[/]")
-        console.print("[dim]Run 'agent approve <task-id>' to proceed to implementation.[/]")
 
     # Step 4: Ensure agents are running (don't block)
     orchestrator = Orchestrator(workspace)
@@ -1710,115 +1696,6 @@ def resume(ctx):
 
 
 @cli.command()
-@click.argument("task_id", required=False)
-@click.option("--message", "-m", help="Optional approval message")
-@click.pass_context
-def approve(ctx, task_id, message):
-    """Approve a task waiting at a checkpoint.
-
-    Example:
-        agent approve                        # List all checkpoints
-        agent approve chain-abc123-engineer  # Approve specific checkpoint
-        agent approve chain-abc123-engineer -m "Reviewed and looks good"
-    """
-    import os
-    from datetime import UTC, datetime
-    from ..core.task import TaskStatus
-
-    workspace = ctx.obj["workspace"]
-    queue = FileQueue(workspace)
-    queue_dir = workspace / ".agent-communication" / "queues"
-    checkpoint_dir = queue_dir / "checkpoints"
-
-    if not task_id:
-        if not checkpoint_dir.exists() or not any(checkpoint_dir.glob("*.json")):
-            console.print("[green]No tasks awaiting approval at checkpoints[/]")
-            return
-
-        console.print("[bold]Tasks Awaiting Checkpoint Approval:[/]")
-        console.print()
-
-        table = Table()
-        table.add_column("Task ID")
-        table.add_column("Title")
-        table.add_column("Checkpoint")
-        table.add_column("Message")
-
-        for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
-            task = FileQueue.load_task_file(checkpoint_file)
-
-            title = task.title[:40] + "..." if len(task.title) > 40 else task.title
-            cp_msg = task.checkpoint_message or "N/A"
-            if len(cp_msg) > 50:
-                cp_msg = cp_msg[:50] + "..."
-
-            table.add_row(
-                task.id,
-                title,
-                task.checkpoint_reached or "N/A",
-                cp_msg,
-            )
-
-        console.print(table)
-        console.print()
-        console.print("[dim]Use 'agent approve <task_id>' to approve a specific checkpoint[/]")
-        return
-
-    checkpoint_file = checkpoint_dir / f"{task_id}.json"
-    if not checkpoint_file.exists():
-        console.print(f"[red]Error: No task found at checkpoint with ID '{task_id}'[/]")
-        console.print("[dim]Use 'agent approve' to see all checkpoints[/]")
-        return
-
-    task = FileQueue.load_task_file(checkpoint_file)
-
-    if task.status != TaskStatus.AWAITING_APPROVAL:
-        console.print(f"[yellow]Warning: Task {task_id} is not awaiting approval[/]")
-        console.print(f"[dim]Current status: {task.status}[/]")
-        return
-
-    console.print(f"[bold]Checkpoint Details:[/]")
-    console.print(f"  Task: {task.title}")
-    console.print(f"  Checkpoint: {task.checkpoint_reached}")
-    console.print(f"  Message: {task.checkpoint_message}")
-    console.print()
-
-    if not click.confirm("Approve this checkpoint and continue workflow?"):
-        console.print("[yellow]Approval cancelled[/]")
-        return
-
-    approver = os.getenv("USER", "user")
-    task.approve_checkpoint(approver)
-
-    if message:
-        task.notes.append(f"Checkpoint approved: {message}")
-    else:
-        task.notes.append(f"Checkpoint approved at {datetime.now(UTC).isoformat()}")
-
-    # Route directly to next workflow step instead of re-queuing to the
-    # same agent — avoids duplicate LLM execution on the completed work
-    from ..workflow.executor import resume_after_checkpoint
-
-    queue = FileQueue(workspace)
-    try:
-        routed = resume_after_checkpoint(task, queue, workspace)
-        if routed:
-            checkpoint_file.unlink()
-            console.print(f"[green]Checkpoint approved for task {task_id}[/]")
-            console.print(f"[dim]Task routed to next workflow step[/]")
-        else:
-            # Preserve checkpoint for retry — don't re-queue to same agent
-            console.print(f"[yellow]Checkpoint approved but routing to next step failed[/]")
-            console.print(f"[dim]Checkpoint preserved — retry with: agent approve {task_id}[/]")
-    except Exception as e:
-        console.print(f"[red]Error routing task after approval: {e}[/]")
-        console.print("[dim]Checkpoint file preserved — task not lost[/]")
-        return
-
-    console.print(f"[dim]Monitor with: agent status --watch[/]")
-
-
-@cli.command()
 @click.option("--fix", is_flag=True, help="Auto-fix detected issues")
 @click.pass_context
 def check(ctx, fix):
@@ -2134,7 +2011,7 @@ This PR implements the same pattern/functionality as the reference implementatio
         traceback.print_exc()
 
 
-def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False, auto_approve: bool = False, preview: bool = False):
+def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False, preview: bool = False):
     """Handle --epic mode: process tickets in a JIRA epic.
 
     Args:
@@ -2144,14 +2021,10 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         epic_key: JIRA epic key (e.g., PROJ-100)
         no_dashboard: Skip dashboard if True
         parallel: If True, process tickets in parallel (no dependencies)
-        auto_approve: If True, skip plan checkpoint (use default_auto workflow)
         preview: If True, run engineer in read-only preview mode first
     """
     from datetime import datetime
     import time
-
-    if auto_approve and preview:
-        console.print("[yellow]Warning: --preview is ignored when --auto-approve is set[/]")
 
     # Validate epic key format
     if "-" not in epic_key:
@@ -2208,12 +2081,7 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             console.print("[yellow]Cancelled[/]")
             return
 
-        if auto_approve:
-            workflow = "default_auto"
-        elif preview:
-            workflow = "preview"
-        else:
-            workflow = "default"
+        workflow = "preview" if preview else "default"
 
         # Determine target repository from epic or config
         github_repo = None

@@ -1,8 +1,8 @@
-# Example workflow configurations with checkpoint support
+# Example workflow configurations
 # Copy this file to workflows.yaml and customize for your needs
 
 workflows:
-  # Simple workflow: architect plans, engineer implements, no approval needed
+  # Simple workflow: architect plans, engineer implements, no QA needed
   simple:
     description: "Quick workflow for bug fixes and small changes"
     agents:
@@ -23,9 +23,9 @@ workflows:
     auto_review: true
     require_tests: true
 
-  # Production deployment workflow with checkpoint and code review
+  # Production deployment workflow with code review
   production-deploy:
-    description: "Production deployment workflow with approval gate"
+    description: "Production deployment workflow with full code review"
     steps:
       architect:
         agent: architect
@@ -34,9 +34,6 @@ workflows:
 
       engineer:
         agent: engineer
-        checkpoint:
-          message: "Review implementation before production deployment"
-          reason: "High-risk production changes require manual verification"
         next:
           - target: code_review
 
@@ -58,9 +55,9 @@ workflows:
     auto_review: true
     require_tests: true
 
-  # Database migration workflow with checkpoint
+  # Database migration workflow
   schema-migration:
-    description: "Database schema migration with safety gate"
+    description: "Database schema migration with QA verification"
     steps:
       architect:
         agent: architect
@@ -69,9 +66,6 @@ workflows:
 
       engineer:
         agent: engineer
-        checkpoint:
-          message: "Review migration script for data integrity and rollback plan"
-          reason: "Database migrations are difficult to roll back"
         next:
           - target: qa
 
@@ -83,9 +77,9 @@ workflows:
     auto_review: true
     require_tests: true
 
-  # Conditional workflow with size-based checkpoint
+  # Conditional workflow with size-based routing
   smart-deploy:
-    description: "Smart deployment with conditional approval based on change size"
+    description: "Smart deployment with conditional routing based on change size"
     steps:
       architect:
         agent: architect
@@ -102,17 +96,13 @@ workflows:
               max_files: 5
             priority: 10
 
-          # Large changes require approval first
-          - target: review
+          # Large changes go through code review first
+          - target: code_review
             condition: always
             priority: 0
 
-      # Review checkpoint for large changes
-      review:
-        agent: engineer
-        checkpoint:
-          message: "Large change detected (>5 files) - review scope and impact"
-          reason: "Extensive changes require additional scrutiny"
+      code_review:
+        agent: architect
         next:
           - target: qa
 

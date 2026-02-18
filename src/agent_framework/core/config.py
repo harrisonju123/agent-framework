@@ -250,7 +250,6 @@ class WorkflowStepDefinition(BaseModel):
     agent: str
     next: Optional[List[Dict[str, Any]]] = None  # List of edge definitions
     task_type: Optional[str] = None  # Override default task type
-    checkpoint: Optional[Dict[str, str]] = None  # Parsed into CheckpointConfig in to_dag()
 
 
 class WorkflowDefinition(BaseModel):
@@ -317,7 +316,6 @@ class WorkflowDefinition(BaseModel):
             WorkflowEdge,
             EdgeCondition,
             EdgeConditionType,
-            CheckpointConfig,
         )
 
         if self.is_legacy_format:
@@ -354,19 +352,11 @@ class WorkflowDefinition(BaseModel):
                             priority=priority
                         ))
 
-            checkpoint = None
-            if step_def.checkpoint:
-                checkpoint = CheckpointConfig(
-                    message=step_def.checkpoint["message"],
-                    reason=step_def.checkpoint.get("reason"),
-                )
-
             dag_steps[step_id] = WorkflowStep(
                 id=step_id,
                 agent=step_def.agent,
                 next=edges,
                 task_type_override=step_def.task_type,
-                checkpoint=checkpoint
             )
 
         dag = WorkflowDAG(

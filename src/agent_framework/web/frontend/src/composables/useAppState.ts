@@ -4,7 +4,7 @@ import { useLogStream } from './useLogStream'
 import { useApi } from './useApi'
 import { useToast } from 'primevue/usetoast'
 import { useConfirm } from 'primevue/useconfirm'
-import type { CheckpointData, LogEntry } from '../types'
+import type { LogEntry } from '../types'
 
 export interface AppState {
   // WebSocket state
@@ -28,8 +28,6 @@ export interface AppState {
   deleteTask: ReturnType<typeof useApi>['deleteTask']
   createTask: ReturnType<typeof useApi>['createTask']
   getActiveTasks: ReturnType<typeof useApi>['getActiveTasks']
-  approveCheckpoint: ReturnType<typeof useApi>['approveCheckpoint']
-  rejectCheckpoint: ReturnType<typeof useApi>['rejectCheckpoint']
   pauseSystem: ReturnType<typeof useApi>['pauseSystem']
   resumeSystem: ReturnType<typeof useApi>['resumeSystem']
   startAllAgents: ReturnType<typeof useApi>['startAllAgents']
@@ -46,7 +44,6 @@ export interface AppState {
   queues: ComputedRef<any[]>
   events: ComputedRef<any[]>
   failedTasks: ComputedRef<any[]>
-  pendingCheckpoints: ComputedRef<CheckpointData[]>
   health: ComputedRef<any>
   agentIds: ComputedRef<string[]>
   queueSummary: ComputedRef<string>
@@ -64,7 +61,6 @@ export interface AppState {
   handleStop: () => Promise<void>
   handlePause: () => Promise<void>
   handleRetryAll: () => Promise<void>
-  handleApproveAll: () => Promise<void>
   handleRetryTask: (taskId: string) => Promise<void>
   handleCancelTask: (taskId: string) => Promise<void>
   handleDeleteTask: (taskId: string) => Promise<void>
@@ -86,7 +82,7 @@ export function provideAppState(): AppState {
   const { state, connected, error: wsError, reconnect, reconnecting, reconnectAttempt } = useWebSocket()
   const { logs, connected: logsConnected, clear: logsClear, reconnect: logsReconnect } = useLogStream()
   const {
-    restartAgent, retryTask, cancelTask, deleteTask, createTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
+    restartAgent, retryTask, cancelTask, deleteTask, createTask, getActiveTasks, pauseSystem, resumeSystem,
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, error: apiError,
   } = useApi()
@@ -110,7 +106,6 @@ export function provideAppState(): AppState {
   const queues = computed(() => state.value?.queues ?? [])
   const events = computed(() => state.value?.events ?? [])
   const failedTasks = computed(() => state.value?.failed_tasks ?? [])
-  const pendingCheckpoints = computed(() => state.value?.pending_checkpoints ?? [])
   const health = computed(() => state.value?.health ?? { passed: true, checks: [], warnings: [] })
   const agentIds = computed(() => agents.value.map((a: any) => a.id))
 
@@ -227,22 +222,6 @@ export function provideAppState(): AppState {
     }
   }
 
-  async function handleApproveAll() {
-    const checkpoints = pendingCheckpoints.value
-    if (checkpoints.length === 0) return
-    let succeeded = 0
-    let failed = 0
-    for (const cp of checkpoints) {
-      const result = await approveCheckpoint(cp.id)
-      if (result?.success) { succeeded++ } else { failed++ }
-    }
-    if (failed === 0) {
-      showToast(`Approved ${succeeded} checkpoint(s)`, 'success')
-    } else {
-      showToast(`Approved ${succeeded}, failed to approve ${failed} checkpoint(s)`, 'error')
-    }
-  }
-
   async function handleRetryTask(taskId: string) {
     const result = await retryTask(taskId)
     if (result?.success) {
@@ -273,13 +252,13 @@ export function provideAppState(): AppState {
   const appState: AppState = {
     state, connected, wsError, reconnect, reconnecting, reconnectAttempt,
     logs, logsConnected, logsClear, logsReconnect,
-    restartAgent, retryTask, cancelTask, deleteTask, createTask, getActiveTasks, approveCheckpoint, rejectCheckpoint, pauseSystem, resumeSystem,
+    restartAgent, retryTask, cancelTask, deleteTask, createTask, getActiveTasks, pauseSystem, resumeSystem,
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, apiError,
-    isPaused, agents, queues, events, failedTasks, pendingCheckpoints,
+    isPaused, agents, queues, events, failedTasks,
     health, agentIds, queueSummary,
     setupComplete, showSetupPrompt, checkSetupStatus, handleSetupComplete, dismissSetupPrompt,
-    handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleApproveAll, handleRetryTask, handleCancelTask, handleDeleteTask,
+    handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleRetryTask, handleCancelTask, handleDeleteTask,
     showWorkDialog, showAnalyzeDialog, showTicketDialog, showCreateTaskDialog,
     showToast, showConfirm,
   }

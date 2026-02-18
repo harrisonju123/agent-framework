@@ -1,26 +1,14 @@
 <script setup lang="ts">
-import { ref } from 'vue'
 import { useAppState } from '../composables/useAppState'
 import KpiCards from '../components/KpiCards.vue'
 import AgentCard from '../components/AgentCard.vue'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import FailedTasks from '../components/FailedTasks.vue'
-import PendingCheckpoints from '../components/PendingCheckpoints.vue'
-import CheckpointDetailDialog from '../components/dialogs/CheckpointDetailDialog.vue'
-import type { CheckpointData } from '../types'
 
 const {
-  agents, queues, events, failedTasks, pendingCheckpoints,
+  agents, queues, events, failedTasks,
   handleRestart, handleRetryTask,
 } = useAppState()
-
-const selectedCheckpoint = ref<CheckpointData | null>(null)
-const showCheckpointDialog = ref(false)
-
-function handleSelectCheckpoint(checkpoint: CheckpointData) {
-  selectedCheckpoint.value = checkpoint
-  showCheckpointDialog.value = true
-}
 </script>
 
 <template>
@@ -48,11 +36,8 @@ function handleSelectCheckpoint(checkpoint: CheckpointData) {
       </div>
     </div>
 
-    <!-- Activity / Failed / Checkpoints panels -->
-    <div
-      class="grid grid-cols-1 gap-4"
-      :class="pendingCheckpoints.length > 0 ? 'lg:grid-cols-3' : 'lg:grid-cols-2'"
-    >
+    <!-- Activity / Failed panels -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <!-- Recent Activity -->
       <div class="bg-white shadow-sm border border-slate-200 rounded-xl overflow-hidden">
         <div class="px-4 py-3 border-b border-slate-200">
@@ -73,24 +58,6 @@ function handleSelectCheckpoint(checkpoint: CheckpointData) {
           <FailedTasks :tasks="failedTasks" :on-retry="handleRetryTask" />
         </div>
       </div>
-
-      <!-- Pending Checkpoints -->
-      <div v-if="pendingCheckpoints.length > 0" class="bg-white shadow-sm border border-amber-200 rounded-xl overflow-hidden">
-        <div class="px-4 py-3 border-b border-amber-200 flex items-center justify-between">
-          <h3 class="text-sm font-medium text-amber-700">Awaiting Approval</h3>
-          <span class="text-amber-600 text-sm font-medium">({{ pendingCheckpoints.length }})</span>
-        </div>
-        <div class="max-h-64 overflow-y-auto">
-          <PendingCheckpoints :checkpoints="pendingCheckpoints" :on-select="handleSelectCheckpoint" />
-        </div>
-      </div>
     </div>
-
-    <!-- Checkpoint Detail Dialog -->
-    <CheckpointDetailDialog
-      v-model:visible="showCheckpointDialog"
-      :checkpoint="selectedCheckpoint"
-      @close="selectedCheckpoint = null"
-    />
   </div>
 </template>

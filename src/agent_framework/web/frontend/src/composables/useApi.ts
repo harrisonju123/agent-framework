@@ -105,25 +105,6 @@ export function useApi() {
     }
   }
 
-  // Checkpoint actions
-  async function approveCheckpoint(taskId: string, message?: string): Promise<TaskActionResponse | null> {
-    return withLoading(() =>
-      fetchJson<TaskActionResponse>(`/checkpoints/${taskId}/approve`, {
-        method: 'POST',
-        body: JSON.stringify({ message }),
-      })
-    )
-  }
-
-  async function rejectCheckpoint(taskId: string, feedback: string): Promise<TaskActionResponse | null> {
-    return withLoading(() =>
-      fetchJson<TaskActionResponse>(`/checkpoints/${taskId}/reject`, {
-        method: 'POST',
-        body: JSON.stringify({ feedback }),
-      })
-    )
-  }
-
   // System actions
   async function pauseSystem(): Promise<SuccessResponse | null> {
     return withLoading(() =>
@@ -189,8 +170,6 @@ export function useApi() {
     deleteTask,
     createTask,
     getActiveTasks,
-    approveCheckpoint,
-    rejectCheckpoint,
     pauseSystem,
     resumeSystem,
     startAllAgents,

@@ -41,6 +41,7 @@ from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
 from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
+from ..workflow.executor import PREVIEW_REVIEW_STEPS
 
 _WORKTREE_CLEANUP_INTERVAL_SECONDS = 2 * 3600  # 2 hours
 
@@ -820,13 +821,7 @@ class Agent:
                     getattr(response, "content", "") or ""
                 )
                 if outcome.approved:
-                    # preview_review approval authorizes implementation — use a
-                    # distinct verdict so the preview_approved DAG edge fires
-                    # instead of the generic approved edge.
-                    if task.context.get("workflow_step") == "preview_review":
-                        task.context["verdict"] = "preview_approved"
-                    else:
-                        task.context["verdict"] = "approved"
+                    task.context["verdict"] = self._approval_verdict(task)
                 elif outcome.needs_fix:
                     task.context["verdict"] = "needs_fix"
                 else:
@@ -834,10 +829,7 @@ class Agent:
                     # treat as implicit approval so condition evaluators don't
                     # fall through to the NeedsFixCondition keyword fallback,
                     # which defaults to True and loops back to implement.
-                    if task.context.get("workflow_step") == "preview_review":
-                        task.context["verdict"] = "preview_approved"
-                    else:
-                        task.context["verdict"] = "approved"
+                    task.context["verdict"] = self._approval_verdict(task)
 
             # Detect "no changes needed" — architect at plan step determines
             # the work is already done or not applicable
@@ -851,12 +843,10 @@ class Agent:
 
             self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
-            # Push + PR lifecycle after chain routing so checkpoints can pause
-            # before any git side-effects. Downstream agents pick up from queue
-            # asynchronously, so push completing here is still in time.
-            if task.status != TaskStatus.AWAITING_APPROVAL:
-                self._git_ops.push_and_create_pr_if_needed(task)
-                self._git_ops.manage_pr_lifecycle(task)
+            # Push + PR lifecycle after chain routing. Downstream agents pick up
+            # from queue asynchronously, so push completes before they fetch the branch.
+            self._git_ops.push_and_create_pr_if_needed(task)
+            self._git_ops.manage_pr_lifecycle(task)
 
         self._extract_and_store_memories(task, response)
         self._analyze_tool_patterns(task)
@@ -868,6 +858,17 @@ class Agent:
         Delegated to BudgetManager.
         """
         self._budget.log_task_completion_metrics(task, response, task_start_time)
+
+    def _approval_verdict(self, task: Task) -> str:
+        """Return the appropriate approval verdict for the current workflow step.
+
+        preview_review uses "preview_approved" so the preview_approved DAG edge
+        fires instead of the generic "approved" edge, which routes to qa_review
+        rather than implement.
+        """
+        if task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS:
+            return "preview_approved"
+        return "approved"
 
     @staticmethod
     def _is_no_changes_response(content: str) -> bool:
@@ -1301,18 +1302,6 @@ class Agent:
         try:
             # Initialize task execution state
             self._initialize_task_execution(task, task_start_time)
-
-            # Belt-and-suspenders: if a checkpoint-approved task somehow ended
-            # up back in the queue, skip the LLM and route forward immediately
-            if self._is_checkpoint_approved(task):
-                self.logger.info(
-                    f"Task {task.id} already approved at checkpoint "
-                    f"{task.checkpoint_reached} — routing forward without LLM"
-                )
-                task.mark_completed(self.config.id)
-                self.queue.mark_completed(task)
-                self._enforce_workflow_chain(task, response=None, routing_signal=None)
-                return
 
             # Get working directory for task (worktree, target repo, or framework workspace)
             working_dir = self._git_ops.get_working_directory(task)
@@ -2227,14 +2216,6 @@ class Agent:
         self.logger.info(f"Task {task.id} reset for test fix retry (attempt {test_retry + 1})")
 
     # Review cycle methods moved to ReviewCycleManager
-
-    # -- Workflow routing methods moved to WorkflowRouter --
-    def _is_checkpoint_approved(self, task: Task) -> bool:
-        """Check if task already passed a checkpoint and just needs routing."""
-        return (
-            task.approved_at is not None
-            and task.checkpoint_reached is not None
-        )
 
     # Backwards compatibility shims that delegate to WorkflowRouter
 

@@ -11,7 +11,7 @@ import RunTicketDialog from '../components/dialogs/RunTicketDialog.vue'
 const route = useRoute()
 const router = useRouter()
 const {
-  connected, isPaused, loading, pendingCheckpoints,
+  connected, isPaused, loading,
   setupComplete,
   showWorkDialog, showAnalyzeDialog, showTicketDialog,
   handlePause, handleStart, handleStop,
@@ -101,16 +101,6 @@ function toggleMenu(event: Event) {
           size="small"
           @click="router.push('/settings')"
         />
-      </div>
-    </div>
-
-    <!-- Checkpoint alert banner -->
-    <div v-if="pendingCheckpoints.length > 0" class="mt-3 -mx-6 px-6 py-2 bg-amber-50 border-t border-amber-200">
-      <div class="flex items-center gap-2 text-sm">
-        <span class="pi pi-exclamation-triangle text-amber-600"></span>
-        <span class="text-amber-700 font-medium">
-          {{ pendingCheckpoints.length }} checkpoint{{ pendingCheckpoints.length > 1 ? 's' : '' }} awaiting approval
-        </span>
       </div>
     </div>
   </header>

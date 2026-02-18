@@ -353,7 +353,6 @@ print_footer() {
     echo "Commands:"
     echo "  Monitor logs:     tail -f $WORKSPACE/.agent-communication/logs/agent-*.jsonl"
     echo "  Review escal.:    bash $(dirname "$0")/review-escalations.sh"
-    echo "  Create checkpoint: bash $(dirname "$0")/create-checkpoint.sh"
     echo "  Pause system:     bash $(dirname "$0")/pause-agents.sh"
     echo "  Resume system:    bash $(dirname "$0")/resume-agents.sh"
 }

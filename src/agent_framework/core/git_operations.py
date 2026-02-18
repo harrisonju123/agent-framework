@@ -254,9 +254,9 @@ class GitOperationsManager:
         for agent_dir in worktree_queue_dir.iterdir():
             if not agent_dir.is_dir():
                 continue
-            # Skip non-agent directories (checkpoints, completed, etc.)
+            # Skip non-agent directories (completed, failed, locks, etc.)
             queue_id = agent_dir.name
-            if queue_id in ("checkpoints", "completed", "failed", "locks", "heartbeats", "malformed"):
+            if queue_id in ("completed", "failed", "locks", "heartbeats", "malformed"):
                 continue
 
             for task_file in agent_dir.glob("*.json"):
@@ -339,9 +339,8 @@ class GitOperationsManager:
     def push_and_create_pr_if_needed(self, task: Task) -> None:
         """Push branch and create PR if the agent produced unpushed commits.
 
-        Runs after workflow chain routing so checkpoints can pause before
-        any git side-effects. Downstream agents poll asynchronously, so
-        the push completes before they fetch the branch.
+        Runs after workflow chain routing. Downstream agents poll asynchronously,
+        so the push completes before they fetch the branch.
 
         Intermediate workflow steps push their branch but skip PR creation —
         the terminal step (or pr_creator) handles that.

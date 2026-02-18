@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from ..workflow.executor import PREVIEW_REVIEW_STEPS
+
 if TYPE_CHECKING:
     from .config import AgentConfig, AgentDefinition, WorkflowDefinition
     from .context_window_manager import ContextWindowManager
@@ -93,8 +95,16 @@ class PromptBuilder:
     # QA handles testing at qa_review; running tests at review/PR steps wastes budget.
     _TEST_SUPPRESSED_STEPS = frozenset({"code_review", "preview_review", "create_pr"})
 
-    # Steps where the LLM must review only — no file writes or implementation
+    # Steps where the LLM must review only — no file writes or implementation.
+    # Injects _build_review_only_guidance() (hard "REVIEWER" constraints + VERDICT format).
     _REVIEW_ONLY_STEPS = frozenset({"code_review"})
+
+    # Steps where the architect evaluates a preview plan rather than live code.
+    # Injects _build_preview_review_guidance() (lighter constraints, same VERDICT format).
+    # Kept separate from _REVIEW_ONLY_STEPS because the guidance text differs —
+    # preview_review evaluates a plan, code_review evaluates a diff.
+    # Canonical source: workflow.executor.PREVIEW_REVIEW_STEPS (shared with Agent and WorkflowExecutor).
+    _PREVIEW_REVIEW_STEPS = PREVIEW_REVIEW_STEPS
 
     def __init__(self, context: PromptContext):
         """Initialize prompt builder with context.
@@ -287,7 +297,7 @@ Focus on reviewing the code changes.
         # Review-only steps must not modify code — only inspect the diff
         if workflow_step in self._REVIEW_ONLY_STEPS:
             mcp_guidance += self._build_review_only_guidance()
-        elif workflow_step == "preview_review":
+        elif workflow_step in self._PREVIEW_REVIEW_STEPS:
             mcp_guidance += self._build_preview_review_guidance()
 
         # Load upstream context from previous agent if available
@@ -370,7 +380,7 @@ IMPORTANT:
         # Review-only steps must not modify code — only inspect the diff
         if workflow_step in self._REVIEW_ONLY_STEPS:
             chain_note += "\n" + self._build_review_only_guidance()
-        elif workflow_step == "preview_review":
+        elif workflow_step in self._PREVIEW_REVIEW_STEPS:
             chain_note += "\n" + self._build_preview_review_guidance()
 
         # Load upstream context from previous agent if available

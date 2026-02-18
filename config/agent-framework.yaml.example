@@ -140,9 +140,9 @@ repositories:
 # Workflow Configuration
 # Supports both legacy linear format and new DAG format with conditional branches
 workflows:
-  # DAG workflow with checkpoint: architect plans, user reviews, then engineer implements
+  # Default DAG workflow: architect plans, engineer implements, code review, QA reviews
   default:
-    description: "Architect plans, user reviews, Engineer implements, QA reviews"
+    description: "Architect plans, Engineer implements, QA reviews"
     start_step: plan
     pr_creator: architect
     auto_review: true
@@ -150,8 +150,6 @@ workflows:
     steps:
       plan:
         agent: architect
-        checkpoint:
-          message: "Review architect's plan before implementation begins"
         next:
           - target: implement
       implement:
@@ -170,9 +168,10 @@ workflows:
       create_pr:
         agent: architect
 
-  # Fully autonomous workflow (no checkpoint)
-  default_auto:
-    description: "Architect plans, Engineer implements, QA reviews (no checkpoint)"
+  # Preview workflow: engineer produces a read-only execution plan, architect
+  # approves before any code is written. Use with: agent work --preview
+  preview:
+    description: "Read-only preview before implementation"
     start_step: plan
     pr_creator: architect
     auto_review: true
@@ -181,11 +180,40 @@ workflows:
       plan:
         agent: architect
         next:
+          - target: create_pr
+            condition: no_changes
+            priority: 10
+          - target: preview
+      preview:
+        agent: engineer
+        task_type: preview
+        next:
+          - target: preview_review
+      preview_review:
+        agent: architect
+        next:
           - target: implement
+            condition: preview_approved
+            priority: 10
+          - target: preview
+            condition: needs_fix
+            priority: 5
+          - target: implement
+            condition: always
+            priority: 0  # failsafe: proceed if verdict logic breaks
       implement:
         agent: engineer
         next:
+          - target: code_review
+      code_review:
+        agent: architect
+        next:
           - target: qa_review
+            condition: approved
+            priority: 10
+          - target: implement
+            condition: needs_fix
+            priority: 5
       qa_review:
         agent: qa
         next:

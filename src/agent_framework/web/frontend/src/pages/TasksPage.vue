@@ -10,18 +10,15 @@ import Tab from 'primevue/tab'
 import TabPanels from 'primevue/tabpanels'
 import TabPanel from 'primevue/tabpanel'
 import Button from 'primevue/button'
-import CheckpointDetailDialog from '../components/dialogs/CheckpointDetailDialog.vue'
 import CreateTaskDialog from '../components/dialogs/CreateTaskDialog.vue'
-import type { CheckpointData, ActiveTask } from '../types'
+import type { ActiveTask } from '../types'
 
 const {
-  failedTasks, pendingCheckpoints, queues,
+  failedTasks, queues,
   handleRetryTask, handleCancelTask, handleDeleteTask,
   getActiveTasks, showConfirm, showCreateTaskDialog,
 } = useAppState()
 
-const selectedCheckpoint = ref<CheckpointData | null>(null)
-const showCheckpointDialog = ref(false)
 const activeTasks = ref<ActiveTask[]>([])
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let polling = true
@@ -73,11 +70,6 @@ function getTaskKey(task: any): string {
   return task.jira_key || task.id.slice(0, 12)
 }
 
-function reviewCheckpoint(cp: CheckpointData) {
-  selectedCheckpoint.value = cp
-  showCheckpointDialog.value = true
-}
-
 function statusSeverity(status: string): string {
   return status === 'in_progress' ? 'info' : 'secondary'
 }
@@ -93,7 +85,6 @@ function statusLabel(status: string): string {
       <TabList>
         <Tab value="active">Active Tasks</Tab>
         <Tab value="failed">Failed Tasks</Tab>
-        <Tab value="checkpoints">Checkpoints</Tab>
         <Tab value="queues">Queues</Tab>
       </TabList>
 
@@ -179,38 +170,6 @@ function statusLabel(status: string): string {
           </DataTable>
         </TabPanel>
 
-        <!-- Checkpoints Tab -->
-        <TabPanel value="checkpoints">
-          <DataTable :value="pendingCheckpoints" stripedRows class="text-sm">
-            <template #empty>
-              <div class="text-center py-6 text-slate-400">No pending checkpoints</div>
-            </template>
-            <Column header="Checkpoint ID" style="width: 160px">
-              <template #body="{ data }">
-                <span class="font-mono text-amber-700 text-xs">{{ data.checkpoint_id }}</span>
-              </template>
-            </Column>
-            <Column field="title" header="Task Title">
-              <template #body="{ data }">
-                <span class="text-slate-700 text-sm">{{ data.title }}</span>
-              </template>
-            </Column>
-            <Column header="Message">
-              <template #body="{ data }">
-                <span class="text-slate-500 text-xs" :title="data.checkpoint_message">
-                  {{ data.checkpoint_message?.slice(0, 60) }}{{ (data.checkpoint_message?.length || 0) > 60 ? '...' : '' }}
-                </span>
-              </template>
-            </Column>
-            <Column field="assigned_to" header="Agent" style="width: 100px" />
-            <Column header="Actions" style="width: 100px">
-              <template #body="{ data }">
-                <Button label="Review" severity="warn" size="small" @click="reviewCheckpoint(data)" />
-              </template>
-            </Column>
-          </DataTable>
-        </TabPanel>
-
         <!-- Queues Tab -->
         <TabPanel value="queues">
           <DataTable :value="queues" stripedRows class="text-sm">
@@ -238,12 +197,6 @@ function statusLabel(status: string): string {
         </TabPanel>
       </TabPanels>
     </Tabs>
-
-    <CheckpointDetailDialog
-      v-model:visible="showCheckpointDialog"
-      :checkpoint="selectedCheckpoint"
-      @close="selectedCheckpoint = null"
-    />
 
     <CreateTaskDialog v-model:visible="showCreateTaskDialog" />
   </div>

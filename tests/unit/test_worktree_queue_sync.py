@@ -122,13 +122,13 @@ class TestSyncWorktreeQueuedTasks:
         assert (queue.queue_dir / "qa" / "review-001.json").exists()
 
     def test_skips_non_agent_directories(self, agent, queue, tmp_path):
-        """Directories like checkpoints and completed are ignored."""
+        """Directories like completed, failed, and locks are ignored."""
         worktree = tmp_path / "worktree"
 
-        # Create a file in checkpoints (should be skipped)
-        checkpoints = worktree / ".agent-communication" / "queues" / "checkpoints"
-        checkpoints.mkdir(parents=True)
-        (checkpoints / "plan-123.json").write_text(json.dumps(_make_task_json("plan-123")))
+        # Create a file in completed (should be skipped)
+        completed = worktree / ".agent-communication" / "queues" / "completed"
+        completed.mkdir(parents=True)
+        (completed / "plan-123.json").write_text(json.dumps(_make_task_json("plan-123")))
 
         # Create a real task too
         eng_queue = worktree / ".agent-communication" / "queues" / "engineer"
@@ -141,9 +141,9 @@ class TestSyncWorktreeQueuedTasks:
 
         # Only the engineer task should be synced
         assert (queue.queue_dir / "engineer" / "impl-001.json").exists()
-        assert not (queue.queue_dir / "checkpoints").exists()
-        # Checkpoint file should still be in worktree (untouched)
-        assert (checkpoints / "plan-123.json").exists()
+        assert not (queue.queue_dir / "completed").exists()
+        # Completed file should still be in worktree (untouched)
+        assert (completed / "plan-123.json").exists()
 
     def test_skips_when_worktree_is_main_workspace(self, agent, queue, main_workspace):
         """Don't sync from main workspace back into itself."""

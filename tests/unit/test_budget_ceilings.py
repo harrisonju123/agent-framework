@@ -257,7 +257,7 @@ class TestCostAccumulation:
         assert task.context["_cumulative_cost"] == pytest.approx(1.25)
 
     def test_no_cost_when_response_is_none(self):
-        """No cost accumulated when response is None (e.g. checkpoint resume)."""
+        """No cost accumulated when response is None (e.g. pre-scan routing)."""
         from agent_framework.core.agent import Agent
 
         agent = MagicMock()

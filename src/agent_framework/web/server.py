@@ -20,7 +20,6 @@ from .data_provider import DashboardDataProvider
 from .models import (
     ActiveTaskData,
     AgentData,
-    CheckpointData,
     QueueStats,
     EventData,
     FailedTaskData,
@@ -29,7 +28,6 @@ from .models import (
     SuccessResponse,
     AgentActionResponse,
     TaskActionResponse,
-    CheckpointRejectRequest,
     CreateTaskRequest,
     WorkRequest,
     AnalyzeRequest,
@@ -299,60 +297,6 @@ def register_routes(app: FastAPI):
         except Exception as e:
             logger.exception(f"Error creating task: {e}")
             raise HTTPException(status_code=500, detail="Failed to create task")
-
-    # ============== Checkpoint API ==============
-
-    @app.get("/api/checkpoints", response_model=list[CheckpointData])
-    async def get_checkpoints():
-        """Get tasks awaiting checkpoint approval."""
-        return app.state.data_provider.get_pending_checkpoints()
-
-    @app.post("/api/checkpoints/{task_id}/approve", response_model=TaskActionResponse)
-    async def approve_checkpoint(task_id: str, request: Request):
-        """Approve a checkpoint and resume workflow."""
-        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
-            raise HTTPException(status_code=400, detail=f"Invalid task_id: {task_id}")
-
-        body = {}
-        try:
-            body = await request.json()
-        except Exception:
-            pass
-
-        message = body.get("message") if body else None
-        success = app.state.data_provider.approve_checkpoint(task_id, message)
-        if success:
-            return TaskActionResponse(
-                success=True,
-                task_id=task_id,
-                action="approve",
-                message=f"Checkpoint approved for task {task_id}",
-            )
-        else:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No pending checkpoint found for task {task_id}",
-            )
-
-    @app.post("/api/checkpoints/{task_id}/reject", response_model=TaskActionResponse)
-    async def reject_checkpoint(task_id: str, request: CheckpointRejectRequest):
-        """Reject a checkpoint with feedback and send task back to the agent."""
-        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
-            raise HTTPException(status_code=400, detail=f"Invalid task_id: {task_id}")
-
-        success = app.state.data_provider.reject_checkpoint(task_id, request.feedback.strip())
-        if success:
-            return TaskActionResponse(
-                success=True,
-                task_id=task_id,
-                action="reject",
-                message=f"Checkpoint rejected for task {task_id}",
-            )
-        else:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No pending checkpoint found for task {task_id}",
-            )
 
     @app.get("/api/events", response_model=list[EventData])
     async def get_events(limit: int = Query(default=20, ge=1, le=100)):
@@ -813,7 +757,6 @@ def register_routes(app: FastAPI):
                     queues=app.state.data_provider.get_queue_stats(),
                     events=app.state.data_provider.get_recent_events(limit=5),
                     failed_tasks=app.state.data_provider.get_failed_tasks(limit=5),
-                    pending_checkpoints=app.state.data_provider.get_pending_checkpoints(),
                     health=app.state.data_provider.get_health_status(),
                     is_paused=app.state.data_provider.is_paused(),
                     uptime_seconds=int(uptime),

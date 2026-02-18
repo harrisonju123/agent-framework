@@ -18,7 +18,6 @@ from .models import (
     ActiveTaskData,
     AgentData,
     AgentStatusEnum,
-    CheckpointData,
     QueueStats,
     EventData,
     FailedTaskData,
@@ -323,7 +322,7 @@ class DashboardDataProvider:
             return result
 
         for queue_dir in self.queue.queue_dir.iterdir():
-            if not queue_dir.is_dir() or queue_dir.name == "checkpoints":
+            if not queue_dir.is_dir():
                 continue
             for task_file in queue_dir.glob("*.json"):
                 try:
@@ -460,117 +459,6 @@ class DashboardDataProvider:
 
         self.queue.push(task, assigned_to)
         return task
-
-    # ============== Checkpoint Methods ==============
-
-    def get_pending_checkpoints(self) -> List[CheckpointData]:
-        """Get all tasks awaiting checkpoint approval."""
-        checkpoint_dir = self.workspace / ".agent-communication" / "queues" / "checkpoints"
-        if not checkpoint_dir.exists():
-            return []
-
-        result: List[CheckpointData] = []
-        for checkpoint_file in sorted(checkpoint_dir.glob("*.json")):
-            try:
-                task = FileQueue.load_task_file(checkpoint_file)
-                if task.status != TaskStatus.AWAITING_APPROVAL:
-                    continue
-
-                # Use file mtime as proxy for when checkpoint was reached
-                paused_at = datetime.fromtimestamp(
-                    checkpoint_file.stat().st_mtime, tz=timezone.utc
-                )
-
-                result.append(
-                    CheckpointData(
-                        id=task.id,
-                        title=task.title,
-                        checkpoint_id=task.checkpoint_reached or "unknown",
-                        checkpoint_message=task.checkpoint_message or "",
-                        assigned_to=task.assigned_to,
-                        paused_at=paused_at,
-                    )
-                )
-            except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
-                logger.warning(f"Error reading checkpoint file {checkpoint_file}: {e}")
-                continue
-
-        return result
-
-    def approve_checkpoint(self, task_id: str, message: Optional[str] = None) -> bool:
-        """Approve a checkpoint and re-queue the task.
-
-        Mirrors the CLI `agent approve` logic: load checkpoint file,
-        verify AWAITING_APPROVAL status, approve, re-queue, delete file.
-        """
-        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
-            raise ValueError(f"Invalid task_id: {task_id}")
-
-        checkpoint_dir = self.workspace / ".agent-communication" / "queues" / "checkpoints"
-        checkpoint_file = checkpoint_dir / f"{task_id}.json"
-        if not checkpoint_file.exists():
-            return False
-
-        task = FileQueue.load_task_file(checkpoint_file)
-        if task.status != TaskStatus.AWAITING_APPROVAL:
-            return False
-
-        approver = os.getenv("USER", "dashboard")
-        task.approve_checkpoint(approver)
-
-        if message:
-            task.notes.append(f"Checkpoint approved: {message}")
-        else:
-            task.notes.append(
-                f"Checkpoint approved at {datetime.now(timezone.utc).isoformat()}"
-            )
-
-        # Route directly to next workflow step instead of re-queuing to the
-        # same agent — avoids duplicate LLM execution on the completed work
-        from ..workflow.executor import resume_after_checkpoint
-
-        try:
-            routed = resume_after_checkpoint(task, self.queue, self.workspace)
-            if routed:
-                checkpoint_file.unlink(missing_ok=True)
-            else:
-                logger.error(
-                    f"Checkpoint approved but could not route task {task_id} "
-                    "to next step — preserving checkpoint for retry"
-                )
-        except Exception as e:
-            logger.error(f"Error routing checkpoint task {task_id}: {e}")
-            return False
-
-        # The approval itself succeeded regardless of routing outcome
-        return True
-
-    def reject_checkpoint(self, task_id: str, feedback: str) -> bool:
-        """Reject a checkpoint with feedback and re-queue to the same agent.
-
-        The agent will see the feedback in its prompt and redo the work.
-        """
-        if not re.match(r'^[a-zA-Z0-9_.-]+$', task_id):
-            raise ValueError(f"Invalid task_id: {task_id}")
-
-        checkpoint_dir = self.workspace / ".agent-communication" / "queues" / "checkpoints"
-        checkpoint_file = checkpoint_dir / f"{task_id}.json"
-        if not checkpoint_file.exists():
-            return False
-
-        task = FileQueue.load_task_file(checkpoint_file)
-        if task.status != TaskStatus.AWAITING_APPROVAL:
-            return False
-
-        task.context["rejection_feedback"] = feedback
-        task.notes.append(f"Checkpoint rejected: {feedback}")
-        task.reset_to_pending()
-        task.checkpoint_reached = None
-        task.checkpoint_message = None
-
-        self.queue.push(task, task.assigned_to)
-        checkpoint_file.unlink(missing_ok=True)
-        return True
 
     # ============== Log Reading Methods ==============
 

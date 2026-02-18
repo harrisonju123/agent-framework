@@ -75,7 +75,6 @@ class TaskStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     TESTING = "testing"  # Running tests in sandbox
     AWAITING_REVIEW = "awaiting_review"  # Tests passed, awaiting optional review
-    AWAITING_APPROVAL = "awaiting_approval"  # At checkpoint, needs human approval
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -156,12 +155,6 @@ class Task(BaseModel):
     failed_task_id: Optional[str] = None
     needs_human_review: bool = False
 
-    # Checkpoint tracking
-    checkpoint_reached: Optional[str] = None
-    checkpoint_message: Optional[str] = None
-    approved_at: Optional[datetime] = None
-    approved_by: Optional[str] = None
-
     # Estimation
     estimated_effort: Optional[str] = None
 
@@ -194,7 +187,7 @@ class Task(BaseModel):
         """
         return self.context.get("_root_task_id", self.id)
 
-    @field_serializer("created_at", "last_failed_at", "started_at", "completed_at", "failed_at", "approved_at")
+    @field_serializer("created_at", "last_failed_at", "started_at", "completed_at", "failed_at")
     def serialize_datetime(self, v: Optional[datetime]) -> Optional[str]:
         return v.isoformat() if v else None
 
@@ -253,22 +246,3 @@ class Task(BaseModel):
         self.retry_count += 1
         self.last_failed_at = datetime.now(UTC)
 
-    def mark_awaiting_approval(self, checkpoint_id: str, message: str) -> None:
-        """Mark task as awaiting approval at a checkpoint."""
-        self.status = TaskStatus.AWAITING_APPROVAL
-        self.checkpoint_reached = checkpoint_id
-        self.checkpoint_message = message
-        # Reset prior approval so each checkpoint requires fresh approval
-        self.approved_at = None
-        self.approved_by = None
-
-    def approve_checkpoint(self, approved_by: str) -> None:
-        """Approve a checkpoint and allow workflow to continue.
-
-        Sets status to COMPLETED — the agent's LLM work is done, and the
-        executor will create a chain task for the next workflow step.
-        COMPLETED prevents accidental re-processing if the task lands in a queue.
-        """
-        self.approved_at = datetime.now(UTC)
-        self.approved_by = approved_by
-        self.status = TaskStatus.COMPLETED

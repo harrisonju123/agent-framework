@@ -9,7 +9,7 @@ import pytest
 
 from agent_framework.core.workflow_router import WorkflowRouter
 from agent_framework.core.config import WorkflowDefinition
-from tests.unit.conftest import PREVIEW_WORKFLOW
+from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
 

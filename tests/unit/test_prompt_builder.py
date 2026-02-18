@@ -992,3 +992,19 @@ class TestCodeReviewConstraints:
 
         assert "CODE REVIEW CONSTRAINTS" in prompt
         assert "PREVIEW REVIEW CONSTRAINTS" not in prompt
+
+    def test_preview_step_injects_read_only_constraints(self, prompt_builder, sample_task):
+        """Engineer at the preview step gets PREVIEW MODE read-only constraints injected.
+
+        _inject_preview_mode is applied by build() after _build_prompt_legacy.
+        Test both together to mirror the real call path.
+        """
+        task = self._make_task_with_step(sample_task, "preview")
+        task.type = TaskType.PREVIEW
+        prompt = prompt_builder._build_prompt_legacy(task)
+        prompt = prompt_builder._inject_preview_mode(prompt, task)
+
+        assert "PREVIEW MODE" in prompt
+        assert "Do NOT use Write" in prompt
+        # Must not inject the architect-facing review guidance
+        assert "PREVIEW REVIEW CONSTRAINTS" not in prompt

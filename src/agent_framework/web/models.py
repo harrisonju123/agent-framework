@@ -115,16 +115,6 @@ class ActiveTaskData(BaseModel):
     parent_task_id: Optional[str] = None
 
 
-class CheckpointData(BaseModel):
-    """Task awaiting checkpoint approval."""
-    id: str
-    title: str
-    checkpoint_id: str
-    checkpoint_message: str
-    assigned_to: str
-    paused_at: Optional[datetime] = None
-
-
 class HealthCheck(BaseModel):
     """Individual health check result."""
     name: str
@@ -154,7 +144,6 @@ class DashboardState(BaseModel):
     queues: List[QueueStats]
     events: List[EventData]
     failed_tasks: List[FailedTaskData]
-    pending_checkpoints: List[CheckpointData]
     health: HealthReport
     is_paused: bool
     uptime_seconds: int
@@ -231,11 +220,6 @@ class CreateTaskRequest(BaseModel):
     assigned_to: str = Field(default="engineer", pattern=r'^[a-z0-9_-]+$')
     repository: Optional[str] = Field(default=None, pattern=r'^[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$')
     priority: int = Field(default=1, ge=1, le=10)
-
-
-class CheckpointRejectRequest(BaseModel):
-    """Request to reject a checkpoint with feedback."""
-    feedback: str = Field(..., min_length=1, max_length=5000)
 
 
 class OperationResponse(BaseModel):

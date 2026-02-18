@@ -168,7 +168,7 @@ Instructions for Architect Agent:
             depends_on=depends_on,
             context={
                 "mode": "planning",
-                "workflow": "default_auto",
+                "workflow": "default",
                 "github_repo": GITHUB_REPO,
                 "repository_name": REPO_NAME,
                 "user_goal": item["goal"],

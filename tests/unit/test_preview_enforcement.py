@@ -211,3 +211,125 @@ class TestPreviewAllowedToolsSet:
     def test_preview_tools_include_bash(self):
         """Bash is allowed so the engineer can run read-only commands like git log."""
         assert "Bash" in EXPECTED_PREVIEW_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# Sync: conftest PREVIEW_WORKFLOW matches config/agent-framework.yaml
+# ---------------------------------------------------------------------------
+
+class TestPreviewWorkflowSync:
+    """Verify that the PREVIEW_WORKFLOW constant in conftest.py stays in sync
+    with the live `preview` workflow in config/agent-framework.yaml.
+
+    If the YAML is updated (e.g. a new step or edge) without updating the
+    constant, these tests catch the divergence before tests give false results.
+    """
+
+    def _load_yaml_preview_dag(self):
+        from pathlib import Path
+        from agent_framework.core.config import load_config
+
+        yaml_path = Path(__file__).parents[2] / "config" / "agent-framework.yaml"
+        if not yaml_path.exists():
+            pytest.skip("config/agent-framework.yaml not present in this environment")
+
+        config = load_config(yaml_path)
+        wf_def = config.workflows.get("preview")
+        assert wf_def is not None, "preview workflow not found in config/agent-framework.yaml"
+        return wf_def.to_dag("preview")
+
+    def test_preview_review_agents_match(self):
+        """preview_review step agent is architect in both YAML and fixture."""
+        from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
+
+        yaml_dag = self._load_yaml_preview_dag()
+        fixture_dag = PREVIEW_WORKFLOW.to_dag("preview")
+
+        yaml_step = yaml_dag.steps["preview_review"]
+        fixture_step = fixture_dag.steps["preview_review"]
+        assert yaml_step.agent == fixture_step.agent
+
+    def test_preview_review_edge_targets_match(self):
+        """preview_review next-step targets are identical in YAML and fixture."""
+        from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
+
+        yaml_dag = self._load_yaml_preview_dag()
+        fixture_dag = PREVIEW_WORKFLOW.to_dag("preview")
+
+        yaml_targets = {e.target for e in yaml_dag.steps["preview_review"].next}
+        fixture_targets = {e.target for e in fixture_dag.steps["preview_review"].next}
+        assert yaml_targets == fixture_targets, (
+            f"preview_review edges differ: YAML={yaml_targets}, fixture={fixture_targets}"
+        )
+
+    def test_preview_step_task_type_match(self):
+        """preview step task_type_override is 'preview' in both YAML and fixture."""
+        from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
+
+        yaml_dag = self._load_yaml_preview_dag()
+        fixture_dag = PREVIEW_WORKFLOW.to_dag("preview")
+
+        assert yaml_dag.steps["preview"].task_type_override == fixture_dag.steps["preview"].task_type_override
+
+    def test_yaml_starts_at_plan_step(self):
+        """Real YAML preview workflow starts at the plan step, not preview.
+
+        The fixture (PREVIEW_WORKFLOW) skips plan for conciseness, so this
+        test explicitly confirms the canonical workflow starts at plan.
+        """
+        yaml_dag = self._load_yaml_preview_dag()
+        assert yaml_dag.start_step == "plan"
+        assert "plan" in yaml_dag.steps
+
+
+# ---------------------------------------------------------------------------
+# _approval_verdict returns the correct verdict per workflow step
+# ---------------------------------------------------------------------------
+
+class TestApprovalVerdict:
+    """_approval_verdict routes to 'preview_approved' only at preview_review.
+
+    All other review steps (code_review, qa_review) must return plain 'approved'
+    so the standard approved→create_pr edge fires instead of the preview edge.
+    """
+
+    def _make_agent(self, base_id: str):
+        from unittest.mock import MagicMock
+        from agent_framework.core.agent import Agent
+        agent = MagicMock()
+        agent.config = MagicMock()
+        agent.config.base_id = base_id
+        agent._approval_verdict = Agent._approval_verdict.__get__(agent)
+        return agent
+
+    def test_qa_review_step_returns_approved(self):
+        """QA agent at qa_review step returns plain 'approved', not 'preview_approved'."""
+        agent = self._make_agent("qa")
+        task = _make_task(task_type=TaskType.REVIEW, verdict=None)
+        task.context["workflow_step"] = "qa_review"
+
+        assert agent._approval_verdict(task) == "approved"
+
+    def test_code_review_step_returns_approved(self):
+        """Architect at code_review step returns plain 'approved'."""
+        agent = self._make_agent("architect")
+        task = _make_task(task_type=TaskType.REVIEW, verdict=None)
+        task.context["workflow_step"] = "code_review"
+
+        assert agent._approval_verdict(task) == "approved"
+
+    def test_preview_review_step_returns_preview_approved(self):
+        """Architect at preview_review step returns 'preview_approved'."""
+        agent = self._make_agent("architect")
+        task = _make_task(verdict=None)  # default task_type=PREVIEW
+        task.context["workflow_step"] = "preview_review"
+
+        assert agent._approval_verdict(task) == "preview_approved"
+
+    def test_no_workflow_step_returns_approved(self):
+        """Missing workflow_step key defaults to plain 'approved'."""
+        agent = self._make_agent("qa")
+        task = _make_task(task_type=TaskType.REVIEW, verdict=None)
+        task.context.pop("workflow_step", None)
+
+        assert agent._approval_verdict(task) == "approved"

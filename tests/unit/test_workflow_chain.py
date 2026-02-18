@@ -9,7 +9,7 @@ import pytest
 from agent_framework.core.agent import Agent, AgentConfig
 from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.config import WorkflowDefinition
-from tests.unit.conftest import PREVIEW_WORKFLOW
+from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
@@ -2253,7 +2253,7 @@ class TestWorktreeBranchClearing:
 # -- Push-after-chain ordering --
 
 class TestPushAfterChainRouting:
-    """Push runs after _enforce_workflow_chain so checkpoints can pause before git side-effects."""
+    """Push runs after _enforce_workflow_chain so git side-effects happen after routing."""
 
     def test_push_runs_after_enforce_workflow_chain(self, agent, queue):
         """push_and_create_pr_if_needed runs after _enforce_workflow_chain."""

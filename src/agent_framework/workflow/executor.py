@@ -21,59 +21,6 @@ from ..utils.type_helpers import strip_chain_prefixes
 logger = logging.getLogger(__name__)
 
 
-def resume_after_checkpoint(task: "Task", queue: "FileQueue", workspace: Path) -> bool:
-    """Route task to next workflow step after checkpoint approval.
-
-    Replaces re-queuing to the same agent, which would re-run the LLM
-    from scratch and waste tokens. Instead, creates a chain task for the
-    next step in the workflow DAG.
-
-    Returns True if successfully routed, False if routing couldn't proceed
-    (e.g., no workflow context, missing config).
-    """
-    from ..core.config import load_config
-
-    workflow_name = (task.context or {}).get("workflow")
-    if not workflow_name:
-        logger.warning(f"Task {task.id} has no workflow in context, cannot resume")
-        return False
-
-    try:
-        config = load_config(workspace / "config" / "agent-framework.yaml")
-    except Exception as e:
-        logger.error(f"Failed to load config for checkpoint resume: {e}")
-        return False
-
-    workflow_def = config.workflows.get(workflow_name)
-    if not workflow_def:
-        logger.warning(f"Workflow '{workflow_name}' not found in config")
-        return False
-
-    try:
-        workflow_dag = workflow_def.to_dag(workflow_name)
-    except Exception as e:
-        logger.error(f"Failed to build workflow DAG for '{workflow_name}': {e}")
-        return False
-
-    queue_dir = workspace / ".agent-communication" / "queues"
-    executor = WorkflowExecutor(queue, queue_dir)
-
-    routed = executor.execute_step(
-        workflow=workflow_dag,
-        task=task,
-        response=None,
-        current_agent_id=task.assigned_to,
-    )
-    if routed:
-        logger.info(f"Task {task.id} resumed after checkpoint — routed to next step")
-    else:
-        logger.warning(
-            f"Task {task.id} could not be routed after checkpoint approval "
-            f"(workflow={workflow_name}, step={task.context.get('workflow_step')})"
-        )
-    return routed
-
-
 # Hard ceiling on chain depth to prevent runaway loops regardless of routing logic
 MAX_CHAIN_DEPTH = 10
 
@@ -85,6 +32,11 @@ MAX_DAG_REVIEW_CYCLES = 2
 
 # Absolute ceiling on total chain hops — survives escalation and re-planning resets
 MAX_GLOBAL_CYCLES = 15
+
+# Workflow steps where the architect evaluates a plan rather than live code.
+# Used by both WorkflowExecutor (verdict routing) and PromptBuilder (guidance injection)
+# so that both consumers stay in sync when new review-type steps are added.
+PREVIEW_REVIEW_STEPS: frozenset[str] = frozenset({"preview_review"})
 
 
 @dataclass
@@ -131,13 +83,7 @@ class WorkflowExecutor:
 
         Returns:
             True if task was routed to the next step.
-            False if workflow is complete, terminal, or paused at a checkpoint.
-
-        Note:
-            Routing signal overrides are evaluated before checkpoints, so a
-            routing signal (e.g. QA sending back to engineer) can bypass a
-            checkpoint. This is intentional — programmatic re-routing reflects
-            an agent decision, not a human-reviewable transition.
+            False if workflow is complete or terminal.
         """
         current_step = self._find_current_step(workflow, task, current_agent_id)
         if not current_step:
@@ -172,30 +118,6 @@ class WorkflowExecutor:
             if target_step and target_step.agent != current_agent_id:
                 self._route_to_step(task, target_step, workflow, current_agent_id, routing_signal)
                 return True
-
-        # Checkpoint gate — pause for human approval before routing to next step.
-        # Compare checkpoint_id so each checkpoint requires its own approval;
-        # a prior approval at a different step won't bypass this one.
-        if current_step.checkpoint:
-            checkpoint_id = f"{workflow.name}-{current_step.id}"
-            already_approved = (
-                task.approved_at is not None
-                and task.checkpoint_reached == checkpoint_id
-            )
-            if not already_approved:
-                message = current_step.checkpoint.message
-                # Stamp workflow_step so _find_current_step resolves
-                # unambiguously on resume (initial tasks don't set this)
-                if task.context is None:
-                    task.context = {}
-                task.context["workflow_step"] = current_step.id
-                task.mark_awaiting_approval(checkpoint_id, message)
-                self._save_task_checkpoint(task)
-                self.logger.info(
-                    f"Task {task.id} paused at checkpoint '{checkpoint_id}': {message}"
-                )
-                self.logger.info(f"   Run 'agent approve {task.id}' to continue workflow")
-                return False
 
         next_edges = workflow.get_next_steps(current_step.id)
         if not next_edges:
@@ -361,13 +283,20 @@ class WorkflowExecutor:
                 return
 
         # Cap review→engineer fix cycles to prevent infinite bounce loops.
-        # Both code_review and qa_review stages share a single counter.
+        # code_review, qa_review, and preview_review share a single counter.
         review_cycles = task.context.get("_dag_review_cycles", 0)
         is_review_to_engineer = (
             target_step.agent == "engineer"
-            and task.context.get("workflow_step") in ("code_review", "qa_review", "preview_review")
+            and task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
         )
-        if is_review_to_engineer:
+        # preview_review → implement is a phase boundary, not a fix cycle.
+        # Reset the counter so implementation review gets a full budget, and
+        # don't treat this as a review→fix hand-off (no "QA FINDINGS" prefix).
+        if (task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS
+                and target_step.id == "implement"):
+            is_review_to_engineer = False
+            review_cycles = 0
+        elif is_review_to_engineer:
             review_cycles += 1
             if review_cycles > MAX_DAG_REVIEW_CYCLES:
                 self.logger.warning(
@@ -395,6 +324,10 @@ class WorkflowExecutor:
 
         if is_review_to_engineer:
             chain_task.context["_dag_review_cycles"] = review_cycles
+        elif task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS and target_step.id == "implement":
+            # Phase transition resets the counter — write 0 explicitly so the chain
+            # task doesn't inherit a non-zero value from the previous preview round.
+            chain_task.context["_dag_review_cycles"] = 0
 
         try:
             self.queue.push(chain_task, next_agent)
@@ -550,17 +483,6 @@ class WorkflowExecutor:
             )
             return "warn"
         return "ok"
-
-    def _save_task_checkpoint(self, task: "Task") -> None:
-        """Save task to checkpoint queue for human approval."""
-        from ..utils.atomic_io import atomic_write_model
-
-        checkpoint_queue_dir = self.queue_dir / "checkpoints"
-        checkpoint_queue_dir.mkdir(exist_ok=True, parents=True)
-
-        checkpoint_file = checkpoint_queue_dir / f"{task.id}.json"
-        atomic_write_model(checkpoint_file, task)
-        self.logger.debug(f"Saved checkpoint state for task {task.id}")
 
     def _queue_qa_pre_scan(self, task: "Task") -> None:
         """Queue a lightweight QA pre-scan in parallel with code review.

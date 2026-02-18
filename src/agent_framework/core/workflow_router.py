@@ -191,6 +191,17 @@ class WorkflowRouter:
             )
             return
 
+        # PREVIEW tasks always route through a DAG workflow. Without a workflow
+        # in context, the task is orphaned (e.g. stale retry) and would fall
+        # through to _queue_code_review_if_needed, creating a spurious review
+        # task before the architect has evaluated the preview output.
+        if task.type == TaskType.PREVIEW and not task.context.get("workflow"):
+            self.logger.warning(
+                f"Skipping workflow chain for {task.id}: "
+                f"PREVIEW task without workflow context, dropping to avoid duplicate routing"
+            )
+            return
+
         workflow_name = task.context.get("workflow")
         if not workflow_name or workflow_name not in self._workflows_config:
             self.logger.debug(
@@ -236,8 +247,7 @@ class WorkflowRouter:
             )
 
             # Terminal step with no routing — check if pr_creator should take over.
-            # Skip when paused at checkpoint — PR creation is premature until approved.
-            if not routed and task.status != TaskStatus.AWAITING_APPROVAL:
+            if not routed:
                 self.queue_pr_creation_if_needed(task, workflow_def)
 
             # Log routing decision

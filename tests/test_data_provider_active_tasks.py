@@ -152,18 +152,6 @@ class TestGetActiveTasks:
             assert result[0].jira_key == "PROJ-42"
             assert result[0].parent_task_id == "parent-001"
 
-    def test_skips_checkpoints_directory(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = _make_workspace(tmpdir)
-            # Write a task in the checkpoints dir — should be ignored
-            cp_dir = workspace / ".agent-communication" / "queues" / "checkpoints"
-            cp_dir.mkdir(parents=True, exist_ok=True)
-            task = _make_task(status=TaskStatus.AWAITING_APPROVAL)
-            (cp_dir / f"{task.id}.json").write_text(task.model_dump_json())
-
-            provider = DashboardDataProvider(workspace)
-            assert provider.get_active_tasks() == []
-
     def test_skips_corrupt_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = _make_workspace(tmpdir)
@@ -258,16 +246,6 @@ class TestCancelTask:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = _make_workspace(tmpdir)
             task = _make_task(status=TaskStatus.FAILED)
-            _queue_task(workspace, task)
-
-            provider = DashboardDataProvider(workspace)
-            assert provider.cancel_task("task-001") is False
-
-    def test_cancel_awaiting_approval_rejected(self):
-        """AWAITING_APPROVAL tasks live in checkpoints dir, not cancellable from here."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            workspace = _make_workspace(tmpdir)
-            task = _make_task(status=TaskStatus.AWAITING_APPROVAL)
             _queue_task(workspace, task)
 
             provider = DashboardDataProvider(workspace)
