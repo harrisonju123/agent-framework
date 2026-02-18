@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 class RetryAttempt(BaseModel):
@@ -110,11 +110,6 @@ class Task(BaseModel):
     notes: list[str] = Field(default_factory=list)
     context: dict[str, Any] = Field(default_factory=dict)
 
-    # Parent-child hierarchy for task decomposition
-    parent_task_id: Optional[str] = None
-    subtask_ids: list[str] = Field(default_factory=list)
-    decomposition_strategy: Optional[str] = None  # by_feature, by_layer, by_refactor_feature
-
     # Retry tracking
     retry_count: int = 0
     last_failed_at: Optional[datetime] = None
@@ -159,16 +154,11 @@ class Task(BaseModel):
     escalation_report: Optional[EscalationReport] = None
     retry_attempts: List[RetryAttempt] = Field(default_factory=list)
 
-    # Task decomposition and fan-in support
-    parent_task_id: Optional[str] = None
-    subtask_ids: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(use_enum_values=True)
 
-    class Config:
-        """Pydantic config."""
-        use_enum_values = True
-        json_encoders = {
-            datetime: lambda v: v.isoformat() if v else None
-        }
+    @field_serializer("created_at", "last_failed_at", "started_at", "completed_at", "failed_at", "approved_at")
+    def serialize_datetime(self, v: Optional[datetime]) -> Optional[str]:
+        return v.isoformat() if v else None
 
     def mark_in_progress(self, agent_id: str) -> None:
         """Mark task as in progress."""
