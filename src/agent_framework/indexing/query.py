@@ -132,6 +132,9 @@ class IndexQuery:
             for mod in index.modules:
                 desc = f" — {mod.description}" if mod.description else ""
                 lines.append(f"- `{mod.path}/` ({mod.file_count} files){desc}")
+                if mod.key_files:
+                    for kf in mod.key_files:
+                        lines.append(f"  - `{kf}`")
         return lines
 
     @staticmethod

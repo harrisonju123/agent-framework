@@ -31,6 +31,7 @@ agents:
 
       PLANNING PHASE:
       - Create structured plans with: Objectives, Approach, Risks, Success Criteria, Files to Modify
+      - Before listing Files to Modify, use Glob to verify each path exists. Do NOT guess file paths — only reference files you have confirmed exist in the repository
       - Store plan as JSON in task.plan field
       - Queue implementation task to engineer with plan embedded
       - If task >500 lines estimated, create multiple subtasks (<300 lines each)

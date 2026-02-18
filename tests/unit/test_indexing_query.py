@@ -141,6 +141,39 @@ class TestOverviewFormatting:
         result = query.format_overview_only("org/repo")
         assert "Core logic" in result
 
+    def test_overview_renders_key_files(self, tmp_path):
+        store = IndexStore(tmp_path)
+        idx = _make_index(modules=[
+            ModuleEntry(
+                path="core",
+                description="Core logic",
+                language="python",
+                file_count=5,
+                key_files=["core/agent.py", "core/executor.py"],
+            ),
+        ])
+        store.save(idx)
+        query = IndexQuery(store)
+
+        result = query.format_overview_only("org/repo")
+        assert "  - `core/agent.py`" in result
+        assert "  - `core/executor.py`" in result
+
+    def test_overview_no_key_files_no_extra_lines(self, tmp_path):
+        store = IndexStore(tmp_path)
+        idx = _make_index(modules=[
+            ModuleEntry(path="utils", description="Helpers", language="python", file_count=3),
+        ])
+        store.save(idx)
+        query = IndexQuery(store)
+
+        result = query.format_overview_only("org/repo")
+        lines = result.split("\n")
+        module_line = next(l for l in lines if "utils/" in l)
+        module_idx = lines.index(module_line)
+        # Either the module line is last, or the next line isn't an indented file entry
+        assert module_idx + 1 >= len(lines) or not lines[module_idx + 1].startswith("  - `")
+
 
 class TestFormatOverviewOnly:
     def test_no_index_returns_empty(self, tmp_path):
