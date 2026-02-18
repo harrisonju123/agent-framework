@@ -2175,3 +2175,36 @@ class TestWorktreeBranchClearing:
         pr_task = queue.push.call_args[0][0]
         assert "worktree_branch" not in pr_task.context
         assert pr_task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc12345"
+
+
+# -- Push-before-chain ordering --
+
+class TestPushBeforeChainRouting:
+    """Verify push runs before _enforce_workflow_chain so downstream agents can fetch the branch."""
+
+    def test_push_runs_before_enforce_workflow_chain(self, agent, queue):
+        """push_and_create_pr_if_needed is called before _enforce_workflow_chain."""
+        task = _make_task(workflow="default")
+        response = _make_response("Done.")
+
+        call_order = []
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        def track_push(*args, **kwargs):
+            call_order.append("push")
+
+        def track_chain(*args, **kwargs):
+            call_order.append("chain")
+
+        agent._git_ops.push_and_create_pr_if_needed = track_push
+        agent._enforce_workflow_chain = track_chain
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert "push" in call_order
+        assert "chain" in call_order
+        assert call_order.index("push") < call_order.index("chain")

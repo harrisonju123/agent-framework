@@ -805,11 +805,11 @@ class Agent:
                     task.context["verdict"] = "no_changes"
 
             self._git_ops.detect_implementation_branch(task)
-            self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
-            # Safety net: create PR if LLM pushed but didn't create one.
-            # Runs AFTER workflow chain so pr_url doesn't short-circuit the executor.
+            # Push before chain routing so downstream agents can fetch the branch
             self._git_ops.push_and_create_pr_if_needed(task)
+
+            self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
             # Autonomous PR lifecycle: poll CI, fix failures, merge
             self._git_ops.manage_pr_lifecycle(task)

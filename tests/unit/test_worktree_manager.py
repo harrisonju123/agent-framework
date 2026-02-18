@@ -785,7 +785,7 @@ class TestCreateWorktreeStartPoint:
     """Tests for create_worktree() with start_point parameter."""
 
     def test_uses_start_point_when_available_on_remote(self, tmp_path):
-        """New branch is based on origin/<start_point> when it exists."""
+        """New branch is based on origin/<start_point> when it exists on remote."""
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
@@ -799,13 +799,13 @@ class TestCreateWorktreeStartPoint:
             git_calls.append(args)
             return MagicMock()
 
-        def mock_branch_exists(repo, branch):
-            # agent/engineer/ME-1-abc exists (locally or on remote)
+        def mock_remote_branch_exists(repo, branch):
             return branch == "agent/engineer/ME-1-abc"
 
         with patch.object(manager, '_enforce_capacity_limit'), \
              patch.object(manager, '_run_git', side_effect=mock_run_git), \
-             patch.object(manager, '_branch_exists', side_effect=mock_branch_exists):
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_remote_branch_exists', side_effect=mock_remote_branch_exists):
             manager.create_worktree(
                 base_repo=base_repo,
                 branch_name="agent/architect/ME-1-def12345",
@@ -835,15 +835,10 @@ class TestCreateWorktreeStartPoint:
             git_calls.append(args)
             return MagicMock()
 
-        def mock_branch_exists(repo, branch):
-            # start_point not on remote; only the named branch check returns False
-            if branch.startswith("origin/"):
-                return False
-            return False
-
         with patch.object(manager, '_enforce_capacity_limit'), \
              patch.object(manager, '_run_git', side_effect=mock_run_git), \
-             patch.object(manager, '_branch_exists', side_effect=mock_branch_exists), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_remote_branch_exists', return_value=False), \
              patch.object(manager, '_get_default_branch', return_value="main"):
             manager.create_worktree(
                 base_repo=base_repo,
@@ -888,3 +883,202 @@ class TestCreateWorktreeStartPoint:
         worktree_add = [c for c in git_calls if c[0] == "worktree"]
         assert len(worktree_add) == 1
         assert "origin/main" in worktree_add[0]
+
+
+class TestRemoteBranchExists:
+    """Tests for _remote_branch_exists — remote-only branch check."""
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        return WorktreeManager(config=config)
+
+    def test_returns_true_when_remote_ref_exists(self, manager, tmp_path):
+        """origin/<branch> resolves → True."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.return_value = MagicMock(returncode=0)
+            assert manager._remote_branch_exists(tmp_path, "feature/test") is True
+            mock_git.assert_called_once_with(
+                ["rev-parse", "--verify", "origin/feature/test"],
+                cwd=tmp_path,
+                check=True,
+                timeout=10,
+            )
+
+    def test_returns_false_when_remote_ref_missing(self, manager, tmp_path):
+        """origin/<branch> not found → False."""
+        from agent_framework.utils.subprocess_utils import SubprocessError
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.side_effect = SubprocessError("git rev-parse", 128, "not found")
+            assert manager._remote_branch_exists(tmp_path, "unpushed-branch") is False
+
+    def test_returns_false_on_timeout(self, manager, tmp_path):
+        """Timeout → False (graceful degradation)."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.side_effect = subprocess.TimeoutExpired("git", 10)
+            assert manager._remote_branch_exists(tmp_path, "slow-branch") is False
+
+
+class TestStartPointUsesRemoteCheck:
+    """Verify create_worktree uses _remote_branch_exists for start_point."""
+
+    def test_start_point_calls_remote_branch_exists(self, tmp_path):
+        """start_point verification goes through _remote_branch_exists, not _branch_exists."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git'), \
+             patch.object(manager, '_remote_branch_exists', return_value=True) as mock_remote, \
+             patch.object(manager, '_branch_exists', return_value=False) as mock_local:
+            manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/architect/ME-1-review",
+                agent_id="architect",
+                task_id="task-review",
+                owner_repo="owner/repo",
+                start_point="agent/engineer/ME-1-impl",
+            )
+
+        mock_remote.assert_called_once_with(base_repo, "agent/engineer/ME-1-impl")
+        # _branch_exists should only be called for branch_name existence check, not start_point
+        for call_args in mock_local.call_args_list:
+            assert call_args[0][1] != "agent/engineer/ME-1-impl"
+
+
+class TestFindWorktreeAgent:
+    """Tests for _find_worktree_agent helper."""
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        return WorktreeManager(config=config)
+
+    def test_finds_agent_for_registered_path(self, manager, tmp_path):
+        """Returns agent_id when path matches a registry entry."""
+        wt_path = tmp_path / "wt-engineer"
+        manager._registry["eng-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="engineer", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+        assert manager._find_worktree_agent(wt_path) == "engineer"
+
+    def test_returns_none_for_unknown_path(self, manager, tmp_path):
+        """Returns None when path not in registry."""
+        assert manager._find_worktree_agent(tmp_path / "unknown") is None
+
+    def test_resolves_symlinks(self, manager, tmp_path):
+        """Resolves paths before comparison so symlinks don't break lookup."""
+        real_path = tmp_path / "real-wt"
+        real_path.mkdir()
+        link_path = tmp_path / "linked-wt"
+        link_path.symlink_to(real_path)
+        manager._registry["key"] = WorktreeInfo(
+            path=str(real_path), branch="b1", agent_id="architect", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+        assert manager._find_worktree_agent(link_path) == "architect"
+
+
+class TestBranchConflictOwnershipValidation:
+    """Tests for cross-agent ownership check in branch conflict handler."""
+
+    def test_rejects_cross_agent_conflict(self, tmp_path):
+        """Branch checked out by another agent raises RuntimeError."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+        existing_wt = tmp_path / "existing-worktree"
+        existing_wt.mkdir()
+
+        # Register the existing worktree as owned by engineer
+        manager._registry["eng-key"] = WorktreeInfo(
+            path=str(existing_wt), branch="feature/shared", agent_id="engineer",
+            task_id="t-eng", created_at="2025-01-01T00:00:00",
+            last_accessed="2025-01-01T00:00:00", base_repo=str(base_repo),
+        )
+
+        conflict_msg = f"fatal: 'feature/shared' is already checked out at '{existing_wt}'"
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = conflict_msg.encode()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            with pytest.raises(RuntimeError, match="locked by agent 'engineer'"):
+                manager.create_worktree(
+                    base_repo=base_repo,
+                    branch_name="feature/shared",
+                    agent_id="architect",
+                    task_id="task-conflict-cross",
+                    owner_repo="owner/repo",
+                )
+
+    def test_allows_same_agent_conflict(self, tmp_path):
+        """Branch checked out by the same agent is reused (existing behavior)."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+        existing_wt = tmp_path / "existing-worktree"
+        existing_wt.mkdir()
+
+        # Register the existing worktree as owned by engineer
+        manager._registry["eng-key"] = WorktreeInfo(
+            path=str(existing_wt), branch="feature/mine", agent_id="engineer",
+            task_id="t-eng", created_at="2025-01-01T00:00:00",
+            last_accessed="2025-01-01T00:00:00", base_repo=str(base_repo),
+        )
+
+        conflict_msg = f"fatal: 'feature/mine' is already checked out at '{existing_wt}'"
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = conflict_msg.encode()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="feature/mine",
+                agent_id="engineer",
+                task_id="task-same-agent",
+                owner_repo="owner/repo",
+            )
+
+        assert result == existing_wt
+
+    def test_allows_unknown_owner_conflict(self, tmp_path):
+        """Branch conflict with no matching registry entry is still reused (graceful fallback)."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+        existing_wt = tmp_path / "orphan-worktree"
+        existing_wt.mkdir()
+
+        conflict_msg = f"fatal: 'feature/orphan' is already checked out at '{existing_wt}'"
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = conflict_msg.encode()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="feature/orphan",
+                agent_id="engineer",
+                task_id="task-orphan",
+                owner_repo="owner/repo",
+            )
+
+        assert result == existing_wt

@@ -276,8 +276,9 @@ class WorktreeManager:
                 # Create worktree with new branch, preferring start_point if available
                 base_ref = None
                 if start_point:
-                    # Check if start_point is available (locally or on remote)
-                    if self._branch_exists(base_repo, start_point):
+                    # Only trust remote refs — local branches in shared clones
+                    # may belong to another agent's worktree and haven't been pushed
+                    if self._remote_branch_exists(base_repo, start_point):
                         base_ref = f"origin/{start_point}"
                     else:
                         logger.debug(
@@ -323,9 +324,19 @@ class WorktreeManager:
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
 
-            # Branch already checked out in another worktree — reuse it
+            # Branch already checked out in another worktree — reuse if same agent
             conflict_path = self._parse_branch_conflict_path(error_msg)
             if conflict_path and conflict_path.exists():
+                owning_agent = self._find_worktree_agent(conflict_path)
+                if owning_agent and owning_agent != agent_id:
+                    logger.warning(
+                        f"Branch {branch_name} checked out by agent '{owning_agent}' "
+                        f"at {conflict_path} — refusing cross-agent reuse"
+                    )
+                    raise RuntimeError(
+                        f"Branch {branch_name} locked by agent '{owning_agent}' "
+                        f"at {conflict_path}"
+                    )
                 logger.info(f"Branch {branch_name} already checked out at {conflict_path}, reusing")
                 now = datetime.now(timezone.utc).isoformat()
                 self._registry[worktree_key] = WorktreeInfo(
@@ -349,6 +360,14 @@ class WorktreeManager:
         match = re.search(r"already checked out at '([^']+)'", error_msg)
         if match:
             return Path(match.group(1))
+        return None
+
+    def _find_worktree_agent(self, path: Path) -> Optional[str]:
+        """Find the agent_id that owns a worktree path, from registry."""
+        resolved = path.resolve()
+        for info in self._registry.values():
+            if Path(info.path).resolve() == resolved:
+                return info.agent_id
         return None
 
     def remove_worktree(self, path: Path, force: bool = False) -> bool:
@@ -659,7 +678,6 @@ class WorktreeManager:
     def _branch_exists(self, repo_path: Path, branch_name: str) -> bool:
         """Check if branch exists locally or remotely."""
         try:
-            # Check local
             run_git_command(
                 ["rev-parse", "--verify", branch_name],
                 cwd=repo_path,
@@ -670,8 +688,17 @@ class WorktreeManager:
         except (SubprocessError, subprocess.TimeoutExpired):
             pass
 
+        return self._remote_branch_exists(repo_path, branch_name)
+
+    def _remote_branch_exists(self, repo_path: Path, branch_name: str) -> bool:
+        """Check if branch exists on the remote (origin) only.
+
+        Unlike _branch_exists(), this ignores local branches. Worktrees share
+        refs with the base repo, so a local-only branch created by one agent
+        appears to exist for all agents — but 'origin/{branch}' won't resolve
+        until it's been pushed.
+        """
         try:
-            # Check remote
             run_git_command(
                 ["rev-parse", "--verify", f"origin/{branch_name}"],
                 cwd=repo_path,
