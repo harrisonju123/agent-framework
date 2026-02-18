@@ -63,6 +63,7 @@ PAUSE_SIGNAL_FILE = ".agent-communication/pause"
 # Constants for optimization strategies
 SUMMARY_CONTEXT_MAX_CHARS = 2000
 SUMMARY_MAX_LENGTH = 500
+_CONVERSATIONAL_PREFIXES = ("i ", "i'", "thank", "sure", "certainly", "of course", "let me")
 BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
 
 # Model pricing (per 1M tokens, as of 2025-01)
@@ -1498,16 +1499,30 @@ class Agent:
 
         # Fall back to Haiku for summarization (only if enabled and insufficient data)
         if self._optimization_config.get("enable_result_summarization", False):
-            summary_prompt = f"Summarize key outcomes in 3 bullet points:\n{response[:SUMMARY_CONTEXT_MAX_CHARS]}"
+            summary_prompt = (
+                "Extract the key outcomes from the following agent output. "
+                "Return exactly 3 bullet points, each on its own line starting with '- '. "
+                "Focus on: what was done, what files/PRs were created, and the final status.\n\n"
+                "<agent_output>\n"
+                f"{response[:SUMMARY_CONTEXT_MAX_CHARS]}\n"
+                "</agent_output>"
+            )
             try:
                 summary_response = await self.llm.complete(LLMRequest(
                     prompt=summary_prompt,
-                    model="haiku"  # Cheap model for summaries
+                    system_prompt="You are a summarization tool. Output only bullet points. Never converse, ask questions, or add commentary.",
+                    model="haiku",
+                    temperature=0.0,
+                    max_tokens=512,
                 ))
 
-                # Verify response is valid before returning
                 if summary_response.success and summary_response.content:
-                    return summary_response.content[:SUMMARY_MAX_LENGTH]
+                    content = summary_response.content.strip()
+                    # Guard against conversational garbage from the LLM
+                    if content.lower().startswith(_CONVERSATIONAL_PREFIXES):
+                        self.logger.warning("Haiku returned conversational response, using fallback")
+                    else:
+                        return content[:SUMMARY_MAX_LENGTH]
                 else:
                     self.logger.warning(f"Haiku summary failed: {summary_response.error}")
             except Exception as e:

@@ -194,6 +194,59 @@ class TestResultSummarization:
         # Should return fallback
         assert "implementation" in summary.lower()
 
+    def _make_summarization_agent(self, agent_config, mock_llm, tmp_path, haiku_content):
+        """Build an agent with result summarization enabled and a canned Haiku response."""
+        mock_llm.complete = AsyncMock(return_value=LLMResponse(
+            content=haiku_content,
+            model_used="haiku",
+            input_tokens=100,
+            output_tokens=50,
+            finish_reason="stop",
+            latency_ms=200,
+            success=True,
+        ))
+        queue = FileQueue(tmp_path)
+        return Agent(
+            agent_config, mock_llm, queue, tmp_path,
+            optimization_config={"enable_result_summarization": True},
+        )
+
+    @pytest.mark.asyncio
+    async def test_extract_summary_llm_request_params(self, agent_config, mock_llm, tmp_path, sample_task):
+        """Verify Haiku LLMRequest uses system_prompt, temperature=0.0, max_tokens=512, XML tags."""
+        agent = self._make_summarization_agent(
+            agent_config, mock_llm, tmp_path,
+            "- Did thing A\n- Did thing B\n- Did thing C",
+        )
+
+        # Response with no regex-extractable patterns forces Haiku fallback
+        summary = await agent._extract_summary("Some work was done on the project.", sample_task)
+
+        mock_llm.complete.assert_called_once()
+        request = mock_llm.complete.call_args[0][0]
+        assert request.system_prompt is not None
+        assert "summarization tool" in request.system_prompt.lower()
+        assert request.temperature == 0.0
+        assert request.max_tokens == 512
+        assert "<agent_output>" in request.prompt
+        assert "</agent_output>" in request.prompt
+        assert summary == "- Did thing A\n- Did thing B\n- Did thing C"
+
+    @pytest.mark.asyncio
+    async def test_extract_summary_rejects_conversational_response(self, agent_config, mock_llm, tmp_path, sample_task):
+        """Verify conversational Haiku responses fall through to guaranteed fallback."""
+        agent = self._make_summarization_agent(
+            agent_config, mock_llm, tmp_path,
+            "I appreciate the summary, but I need to clarify that the task involved...",
+        )
+
+        summary = await agent._extract_summary("Some work was done on the project.", sample_task)
+
+        # Should NOT contain the conversational garbage
+        assert "I appreciate" not in summary
+        # Should have fallen through to guaranteed fallback
+        assert "implementation" in summary.lower() or "completed" in summary.lower()
+
 
 class TestErrorTruncation:
     """Test Strategy 8: Error Truncation."""
