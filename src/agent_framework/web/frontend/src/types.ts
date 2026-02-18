@@ -158,6 +158,52 @@ export interface OperationResponse {
   message: string
 }
 
+// Agentic observability metrics types matching agentic_metrics.py Pydantic models
+
+export interface MemoryMetrics {
+  sessions_with_recall: number
+  sessions_without_recall: number
+  total_sessions: number
+  hit_rate_pct: number
+  avg_chars_injected: number
+  total_recalls: number
+}
+
+export interface SelfEvalMetrics {
+  total_evals: number
+  auto_pass_count: number
+  pass_count: number
+  fail_count: number
+  catch_rate_pct: number
+  auto_pass_rate_pct: number
+}
+
+export interface ReplanMetrics {
+  total_replans: number
+  tasks_with_replans: number
+  tasks_completed_after_replan: number
+  replan_success_rate_pct: number
+}
+
+export interface ContextBudgetMetrics {
+  total_completions: number
+  band_0_25_pct: number
+  band_25_50_pct: number
+  band_50_75_pct: number
+  band_75_100_pct: number
+  band_over_100_pct: number
+  avg_utilization_pct: number
+}
+
+export interface AgenticMetricsReport {
+  generated_at: string
+  time_range_hours: number
+  memory: MemoryMetrics
+  self_eval: SelfEvalMetrics
+  replan: ReplanMetrics
+  context_budget: ContextBudgetMetrics
+}
+
 // Log streaming types
 export interface LogEntry {
   id?: number  // Client-side ID for Vue key binding
