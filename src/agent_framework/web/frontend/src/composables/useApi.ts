@@ -7,6 +7,7 @@ import type {
   AnalyzeRequest,
   RunTicketRequest,
   OperationResponse,
+  AgenticMetrics,
 } from '../types'
 
 const baseUrl = '/api'
@@ -124,6 +125,11 @@ export function useApi() {
     )
   }
 
+  // Metrics
+  async function fetchAgenticMetrics(): Promise<AgenticMetrics | null> {
+    return withLoading(() => fetchJson<AgenticMetrics>('/metrics/agentic'))
+  }
+
   return {
     loading,
     error,
@@ -138,5 +144,6 @@ export function useApi() {
     createWork,
     analyzeRepo,
     runTicket,
+    fetchAgenticMetrics,
   }
 }

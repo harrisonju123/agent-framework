@@ -71,6 +71,48 @@ export interface HealthReport {
   warnings: string[]
 }
 
+// Agentic feature metrics — mirrors backend AgenticMetrics Pydantic models
+
+export interface MemoryMetrics {
+  total_entries: number
+  stores_count: number
+  categories: Record<string, number>
+}
+
+export interface SelfEvalMetrics {
+  tasks_evaluated: number
+  total_retries: number
+}
+
+export interface ReplanMetrics {
+  tasks_replanned: number
+  total_replan_attempts: number
+}
+
+export interface SpecializationMetrics {
+  profiles_cached: number
+  total_matches: number
+}
+
+export interface DebateMetrics {
+  debates_recorded: number
+  high_confidence_count: number
+}
+
+export interface ContextBudgetMetrics {
+  critical_events: number
+}
+
+export interface AgenticMetrics {
+  memory: MemoryMetrics
+  self_eval: SelfEvalMetrics
+  replan: ReplanMetrics
+  specialization: SpecializationMetrics
+  debate: DebateMetrics
+  context_budget: ContextBudgetMetrics
+  computed_at: string
+}
+
 export interface DashboardState {
   agents: Agent[]
   queues: QueueStats[]
@@ -79,6 +121,7 @@ export interface DashboardState {
   health: HealthReport
   is_paused: boolean
   uptime_seconds: number
+  agentic_metrics: AgenticMetrics | null
 }
 
 // API Response types

@@ -14,6 +14,7 @@ import Modal from './components/Modal.vue'
 import Toast from './components/Toast.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import SetupWizard from './components/SetupWizard.vue'
+import InsightsPage from './pages/InsightsPage.vue'
 import type { ModalType } from './types'
 
 const { state, connected, error: wsError, reconnect, reconnecting, reconnectAttempt } = useWebSocket()
@@ -31,6 +32,9 @@ const {
   loading,
   error: apiError,
 } = useApi()
+
+// Top-level view — 'dashboard' is the default, 'insights' is the Insights page
+const activeView = ref<'dashboard' | 'insights'>('dashboard')
 
 // Modal state
 const activeModal = ref<ModalType | 'setup'>(null)
@@ -386,6 +390,29 @@ onMounted(() => {
       <div class="flex items-center gap-3 font-mono text-sm">
         <span class="text-gray-200 font-medium">Agent Dashboard</span>
         <span v-if="isPaused" class="px-2 py-0.5 bg-yellow-500/20 text-yellow-400 text-xs rounded">PAUSED</span>
+        <!-- View navigation -->
+        <nav class="flex gap-1 ml-2" aria-label="Dashboard navigation">
+          <button
+            @click="activeView = 'dashboard'"
+            class="px-2.5 py-1 text-xs rounded transition-colors"
+            :class="activeView === 'dashboard'
+              ? 'bg-gray-700 text-gray-100'
+              : 'text-gray-500 hover:text-gray-300'"
+            aria-label="Dashboard view"
+          >
+            Dashboard
+          </button>
+          <button
+            @click="activeView = 'insights'"
+            class="px-2.5 py-1 text-xs rounded transition-colors"
+            :class="activeView === 'insights'
+              ? 'bg-gray-700 text-gray-100'
+              : 'text-gray-500 hover:text-gray-300'"
+            aria-label="Insights view"
+          >
+            Insights
+          </button>
+        </nav>
       </div>
 
       <!-- Action Toolbar -->
@@ -475,7 +502,10 @@ onMounted(() => {
 
     <!-- Main content -->
     <template v-else>
-      <div class="flex-1 min-h-0 overflow-y-auto">
+      <!-- Insights view -->
+      <InsightsPage v-if="activeView === 'insights'" />
+
+      <div v-else class="flex-1 min-h-0 overflow-y-auto">
         <!-- Agent Cards -->
         <div class="p-4">
           <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
@@ -538,8 +568,8 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- Collapsible Log Panel -->
-      <div class="border-t border-gray-800 shrink-0">
+      <!-- Collapsible Log Panel (dashboard only) -->
+      <div v-if="activeView === 'dashboard'" class="border-t border-gray-800 shrink-0">
         <button
           @click="logsExpanded = !logsExpanded"
           class="w-full px-4 py-2 flex items-center justify-between text-sm font-mono text-gray-400 hover:bg-gray-900/30 transition-colors"
@@ -562,8 +592,8 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- Footer with keyboard shortcuts -->
-      <footer class="bg-gray-900 border-t border-gray-800 px-4 py-1.5 font-mono text-xs text-gray-600 flex items-center gap-4 shrink-0">
+      <!-- Footer with keyboard shortcuts (dashboard only) -->
+      <footer v-if="activeView === 'dashboard'" class="bg-gray-900 border-t border-gray-800 px-4 py-1.5 font-mono text-xs text-gray-600 flex items-center gap-4 shrink-0">
         <span>[s] start</span>
         <span>[x] stop</span>
         <span>[p] pause</span>
