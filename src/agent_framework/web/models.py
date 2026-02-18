@@ -148,6 +148,60 @@ class TeamSessionData(BaseModel):
     status: str = "active"
 
 
+class MemoryMetrics(BaseModel):
+    """Metrics about the agent memory system."""
+    total_entries: int = 0
+    stores_count: int = 0  # number of (repo, agent_type) stores
+    categories: Dict[str, int] = {}  # category → entry count
+
+
+class SelfEvalMetrics(BaseModel):
+    """Metrics derived from self-evaluation events in session logs."""
+    total_evals: int = 0
+    passed: int = 0
+    failed: int = 0
+    # sessions scanned to produce these numbers (bounded scan)
+    sessions_scanned: int = 0
+
+
+class ReplanMetrics(BaseModel):
+    """Metrics about replanning events in session logs."""
+    total_replans: int = 0
+    sessions_with_replans: int = 0
+    sessions_scanned: int = 0
+
+
+class SpecializationMetrics(BaseModel):
+    """Metrics about engineer specialization profile usage."""
+    # profile id → number of times selected (read from session logs)
+    profile_counts: Dict[str, int] = {}
+    sessions_scanned: int = 0
+
+
+class DebateMetrics(BaseModel):
+    """Metrics about multi-agent debate invocations in session logs."""
+    total_debates: int = 0
+    sessions_scanned: int = 0
+
+
+class ContextBudgetMetrics(BaseModel):
+    """Metrics about context window budget utilisation."""
+    budget_exceeded_count: int = 0
+    # breakdown by agent of how many times their tasks exceeded budget
+    exceeded_by_agent: Dict[str, int] = {}
+
+
+class AgenticMetrics(BaseModel):
+    """Aggregated agentic observability metrics across all 6 data sources."""
+    memory: MemoryMetrics = Field(default_factory=MemoryMetrics)
+    self_eval: SelfEvalMetrics = Field(default_factory=SelfEvalMetrics)
+    replan: ReplanMetrics = Field(default_factory=ReplanMetrics)
+    specialization: SpecializationMetrics = Field(default_factory=SpecializationMetrics)
+    debates: DebateMetrics = Field(default_factory=DebateMetrics)
+    context_budget: ContextBudgetMetrics = Field(default_factory=ContextBudgetMetrics)
+    computed_at: Optional[datetime] = None
+
+
 class DashboardState(BaseModel):
     """Complete dashboard state for WebSocket updates."""
     agents: List[AgentData]
@@ -159,6 +213,7 @@ class DashboardState(BaseModel):
     is_paused: bool
     uptime_seconds: int
     active_teams: List[TeamSessionData] = []
+    agentic_metrics: Optional[AgenticMetrics] = None
 
 
 # API Response models

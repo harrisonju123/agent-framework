@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -18,7 +19,11 @@ from .models import (
     ActiveTaskData,
     AgentData,
     AgentStatusEnum,
+    AgenticMetrics,
     CheckpointData,
+    ContextBudgetMetrics,
+    DebateMetrics,
+    MemoryMetrics,
     QueueStats,
     EventData,
     FailedTaskData,
@@ -26,6 +31,9 @@ from .models import (
     HealthReport,
     CurrentTaskData,
     LogEntry,
+    ReplanMetrics,
+    SelfEvalMetrics,
+    SpecializationMetrics,
     TeamSessionData,
     ToolActivityData,
 )
@@ -50,6 +58,9 @@ class DashboardDataProvider:
         self._cache_ttl_seconds = 5  # Refresh config/teams every 5 seconds
         self._teams_cache: Optional[List[TeamSessionData]] = None
         self._teams_cache_time: Optional[datetime] = None
+        self._agentic_metrics_cache: Optional[AgenticMetrics] = None
+        self._agentic_metrics_cache_time: Optional[datetime] = None
+        self._agentic_metrics_ttl_seconds = 10  # Filesystem scans are cheap but bounded
 
     def _get_agents_config(self) -> List[AgentDefinition]:
         """Get agents config with caching."""
@@ -838,3 +849,158 @@ class DashboardDataProvider:
                 result[activity.agent_id] = activity.current_task.id
 
         return result
+
+    # ============== Agentic Metrics ==============
+
+    def get_agentic_metrics(self) -> AgenticMetrics:
+        """Aggregate observability metrics from 6 agentic data sources.
+
+        Results are cached for 10 seconds to avoid hammering the filesystem
+        on each WebSocket tick.
+        """
+        now = datetime.now(timezone.utc)
+        if (
+            self._agentic_metrics_cache is not None
+            and self._agentic_metrics_cache_time is not None
+            and (now - self._agentic_metrics_cache_time).total_seconds()
+            <= self._agentic_metrics_ttl_seconds
+        ):
+            return self._agentic_metrics_cache
+
+        memory = self._collect_memory_metrics()
+        self_eval, replan, specialization, debates = self._collect_session_log_metrics()
+        context_budget = self._collect_context_budget_metrics()
+
+        metrics = AgenticMetrics(
+            memory=memory,
+            self_eval=self_eval,
+            replan=replan,
+            specialization=specialization,
+            debates=debates,
+            context_budget=context_budget,
+            computed_at=now,
+        )
+        self._agentic_metrics_cache = metrics
+        self._agentic_metrics_cache_time = now
+        return metrics
+
+    def _collect_memory_metrics(self) -> MemoryMetrics:
+        """Walk the memory store directory and count entries per category."""
+        memory_base = self.workspace / ".agent-communication" / "memory"
+        if not memory_base.exists():
+            return MemoryMetrics()
+
+        total_entries = 0
+        stores_count = 0
+        category_counts: Dict[str, int] = defaultdict(int)
+
+        for json_file in memory_base.rglob("*.json"):
+            try:
+                data = json.loads(json_file.read_text())
+                if not isinstance(data, list):
+                    continue
+                stores_count += 1
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    total_entries += 1
+                    category = entry.get("category", "unknown")
+                    category_counts[category] += 1
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        return MemoryMetrics(
+            total_entries=total_entries,
+            stores_count=stores_count,
+            categories=dict(category_counts),
+        )
+
+    # Maximum recent session files to scan to keep response times bounded
+    _SESSION_SCAN_LIMIT = 50
+
+    def _collect_session_log_metrics(
+        self,
+    ) -> tuple[SelfEvalMetrics, ReplanMetrics, SpecializationMetrics, DebateMetrics]:
+        """Scan recent session JSONL logs and extract per-event counters.
+
+        Only the most recent _SESSION_SCAN_LIMIT files are read to bound the
+        cost of a cold cache fill on large workspaces.
+        """
+        sessions_dir = self.workspace / "logs" / "sessions"
+
+        self_eval = SelfEvalMetrics()
+        replan = ReplanMetrics()
+        specialization = SpecializationMetrics()
+        debates = DebateMetrics()
+
+        if not sessions_dir.exists():
+            return self_eval, replan, specialization, debates
+
+        # Scan most-recently-modified files first so the bounded scan covers
+        # the freshest data rather than the oldest.
+        session_files = sorted(
+            sessions_dir.glob("*.jsonl"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )[: self._SESSION_SCAN_LIMIT]
+
+        sessions_scanned = len(session_files)
+        profile_counts: Dict[str, int] = defaultdict(int)
+        sessions_with_replans: set = set()
+
+        for session_file in session_files:
+            try:
+                for raw_line in session_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                    raw_line = raw_line.strip()
+                    if not raw_line:
+                        continue
+                    try:
+                        entry = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    event = entry.get("event", "")
+
+                    if event == "self_eval":
+                        self_eval.total_evals += 1
+                        if entry.get("passed", False):
+                            self_eval.passed += 1
+                        else:
+                            self_eval.failed += 1
+
+                    elif event == "replan":
+                        replan.total_replans += 1
+                        sessions_with_replans.add(session_file.name)
+
+                    elif event == "specialization_selected":
+                        profile_id = entry.get("profile_id", "unknown")
+                        profile_counts[profile_id] += 1
+
+                    elif event == "debate_start":
+                        debates.total_debates += 1
+
+            except OSError:
+                continue
+
+        self_eval.sessions_scanned = sessions_scanned
+        replan.sessions_scanned = sessions_scanned
+        replan.sessions_with_replans = len(sessions_with_replans)
+        specialization.sessions_scanned = sessions_scanned
+        specialization.profile_counts = dict(profile_counts)
+        debates.sessions_scanned = sessions_scanned
+
+        return self_eval, replan, specialization, debates
+
+    def _collect_context_budget_metrics(self) -> ContextBudgetMetrics:
+        """Count token_budget_exceeded events from the activity event stream."""
+        events = self.activity_manager.get_recent_events(limit=200)
+        exceeded_by_agent: Dict[str, int] = defaultdict(int)
+
+        for event in events:
+            if event.type == "token_budget_exceeded":
+                exceeded_by_agent[event.agent] += 1
+
+        return ContextBudgetMetrics(
+            budget_exceeded_count=sum(exceeded_by_agent.values()),
+            exceeded_by_agent=dict(exceeded_by_agent),
+        )

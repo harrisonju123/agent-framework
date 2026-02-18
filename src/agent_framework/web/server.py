@@ -20,6 +20,7 @@ from .data_provider import DashboardDataProvider
 from .models import (
     ActiveTaskData,
     AgentData,
+    AgenticMetrics,
     CheckpointData,
     QueueStats,
     EventData,
@@ -363,6 +364,16 @@ def register_routes(app: FastAPI):
     async def get_health():
         """Get system health status."""
         return app.state.data_provider.get_health_status()
+
+    @app.get("/api/metrics/agentic", response_model=AgenticMetrics)
+    async def get_agentic_metrics():
+        """Get aggregated agentic observability metrics.
+
+        Aggregates data from memory stores, session logs (self-eval, replan,
+        specialization, debates), and activity events (context budget).
+        Results are cached for 10 seconds server-side.
+        """
+        return app.state.data_provider.get_agentic_metrics()
 
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():
@@ -818,6 +829,7 @@ def register_routes(app: FastAPI):
                     is_paused=app.state.data_provider.is_paused(),
                     uptime_seconds=int(uptime),
                     active_teams=app.state.data_provider.get_active_teams(),
+                    agentic_metrics=app.state.data_provider.get_agentic_metrics(),
                 )
 
                 await websocket.send_json(state.model_dump(mode="json"))
