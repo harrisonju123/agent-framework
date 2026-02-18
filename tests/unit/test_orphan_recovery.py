@@ -1,6 +1,8 @@
 """Tests for orphan task recovery — 3-tier smart detection."""
 
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -206,6 +208,33 @@ class TestRecoverOrphanedTasks:
         # No recovery_reason stamped — tier 1 doesn't rewrite the completed copy
         completed_data = json.loads(completed_file.read_text())
         assert "recovery_reason" not in completed_data.get("context", {})
+
+
+class TestIsOrphaned:
+    """Unit tests for FileQueue._is_orphaned() heartbeat detection."""
+
+    def test_live_agent_not_orphaned(self, queue):
+        """Task with a fresh heartbeat file is not orphaned."""
+        task = _make_task(status=TaskStatus.IN_PROGRESS)
+        task.started_by = "live-agent"
+
+        heartbeat = queue.heartbeat_dir / "live-agent"
+        heartbeat.write_text(str(int(time.time())))
+
+        assert queue._is_orphaned(task) is False
+
+    def test_stale_heartbeat_is_orphaned(self, queue, tmp_path):
+        """Task whose heartbeat is older than 120 s is considered orphaned."""
+        task = _make_task(status=TaskStatus.IN_PROGRESS)
+        task.started_by = "dead-agent"
+
+        heartbeat = queue.heartbeat_dir / "dead-agent"
+        heartbeat.write_text(str(int(time.time())))
+        # Backdate mtime by 3 minutes so the agent appears dead
+        stale_mtime = time.time() - 180
+        os.utime(heartbeat, (stale_mtime, stale_mtime))
+
+        assert queue._is_orphaned(task) is True
 
 
 class TestPopOrphanRecovery:

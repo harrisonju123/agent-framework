@@ -170,7 +170,7 @@ class FileQueue:
         if not task.started_by:
             return True
 
-        heartbeat_file = self.heartbeat_dir / f"{task.started_by}.json"
+        heartbeat_file = self.heartbeat_dir / task.started_by
         if not heartbeat_file.exists():
             return True
 
