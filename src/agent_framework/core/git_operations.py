@@ -103,6 +103,9 @@ class GitOperationsManager:
                     task_hash = hashlib.sha256(task.id.encode()).hexdigest()[:8]
                     branch_name = f"agent/{self.config.id}/{jira_key}-{task_hash}"
 
+                # Reload registry so we see worktrees created by other agent processes
+                self.worktree_manager.reload_registry()
+
                 # Check registry for existing worktree on this branch (reuse or retry)
                 existing = self.worktree_manager.find_worktree_by_branch(branch_name)
                 if existing:

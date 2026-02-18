@@ -148,6 +148,10 @@ class WorktreeManager:
         else:
             self._registry = {}
 
+    def reload_registry(self) -> None:
+        """Reload registry from disk for cross-process visibility."""
+        self._load_registry()
+
     def _save_registry(self) -> None:
         """Save worktree registry to disk with file locking."""
         registry_path = self._get_registry_path()
@@ -302,8 +306,34 @@ class WorktreeManager:
 
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
+
+            # Branch already checked out in another worktree — reuse it
+            conflict_path = self._parse_branch_conflict_path(error_msg)
+            if conflict_path and conflict_path.exists():
+                logger.info(f"Branch {branch_name} already checked out at {conflict_path}, reusing")
+                now = datetime.now(timezone.utc).isoformat()
+                self._registry[worktree_key] = WorktreeInfo(
+                    path=str(conflict_path),
+                    branch=branch_name,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    created_at=now,
+                    last_accessed=now,
+                    base_repo=str(base_repo),
+                    active=True,
+                )
+                self._save_registry()
+                return conflict_path
+
             logger.error(f"Failed to create worktree: {error_msg}")
             raise RuntimeError(f"Failed to create worktree: {error_msg}")
+
+    def _parse_branch_conflict_path(self, error_msg: str) -> Optional[Path]:
+        """Extract worktree path from git 'already checked out' error."""
+        match = re.search(r"already checked out at '([^']+)'", error_msg)
+        if match:
+            return Path(match.group(1))
+        return None
 
     def remove_worktree(self, path: Path, force: bool = False) -> bool:
         """

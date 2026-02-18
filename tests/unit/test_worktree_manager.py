@@ -595,3 +595,187 @@ class TestActiveWorktreeProtection:
             manager.mark_worktree_inactive(tmp_path / "does-not-exist")
 
         mock_save.assert_not_called()
+
+
+class TestReloadRegistry:
+    """Tests for reload_registry() cross-process visibility."""
+
+    def test_reload_picks_up_external_changes(self, tmp_path):
+        """Registry changes written by another process are visible after reload."""
+        worktree_root = tmp_path / "worktrees"
+        worktree_root.mkdir(parents=True)
+
+        config = WorktreeConfig(enabled=True, root=worktree_root)
+        manager = WorktreeManager(config=config)
+        assert len(manager._registry) == 0
+
+        # Simulate another process writing to the registry file
+        registry_data = {
+            "engineer-task-ext": {
+                "path": str(tmp_path / "wt-ext"),
+                "branch": "agent/engineer/EXT-1",
+                "agent_id": "engineer",
+                "task_id": "task-ext",
+                "created_at": "2025-01-01T00:00:00+00:00",
+                "last_accessed": "2025-01-01T00:00:00+00:00",
+                "base_repo": str(tmp_path),
+                "active": True,
+            }
+        }
+        registry_file = worktree_root / ".worktree-registry.json"
+        registry_file.write_text(json.dumps(registry_data))
+
+        # Before reload — still empty
+        assert len(manager._registry) == 0
+
+        manager.reload_registry()
+
+        assert len(manager._registry) == 1
+        assert "engineer-task-ext" in manager._registry
+        assert manager._registry["engineer-task-ext"].branch == "agent/engineer/EXT-1"
+
+    def test_reload_delegates_to_load_registry(self, tmp_path):
+        """reload_registry() calls _load_registry() internally."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        with patch.object(manager, '_load_registry') as mock_load:
+            manager.reload_registry()
+            mock_load.assert_called_once()
+
+
+class TestParseBranchConflictPath:
+    """Tests for _parse_branch_conflict_path()."""
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        return WorktreeManager(config=config)
+
+    def test_parses_standard_error_message(self, manager):
+        """Extracts path from standard git 'already checked out' error."""
+        error = "fatal: 'agent/engineer/ME-123' is already checked out at '/home/user/.agent-workspaces/worktrees/owner/repo/engineer-ME-123'"
+        result = manager._parse_branch_conflict_path(error)
+        assert result == Path("/home/user/.agent-workspaces/worktrees/owner/repo/engineer-ME-123")
+
+    def test_returns_none_for_unrelated_error(self, manager):
+        """Returns None when error doesn't match the conflict pattern."""
+        error = "fatal: not a git repository"
+        result = manager._parse_branch_conflict_path(error)
+        assert result is None
+
+    def test_returns_none_for_empty_string(self, manager):
+        """Returns None for empty error message."""
+        result = manager._parse_branch_conflict_path("")
+        assert result is None
+
+
+class TestCreateWorktreeBranchConflict:
+    """Tests for branch conflict recovery in create_worktree()."""
+
+    def test_returns_existing_path_on_branch_conflict(self, tmp_path):
+        """When git says branch is already checked out, return that path."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        # Create a fake base repo and existing worktree path
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+        existing_wt = tmp_path / "existing-worktree"
+        existing_wt.mkdir()
+
+        conflict_msg = f"fatal: 'feature/test' is already checked out at '{existing_wt}'"
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = conflict_msg.encode()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="feature/test",
+                agent_id="engineer",
+                task_id="task-conflict",
+                owner_repo="owner/repo",
+            )
+
+        assert result == existing_wt
+
+        # Verify the conflict worktree was registered
+        key = manager._get_worktree_key("engineer", "task-conflict")
+        assert key in manager._registry
+        info = manager._registry[key]
+        assert info.branch == "feature/test"
+        assert info.path == str(existing_wt)
+        assert info.active is True
+
+    def test_raises_on_non_conflict_error(self, tmp_path):
+        """Non-conflict CalledProcessError still raises RuntimeError."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = b"fatal: some other git error"
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            with pytest.raises(RuntimeError, match="some other git error"):
+                manager.create_worktree(
+                    base_repo=base_repo,
+                    branch_name="feature/test",
+                    agent_id="engineer",
+                    task_id="task-other",
+                    owner_repo="owner/repo",
+                )
+
+    def test_raises_when_conflict_path_does_not_exist(self, tmp_path):
+        """If the parsed conflict path doesn't exist on disk, still raise."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        ghost_path = tmp_path / "ghost-worktree"
+        conflict_msg = f"fatal: 'feature/test' is already checked out at '{ghost_path}'"
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = conflict_msg.encode()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            with pytest.raises(RuntimeError, match="already checked out"):
+                manager.create_worktree(
+                    base_repo=base_repo,
+                    branch_name="feature/test",
+                    agent_id="engineer",
+                    task_id="task-ghost",
+                    owner_repo="owner/repo",
+                )
+
+    def test_raises_when_stderr_is_none(self, tmp_path):
+        """CalledProcessError with None stderr falls through to RuntimeError."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = None
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            with pytest.raises(RuntimeError):
+                manager.create_worktree(
+                    base_repo=base_repo,
+                    branch_name="feature/test",
+                    agent_id="engineer",
+                    task_id="task-none-stderr",
+                    owner_repo="owner/repo",
+                )

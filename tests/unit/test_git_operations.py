@@ -435,3 +435,66 @@ class TestDetectImplementationBranch:
         git_ops.detect_implementation_branch(sample_task)
 
         assert "implementation_branch" not in sample_task.context
+
+
+class TestRegistryReloadInGetWorkingDirectory:
+    """Tests that get_working_directory reloads the registry before branch lookup."""
+
+    def test_reloads_registry_before_branch_lookup(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """reload_registry() is called before find_worktree_by_branch()."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+        mock_worktree_manager.find_worktree_by_branch.return_value = Path("/existing/wt")
+
+        from datetime import datetime, timezone
+        task = Task(
+            id="task-reload", title="Test", description="Test", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={"github_repo": "owner/repo", "implementation_branch": "agent/engineer/ME-1"},
+        )
+
+        git_ops.get_working_directory(task)
+
+        # Verify ordering: reload_registry called before find_worktree_by_branch
+        calls = mock_worktree_manager.method_calls
+        reload_idx = next(i for i, c in enumerate(calls) if c[0] == "reload_registry")
+        find_idx = next(i for i, c in enumerate(calls) if c[0] == "find_worktree_by_branch")
+        assert reload_idx < find_idx
+
+    def test_reuses_worktree_via_implementation_branch(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """Chain task with implementation_branch finds engineer's worktree after reload."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        worktree_path = Path("/worktrees/owner/repo/engineer-ME-1")
+        mock_worktree_manager.find_worktree_by_branch.return_value = worktree_path
+
+        from datetime import datetime, timezone
+        task = Task(
+            id="task-chain", title="Code Review", description="Review", type="review",
+            status="pending", priority=1, created_by="test", assigned_to="architect",
+            created_at=datetime.now(timezone.utc),
+            context={
+                "github_repo": "owner/repo",
+                "implementation_branch": "agent/engineer/ME-1-abc12345",
+            },
+        )
+
+        result = git_ops.get_working_directory(task)
+
+        assert result == worktree_path
+        assert git_ops._active_worktree == worktree_path
+        mock_worktree_manager.create_worktree.assert_not_called()
