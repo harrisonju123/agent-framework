@@ -826,7 +826,7 @@ class TestCreateWorktreeStartPoint:
             )
 
         # The worktree add command should use origin/<start_point> as base
-        worktree_add = [c for c in git_calls if c[0] == "worktree"]
+        worktree_add = [c for c in git_calls if c[:2] == ["worktree", "add"]]
         assert len(worktree_add) == 1
         assert "origin/agent/engineer/ME-1-abc" in worktree_add[0]
 
@@ -859,7 +859,7 @@ class TestCreateWorktreeStartPoint:
                 start_point="agent/engineer/ME-1-abc",
             )
 
-        worktree_add = [c for c in git_calls if c[0] == "worktree"]
+        worktree_add = [c for c in git_calls if c[:2] == ["worktree", "add"]]
         assert len(worktree_add) == 1
         assert "origin/main" in worktree_add[0]
 
@@ -890,7 +890,7 @@ class TestCreateWorktreeStartPoint:
                 owner_repo="owner/repo",
             )
 
-        worktree_add = [c for c in git_calls if c[0] == "worktree"]
+        worktree_add = [c for c in git_calls if c[:2] == ["worktree", "add"]]
         assert len(worktree_add) == 1
         assert "origin/main" in worktree_add[0]
 
@@ -1232,3 +1232,103 @@ class TestCleanupSafetyChecks:
         assert "stale-key" in manager._registry
         mock_remove.assert_not_called()
         assert result["registered"] == 0
+
+
+class TestTouchWorktree:
+    """Tests for touch_worktree() timestamp update."""
+
+    def test_touch_worktree_updates_last_accessed(self, tmp_path):
+        """Timestamp updated, active flag unchanged."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt"
+        old_ts = "2025-01-01T00:00:00+00:00"
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="a1", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts,
+            base_repo="/base", active=True,
+        )
+
+        with patch.object(manager, '_save_registry') as mock_save:
+            manager.touch_worktree(wt_path)
+
+        assert manager._registry["key1"].last_accessed != old_ts
+        assert manager._registry["key1"].active is True
+        mock_save.assert_called_once()
+
+    def test_touch_worktree_noop_for_unknown_path(self, tmp_path):
+        """No crash for unregistered path, no save triggered."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        with patch.object(manager, '_save_registry') as mock_save:
+            manager.touch_worktree(tmp_path / "nonexistent")
+
+        mock_save.assert_not_called()
+
+
+class TestCreateWorktreePrunesBeforeAdd:
+    """Tests that create_worktree prunes stale refs before git worktree add."""
+
+    def test_create_worktree_prunes_before_add(self, tmp_path):
+        """git worktree prune is called during creation when path doesn't exist."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_get_default_branch', return_value="main"):
+            manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/engineer/test-prune",
+                agent_id="engineer",
+                task_id="task-prune",
+                owner_repo="owner/repo",
+            )
+
+        # Verify prune happens before worktree add
+        prune_idx = next(i for i, c in enumerate(git_calls) if c == ["worktree", "prune"])
+        add_idx = next(i for i, c in enumerate(git_calls) if c[:2] == ["worktree", "add"])
+        assert prune_idx < add_idx
+
+
+class TestForceRemovalPrunesAfterRmtree:
+    """Tests that force-removal fallback prunes after shutil.rmtree."""
+
+    def test_force_removal_prunes_after_rmtree(self, tmp_path):
+        """git worktree prune called after shutil.rmtree fallback."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-to-remove"
+        wt_path.mkdir()
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            # The initial "git worktree remove" fails, triggering force fallback
+            if args[0] == "worktree" and args[1] == "remove":
+                raise subprocess.CalledProcessError(1, "git")
+            return MagicMock()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git):
+            result = manager._remove_worktree_directory(wt_path, base_repo, force=True)
+
+        assert result is True
+        # Verify prune was called after the failed remove attempt
+        assert ["worktree", "prune"] in git_calls

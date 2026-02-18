@@ -310,8 +310,20 @@ class GitOperationsManager:
         if not self._active_worktree or not self.worktree_manager:
             return
 
-        # Unprotect from eviction immediately, regardless of whether
-        # the directory itself gets removed below
+        # Intermediate chain steps keep worktree active/protected so it survives
+        # eviction during the gap before the next step for this agent
+        is_intermediate = (
+            task.context.get("chain_step")
+            and not self._is_at_terminal_workflow_step(task)
+        )
+        if is_intermediate:
+            self.worktree_manager.touch_worktree(self._active_worktree)
+            self.logger.debug(f"Intermediate chain step — kept worktree active: {self._active_worktree}")
+            self._active_worktree = None
+            return
+
+        # Terminal or standalone — unprotect from eviction immediately,
+        # regardless of whether the directory itself gets removed below
         self.worktree_manager.mark_worktree_inactive(self._active_worktree)
 
         worktree_config = self.worktree_manager.config

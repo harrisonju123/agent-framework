@@ -264,6 +264,13 @@ class WorktreeManager:
         # Ensure parent directory exists
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Prune stale worktree refs — handles force-removal leftovers where
+        # shutil.rmtree deleted the directory but git still tracks the worktree
+        try:
+            self._run_git(["worktree", "prune"], cwd=base_repo, timeout=30)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+
         try:
             # Fetch latest from origin
             self._run_git(["fetch", "origin"], cwd=base_repo, timeout=60)
@@ -455,6 +462,12 @@ class WorktreeManager:
                 try:
                     import shutil
                     shutil.rmtree(path)
+                    # Clean up git's stale worktree tracking left behind by rmtree
+                    if base_repo and base_repo.exists():
+                        try:
+                            self._run_git(["worktree", "prune"], cwd=base_repo, timeout=30)
+                        except subprocess.CalledProcessError:
+                            pass
                     logger.info(f"Force removed worktree: {path}")
                     return True
                 except Exception:
@@ -654,6 +667,19 @@ class WorktreeManager:
                 info.active = False
                 self._save_registry()
                 logger.debug(f"Marked worktree inactive: {path}")
+                return
+
+    def touch_worktree(self, path: Path) -> None:
+        """Update last_accessed without changing active status.
+
+        Used by intermediate chain steps to prevent stale-active eviction
+        during the gap before the next step reuses this worktree.
+        """
+        path = Path(path).resolve()
+        for key, info in self._registry.items():
+            if Path(info.path).resolve() == path:
+                info.last_accessed = datetime.now(timezone.utc).isoformat()
+                self._save_registry()
                 return
 
     def _is_stale_active(self, info: WorktreeInfo) -> bool:
