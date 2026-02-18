@@ -262,6 +262,13 @@ class ClaudeCLIBackend(LLMBackend):
             cmd.extend(["--agents", json.dumps(request.agents)])
             logger.debug(f"Team mode active: teammates={list(request.agents.keys())}")
 
+        # Restrict tool access for PREVIEW tasks — enforces read-only mode at the
+        # CLI level. Bash is still allowed for read-only exploration (git log, ls, etc.)
+        # so this is defense-in-depth alongside the prompt injection, not airtight.
+        if request.allowed_tools:
+            cmd.extend(["--allowedTools", ",".join(request.allowed_tools)])
+            logger.debug(f"Tool restriction active: allowed_tools={request.allowed_tools}")
+
         # Build prompt (combine system + user)
         full_prompt = ""
         if request.system_prompt:
