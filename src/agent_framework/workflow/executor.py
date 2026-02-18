@@ -348,6 +348,21 @@ class WorkflowExecutor:
             )
             return
 
+        # Per-task budget ceiling: fast-forward to PR when spend exceeds limit
+        budget_action = self._check_budget_ceiling(task)
+        if budget_action == "halt":
+            self.logger.warning(
+                f"Cumulative cost ${task.context.get('_cumulative_cost', 0):.2f} "
+                f"exceeds ceiling ${task.context.get('_budget_ceiling', 0):.2f} "
+                f"for task {task.id} — fast-forwarding to PR creation"
+            )
+            pr_step = workflow.steps.get("create_pr")
+            if pr_step and pr_step != target_step:
+                target_step = pr_step
+                next_agent = pr_step.agent
+            else:
+                return
+
         # Cap review→engineer fix cycles to prevent infinite bounce loops.
         # Both code_review and qa_review stages share a single counter.
         review_cycles = task.context.get("_dag_review_cycles", 0)
@@ -513,6 +528,25 @@ class WorkflowExecutor:
             context=context,
             plan=task.plan,
         )
+
+    def _check_budget_ceiling(self, task: "Task") -> str:
+        """Check cumulative cost against budget ceiling.
+
+        Returns "ok", "warn", or "halt".
+        """
+        ceiling = task.context.get("_budget_ceiling")
+        if ceiling is None:
+            return "ok"
+        cumulative = task.context.get("_cumulative_cost", 0.0)
+        if cumulative >= ceiling:
+            return "halt"
+        if cumulative >= ceiling * 0.8:
+            self.logger.info(
+                f"Budget warning: ${cumulative:.2f} is ≥80% of "
+                f"${ceiling:.2f} ceiling for task {task.id}"
+            )
+            return "warn"
+        return "ok"
 
     def _save_task_checkpoint(self, task: "Task") -> None:
         """Save task to checkpoint queue for human approval."""

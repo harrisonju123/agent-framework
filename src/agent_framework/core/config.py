@@ -123,6 +123,16 @@ class OptimizationConfig(BaseModel):
     # Budget warning threshold (e.g., 1.3 = warn at 130% of budget)
     budget_warning_threshold: float = 1.3
 
+    # Per-task-tree USD budget ceilings by estimated effort (t-shirt size)
+    enable_effort_budget_ceilings: bool = False
+    effort_budget_ceilings: Dict[str, float] = Field(default_factory=lambda: {
+        "XS": 3.0,
+        "S": 5.0,
+        "M": 15.0,
+        "L": 30.0,
+        "XL": 50.0,
+    })
+
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
 
     # Token budgets by task type (configurable)
@@ -156,6 +166,17 @@ class OptimizationConfig(BaseModel):
                 logger.warning(
                     f"Token budget for '{task_type}' is very high: {budget}. "
                     "This may indicate a configuration error."
+                )
+        return v
+
+    @field_validator('effort_budget_ceilings')
+    @classmethod
+    def validate_effort_ceilings(cls, v: Dict[str, float]) -> Dict[str, float]:
+        """Validate effort budget ceilings are positive."""
+        for size, ceiling in v.items():
+            if ceiling <= 0:
+                raise ValueError(
+                    f"Effort budget ceiling for '{size}' must be positive, got {ceiling}"
                 )
         return v
 

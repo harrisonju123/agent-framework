@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from ..utils.rich_logging import ContextLogger
     from .session_logger import SessionLogger
     from .activity import ActivityManager
+    from .task import PlanDocument
 
 from .task import Task, TaskType
 from .activity import ActivityEvent
@@ -121,6 +122,26 @@ class BudgetManager:
             response.output_tokens / 1_000_000 * prices["output"]
         )
         return cost
+
+    def derive_effort_from_plan(self, plan: Optional["PlanDocument"]) -> str:
+        """Derive t-shirt size from plan when architect didn't set estimated_effort."""
+        if not plan or not plan.files_to_modify:
+            return "M"
+        estimated_lines = len(plan.files_to_modify) * 15
+        if estimated_lines < 50:
+            return "XS"
+        elif estimated_lines < 200:
+            return "S"
+        elif estimated_lines < 500:
+            return "M"
+        elif estimated_lines < 1000:
+            return "L"
+        return "XL"
+
+    def get_effort_ceiling(self, effort_key: str) -> Optional[float]:
+        """Look up USD ceiling for effort size. Returns None if not configured."""
+        ceilings = self.optimization_config.get("effort_budget_ceilings", {})
+        return ceilings.get(effort_key)
 
     def log_task_completion_metrics(self, task: Task, response: "LLMResponse", task_start_time: datetime) -> None:
         """Log token usage, cost, and completion events."""

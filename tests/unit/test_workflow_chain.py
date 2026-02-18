@@ -144,6 +144,12 @@ def agent(queue, tmp_path):
         multi_repo_manager=None,
     )
 
+    # Budget manager and optimization config (required by cost accumulation)
+    from types import MappingProxyType
+    a._optimization_config = MappingProxyType({"enable_effort_budget_ceilings": False})
+    a._budget = MagicMock()
+    a._budget.estimate_cost.return_value = 0.0
+
     return a
 
 

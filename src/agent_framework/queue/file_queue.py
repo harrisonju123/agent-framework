@@ -696,6 +696,17 @@ class FileQueue:
             if len(subtask_branches) > 1:
                 context["subtask_branches"] = subtask_branches
 
+        # Aggregate subtask costs for the fan-in task.
+        # Subtasks inherit parent context (including the parent's _cumulative_cost
+        # as a baseline), then accumulate their own LLM cost on top. To avoid
+        # counting the parent baseline N times, subtract it from each subtask.
+        parent_baseline = parent_task.context.get("_cumulative_cost", 0.0)
+        subtask_own_costs = sum(
+            st.context.get("_cumulative_cost", 0.0) - parent_baseline
+            for st in completed_subtasks
+        )
+        context["_cumulative_cost"] = parent_baseline + subtask_own_costs
+
         fan_in_task = Task(
             id=f"fan-in-{parent_task.id}",
             type=parent_task.type,

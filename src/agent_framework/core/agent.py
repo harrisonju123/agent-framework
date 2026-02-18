@@ -759,6 +759,19 @@ class Agent:
         Subtasks (parent_task_id set) skip the workflow chain — the fan-in
         task aggregates results and flows through QA/review/PR instead.
         """
+        # Accumulate cost before chain routing so _build_chain_task
+        # copies the up-to-date total into the next task's context
+        if response is not None:
+            this_cost = self._budget.estimate_cost(response)
+            prev = task.context.get("_cumulative_cost", 0.0)
+            task.context["_cumulative_cost"] = prev + this_cost
+
+        # Stamp ceiling once on root task; propagated via context copy
+        if "_budget_ceiling" not in task.context:
+            ceiling = self._resolve_budget_ceiling(task)
+            if ceiling is not None:
+                task.context["_budget_ceiling"] = ceiling
+
         # Fan-in check: if this is a subtask, check if all siblings are done
         self._workflow_router.check_and_create_fan_in_task(task)
 
@@ -830,6 +843,18 @@ class Agent:
     def _is_no_changes_response(content: str) -> bool:
         """Detect if response indicates no code changes are needed."""
         return any(p.search(content) for p in _NO_CHANGES_PATTERNS)
+
+    def _resolve_budget_ceiling(self, task: Task) -> Optional[float]:
+        """Resolve USD budget ceiling from task effort or plan heuristic.
+
+        Returns None when the feature is disabled or no ceiling applies.
+        """
+        if not self._optimization_config.get("enable_effort_budget_ceilings", False):
+            return None
+        effort = task.estimated_effort
+        if not effort:
+            effort = self._budget.derive_effort_from_plan(task.plan)
+        return self._budget.get_effort_ceiling(effort.upper())
 
     @staticmethod
     def _extract_partial_progress(content: str, max_bytes: int = 2048) -> str:
