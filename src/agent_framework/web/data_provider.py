@@ -5,7 +5,8 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -17,6 +18,7 @@ from ..core.task import Task, TaskStatus, TaskType
 from .models import (
     ActiveTaskData,
     AgentData,
+    AgenticsMetrics,
     AgentStatusEnum,
     CheckpointData,
     QueueStats,
@@ -26,6 +28,7 @@ from .models import (
     HealthReport,
     CurrentTaskData,
     LogEntry,
+    SpecializationCount,
     TeamSessionData,
     ToolActivityData,
 )
@@ -709,6 +712,123 @@ class DashboardDataProvider:
         if match:
             return match.group(1).upper()
         return None
+
+    # ============== Agentic Metrics ==============
+
+    def compute_agentics_metrics(self, hours: int = 24) -> AgenticsMetrics:
+        """Compute agentic feature metrics by scanning recent session JSONL logs.
+
+        Reads all session files modified within the past `hours` window and
+        aggregates events logged by the agent loop:
+        - ``memory_recall`` → memory hit rate
+        - ``self_eval``     → self-evaluation catch rate (FAIL verdicts)
+        - ``replan``        → replan trigger rate
+        - ``task_start`` / ``task_complete`` → task counts for rate denominators
+        - activity files    → specialization distribution (current snapshot)
+
+        Context budget utilization is not recorded in session logs today, so
+        that metric is omitted until the budget_manager emits a dedicated event.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        sessions_dir = self.workspace / "logs" / "sessions"
+
+        task_ids_seen: Set[str] = set()
+        task_ids_with_memory_recall: Set[str] = set()
+        task_ids_with_replan: Set[str] = set()
+
+        self_eval_total = 0
+        self_eval_fail_count = 0
+
+        if sessions_dir.exists():
+            for session_file in sessions_dir.glob("*.jsonl"):
+                try:
+                    mtime = datetime.fromtimestamp(
+                        session_file.stat().st_mtime, tz=timezone.utc
+                    )
+                    if mtime < cutoff:
+                        continue
+
+                    with open(session_file, "r", encoding="utf-8", errors="replace") as fh:
+                        for raw_line in fh:
+                            raw_line = raw_line.strip()
+                            if not raw_line:
+                                continue
+                            try:
+                                entry = json.loads(raw_line)
+                            except json.JSONDecodeError:
+                                continue
+
+                            # Filter by event timestamp, not just file mtime
+                            try:
+                                ts = datetime.fromisoformat(entry.get("ts", ""))
+                                if ts < cutoff:
+                                    continue
+                            except (ValueError, TypeError):
+                                continue
+
+                            event = entry.get("event", "")
+                            task_id = entry.get("task_id", "")
+
+                            if event == "task_start" and task_id:
+                                task_ids_seen.add(task_id)
+
+                            elif event == "memory_recall" and task_id:
+                                task_ids_with_memory_recall.add(task_id)
+
+                            elif event == "self_eval":
+                                verdict = entry.get("verdict", "")
+                                # AUTO_PASS means no evaluation ran — don't count it
+                                if verdict in ("PASS", "FAIL"):
+                                    self_eval_total += 1
+                                    if verdict == "FAIL":
+                                        self_eval_fail_count += 1
+
+                            elif event == "replan" and task_id:
+                                task_ids_with_replan.add(task_id)
+
+                except OSError as e:
+                    logger.warning(f"Error reading session file {session_file}: {e}")
+
+        task_count = len(task_ids_seen)
+
+        memory_recall_rate = (
+            len(task_ids_with_memory_recall) / task_count if task_count else 0.0
+        )
+        replan_trigger_rate = (
+            len(task_ids_with_replan) / task_count if task_count else 0.0
+        )
+        self_eval_catch_rate = (
+            self_eval_fail_count / self_eval_total if self_eval_total else 0.0
+        )
+
+        # Specialization distribution from live activity files (current snapshot).
+        # Activity files reflect the most recent task each agent processed, so this
+        # captures what profiles are in active use rather than historical counts.
+        specialization_counts: Dict[str, int] = defaultdict(int)
+        activities = self.activity_manager.get_all_activities()
+        for activity in activities:
+            profile = getattr(activity, "specialization", None)
+            if profile:
+                specialization_counts[profile] += 1
+
+        specialization_distribution = [
+            SpecializationCount(profile=profile, count=count)
+            for profile, count in sorted(specialization_counts.items())
+        ]
+
+        return AgenticsMetrics(
+            memory_recall_rate=round(memory_recall_rate, 4),
+            memory_recalls_total=len(task_ids_with_memory_recall),
+            self_eval_catch_rate=round(self_eval_catch_rate, 4),
+            self_eval_total=self_eval_total,
+            replan_trigger_rate=round(replan_trigger_rate, 4),
+            replan_total=len(task_ids_with_replan),
+            replan_success_rate=0.0,  # Not tracked in session logs yet
+            specialization_distribution=specialization_distribution,
+            avg_context_budget_utilization=0.0,  # Not emitted by budget_manager yet
+            context_budget_samples=0,
+            window_hours=hours,
+        )
 
     # ============== Claude CLI Log Methods ==============
 

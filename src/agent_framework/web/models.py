@@ -1,6 +1,6 @@
 """Pydantic models for web dashboard API responses."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal, Optional, List, Dict, Any
 
@@ -148,6 +148,46 @@ class TeamSessionData(BaseModel):
     status: str = "active"
 
 
+class SpecializationCount(BaseModel):
+    """Count of tasks processed under a given specialization profile."""
+    profile: str
+    count: int
+
+
+class AgenticsMetrics(BaseModel):
+    """Metrics for agentic features surfaced on the observability dashboard.
+
+    Computed from session JSONL logs over a configurable time window.
+    All rates are expressed as 0.0–1.0 floats; counts as integers.
+    """
+    # How often memory recall events were injected into prompts
+    memory_recall_rate: float = 0.0
+    memory_recalls_total: int = 0
+
+    # Fraction of self-eval attempts that caught issues (verdict=FAIL)
+    self_eval_catch_rate: float = 0.0
+    self_eval_total: int = 0
+
+    # How often tasks triggered a replan
+    replan_trigger_rate: float = 0.0
+    replan_total: int = 0
+    # Fraction of replanned tasks that eventually completed (best-effort from session logs)
+    replan_success_rate: float = 0.0
+
+    # Distribution of engineer specialization profiles applied
+    specialization_distribution: List[SpecializationCount] = []
+
+    # Context budget: average utilization % across completed tasks
+    avg_context_budget_utilization: float = 0.0
+    context_budget_samples: int = 0
+
+    # Wall-clock window used to compute these metrics (hours)
+    window_hours: int = 24
+
+    # Timestamp of computation
+    computed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class DashboardState(BaseModel):
     """Complete dashboard state for WebSocket updates."""
     agents: List[AgentData]
@@ -159,6 +199,7 @@ class DashboardState(BaseModel):
     is_paused: bool
     uptime_seconds: int
     active_teams: List[TeamSessionData] = []
+    agentics_metrics: Optional[AgenticsMetrics] = None
 
 
 # API Response models

@@ -20,6 +20,7 @@ from .data_provider import DashboardDataProvider
 from .models import (
     ActiveTaskData,
     AgentData,
+    AgenticsMetrics,
     CheckpointData,
     QueueStats,
     EventData,
@@ -698,7 +699,7 @@ def register_routes(app: FastAPI):
 
             return OperationResponse(
                 success=True,
-                task_id=task_id,
+                task_id=task.id,
                 message=f"Analysis queued for {request.repository}"
             )
 
@@ -758,6 +759,24 @@ def register_routes(app: FastAPI):
             logger.exception(f"Error in run_ticket: {e}")
             raise HTTPException(status_code=500, detail="Failed to queue ticket")
 
+    # ============== Agentic Metrics API ==============
+
+    @app.get("/api/metrics/agentics", response_model=AgenticsMetrics)
+    async def get_agentics_metrics(
+        hours: int = Query(default=24, ge=1, le=168, description="Look-back window in hours (max 1 week)")
+    ):
+        """Return agentic feature metrics computed from session logs.
+
+        Scans session JSONL files written by the agent loop and aggregates:
+        memory recall rate, self-evaluation catch rate, replan trigger rate,
+        and specialization distribution for the requested time window.
+        """
+        try:
+            return app.state.data_provider.compute_agentics_metrics(hours=hours)
+        except Exception as e:
+            logger.exception(f"Error computing agentics metrics: {e}")
+            raise HTTPException(status_code=500, detail="Failed to compute agentic metrics")
+
     # ============== Log Streaming API ==============
 
     @app.get("/api/logs")
@@ -803,10 +822,30 @@ def register_routes(app: FastAPI):
         await websocket.accept()
         logger.info("WebSocket client connected")
 
+        # Agentic metrics are expensive to compute (session log scan), so we
+        # refresh them on a 60-second cadence rather than every 500ms tick.
+        _agentics_cache: Optional[AgenticsMetrics] = None
+        _agentics_refreshed_at: Optional[datetime] = None
+        _AGENTICS_TTL_SECONDS = 60
+
         try:
             while True:
                 # Build full dashboard state
                 uptime = (datetime.now(timezone.utc) - app.state.start_time).total_seconds()
+                now = datetime.now(timezone.utc)
+
+                if (
+                    _agentics_cache is None
+                    or _agentics_refreshed_at is None
+                    or (now - _agentics_refreshed_at).total_seconds() >= _AGENTICS_TTL_SECONDS
+                ):
+                    try:
+                        _agentics_cache = await asyncio.to_thread(
+                            app.state.data_provider.compute_agentics_metrics
+                        )
+                        _agentics_refreshed_at = now
+                    except Exception as e:
+                        logger.warning(f"Agentic metrics refresh failed (non-fatal): {e}")
 
                 state = DashboardState(
                     agents=app.state.data_provider.get_agents_data(),
@@ -818,6 +857,7 @@ def register_routes(app: FastAPI):
                     is_paused=app.state.data_provider.is_paused(),
                     uptime_seconds=int(uptime),
                     active_teams=app.state.data_provider.get_active_teams(),
+                    agentics_metrics=_agentics_cache,
                 )
 
                 await websocket.send_json(state.model_dump(mode="json"))
