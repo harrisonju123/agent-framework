@@ -332,12 +332,12 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
             self.logger.warning(
                 f"Self-evaluation FAILED for task {task.id} "
                 f"(attempt {eval_retries + 1}/{self._self_eval_max_retries}): "
-                f"{verdict[:200]}"
+                f"{verdict[:500]}"
             )
 
             task.context["_self_eval_count"] = eval_retries + 1
-            task.context["_self_eval_critique"] = verdict[:1000]
-            task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:200]}")
+            task.context["_self_eval_critique"] = verdict
+            task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:500]}")
 
             # Reset without consuming queue retry
             task.status = TaskStatus.PENDING
