@@ -321,9 +321,9 @@ class GitOperationsManager:
     def push_and_create_pr_if_needed(self, task: Task) -> None:
         """Push branch and create PR if the agent produced unpushed commits.
 
-        Runs after the LLM finishes but before the task is marked completed,
-        so the PR URL is available in task.context for downstream chain steps.
-        Only acts when working in a worktree with actual unpushed commits.
+        Runs after workflow chain routing so checkpoints can pause before
+        any git side-effects. Downstream agents poll asynchronously, so
+        the push completes before they fetch the branch.
 
         Intermediate workflow steps push their branch but skip PR creation —
         the terminal step (or pr_creator) handles that.

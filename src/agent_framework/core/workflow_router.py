@@ -240,8 +240,9 @@ class WorkflowRouter:
                 context=self.build_workflow_context(task),
             )
 
-            # Terminal step with no routing — check if pr_creator should take over
-            if not routed:
+            # Terminal step with no routing — check if pr_creator should take over.
+            # Skip when paused at checkpoint — PR creation is premature until approved.
+            if not routed and task.status != TaskStatus.AWAITING_APPROVAL:
                 self.queue_pr_creation_if_needed(task, workflow_def)
 
             # Log routing decision

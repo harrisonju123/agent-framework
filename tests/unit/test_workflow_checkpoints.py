@@ -691,3 +691,104 @@ async def test_handle_task_skips_llm_for_checkpoint_approved():
     agent._enforce_workflow_chain.assert_called_once_with(
         task, response=None, routing_signal=None
     )
+
+
+# -- Checkpoint double-processing guards --
+
+
+def test_checkpoint_pause_does_not_trigger_pr_creation(tmp_path):
+    """enforce_chain must not queue a PR task when paused at checkpoint."""
+    from agent_framework.core.workflow_router import WorkflowRouter
+
+    router = MagicMock()
+    router.enforce_chain = WorkflowRouter.enforce_chain.__get__(router)
+    router.config.base_id = "architect"
+
+    workflow_def = MagicMock()
+    workflow_dag = _build_checkpoint_workflow()
+    workflow_def.to_dag.return_value = workflow_dag
+    router._workflows_config = {"test_workflow": workflow_def}
+
+    task = create_test_task()
+    task.context["workflow"] = "test_workflow"
+    task.context["implementation_branch"] = "feature/planning-branch"
+    response = Mock()
+
+    # execute_step pauses at checkpoint → returns False, sets AWAITING_APPROVAL
+    def fake_execute_step(**kwargs):
+        kwargs["task"].status = TaskStatus.AWAITING_APPROVAL
+        return False
+
+    router._workflow_executor.execute_step.side_effect = fake_execute_step
+    router.build_workflow_context.return_value = None
+
+    router.enforce_chain(task, response, routing_signal=None)
+
+    router.queue_pr_creation_if_needed.assert_not_called()
+
+
+def test_post_completion_skips_git_ops_at_checkpoint():
+    """Git push/PR/lifecycle must not run when task is paused at checkpoint."""
+    from agent_framework.core.agent import Agent
+
+    agent = MagicMock()
+    agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+    agent.config = MagicMock()
+    agent.config.base_id = "architect"
+    agent._session_logger = MagicMock()
+
+    task = create_test_task()
+    task.parent_task_id = None
+    task.context["workflow"] = "test_workflow"
+    response = Mock()
+
+    # _enforce_workflow_chain sets status to AWAITING_APPROVAL (checkpoint fired)
+    def checkpoint_side_effect(t, resp, routing_signal=None):
+        t.status = TaskStatus.AWAITING_APPROVAL
+
+    agent._enforce_workflow_chain.side_effect = checkpoint_side_effect
+    agent._git_ops.detect_implementation_branch = MagicMock()
+    agent._git_ops.push_and_create_pr_if_needed = MagicMock()
+    agent._git_ops.manage_pr_lifecycle = MagicMock()
+    agent._workflow_router.check_and_create_fan_in_task = MagicMock()
+    agent._extract_and_store_memories = MagicMock()
+    agent._analyze_tool_patterns = MagicMock()
+    agent._log_task_completion_metrics = MagicMock()
+
+    agent._run_post_completion_flow(task, response, routing_signal=None, task_start_time=0)
+
+    agent._git_ops.push_and_create_pr_if_needed.assert_not_called()
+    agent._git_ops.manage_pr_lifecycle.assert_not_called()
+    # Chain enforcement still ran
+    agent._enforce_workflow_chain.assert_called_once()
+
+
+def test_post_completion_runs_git_ops_for_normal_completion():
+    """Git push/PR/lifecycle run normally when no checkpoint fires."""
+    from agent_framework.core.agent import Agent
+
+    agent = MagicMock()
+    agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+    agent.config = MagicMock()
+    agent.config.base_id = "engineer"
+    agent._session_logger = MagicMock()
+
+    task = create_test_task()
+    task.parent_task_id = None
+    task.context["workflow"] = "test_workflow"
+    response = Mock()
+
+    # enforce_chain completes without setting AWAITING_APPROVAL
+    agent._enforce_workflow_chain = MagicMock()
+    agent._git_ops.detect_implementation_branch = MagicMock()
+    agent._git_ops.push_and_create_pr_if_needed = MagicMock()
+    agent._git_ops.manage_pr_lifecycle = MagicMock()
+    agent._workflow_router.check_and_create_fan_in_task = MagicMock()
+    agent._extract_and_store_memories = MagicMock()
+    agent._analyze_tool_patterns = MagicMock()
+    agent._log_task_completion_metrics = MagicMock()
+
+    agent._run_post_completion_flow(task, response, routing_signal=None, task_start_time=0)
+
+    agent._git_ops.push_and_create_pr_if_needed.assert_called_once_with(task)
+    agent._git_ops.manage_pr_lifecycle.assert_called_once_with(task)

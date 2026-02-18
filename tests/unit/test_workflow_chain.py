@@ -2177,13 +2177,13 @@ class TestWorktreeBranchClearing:
         assert pr_task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc12345"
 
 
-# -- Push-before-chain ordering --
+# -- Push-after-chain ordering --
 
-class TestPushBeforeChainRouting:
-    """Verify push runs before _enforce_workflow_chain so downstream agents can fetch the branch."""
+class TestPushAfterChainRouting:
+    """Push runs after _enforce_workflow_chain so checkpoints can pause before git side-effects."""
 
-    def test_push_runs_before_enforce_workflow_chain(self, agent, queue):
-        """push_and_create_pr_if_needed is called before _enforce_workflow_chain."""
+    def test_push_runs_after_enforce_workflow_chain(self, agent, queue):
+        """push_and_create_pr_if_needed runs after _enforce_workflow_chain."""
         task = _make_task(workflow="default")
         response = _make_response("Done.")
 
@@ -2207,4 +2207,4 @@ class TestPushBeforeChainRouting:
 
         assert "push" in call_order
         assert "chain" in call_order
-        assert call_order.index("push") < call_order.index("chain")
+        assert call_order.index("chain") < call_order.index("push")

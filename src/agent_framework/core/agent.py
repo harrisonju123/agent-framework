@@ -806,13 +806,14 @@ class Agent:
 
             self._git_ops.detect_implementation_branch(task)
 
-            # Push before chain routing so downstream agents can fetch the branch
-            self._git_ops.push_and_create_pr_if_needed(task)
-
             self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
-            # Autonomous PR lifecycle: poll CI, fix failures, merge
-            self._git_ops.manage_pr_lifecycle(task)
+            # Push + PR lifecycle after chain routing so checkpoints can pause
+            # before any git side-effects. Downstream agents pick up from queue
+            # asynchronously, so push completing here is still in time.
+            if task.status != TaskStatus.AWAITING_APPROVAL:
+                self._git_ops.push_and_create_pr_if_needed(task)
+                self._git_ops.manage_pr_lifecycle(task)
 
         self._extract_and_store_memories(task, response)
         self._analyze_tool_patterns(task)
