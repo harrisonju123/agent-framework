@@ -124,6 +124,42 @@ workflows:
     auto_review: true
     require_tests: true
 
+  # Preview workflow: architect plans, engineer does read-only preview, architect reviews
+  # and authorizes, then engineer implements. Use for high-risk or unfamiliar changes.
+  preview:
+    description: "Preview workflow with architect review gate before implementation"
+    steps:
+      architect:
+        agent: architect
+        next:
+          - target: preview
+
+      preview:
+        agent: engineer
+        task_type_override: preview
+        next:
+          - target: review
+
+      review:
+        agent: architect
+        next:
+          # Architect approved preview — engineer proceeds with implementation
+          - target: implement
+            condition: preview_approved
+            priority: 10
+          # Architect wants changes to the plan before implementation
+          - target: preview
+            condition: needs_fix
+            priority: 5
+
+      implement:
+        agent: engineer
+        next: []
+    start_step: architect
+    pr_creator: engineer
+    auto_review: false
+    require_tests: true
+
 # Workflow selection guide:
 #
 # Use 'simple' for:
