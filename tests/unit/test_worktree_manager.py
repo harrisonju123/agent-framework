@@ -1150,3 +1150,85 @@ class TestHasUnpushedCommitsFallback:
         mock_run.return_value = rev_list
 
         assert manager.has_unpushed_commits(tmp_path) is False
+
+
+class TestCleanupSafetyChecks:
+    """Tests for safety checks that prevent deleting worktrees with unsaved work."""
+
+    def _make_unregistered_worktree(self, tmp_path):
+        """Set up a worktree root with one unregistered worktree directory."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        # Create owner/repo/worktree structure with .git marker
+        owner_dir = config.root / "owner"
+        repo_dir = owner_dir / "repo"
+        wt_dir = repo_dir / "orphan-wt"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/orphan-wt")
+
+        return manager, wt_dir
+
+    def test_cleanup_unregistered_skips_worktree_with_uncommitted_changes(self, tmp_path):
+        """Unregistered worktree with uncommitted changes is not deleted."""
+        manager, wt_dir = self._make_unregistered_worktree(tmp_path)
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=True), \
+             patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory') as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees()
+
+        assert removed == 0
+        mock_remove.assert_not_called()
+
+    def test_cleanup_unregistered_skips_worktree_with_unpushed_commits(self, tmp_path):
+        """Unregistered worktree with unpushed commits is not deleted."""
+        manager, wt_dir = self._make_unregistered_worktree(tmp_path)
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, 'has_unpushed_commits', return_value=True), \
+             patch.object(manager, '_remove_worktree_directory') as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees()
+
+        assert removed == 0
+        mock_remove.assert_not_called()
+
+    def test_cleanup_unregistered_removes_clean_worktree(self, tmp_path):
+        """Unregistered worktree with no unsaved work is removed (with force=False)."""
+        manager, wt_dir = self._make_unregistered_worktree(tmp_path)
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory', return_value=True) as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees()
+
+        assert removed == 1
+        # Verify force=False — we confirmed no uncommitted changes
+        mock_remove.assert_called_once()
+        _, kwargs = mock_remove.call_args
+        assert kwargs.get("force") is False
+
+    def test_cleanup_orphaned_skips_stale_worktree_with_unsaved_work(self, tmp_path):
+        """Stale registered worktree with uncommitted changes survives cleanup."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-stale"
+        wt_path.mkdir()
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        manager._registry["stale-key"] = WorktreeInfo(
+            path=str(wt_path), branch="feature/stale", agent_id="engineer",
+            task_id="task-stale", created_at=old_ts, last_accessed=old_ts,
+            base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=True), \
+             patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory') as mock_remove, \
+             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0):
+            result = manager.cleanup_orphaned_worktrees()
+
+        assert "stale-key" in manager._registry
+        mock_remove.assert_not_called()
+        assert result["registered"] == 0
