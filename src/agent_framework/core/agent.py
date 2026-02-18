@@ -114,6 +114,8 @@ class AgentConfig:
 
 _JSON_FENCE_PATTERN = re.compile(r'```json\s*\n(.*?)\n?\s*```', re.DOTALL)
 
+_NO_CHANGES_MAX_LENGTH = 2000  # Genuine "nothing to do" responses are short
+
 _NO_CHANGES_PATTERNS = [
     re.compile(r'\balready\s+(\w+\s+)?(exists?|merged|implemented|shipped|completed|done)\b', re.IGNORECASE),
     re.compile(r'\bno\s+(code\s+)?changes?\s+(needed|required|necessary)\b', re.IGNORECASE),
@@ -908,6 +910,11 @@ class Agent:
     @staticmethod
     def _is_no_changes_response(content: str) -> bool:
         """Detect if response indicates no code changes are needed."""
+        # A substantive plan (2000+ chars) may incidentally mention
+        # "already exists" while describing current state. Only short
+        # responses are genuine "nothing to do" dismissals.
+        if len(content) > _NO_CHANGES_MAX_LENGTH:
+            return False
         return any(p.search(content) for p in _NO_CHANGES_PATTERNS)
 
     def _resolve_budget_ceiling(self, task: Task) -> Optional[float]:

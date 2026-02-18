@@ -1894,6 +1894,44 @@ class TestNoChangesVerdict:
             assert Agent._is_no_changes_response(phrase), \
                 f"Failed to detect no-changes in: {phrase}"
 
+    def test_long_plan_with_already_exists_not_detected_as_no_changes(self):
+        """Long plan that incidentally mentions 'already exist' is NOT no_changes."""
+        plan_text = (
+            "## Plan: Enhance Observability Dashboard\n\n"
+            "### Objectives\n"
+            "1. Add real-time metrics panel\n"
+            "2. Improve data refresh intervals\n\n"
+            "### Data Sources (all already exist)\n"
+            "- Session logs in /var/log/agent/\n"
+            "- Memory files in .agent-workspaces/\n"
+            "- Profile registry already exists in config/\n\n"
+            "### Files to Modify\n"
+            "1. server.py - add metrics endpoint\n"
+            "2. models.py - add MetricsSnapshot model\n"
+            "3. DashboardPage.vue - new metrics panel component\n"
+            "4. activity.py - aggregate session data\n"
+            "5. styles.css - dashboard layout updates\n\n"
+            "### Approach\n"
+        ) + "Detailed implementation steps...\n" * 100
+        assert len(plan_text) > 2000, "Test precondition: plan must exceed length threshold"
+        assert not Agent._is_no_changes_response(plan_text), \
+            "Long plan with incidental 'already exist' should not trigger no_changes"
+
+    def test_no_changes_boundary_at_threshold(self):
+        """Response exactly at the length threshold still gets checked."""
+        from agent_framework.core.agent import _NO_CHANGES_MAX_LENGTH
+        # Pad a matching phrase to exactly the threshold length
+        base = "No code changes needed."
+        padded = base + " " * (_NO_CHANGES_MAX_LENGTH - len(base))
+        assert len(padded) == _NO_CHANGES_MAX_LENGTH
+        assert Agent._is_no_changes_response(padded), \
+            "Response at exactly the threshold should still be checked"
+
+        # One char over the threshold bypasses regex
+        over = padded + "x"
+        assert not Agent._is_no_changes_response(over), \
+            "Response exceeding the threshold should bypass regex"
+
     def test_normal_plan_not_detected_as_no_changes(self):
         """Normal planning output should NOT trigger no_changes."""
         normal_plans = [
