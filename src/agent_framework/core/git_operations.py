@@ -309,6 +309,11 @@ class GitOperationsManager:
             has_uncommitted = self.worktree_manager.has_uncommitted_changes(self._active_worktree)
 
             if has_unpushed:
+                if self._try_push_worktree_branch(self._active_worktree):
+                    has_unpushed = False
+                    self.logger.info("Pushed unpushed commits during cleanup")
+
+            if has_unpushed:
                 self.logger.warning(
                     f"Skipping worktree cleanup - unpushed commits detected: {self._active_worktree}. "
                     f"Manual cleanup required after pushing changes."
@@ -698,6 +703,36 @@ class GitOperationsManager:
                 self.jira_client.add_comment(jira_key, comment)
         except Exception as e:
             self.logger.warning(f"Failed to transition JIRA {jira_key} to '{target_status}': {e}")
+
+    def _try_push_worktree_branch(self, worktree_path: Path) -> bool:
+        """Best-effort push of the worktree's branch to origin.
+
+        Prevents worktree accumulation by pushing local-only commits so the
+        worktree can be safely removed afterward.
+
+        Returns True if push succeeded, False on any failure.
+        """
+        from ..utils.subprocess_utils import run_git_command
+
+        try:
+            result = run_git_command(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=worktree_path, check=False, timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            branch = result.stdout.strip()
+            if branch in ("main", "master", "HEAD"):
+                return False
+
+            push_result = run_git_command(
+                ["push", "origin", branch],
+                cwd=worktree_path, check=False, timeout=60,
+            )
+            return push_result.returncode == 0
+        except Exception as e:
+            self.logger.debug(f"Best-effort push failed for {worktree_path}: {e}")
+            return False
 
     @property
     def active_worktree(self) -> Optional[Path]:

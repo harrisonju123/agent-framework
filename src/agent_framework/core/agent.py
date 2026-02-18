@@ -42,6 +42,8 @@ from .workflow_router import WorkflowRouter
 from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
 
+_WORKTREE_CLEANUP_INTERVAL_SECONDS = 2 * 3600  # 2 hours
+
 # Optional sandbox imports (only used if Docker is available)
 try:
     from ..sandbox import DockerExecutor, GoTestRunner, TestResult
@@ -155,6 +157,7 @@ class Agent:
         self._current_task_id: Optional[str] = None
         self.worktree_manager = worktree_manager
         self._active_worktree: Optional[Path] = None
+        self._last_worktree_cleanup: float = time.time()
 
     def _init_team_mode(self, agents_config, agent_definition, team_mode_enabled, team_mode_default_model, workflows_config):
         """Initialize team mode and workflow configuration."""
@@ -936,10 +939,31 @@ class Agent:
         task_succeeded = task.status == TaskStatus.COMPLETED
         self._git_ops.sync_worktree_queued_tasks()
         self._git_ops.cleanup_worktree(task, success=task_succeeded)
+        self._maybe_run_periodic_worktree_cleanup()
 
         if lock:
             self.queue.release_lock(lock)
         self._current_task_id = None
+
+    def _maybe_run_periodic_worktree_cleanup(self) -> None:
+        """Run orphaned worktree cleanup at most every 2 hours.
+
+        Long-running agent sessions accumulate stale worktrees because
+        cleanup_orphaned_worktrees() only runs at startup. This timer
+        ensures periodic cleanup without blocking the main loop.
+        """
+        if not self.worktree_manager:
+            return
+        now = time.time()
+        if now - self._last_worktree_cleanup < _WORKTREE_CLEANUP_INTERVAL_SECONDS:
+            return
+        self._last_worktree_cleanup = now
+        try:
+            result = self.worktree_manager.cleanup_orphaned_worktrees()
+            if result.get("total", 0) > 0:
+                self.logger.info(f"Periodic worktree cleanup: removed {result['total']} stale worktree(s)")
+        except Exception as e:
+            self.logger.debug(f"Periodic worktree cleanup failed: {e}")
 
     async def _watch_for_interruption(self) -> None:
         """Poll for pause/stop signals during LLM execution.

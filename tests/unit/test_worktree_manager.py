@@ -1054,7 +1054,7 @@ class TestBranchConflictOwnershipValidation:
                 owner_repo="owner/repo",
             )
 
-        assert result == existing_wt
+        assert result == existing_wt  # same-agent reuse
 
     def test_allows_unknown_owner_conflict(self, tmp_path):
         """Branch conflict with no matching registry entry is still reused (graceful fallback)."""
@@ -1081,4 +1081,62 @@ class TestBranchConflictOwnershipValidation:
                 owner_repo="owner/repo",
             )
 
-        assert result == existing_wt
+        assert result == existing_wt  # orphan reuse
+
+
+class TestHasUnpushedCommitsFallback:
+    """Tests for has_unpushed_commits() when no tracking branch is set."""
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        return WorktreeManager(config=config)
+
+    @patch("subprocess.run")
+    def test_detects_local_only_commits_via_git_log(self, mock_run, manager, tmp_path):
+        """Branches with commits not on any remote are detected as unpushed."""
+        rev_list = MagicMock(returncode=128, stdout="", stderr="no upstream")
+        log_result = MagicMock(returncode=0, stdout="abc1234 Add feature\n")
+        mock_run.side_effect = [rev_list, log_result]
+
+        assert manager.has_unpushed_commits(tmp_path) is True
+        log_call = mock_run.call_args_list[1]
+        assert "--not" in log_call[0][0]
+        assert "--remotes" in log_call[0][0]
+
+    @patch("subprocess.run")
+    def test_falls_through_to_porcelain_when_no_local_commits(self, mock_run, manager, tmp_path):
+        """When git log finds nothing, falls through to status --porcelain."""
+        rev_list = MagicMock(returncode=128, stdout="", stderr="no upstream")
+        log_result = MagicMock(returncode=0, stdout="")
+        porcelain = MagicMock(returncode=0, stdout=" M file.py\n")
+        mock_run.side_effect = [rev_list, log_result, porcelain]
+
+        assert manager.has_unpushed_commits(tmp_path) is True
+
+    @patch("subprocess.run")
+    def test_returns_false_when_clean_and_no_local_commits(self, mock_run, manager, tmp_path):
+        """Clean worktree with no local-only commits returns False."""
+        rev_list = MagicMock(returncode=128, stdout="", stderr="no upstream")
+        log_result = MagicMock(returncode=0, stdout="")
+        porcelain = MagicMock(returncode=0, stdout="")
+        mock_run.side_effect = [rev_list, log_result, porcelain]
+
+        assert manager.has_unpushed_commits(tmp_path) is False
+
+    @patch("subprocess.run")
+    def test_tracking_branch_path_still_works(self, mock_run, manager, tmp_path):
+        """Normal path (tracking branch exists) is unchanged."""
+        rev_list = MagicMock(returncode=0, stdout="3\n")
+        mock_run.return_value = rev_list
+
+        assert manager.has_unpushed_commits(tmp_path) is True
+        mock_run.assert_called_once()
+
+    @patch("subprocess.run")
+    def test_tracking_branch_zero_ahead(self, mock_run, manager, tmp_path):
+        """Zero commits ahead with tracking branch returns False."""
+        rev_list = MagicMock(returncode=0, stdout="0\n")
+        mock_run.return_value = rev_list
+
+        assert manager.has_unpushed_commits(tmp_path) is False

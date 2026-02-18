@@ -799,7 +799,19 @@ class WorktreeManager:
                 count = int(result.stdout.strip())
                 return count > 0
 
-            # If tracking branch not set, check if we have any commits at all
+            # No tracking branch — check for local commits not reachable
+            # from any remote ref (catches committed-but-never-pushed work)
+            log_result = subprocess.run(
+                ["git", "log", "--oneline", "--not", "--remotes", "-1"],
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if log_result.returncode == 0 and log_result.stdout.strip():
+                return True
+
+            # Fall through to uncommitted changes check
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=worktree_path,
@@ -807,7 +819,6 @@ class WorktreeManager:
                 text=True,
                 timeout=10,
             )
-            # If there are uncommitted changes, treat as having work
             return bool(result.stdout.strip())
 
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, ValueError):
