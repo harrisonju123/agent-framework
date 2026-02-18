@@ -758,6 +758,21 @@ def register_routes(app: FastAPI):
             logger.exception(f"Error in run_ticket: {e}")
             raise HTTPException(status_code=500, detail="Failed to queue ticket")
 
+    # ============== Agentic Metrics API ==============
+
+    @app.get("/api/metrics/agentics")
+    async def get_agentic_metrics(hours: int = Query(default=24, ge=1, le=720)):
+        """Get agentic observability metrics (memory, self-eval, replan, budget)."""
+        try:
+            from ..analytics.agentic_metrics import AgenticMetrics
+
+            metrics = AgenticMetrics(app.state.workspace)
+            report = metrics.generate_report(hours=hours)
+            return report.model_dump(mode="json")
+        except Exception as e:
+            logger.exception(f"Error generating agentic metrics: {e}")
+            raise HTTPException(status_code=500, detail="Failed to generate agentic metrics")
+
     # ============== Log Streaming API ==============
 
     @app.get("/api/logs")
