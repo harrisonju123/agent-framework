@@ -531,7 +531,14 @@ class WorktreeManager:
                         logger.debug(f"Purged stale worktree from registry: {key}")
                         continue
 
-                    if self._remove_worktree_directory(path, base_repo, force=True):
+                    # Don't destroy worktrees with uncommitted or unpushed work
+                    if self.has_uncommitted_changes(path) or self.has_unpushed_commits(path):
+                        logger.warning(
+                            f"Skipping stale worktree with unsaved work: {path}"
+                        )
+                        continue
+
+                    if self._remove_worktree_directory(path, base_repo, force=False):
                         keys_to_remove.append(key)
                         registered_removed += 1
                         logger.info(f"Cleaned up stale registered worktree: {path} (age: {age_seconds/3600:.1f}h)")
@@ -582,9 +589,15 @@ class WorktreeManager:
                                     continue
                                 git_marker = worktree_dir / ".git"
                                 if git_marker.exists() and worktree_dir.resolve() not in registered_paths:
-                                    # Unregistered worktree
+                                    # Don't destroy worktrees with uncommitted or unpushed work
+                                    if self.has_uncommitted_changes(worktree_dir) or self.has_unpushed_commits(worktree_dir):
+                                        logger.warning(
+                                            f"Skipping unregistered worktree with unsaved work: {worktree_dir}"
+                                        )
+                                        continue
+
                                     base_repo = self._find_base_repo(worktree_dir)
-                                    if self._remove_worktree_directory(worktree_dir, base_repo, force=True):
+                                    if self._remove_worktree_directory(worktree_dir, base_repo, force=False):
                                         removed += 1
                                         logger.debug(f"Removed unregistered worktree: {worktree_dir}")
                         except PermissionError as e:
