@@ -77,8 +77,10 @@ def resume_after_checkpoint(task: "Task", queue: "FileQueue", workspace: Path) -
 # Hard ceiling on chain depth to prevent runaway loops regardless of routing logic
 MAX_CHAIN_DEPTH = 10
 
-# Cap review→engineer fix cycles (both code_review and qa_review share one counter).
+# Cap review→engineer fix cycles. The counter is shared across all review steps
+# (code_review, qa_review, preview_review) so the total budget is global per task.
 # Value of 2: initial review + 2 fix rounds + final review = 6 chain hops max.
+# Consequence: preview_review loops eat into the code_review/qa_review budget.
 MAX_DAG_REVIEW_CYCLES = 2
 
 # Absolute ceiling on total chain hops — survives escalation and re-planning resets
@@ -363,7 +365,7 @@ class WorkflowExecutor:
         review_cycles = task.context.get("_dag_review_cycles", 0)
         is_review_to_engineer = (
             target_step.agent == "engineer"
-            and task.context.get("workflow_step") in ("code_review", "qa_review")
+            and task.context.get("workflow_step") in ("code_review", "qa_review", "preview_review")
         )
         if is_review_to_engineer:
             review_cycles += 1

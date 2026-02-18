@@ -820,7 +820,13 @@ class Agent:
                     getattr(response, "content", "") or ""
                 )
                 if outcome.approved:
-                    task.context["verdict"] = "approved"
+                    # preview_review approval authorizes implementation — use a
+                    # distinct verdict so the preview_approved DAG edge fires
+                    # instead of the generic approved edge.
+                    if task.context.get("workflow_step") == "preview_review":
+                        task.context["verdict"] = "preview_approved"
+                    else:
+                        task.context["verdict"] = "approved"
                 elif outcome.needs_fix:
                     task.context["verdict"] = "needs_fix"
                 else:
@@ -828,7 +834,10 @@ class Agent:
                     # treat as implicit approval so condition evaluators don't
                     # fall through to the NeedsFixCondition keyword fallback,
                     # which defaults to True and loops back to implement.
-                    task.context["verdict"] = "approved"
+                    if task.context.get("workflow_step") == "preview_review":
+                        task.context["verdict"] = "preview_approved"
+                    else:
+                        task.context["verdict"] = "approved"
 
             # Detect "no changes needed" — architect at plan step determines
             # the work is already done or not applicable
@@ -1729,52 +1738,6 @@ class Agent:
         Delegated to ErrorRecoveryManager.
         """
         return self._error_recovery.inject_replan_context(prompt, task)
-
-    def _inject_preview_mode(self, prompt: str, task: Task) -> str:
-        """Inject preview mode constraints when task is a preview."""
-        preview_section = """
-## PREVIEW MODE — READ-ONLY EXECUTION
-You are in PREVIEW MODE. You must plan your implementation WITHOUT writing any files.
-
-CONSTRAINTS:
-- Do NOT use Write, Edit, or NotebookEdit tools
-- Do NOT use Bash to create, modify, or delete files
-- DO use Read, Glob, Grep, and Bash (read-only commands like git log, git diff, ls) to explore
-- DO read every file you plan to modify to understand current state
-
-REQUIRED OUTPUT — Produce a structured execution preview:
-
-### Files to Modify
-For each file, list:
-- File path
-- What changes will be made (specific, not vague)
-- Estimated lines added/removed
-
-### New Files to Create
-For each new file:
-- File path
-- Purpose
-- Key contents/structure
-- Estimated line count
-
-### Implementation Approach
-- Step-by-step plan with ordering
-- Which patterns from existing code will be followed
-- Any dependencies between changes
-
-### Risks and Edge Cases
-- What could go wrong
-- Edge cases to handle
-- Backward compatibility concerns
-
-### Estimated Total Change Size
-- Total lines added/removed
-- Number of files affected
-
-This preview will be reviewed by the architect before implementation is authorized.
-        """
-        return preview_section + "\n\n" + prompt
-
 
     def _record_optimization_metrics(
         self,

@@ -963,3 +963,32 @@ class TestCodeReviewConstraints:
         prompt = prompt_builder._build_prompt_legacy(sample_task)
 
         assert "REVIEWER" not in prompt
+
+    def test_preview_review_injects_guidance_legacy(self, prompt_builder, sample_task):
+        """preview_review step injects preview-specific review guidance in legacy prompt."""
+        task = self._make_task_with_step(sample_task, "preview_review")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "PREVIEW REVIEW CONSTRAINTS" in prompt
+        assert "EXECUTION PREVIEW" in prompt
+        assert "VERDICT: APPROVE" in prompt
+        assert "VERDICT: REQUEST_CHANGES" in prompt
+        # Must not inject the code-review guidance by mistake
+        assert "CODE REVIEW CONSTRAINTS" not in prompt
+
+    def test_preview_review_injects_guidance_optimized(self, prompt_builder, sample_task):
+        """preview_review step injects preview-specific review guidance in optimized prompt."""
+        task = self._make_task_with_step(sample_task, "preview_review")
+        prompt = prompt_builder._build_prompt_optimized(task)
+
+        assert "PREVIEW REVIEW CONSTRAINTS" in prompt
+        assert "VERDICT: APPROVE" in prompt
+        assert "CODE REVIEW CONSTRAINTS" not in prompt
+
+    def test_code_review_does_not_get_preview_guidance(self, prompt_builder, sample_task):
+        """code_review step gets code-review guidance, not preview-review guidance."""
+        task = self._make_task_with_step(sample_task, "code_review")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "CODE REVIEW CONSTRAINTS" in prompt
+        assert "PREVIEW REVIEW CONSTRAINTS" not in prompt

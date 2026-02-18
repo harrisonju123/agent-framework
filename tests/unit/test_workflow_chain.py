@@ -9,6 +9,7 @@ import pytest
 from agent_framework.core.agent import Agent, AgentConfig
 from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.config import WorkflowDefinition
+from tests.unit.conftest import PREVIEW_WORKFLOW
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
@@ -804,27 +805,50 @@ class TestWorktreeSkipForPRCreation:
 class TestPreviewMode:
     """Tests for PREVIEW task type routing and prompt injection."""
 
-    def test_preview_routes_back_to_architect(self, agent, queue):
-        """Engineer completing a PREVIEW task routes back to architect, not QA."""
-        task = _make_task(workflow="default")
+    @pytest.fixture
+    def preview_agent(self, agent):
+        """Extend the module-level agent with the preview workflow.
+
+        The router holds the same dict reference as agent._workflows_config,
+        so adding a key here is immediately visible to both.
+        """
+        agent._workflows_config["preview"] = PREVIEW_WORKFLOW
+        return agent
+
+    def test_preview_routes_to_preview_review(self, preview_agent, queue):
+        """Engineer completing the preview step routes to architect for preview_review."""
+        task = _make_task(
+            workflow="preview",
+            workflow_step="preview",
+            _chain_depth=1,
+            _root_task_id="root-preview-1",
+            _global_cycle_count=1,
+        )
         task.type = TaskType.PREVIEW
         response = _make_response()
 
-        agent._enforce_workflow_chain(task, response)
+        preview_agent._enforce_workflow_chain(task, response)
 
         queue.push.assert_called_once()
         chain_task = queue.push.call_args[0][0]
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "architect"
         assert chain_task.assigned_to == "architect"
+        assert chain_task.context.get("workflow_step") == "preview_review"
 
-    def test_preview_does_not_route_to_qa(self, agent, queue):
-        """PREVIEW tasks must skip QA — only architect reviews previews."""
-        task = _make_task(workflow="default")
+    def test_preview_does_not_route_to_qa(self, preview_agent, queue):
+        """PREVIEW tasks route to architect for review, not directly to QA."""
+        task = _make_task(
+            workflow="preview",
+            workflow_step="preview",
+            _chain_depth=1,
+            _root_task_id="root-preview-2",
+            _global_cycle_count=1,
+        )
         task.type = TaskType.PREVIEW
         response = _make_response()
 
-        agent._enforce_workflow_chain(task, response)
+        preview_agent._enforce_workflow_chain(task, response)
 
         target_queue = queue.push.call_args[0][1]
         assert target_queue != "qa"
@@ -838,23 +862,6 @@ class TestPreviewMode:
 
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "qa"
-
-    def test_preview_routing_only_applies_to_engineer(self, agent, queue):
-        """Architect completing a PREVIEW task should NOT trigger preview routing."""
-        agent.config = AgentConfig(
-            id="architect", name="Architect", queue="architect", prompt="You are an architect.",
-        )
-        agent._workflow_router.config = agent.config
-        task = _make_task(workflow="default")
-        task.type = TaskType.PREVIEW
-        response = _make_response()
-
-        agent._enforce_workflow_chain(task, response)
-
-        # Should follow normal workflow chain, not preview routing
-        if queue.push.called:
-            target_queue = queue.push.call_args[0][1]
-            assert target_queue != "architect"
 
     def test_inject_preview_mode_prepends_constraints(self, agent):
         """_inject_preview_mode prepends read-only constraints before the original prompt."""
@@ -1703,6 +1710,66 @@ class TestVerdictStorageAndClearing:
         agent._run_post_completion_flow(task, response, None, 0)
 
         assert "verdict" not in task.context
+
+    def test_preview_review_approval_stores_preview_approved(self, agent, queue):
+        """Architect approving at preview_review sets verdict='preview_approved', not 'approved'.
+
+        This is the critical distinction that fires the preview_approved DAG edge
+        instead of the generic approved edge, routing to implement rather than qa_review.
+        """
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="preview", workflow_step="preview_review")
+        response = _make_response("VERDICT: APPROVE")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "preview_approved"
+
+    def test_preview_review_implicit_approval_stores_preview_approved(self, agent, queue):
+        """Architect at preview_review with no explicit keywords → implicit 'preview_approved'.
+
+        The else branch must emit 'preview_approved' not 'approved' so the workflow
+        doesn't stall when the architect writes a nuanced response without the verdict keyword.
+        """
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="preview", workflow_step="preview_review")
+        # No APPROVE/REQUEST_CHANGES keyword — falls to the else branch
+        response = _make_response("The plan looks comprehensive and well-structured.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "preview_approved"
+
+    def test_code_review_approval_still_stores_approved(self, agent, queue):
+        """Architect at code_review (not preview_review) still gets verdict='approved'.
+
+        Regression guard: the new preview_review branching must not affect code_review.
+        """
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent._workflow_router.config = agent.config
+        task = _make_task(workflow="default", workflow_step="code_review")
+        response = _make_response("VERDICT: APPROVE")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.context.get("verdict") == "approved"
 
 
 # -- No-changes verdict detection --

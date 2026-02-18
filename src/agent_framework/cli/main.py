@@ -320,8 +320,9 @@ def pull(ctx, project, max):
 @click.option("--epic", "-e", help="JIRA epic key to process (e.g., PROJ-100)")
 @click.option("--parallel", "-p", is_flag=True, help="Process epic tickets in parallel (requires worktrees)")
 @click.option("--auto-approve", is_flag=True, help="Skip plan checkpoint, run fully autonomous")
+@click.option("--preview", is_flag=True, help="Run engineer in read-only preview mode before implementation")
 @click.pass_context
-def work(ctx, no_dashboard, epic, parallel, auto_approve):
+def work(ctx, no_dashboard, epic, parallel, auto_approve, preview):
     """Interactive mode: describe what to build, delegate to Architect agent.
 
     With --epic: Process all tickets in an existing JIRA epic.
@@ -329,8 +330,12 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve):
 
     Use --parallel with --epic to process multiple tickets concurrently.
     Use --auto-approve to skip the plan review checkpoint.
+    Use --preview to have the engineer produce a read-only execution plan for architect approval before writing any code.
     """
     workspace = ctx.obj["workspace"]
+
+    if auto_approve and preview:
+        console.print("[yellow]Warning: --preview is ignored when --auto-approve is set[/]")
 
     console.print("[bold cyan]🤖 Agent Framework - Interactive Mode[/]")
     console.print()
@@ -340,7 +345,7 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve):
 
     # Handle epic processing mode
     if epic:
-        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel, auto_approve)
+        _handle_epic_mode(ctx, workspace, framework_config, epic, no_dashboard, parallel, auto_approve, preview)
         return
 
     # Check if repos are registered
@@ -375,7 +380,12 @@ def work(ctx, no_dashboard, epic, parallel, auto_approve):
         console.print(f"\n[green]✓[/] Selected: [bold]{selected_repo.github_repo}[/]")
         console.print("[dim]No JIRA project configured - using local task tracking[/]")
 
-    workflow = "default_auto" if auto_approve else "default"
+    if auto_approve:
+        workflow = "default_auto"
+    elif preview:
+        workflow = "preview"
+    else:
+        workflow = "default"
 
     # Step 3: Create planning task for Architect
     from ..core.task_builder import build_planning_task
@@ -2124,7 +2134,7 @@ This PR implements the same pattern/functionality as the reference implementatio
         traceback.print_exc()
 
 
-def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False, auto_approve: bool = False):
+def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashboard: bool, parallel: bool = False, auto_approve: bool = False, preview: bool = False):
     """Handle --epic mode: process tickets in a JIRA epic.
 
     Args:
@@ -2135,9 +2145,13 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         no_dashboard: Skip dashboard if True
         parallel: If True, process tickets in parallel (no dependencies)
         auto_approve: If True, skip plan checkpoint (use default_auto workflow)
+        preview: If True, run engineer in read-only preview mode first
     """
     from datetime import datetime
     import time
+
+    if auto_approve and preview:
+        console.print("[yellow]Warning: --preview is ignored when --auto-approve is set[/]")
 
     # Validate epic key format
     if "-" not in epic_key:
@@ -2194,7 +2208,12 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
             console.print("[yellow]Cancelled[/]")
             return
 
-        workflow = "default_auto" if auto_approve else "default"
+        if auto_approve:
+            workflow = "default_auto"
+        elif preview:
+            workflow = "preview"
+        else:
+            workflow = "default"
 
         # Determine target repository from epic or config
         github_repo = None

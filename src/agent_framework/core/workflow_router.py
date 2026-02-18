@@ -179,11 +179,6 @@ class WorkflowRouter:
             )
             return
 
-        # Preview tasks route back to architect for review, not to QA
-        if task.type == TaskType.PREVIEW and self.config.base_id == 'engineer':
-            self.route_to_agent(task, 'architect', 'preview_review')
-            return
-
         # Legacy REVIEW/FIX tasks are routed by _queue_code_review_if_needed
         # and _queue_review_fix_if_needed — letting them also route through
         # the DAG creates a duplicate-routing feedback loop.

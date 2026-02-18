@@ -9,6 +9,7 @@ import pytest
 
 from agent_framework.core.workflow_router import WorkflowRouter
 from agent_framework.core.config import WorkflowDefinition
+from tests.unit.conftest import PREVIEW_WORKFLOW
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
@@ -86,7 +87,7 @@ def router(config, queue, tmp_path):
     """Create WorkflowRouter instance for testing."""
     logger = MagicMock()
     session_logger = MagicMock()
-    workflows_config = {"default": DEFAULT_WORKFLOW, "analysis": ANALYSIS_WORKFLOW}
+    workflows_config = {"default": DEFAULT_WORKFLOW, "preview": PREVIEW_WORKFLOW, "analysis": ANALYSIS_WORKFLOW}
     agents_config = [
         SimpleNamespace(id="architect"),
         SimpleNamespace(id="engineer"),
@@ -308,8 +309,14 @@ class TestEnforceChain:
         queue.push.assert_not_called()
 
     def test_preview_routes_back_to_architect(self, router, queue):
-        """Engineer completing a PREVIEW task routes back to architect, not QA."""
-        task = _make_task(workflow="default")
+        """Engineer completing the preview step routes to architect at preview_review."""
+        task = _make_task(
+            workflow="preview",
+            workflow_step="preview",
+            _chain_depth=1,
+            _root_task_id="root-preview-router-1",
+            _global_cycle_count=1,
+        )
         task.type = TaskType.PREVIEW
         response = _make_response()
 
@@ -320,6 +327,7 @@ class TestEnforceChain:
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "architect"
         assert chain_task.assigned_to == "architect"
+        assert chain_task.context.get("workflow_step") == "preview_review"
 
 
 # -- Terminal step detection --

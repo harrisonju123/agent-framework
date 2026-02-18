@@ -91,7 +91,7 @@ class PromptBuilder:
 
     # Steps where test execution should be suppressed in the LLM prompt.
     # QA handles testing at qa_review; running tests at review/PR steps wastes budget.
-    _TEST_SUPPRESSED_STEPS = frozenset({"code_review", "create_pr"})
+    _TEST_SUPPRESSED_STEPS = frozenset({"code_review", "preview_review", "create_pr"})
 
     # Steps where the LLM must review only — no file writes or implementation
     _REVIEW_ONLY_STEPS = frozenset({"code_review"})
@@ -287,6 +287,8 @@ Focus on reviewing the code changes.
         # Review-only steps must not modify code — only inspect the diff
         if workflow_step in self._REVIEW_ONLY_STEPS:
             mcp_guidance += self._build_review_only_guidance()
+        elif workflow_step == "preview_review":
+            mcp_guidance += self._build_preview_review_guidance()
 
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
@@ -368,6 +370,8 @@ IMPORTANT:
         # Review-only steps must not modify code — only inspect the diff
         if workflow_step in self._REVIEW_ONLY_STEPS:
             chain_note += "\n" + self._build_review_only_guidance()
+        elif workflow_step == "preview_review":
+            chain_note += "\n" + self._build_preview_review_guidance()
 
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
@@ -605,6 +609,32 @@ You are a REVIEWER, not an implementer. You must NOT modify any files.
 Your output MUST end with exactly one of:
   VERDICT: APPROVE
   VERDICT: REQUEST_CHANGES
+
+"""
+
+    def _build_preview_review_guidance(self) -> str:
+        """Build constraints for the preview_review step.
+
+        At preview_review the architect evaluates the engineer's structured preview
+        (files to modify, approach, risks) and decides whether to authorize
+        proceeding to implementation. No code modifications — evaluate the plan only.
+        """
+        return """IMPORTANT — PREVIEW REVIEW CONSTRAINTS:
+You are evaluating an EXECUTION PREVIEW produced by the engineer. Do NOT modify any files.
+
+- Do NOT use Write, Edit, or NotebookEdit tools
+- Do NOT use Bash to create, modify, or delete files
+- Read source files only if you need context to evaluate the plan
+
+Evaluate the engineer's preview for:
+- Correctness: does the proposed approach actually solve the task?
+- Completeness: are all necessary changes identified?
+- Risk: are edge cases and backward compatibility concerns addressed?
+- Scope: is anything added that wasn't requested?
+
+Your output MUST end with exactly one of:
+  VERDICT: APPROVE     (authorize the engineer to proceed with implementation)
+  VERDICT: REQUEST_CHANGES  (send back with specific required changes)
 
 """
 
