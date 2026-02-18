@@ -299,10 +299,35 @@ class TestDetectSpecialization:
         assert profile is None
 
     def test_minimum_threshold(self):
-        """Should require at least 2 matching files."""
+        """Should require >50% majority — 1 backend file among neutral files doesn't qualify."""
+        task = create_test_task(files_in_plan=[
+            "src/handler.go",
+            "docs/readme.md",
+            "docs/design.md",
+            "docs/notes.md",
+        ])
+        profile = detect_specialization(task)
+        # 1 go file out of 4 (25%) is below the 50% floor (threshold=2, score=1)
+        assert profile is None
+
+    def test_single_go_file_specializes_as_backend(self):
+        """A single .go file is an unambiguous backend signal."""
         task = create_test_task(files_in_plan=["src/handler.go"])
         profile = detect_specialization(task)
-        # Only 1 file, below threshold
+        assert profile is not None
+        assert profile.id == "backend"
+
+    def test_single_tsx_file_specializes_as_frontend(self):
+        """A single .tsx file is an unambiguous frontend signal."""
+        task = create_test_task(files_in_plan=["src/Component.tsx"])
+        profile = detect_specialization(task)
+        assert profile is not None
+        assert profile.id == "frontend"
+
+    def test_single_markdown_file_no_specialization(self):
+        """A single README.md has no specialization signal."""
+        task = create_test_task(files_in_plan=["README.md"])
+        profile = detect_specialization(task)
         assert profile is None
 
 
@@ -610,8 +635,9 @@ class TestAutoProfileFallback:
         prompt_builder = self._make_agent()
         task = create_test_task(files_in_plan=["service.proto"])
 
-        result = prompt_builder._detect_engineer_specialization(task)
-        assert result is None
+        profile, files = prompt_builder._detect_engineer_specialization(task)
+        assert profile is None
+        assert files == []
 
     @patch("agent_framework.core.profile_generator.ProfileGenerator.generate_profile")
     @patch("agent_framework.core.profile_registry.ProfileRegistry.find_matching_profile", return_value=None)
@@ -646,9 +672,9 @@ class TestAutoProfileFallback:
         prompt_builder = self._make_agent()
         task = create_test_task(files_in_plan=["service.proto"])
 
-        result = prompt_builder._detect_engineer_specialization(task)
-        assert result is not None
-        assert result.id == "grpc"
+        profile, files = prompt_builder._detect_engineer_specialization(task)
+        assert profile is not None
+        assert profile.id == "grpc"
         mock_store.assert_called_once()
 
     @patch("agent_framework.core.profile_registry.ProfileRegistry.find_matching_profile")
@@ -676,9 +702,9 @@ class TestAutoProfileFallback:
         prompt_builder = self._make_agent()
         task = create_test_task(files_in_plan=["service.proto"])
 
-        result = prompt_builder._detect_engineer_specialization(task)
-        assert result is not None
-        assert result.id == "grpc"
+        profile, files = prompt_builder._detect_engineer_specialization(task)
+        assert profile is not None
+        assert profile.id == "grpc"
 
     @patch("agent_framework.core.engineer_specialization.detect_file_patterns", return_value=[])
     @patch("agent_framework.core.engineer_specialization.get_auto_profile_config")
@@ -691,5 +717,6 @@ class TestAutoProfileFallback:
         prompt_builder = self._make_agent()
         task = create_test_task()
 
-        result = prompt_builder._detect_engineer_specialization(task)
-        assert result is None
+        profile, files = prompt_builder._detect_engineer_specialization(task)
+        assert profile is None
+        assert files == []

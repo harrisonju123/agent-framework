@@ -39,15 +39,18 @@ class ModelSelector:
         Routing priority:
         1. retry_count >= 3 → premium (task is difficult)
         2. task_type in premium_types → premium (fixed premium tasks)
-        3. IMPLEMENTATION + backend/infra + high file count → premium
-        4. IMPLEMENTATION + frontend + low file count → cheap
-        5. task_type in cheap_types → cheap (fixed cheap tasks)
+        3. (IMPLEMENTATION|ENHANCEMENT) + frontend + file_count <= 5 → cheap
+        4. (IMPLEMENTATION|ENHANCEMENT) + non-frontend + file_count >= 8 → premium
+           (covers auto-generated profiles like "grpc" that aren't explicitly "backend")
+        5. task_type in cheap_types → cheap, except FIX-family + specialization +
+           file_count >= 8 → sonnet (complex multi-file bug fixes need more than haiku)
         6. Default → sonnet
 
         Args:
             task_type: Type of task being performed
             retry_count: Number of times task has been retried
-            specialization_profile: Specialization ID (backend, frontend, infrastructure)
+            specialization_profile: Specialization ID (backend, frontend, infrastructure, or
+                auto-generated IDs like "grpc")
             file_count: Number of files involved in the task
         """
         # Priority 1: Escalate to stronger model if task keeps failing
@@ -65,30 +68,38 @@ class ModelSelector:
         if task_type in premium_types:
             return self.premium_model
 
-        # Priority 3-4: Specialization-aware routing (IMPLEMENTATION tasks only)
-        if task_type == TaskType.IMPLEMENTATION and specialization_profile:
-            # Backend/infra with high file count → premium
-            if specialization_profile in {"backend", "infrastructure"} and file_count >= 8:
-                return self.premium_model
-            # Frontend with low file count → cheap
+        # Priority 3-4: Specialization-aware routing for implementation-like tasks.
+        # ENHANCEMENT is grouped with IMPLEMENTATION — both produce code that benefits
+        # from the same specialization signals.
+        impl_types = {TaskType.IMPLEMENTATION, TaskType.ENHANCEMENT}
+        if task_type in impl_types and specialization_profile:
+            # Frontend with low file count → cheap (UI changes tend to be contained)
             if specialization_profile == "frontend" and file_count <= 5:
                 return self.cheap_model
+            # Any non-frontend profile (including auto-generated ones like "grpc") with
+            # high file count → premium.  We use != "frontend" rather than an allowlist
+            # so that auto-generated profiles aren't silently dropped.
+            if specialization_profile != "frontend" and file_count >= 8:
+                return self.premium_model
+            # 6–7 files with any profile: no override — falls through to default (sonnet).
+            # This is intentional dead space between the cheap and premium thresholds.
 
-        # Priority 5: Cheap tasks (fixed cheap)
+        # Priority 5: Cheap tasks. FIX-family is cheap by default, but a specialized
+        # fix touching >=8 files likely spans subsystems and benefits from sonnet.
+        fix_types = {TaskType.FIX, TaskType.BUGFIX, TaskType.BUG_FIX}
         cheap_types = {
             TaskType.TESTING,
             TaskType.VERIFICATION,
-            TaskType.FIX,
-            TaskType.BUGFIX,
-            TaskType.BUG_FIX,
             TaskType.COORDINATION,
             TaskType.STATUS_REPORT,
             TaskType.DOCUMENTATION,
-        }
+        } | fix_types
         if task_type in cheap_types:
+            if task_type in fix_types and specialization_profile and file_count >= 8:
+                return self.default_model
             return self.cheap_model
 
-        # Priority 6: Default for implementation, architecture, planning, etc.
+        # Priority 7: Default for implementation, architecture, planning, etc.
         return self.default_model
 
     def select_timeout(self, task_type: TaskType) -> int:

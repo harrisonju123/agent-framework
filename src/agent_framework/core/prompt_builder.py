@@ -125,12 +125,11 @@ class PromptBuilder:
         shadow_mode = self.ctx.optimization_config.get("shadow_mode", False)
         use_optimizations = self._should_use_optimization(task)
 
-        # Detect specialization once — reused for both prompt and team composition
-        from .engineer_specialization import apply_specialization_to_prompt, detect_file_patterns
-        profile = self._detect_engineer_specialization(task)
+        # Detect specialization once — reused for both prompt and team composition.
+        # Returns (profile, files) so we avoid calling detect_file_patterns twice.
+        from .engineer_specialization import apply_specialization_to_prompt
+        profile, files = self._detect_engineer_specialization(task)
         self._current_specialization = profile
-        # Extract file count for model routing (specialization-aware routing uses this)
-        files = detect_file_patterns(task)
         self._current_file_count = len(files)
         prompt_text = apply_specialization_to_prompt(self.ctx.config.prompt, profile)
 
@@ -1178,19 +1177,20 @@ Your previous implementation had test failures. Please fix the issues below:
 Fix the failing tests and ensure all tests pass.
 """
 
-    def _detect_engineer_specialization(self, task: Task):
+    def _detect_engineer_specialization(self, task: Task) -> tuple[Optional["SpecializationProfile"], list[str]]:
         """Detect engineer specialization profile for this task.
 
-        Returns the profile if this is an engineer agent with a clear match, else None.
-        Delegates to engineer_specialization module.
+        Returns (profile, files) so the caller can reuse the file list for
+        model routing without a second detect_file_patterns() call.
+        Returns (None, []) when specialization is disabled or no match found.
         """
         if self.ctx.config.base_id != "engineer":
-            return None
+            return None, []
 
         # Per-agent toggle from agents.yaml
         if self.ctx.agent_definition and not self.ctx.agent_definition.specialization_enabled:
             self.logger.debug("Specialization disabled for this agent via agents.yaml")
-            return None
+            return None, []
 
         # Global toggle from specializations.yaml
         from .engineer_specialization import (
@@ -1203,22 +1203,22 @@ Fix the failing tests and ensure all tests pass.
 
         if not get_specialization_enabled():
             self.logger.debug("Specialization disabled globally via specializations.yaml")
-            return None
+            return None, []
 
         # Extract files once — reused for both static detection and auto-profile fallback
         files = detect_file_patterns(task)
 
         profile = detect_specialization(task, files=files)
         if profile:
-            return profile
+            return profile, files
 
         # Auto-profile fallback: check registry, then generate
         auto_config = get_auto_profile_config()
         if auto_config is None or not auto_config.enabled:
-            return None
+            return None, []
 
         if not files:
-            return None
+            return None, []
 
         import time
         from .profile_registry import ProfileRegistry, GeneratedProfileEntry
@@ -1238,7 +1238,7 @@ Fix the failing tests and ensure all tests pass.
         )
         if cached:
             self.logger.info("Matched cached generated profile '%s'", cached.id)
-            return cached
+            return cached, files
 
         # Generate new profile
         generator = ProfileGenerator(self.ctx.workspace, model=auto_config.model)
@@ -1256,6 +1256,6 @@ Fix the failing tests and ensure all tests pass.
                 file_extensions=generated.file_extensions,
             ))
             self.logger.info("Generated new profile '%s'", generated.profile.id)
-            return generated.profile
+            return generated.profile, files
 
-        return None
+        return None, []

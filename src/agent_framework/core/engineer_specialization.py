@@ -517,8 +517,10 @@ def detect_specialization(
 
     top_score, top_profile = scores[0]
 
-    # Require clear signal: at least 2 matching files AND >50% of files
-    threshold = max(2, total_files * 0.5)
+    # Require clear signal: >50% of files match, with a floor of 2 — except for
+    # single-file tasks where one matching file is treated as a sufficient signal
+    # (the 50% rule is meaningless when there's nothing to compare against).
+    threshold = 1 if total_files == 1 else max(2, total_files * 0.5)
     if top_score >= threshold:
         logger.info(
             "Selected specialization '%s' (score=%d, threshold=%.0f, total_files=%d)",

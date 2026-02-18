@@ -145,15 +145,15 @@ class TestSpecializationRouting:
         )
         assert model == "sonnet"
 
-    def test_unknown_specialization_uses_default(self, selector):
-        """Unknown specialization falls through to default."""
+    def test_unknown_specialization_uses_premium_with_high_file_count(self, selector):
+        """Auto-generated profiles (non-frontend) with >=8 files route to premium."""
         model = selector.select(
             TaskType.IMPLEMENTATION,
             retry_count=0,
             specialization_profile="unknown-spec",
             file_count=10,
         )
-        assert model == "sonnet"
+        assert model == "opus"
 
     def test_no_specialization_uses_default(self, selector):
         """Implementation without specialization uses default."""
@@ -193,5 +193,55 @@ class TestSpecializationRouting:
             retry_count=0,
             specialization_profile="backend",
             file_count=10,
+        )
+        assert model == "haiku"
+
+    def test_enhancement_backend_high_file_count_uses_premium(self, selector):
+        """ENHANCEMENT behaves like IMPLEMENTATION — backend + >=8 files → premium."""
+        model = selector.select(
+            TaskType.ENHANCEMENT,
+            retry_count=0,
+            specialization_profile="backend",
+            file_count=8,
+        )
+        assert model == "opus"
+
+    def test_enhancement_frontend_low_file_count_uses_cheap(self, selector):
+        """ENHANCEMENT behaves like IMPLEMENTATION — frontend + <=5 files → cheap."""
+        model = selector.select(
+            TaskType.ENHANCEMENT,
+            retry_count=0,
+            specialization_profile="frontend",
+            file_count=3,
+        )
+        assert model == "haiku"
+
+    def test_fix_with_specialization_high_file_count_uses_default(self, selector):
+        """FIX tasks with a specialization and >=8 files escalate from cheap to sonnet."""
+        model = selector.select(
+            TaskType.FIX,
+            retry_count=0,
+            specialization_profile="backend",
+            file_count=8,
+        )
+        assert model == "sonnet"
+
+    def test_fix_with_specialization_low_file_count_stays_cheap(self, selector):
+        """FIX tasks with specialization but <8 files keep the cheap model."""
+        model = selector.select(
+            TaskType.FIX,
+            retry_count=0,
+            specialization_profile="backend",
+            file_count=7,
+        )
+        assert model == "haiku"
+
+    def test_fix_without_specialization_stays_cheap(self, selector):
+        """FIX tasks without a specialization always use the cheap model."""
+        model = selector.select(
+            TaskType.FIX,
+            retry_count=0,
+            specialization_profile=None,
+            file_count=20,
         )
         assert model == "haiku"
