@@ -397,9 +397,8 @@ class TestQueueReviewFix:
         task = _make_task()
         response = _make_response("REQUEST_CHANGES\nFix it")
 
-        # Pre-create the fix task file — ID now uses _root_task_id (falls back to task.id)
-        root_id = task.context.get("_root_task_id", task.id)
-        fix_id = f"review-fix-{root_id[:12]}-c1"
+        # Pre-create the fix task file — ID uses task.root_id (falls back to task.id)
+        fix_id = f"review-fix-{task.root_id[:12]}-c1"
         engineer_dir = queue.queue_dir / "engineer"
         engineer_dir.mkdir()
         (engineer_dir / f"{fix_id}.json").write_text("{}")

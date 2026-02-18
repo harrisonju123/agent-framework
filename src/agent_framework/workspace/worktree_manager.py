@@ -196,7 +196,7 @@ class WorktreeManager:
             if len(parts) >= 3:
                 ticket_key = f"{parts[1]}-{parts[2]}"
         if len(ticket_key) > self._MAX_WORKTREE_KEY_LENGTH:
-            ticket_key = ticket_key[:self._MAX_WORKTREE_KEY_LENGTH]
+            ticket_key = ticket_key[:self._MAX_WORKTREE_KEY_LENGTH].rstrip("-")
         return f"{agent_id}-{ticket_key}"
 
     def _get_worktree_path(self, owner_repo: str, agent_id: str, task_id: str) -> Path:

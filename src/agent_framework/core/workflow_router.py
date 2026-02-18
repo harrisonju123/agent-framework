@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 from .task import Task, TaskStatus, TaskType
 from .routing import validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
-from ..utils.type_helpers import get_type_str
+from ..utils.type_helpers import get_type_str, strip_chain_prefixes
 
 
 class WorkflowRouter:
@@ -400,8 +400,6 @@ class WorkflowRouter:
             self.logger.debug(f"PR creation task {pr_task_id} already queued, skipping")
             return
 
-        from ..workflow.executor import _strip_chain_prefixes
-
         pr_context = {
             **task.context,
             "source_task_id": task.id,
@@ -419,7 +417,7 @@ class WorkflowRouter:
             created_by=self.config.id,
             assigned_to=pr_creator,
             created_at=datetime.now(timezone.utc),
-            title=f"[pr] {_strip_chain_prefixes(task.title)}",
+            title=f"[pr] {strip_chain_prefixes(task.title)}",
             description=task.description,
             context=pr_context,
         )

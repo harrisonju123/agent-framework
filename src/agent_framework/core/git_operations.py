@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .pr_lifecycle import PRLifecycleManager
 
 from .task import Task
+from ..utils.type_helpers import strip_chain_prefixes
 
 
 class GitOperationsManager:
@@ -468,8 +469,7 @@ class GitOperationsManager:
         from ..utils.subprocess_utils import run_command, SubprocessError
 
         # Build a clean PR title — strip workflow prefixes
-        from ..workflow.executor import _strip_chain_prefixes
-        pr_title = _strip_chain_prefixes(task.title)[:70]
+        pr_title = strip_chain_prefixes(task.title)[:70]
 
         pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
 

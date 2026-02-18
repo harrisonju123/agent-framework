@@ -31,7 +31,7 @@ from ..safeguards.retry_handler import RetryHandler
 from ..safeguards.escalation import EscalationHandler
 from ..workspace.worktree_manager import WorktreeManager, WorktreeConfig
 from ..utils.rich_logging import ContextLogger, setup_rich_logging
-from ..utils.type_helpers import get_type_str
+from ..utils.type_helpers import get_type_str, strip_chain_prefixes
 from ..memory.memory_store import MemoryStore
 from ..memory.memory_retriever import MemoryRetriever
 from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer
@@ -649,6 +649,9 @@ class Agent:
         """Initialize task execution with activity tracking and events."""
         from datetime import datetime
 
+        # Read before mark_in_progress to avoid any future mutation ordering surprises
+        self_eval_count = task.context.get("_self_eval_count", 0)
+
         task.mark_in_progress(self.config.id)
         self.queue.update(task)
 
@@ -666,13 +669,16 @@ class Agent:
             last_updated=datetime.now(timezone.utc)
         ))
 
-        # Append start event
+        # On self-eval retry, emit "retry" so the stream doesn't show a
+        # duplicate "start" for what is logically the same task execution.
+        event_type = "retry" if self_eval_count > 0 else "start"
         self.activity_manager.append_event(ActivityEvent(
-            type="start",
+            type=event_type,
             agent=self.config.id,
             task_id=task.id,
             title=task.title,
-            timestamp=datetime.now(timezone.utc)
+            timestamp=datetime.now(timezone.utc),
+            retry_count=self_eval_count if event_type == "retry" else None,
         ))
 
         # Deterministic JIRA transition on task start
@@ -2018,8 +2024,7 @@ This preview will be reviewed by the architect before implementation is authoriz
         from ..utils.subprocess_utils import run_command, SubprocessError
 
         # Build a clean PR title — strip workflow prefixes
-        from ..workflow.executor import _strip_chain_prefixes
-        pr_title = _strip_chain_prefixes(task.title)[:70]
+        pr_title = strip_chain_prefixes(task.title)[:70]
 
         pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
 

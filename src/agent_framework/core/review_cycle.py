@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .task import Task, TaskStatus, TaskType
+from ..utils.type_helpers import strip_chain_prefixes
 
 # Cap review cycles to prevent infinite QA ↔ Engineer loops
 MAX_REVIEW_CYCLES = 3
@@ -150,12 +151,11 @@ class ReviewCycleManager:
 
     def build_review_task(self, task: Task, pr_info: dict) -> Task:
         """Build code review task for a PR."""
-        from ..workflow.executor import _strip_chain_prefixes
         jira_key = task.context.get("jira_key", "UNKNOWN")
         pr_number = pr_info["pr_number"]
         # Stable root ID keeps review task IDs flat across chain hops
         root_task_id = task.root_id
-        clean_title = _strip_chain_prefixes(task.title)[:50]
+        clean_title = strip_chain_prefixes(task.title)[:50]
 
         return Task(
             id=f"review-{root_task_id}-{pr_number}",

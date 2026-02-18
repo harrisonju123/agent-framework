@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional, List
+from typing import Literal, Optional, List
 
 from pydantic import BaseModel
 
@@ -94,7 +94,10 @@ class AgentActivity(BaseModel):
 
 class ActivityEvent(BaseModel):
     """Event for activity stream."""
-    type: str  # "start", "complete", "fail", "phase"
+    type: Literal[
+        "start", "retry", "complete", "fail", "interrupted", "phase",
+        "test_complete", "test_fail", "context_budget_critical", "token_budget_exceeded",
+    ]
     agent: str
     task_id: str
     title: str

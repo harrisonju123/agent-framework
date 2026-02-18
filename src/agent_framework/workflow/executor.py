@@ -16,6 +16,7 @@ from .dag import WorkflowDAG, WorkflowStep, WorkflowEdge, EdgeConditionType
 from .conditions import ConditionRegistry
 from ..core.task import TaskStatus, TaskType
 from ..core.routing import WORKFLOW_COMPLETE
+from ..utils.type_helpers import strip_chain_prefixes
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +104,6 @@ AGENT_TASK_TYPES = {
 
 _PR_URL_PATTERN = re.compile(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)')
 
-
-def _strip_chain_prefixes(title: str) -> str:
-    """Remove accumulated [chain]/[pr] prefixes so re-wrapping adds exactly one."""
-    while title.startswith(("[chain] ", "[pr] ")):
-        title = title[len("[chain] "):] if title.startswith("[chain] ") else title[len("[pr] "):]
-    return title
 
 
 class WorkflowExecutor:
@@ -431,13 +426,13 @@ class WorkflowExecutor:
 
         # Title-based dedup: catch same work queued under different IDs
         if title:
-            normalized = _strip_chain_prefixes(title).lower().strip()
+            normalized = strip_chain_prefixes(title).lower().strip()
             queue_dir = self.queue_dir / next_agent
             if queue_dir.exists():
                 for f in queue_dir.glob("*.json"):
                     try:
                         data = json.loads(f.read_text())
-                        existing = _strip_chain_prefixes(data.get("title", "")).lower().strip()
+                        existing = strip_chain_prefixes(data.get("title", "")).lower().strip()
                         if existing == normalized:
                             self.logger.debug(
                                 f"Title dedup: '{title}' matches existing {f.name}"
@@ -529,7 +524,7 @@ class WorkflowExecutor:
             created_by=current_agent_id,
             assigned_to=next_agent,
             created_at=datetime.now(timezone.utc),
-            title=f"[chain] {_strip_chain_prefixes(task.title)}",
+            title=f"[chain] {strip_chain_prefixes(task.title)}",
             description=description,
             context=context,
             plan=task.plan,
