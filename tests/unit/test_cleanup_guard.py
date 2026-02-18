@@ -185,12 +185,14 @@ class TestPollingLoopGuard:
         agent.config.poll_interval = 0
         agent.config.queue = "engineer"
         agent.config.id = "eng-01"
+        agent._heartbeat_task = None
 
         task = _make_task()
         lock = MagicMock()
 
         agent._check_pause_signal = MagicMock(return_value=False)
         agent._write_heartbeat = MagicMock()
+        agent._heartbeat_loop = AsyncMock()
         agent._review_cycle.purge_orphaned_review_tasks = MagicMock()
         agent.activity_manager.update_activity = MagicMock()
 

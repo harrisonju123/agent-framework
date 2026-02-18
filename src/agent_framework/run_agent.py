@@ -236,6 +236,7 @@ def main():
             repositories_config=framework_config.repositories,
             pr_lifecycle_config=framework_config.pr_lifecycle.model_dump(),
             code_indexing_config=framework_config.indexing.model_dump(),
+            heartbeat_interval=framework_config.safeguards.heartbeat_interval,
         )
 
         # Let SIGTERM trigger a clean exit through the polling loop

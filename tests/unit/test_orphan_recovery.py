@@ -224,7 +224,7 @@ class TestIsOrphaned:
         assert queue._is_orphaned(task) is False
 
     def test_stale_heartbeat_is_orphaned(self, queue, tmp_path):
-        """Task whose heartbeat is older than 120 s is considered orphaned."""
+        """Task whose heartbeat is older than 90s is considered orphaned."""
         task = _make_task(status=TaskStatus.IN_PROGRESS)
         task.started_by = "dead-agent"
 

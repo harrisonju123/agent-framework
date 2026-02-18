@@ -63,7 +63,8 @@ safeguards:
   max_queue_size: 100        # Max tasks per agent queue
   max_escalations: 50        # Max total escalations
   max_task_age_days: 7       # Archive tasks older than N days
-  heartbeat_timeout: 600     # Agent considered dead after N seconds (10 min for long MCP tasks)
+  heartbeat_interval: 15     # Background heartbeat write interval (seconds)
+  heartbeat_timeout: 90      # Agent considered dead after N seconds without heartbeat
   watchdog_interval: 60      # Watchdog check interval (seconds)
 
 # Optimization Configuration

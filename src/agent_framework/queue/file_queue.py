@@ -177,8 +177,8 @@ class FileQueue:
         try:
             stat = heartbeat_file.stat()
             age_seconds = time.time() - stat.st_mtime
-            # Stale if no heartbeat for 2 minutes (agents write every poll cycle)
-            return age_seconds > 120
+            # Stale if no heartbeat for 90s (background heartbeat writes every 15s)
+            return age_seconds > 90
         except OSError:
             return True
 

@@ -85,7 +85,8 @@ class SafeguardsConfig(BaseModel):
     max_queue_size: int = 100
     max_escalations: int = 50
     max_task_age_days: int = 7
-    heartbeat_timeout: int = 600  # 10 min to accommodate long MCP tasks
+    heartbeat_interval: int = 15  # Background heartbeat write interval (seconds)
+    heartbeat_timeout: int = 90  # Agent considered dead after N seconds without heartbeat
     watchdog_interval: int = 60
 
 

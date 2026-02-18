@@ -199,6 +199,7 @@ class Agent:
         """Initialize heartbeat, activity tracking, and caches."""
         self.heartbeat_file = self.workspace / ".agent-communication" / "heartbeats" / self.config.id
         self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+        self._heartbeat_task: Optional[asyncio.Task] = None
         self.activity_manager = ActivityManager(self.workspace)
         self._paused = False
 
@@ -364,8 +365,11 @@ class Agent:
         repositories_config: Optional[List["RepositoryConfig"]] = None,
         pr_lifecycle_config: Optional[dict] = None,
         code_indexing_config: Optional[dict] = None,
+        heartbeat_interval: int = 15,
     ):
         """Initialize Agent with modular subsystem setup."""
+        self._heartbeat_interval = heartbeat_interval
+
         # Core dependencies and basic state
         self._init_core_dependencies(
             config, llm, queue, workspace, jira_client, github_client,
@@ -561,8 +565,11 @@ class Agent:
         # Drain stale review-chain tasks left over from before the cycle-count guard
         self._review_cycle.purge_orphaned_review_tasks()
 
+        # Background heartbeat keeps the watchdog informed during long LLM calls
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
         while self._running:
-            # Write heartbeat every iteration
+            # Belt-and-suspenders: also write heartbeat at top of each iteration
             self._write_heartbeat()
 
             # Check for pause signal before processing tasks
@@ -610,6 +617,14 @@ class Agent:
         """Stop the polling loop gracefully."""
         self.logger.info(f"Stopping {self.config.id}")
         self._running = False
+
+        # Stop background heartbeat before anything else
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         # Kill any in-flight LLM subprocess so the agent doesn't block
         self.llm.cancel()
@@ -2132,6 +2147,19 @@ class Agent:
     def _write_heartbeat(self) -> None:
         """Write current Unix timestamp to heartbeat file."""
         self.heartbeat_file.write_text(str(int(time.time())))
+
+    async def _heartbeat_loop(self) -> None:
+        """Background loop that writes heartbeats independent of main loop progress.
+
+        Decouples heartbeat freshness from LLM call duration so the watchdog
+        can use a tight timeout (90s) without false-positive kills.
+        """
+        while self._running:
+            try:
+                self._write_heartbeat()
+            except OSError:
+                pass  # Transient FS error; next iteration will retry
+            await asyncio.sleep(self._heartbeat_interval)
 
     def _check_pause_signal(self) -> bool:
         """Check if pause signal file exists.
