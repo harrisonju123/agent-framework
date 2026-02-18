@@ -293,3 +293,15 @@ class SetupStatusResponse(BaseModel):
     repositories_registered: int
     mcp_enabled: bool
     ready_to_start: bool
+
+
+class AgenticMetricsResponse(BaseModel):
+    """Response for GET /api/analytics/agentic."""
+    generated_at: datetime
+    time_range_hours: int
+    memory: Dict[str, Any]
+    self_eval: Dict[str, Any]
+    replan: Dict[str, Any]
+    specialization: Dict[str, Any]
+    context_budget: Dict[str, Any]
+    debate: Optional[Dict[str, Any]] = None

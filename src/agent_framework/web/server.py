@@ -308,6 +308,14 @@ def register_routes(app: FastAPI):
         """Get system health status."""
         return app.state.data_provider.get_health_status()
 
+    @app.get("/api/analytics/agentic")
+    async def get_agentic_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Aggregate and return agentic feature metrics for the given time window."""
+        from ..analytics.agentic_metrics import AgenticMetricsCollector
+        collector = AgenticMetricsCollector(app.state.workspace)
+        metrics = collector.collect(hours=hours)
+        return metrics.model_dump(mode="json")
+
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():
         """Pause all agents."""
@@ -642,7 +650,7 @@ def register_routes(app: FastAPI):
 
             return OperationResponse(
                 success=True,
-                task_id=task_id,
+                task_id=task.id,
                 message=f"Analysis queued for {request.repository}"
             )
 
