@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..utils.validators import validate_branch_name, validate_identifier, validate_owner_repo
-from ..utils.subprocess_utils import run_git_command, SubprocessError
+from ..utils.subprocess_utils import run_git_command
 
 logger = logging.getLogger(__name__)
 
@@ -723,15 +723,16 @@ class WorktreeManager:
     def _branch_exists(self, repo_path: Path, branch_name: str) -> bool:
         """Check if branch exists locally or remotely."""
         try:
-            run_git_command(
+            result = run_git_command(
                 ["rev-parse", "--verify", branch_name],
                 cwd=repo_path,
-                check=True,
+                check=False,
                 timeout=10,
             )
-            return True
-        except (SubprocessError, subprocess.TimeoutExpired):
-            pass
+            if result.returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            return False
 
         return self._remote_branch_exists(repo_path, branch_name)
 
@@ -744,14 +745,14 @@ class WorktreeManager:
         until it's been pushed.
         """
         try:
-            run_git_command(
+            result = run_git_command(
                 ["rev-parse", "--verify", f"origin/{branch_name}"],
                 cwd=repo_path,
-                check=True,
+                check=False,
                 timeout=10,
             )
-            return True
-        except (SubprocessError, subprocess.TimeoutExpired):
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
             return False
 
     def _get_default_branch(self, repo_path: Path) -> str:
@@ -760,24 +761,28 @@ class WorktreeManager:
             result = run_git_command(
                 ["symbolic-ref", "refs/remotes/origin/HEAD"],
                 cwd=repo_path,
-                check=True,
+                check=False,
                 timeout=10,
             )
-            return result.stdout.strip().split('/')[-1]
-        except (SubprocessError, subprocess.TimeoutExpired):
-            # Fallback to common names
-            for branch in ["main", "master"]:
-                try:
-                    run_git_command(
-                        ["rev-parse", "--verify", f"origin/{branch}"],
-                        cwd=repo_path,
-                        check=True,
-                        timeout=10,
-                    )
+            if result.returncode == 0:
+                return result.stdout.strip().split('/')[-1]
+        except subprocess.TimeoutExpired:
+            pass
+
+        # Fallback to common names
+        for branch in ["main", "master"]:
+            try:
+                probe = run_git_command(
+                    ["rev-parse", "--verify", f"origin/{branch}"],
+                    cwd=repo_path,
+                    check=False,
+                    timeout=10,
+                )
+                if probe.returncode == 0:
                     return branch
-                except (SubprocessError, subprocess.TimeoutExpired):
-                    continue
-            return "main"
+            except subprocess.TimeoutExpired:
+                continue
+        return "main"
 
     def _find_base_repo(self, worktree_path: Path) -> Optional[Path]:
         """Find base repository for a worktree."""

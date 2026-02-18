@@ -911,15 +911,14 @@ class TestRemoteBranchExists:
             mock_git.assert_called_once_with(
                 ["rev-parse", "--verify", "origin/feature/test"],
                 cwd=tmp_path,
-                check=True,
+                check=False,
                 timeout=10,
             )
 
     def test_returns_false_when_remote_ref_missing(self, manager, tmp_path):
         """origin/<branch> not found → False."""
-        from agent_framework.utils.subprocess_utils import SubprocessError
         with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
-            mock_git.side_effect = SubprocessError("git rev-parse", 128, "not found")
+            mock_git.return_value = MagicMock(returncode=128)
             assert manager._remote_branch_exists(tmp_path, "unpushed-branch") is False
 
     def test_returns_false_on_timeout(self, manager, tmp_path):
@@ -927,6 +926,98 @@ class TestRemoteBranchExists:
         with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
             mock_git.side_effect = subprocess.TimeoutExpired("git", 10)
             assert manager._remote_branch_exists(tmp_path, "slow-branch") is False
+
+
+class TestBranchExists:
+    """Tests for _branch_exists — local-then-remote branch check."""
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        return WorktreeManager(config=config)
+
+    def test_returns_true_when_local_ref_exists(self, manager, tmp_path):
+        """Local rev-parse succeeds → True without checking remote."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.return_value = MagicMock(returncode=0)
+            assert manager._branch_exists(tmp_path, "feature/local") is True
+            mock_git.assert_called_once()
+
+    def test_falls_through_to_remote_on_local_miss(self, manager, tmp_path):
+        """Local rev-parse fails → delegates to _remote_branch_exists."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            # First call (local) fails, second call (remote) succeeds
+            mock_git.side_effect = [
+                MagicMock(returncode=128),
+                MagicMock(returncode=0),
+            ]
+            assert manager._branch_exists(tmp_path, "feature/remote-only") is True
+            assert mock_git.call_count == 2
+
+    def test_returns_false_when_both_miss(self, manager, tmp_path):
+        """Neither local nor remote ref exists → False."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.return_value = MagicMock(returncode=128)
+            assert manager._branch_exists(tmp_path, "nonexistent") is False
+
+    def test_returns_false_on_timeout(self, manager, tmp_path):
+        """Timeout → False immediately (no redundant remote probe)."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.side_effect = subprocess.TimeoutExpired("git", 10)
+            assert manager._branch_exists(tmp_path, "slow-branch") is False
+            mock_git.assert_called_once()
+
+
+class TestGetDefaultBranch:
+    """Tests for _get_default_branch — symbolic-ref with fallback probing."""
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        return WorktreeManager(config=config)
+
+    def test_returns_branch_from_symbolic_ref(self, manager, tmp_path):
+        """symbolic-ref succeeds → parse branch name from output."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.return_value = MagicMock(
+                returncode=0, stdout="refs/remotes/origin/main\n"
+            )
+            assert manager._get_default_branch(tmp_path) == "main"
+            mock_git.assert_called_once()
+
+    def test_falls_back_to_probe_on_symbolic_ref_failure(self, manager, tmp_path):
+        """symbolic-ref fails → probes origin/main, origin/master."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                MagicMock(returncode=1),   # symbolic-ref fails
+                MagicMock(returncode=0),   # origin/main exists
+            ]
+            assert manager._get_default_branch(tmp_path) == "main"
+
+    def test_returns_master_when_main_missing(self, manager, tmp_path):
+        """origin/main missing but origin/master exists → 'master'."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                MagicMock(returncode=1),     # symbolic-ref fails
+                MagicMock(returncode=128),   # origin/main missing
+                MagicMock(returncode=0),     # origin/master exists
+            ]
+            assert manager._get_default_branch(tmp_path) == "master"
+
+    def test_defaults_to_main_when_all_fail(self, manager, tmp_path):
+        """All probes fail → falls back to 'main'."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.return_value = MagicMock(returncode=128)
+            assert manager._get_default_branch(tmp_path) == "main"
+
+    def test_handles_timeout_gracefully(self, manager, tmp_path):
+        """Timeout on symbolic-ref → still probes fallback branches."""
+        with patch("agent_framework.workspace.worktree_manager.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                subprocess.TimeoutExpired("git", 10),  # symbolic-ref times out
+                MagicMock(returncode=0),                # origin/main exists
+            ]
+            assert manager._get_default_branch(tmp_path) == "main"
 
 
 class TestStartPointUsesRemoteCheck:
