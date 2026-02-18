@@ -750,21 +750,17 @@ class Agent:
             self._sync_jira_status(task, self._agent_definition.jira_on_complete, comment=comment)
 
         # Transition to COMPLETING status
-        try:
-            self.activity_manager.update_activity(AgentActivity(
-                agent_id=self.config.id,
-                status=AgentStatus.COMPLETING,
-                current_task=CurrentTask(
-                    id=task.id,
-                    title=task.title,
-                    type=get_type_str(task.type),
-                    started_at=task_start_time
-                ),
-                last_updated=datetime.now(timezone.utc)
-            ))
-            await asyncio.sleep(1.5)
-        except asyncio.CancelledError:
-            pass
+        self.activity_manager.update_activity(AgentActivity(
+            agent_id=self.config.id,
+            status=AgentStatus.COMPLETING,
+            current_task=CurrentTask(
+                id=task.id,
+                title=task.title,
+                type=get_type_str(task.type),
+                started_at=task_start_time
+            ),
+            last_updated=datetime.now(timezone.utc)
+        ))
 
         routing_signal = read_routing_signal(self.workspace, task.id)
         if routing_signal:
