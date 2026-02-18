@@ -762,6 +762,7 @@ class TestReplanMemory:
 
         memory_store.remember.assert_not_called()
         manager.escalation_handler.create_escalation.assert_called_once()
+        manager.queue.push.assert_called_once_with(escalation_task, escalation_task.assigned_to)
 
     @pytest.mark.asyncio
     async def test_handle_failure_antipattern_exception_does_not_block_logging(self):

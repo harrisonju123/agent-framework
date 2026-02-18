@@ -81,7 +81,7 @@ class ErrorRecoveryManager:
                 f"Task {task.id} has failed {task.retry_count} times "
                 f"(max: {self.retry_handler.max_retries})"
             )
-            error_type = self._categorize_error(task.last_error or "")
+            error_type = self._categorize_error(task.last_error or "") or "unknown"
             task.mark_failed(self.config.id, error_message=task.last_error, error_type=error_type)
             self.queue.mark_failed(task)
 
@@ -600,7 +600,7 @@ breaking the task into smaller steps, or working around the root cause."""
             agent_type=self.config.base_id,
             category="past_failures",
             content=content,
-            task_id=task.id,
+            source_task_id=task.id,
             tags=[error_type],
         )
 
@@ -619,7 +619,7 @@ breaking the task into smaller steps, or working around the root cause."""
             return
 
         approaches = [
-            entry.get("approach_tried", "unknown")
+            entry["approach_tried"]
             for entry in task.replan_history
             if entry.get("approach_tried")
         ]
@@ -644,7 +644,7 @@ breaking the task into smaller steps, or working around the root cause."""
             agent_type=self.config.base_id,
             category="past_failures",
             content=content,
-            task_id=task.id,
+            source_task_id=task.id,
             tags=[error_type],
         )
 

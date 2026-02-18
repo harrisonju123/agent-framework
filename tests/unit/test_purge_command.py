@@ -116,9 +116,12 @@ def test_purge_empty_workspace(tmp_path):
 
 
 @patch("agent_framework.cli.main.Orchestrator")
-def test_purge_removes_all_categories(mock_orch_cls, tmp_path):
+def test_purge_removes_all_categories(mock_orch_cls, tmp_path, monkeypatch):
     """All file categories are deleted when no --keep flags are given."""
     mock_orch_cls.return_value = _mock_orchestrator()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     created = _populate_workspace(tmp_path)
 
     runner = CliRunner()
@@ -139,9 +142,12 @@ def test_purge_removes_all_categories(mock_orch_cls, tmp_path):
 
 
 @patch("agent_framework.cli.main.Orchestrator")
-def test_purge_keep_memory(mock_orch_cls, tmp_path):
+def test_purge_keep_memory(mock_orch_cls, tmp_path, monkeypatch):
     """--keep-memory preserves memory dir while other categories are deleted."""
     mock_orch_cls.return_value = _mock_orchestrator()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     _populate_workspace(tmp_path)
 
     memory_dir = tmp_path / ".agent-communication" / "memory"
@@ -157,9 +163,12 @@ def test_purge_keep_memory(mock_orch_cls, tmp_path):
 
 
 @patch("agent_framework.cli.main.Orchestrator")
-def test_purge_keep_indexes(mock_orch_cls, tmp_path):
+def test_purge_keep_indexes(mock_orch_cls, tmp_path, monkeypatch):
     """--keep-indexes preserves the indexes directory."""
     mock_orch_cls.return_value = _mock_orchestrator()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     _populate_workspace(tmp_path)
 
     indexes_dir = tmp_path / ".agent-communication" / "indexes"
@@ -214,11 +223,14 @@ def test_purge_dry_run(mock_orch_cls, tmp_path):
 
 
 @patch("agent_framework.cli.main.Orchestrator")
-def test_purge_stops_agents_first(mock_orch_cls, tmp_path):
-    """Purge calls stop_all_agents before deleting any files."""
+def test_purge_stops_agents_before_deleting(mock_orch_cls, tmp_path, monkeypatch):
+    """Purge stops agents before deleting files (but only when there is something to delete)."""
     mock_orch = _mock_orchestrator()
     mock_orch_cls.return_value = mock_orch
-    _make_comm_dir(tmp_path)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+    _populate_workspace(tmp_path)
 
     runner = CliRunner()
     runner.invoke(cli, ["--workspace", str(tmp_path), "purge", "--yes"])
@@ -262,9 +274,12 @@ def test_purge_handles_missing_directories(mock_orch_cls, tmp_path):
 
 
 @patch("agent_framework.cli.main.Orchestrator")
-def test_purge_handles_permission_errors(mock_orch_cls, tmp_path):
+def test_purge_handles_permission_errors(mock_orch_cls, tmp_path, monkeypatch):
     """Purge continues past files it cannot delete and reports success for others."""
     mock_orch_cls.return_value = _mock_orchestrator()
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
     _populate_workspace(tmp_path)
 
     original_unlink = Path.unlink

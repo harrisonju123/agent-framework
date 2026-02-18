@@ -11,7 +11,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-MEMORY_BUDGET_RATIO = 3000 / 50_000  # scales memory budget proportionally so larger token_budget configs get more memory context (anchored to 3000 chars at the 50K default)
+# Scales memory budget proportionally — larger token_budget configs get more memory context
+# (anchored to 3000 chars at the 50K default).
+MEMORY_BUDGET_RATIO = 3000 / 50_000
 MIN_MEMORY_CHARS = 800               # Floor: enough for 5-6 useful memory entries
 MAX_MEMORY_CHARS = 6000              # Ceiling: prevent excessive injection for huge budgets
 

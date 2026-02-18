@@ -1522,22 +1522,7 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
         console.print("[green]Nothing to purge — .agent-communication/ does not exist[/]")
         return
 
-    # ── Phase 1: Stop running agents ──────────────────────────────────────────
-    # Skipped for --dry-run: a preview should never have side effects.
-    # Best-effort otherwise: if config is missing or nothing is running, proceed
-    # anyway — PID files get cleaned in the deletion phase below.
-    if not dry_run:
-        console.print("[bold yellow]Stopping agents before purge...[/]")
-        try:
-            orchestrator = Orchestrator(workspace)
-            if orchestrator.get_dashboard_info():
-                orchestrator.stop_dashboard()
-            orchestrator.stop_all_agents(graceful=True)
-            console.print("[green]✓ Agents stopped[/]")
-        except Exception as e:
-            console.print(f"[yellow]Could not stop agents ({e}); continuing with file cleanup[/]")
-
-    # ── Phase 2: Build inventory ───────────────────────────────────────────────
+    # ── Phase 1: Build inventory ───────────────────────────────────────────────
     queues_dir = comm_dir / "queues"
     completed_dir = comm_dir / "completed"
     locks_dir = comm_dir / "locks"
@@ -1603,7 +1588,7 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
             _PurgeTarget(logs_dir, glob="*.log"),
             _PurgeTarget(logs_dir / "sessions", glob="*.jsonl"),
         ]),
-        _PurgeCategory("Worktrees & clones", [
+        _PurgeCategory(f"Worktrees & clones ({workspaces_dir})", [
             _PurgeTarget(workspaces_dir, whole_dir=True),
         ], skip=keep_worktrees),
     ]
@@ -1639,7 +1624,20 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
         console.print(f"\n[yellow]Dry run — {total_items} items would be removed[/]")
         return
 
-    # ── Phase 4: Confirm and delete ───────────────────────────────────────────
+    # ── Phase 4: Stop running agents ──────────────────────────────────────────
+    # Deferred until here so a no-op purge (empty workspace) doesn't interrupt
+    # running agents. PID files get cleaned in the deletion phase below.
+    console.print("[bold yellow]Stopping agents before purge...[/]")
+    try:
+        orchestrator = Orchestrator(workspace)
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+        orchestrator.stop_all_agents(graceful=True)
+        console.print("[green]✓ Agents stopped[/]")
+    except Exception as e:
+        console.print(f"[yellow]Could not stop agents ({e}); continuing with file cleanup[/]")
+
+    # ── Phase 5: Confirm and delete ───────────────────────────────────────────
     console.print(f"\n[bold red]This will permanently remove {total_items} items.[/]")
     if not yes:
         if not click.confirm("Continue?"):
@@ -1653,7 +1651,7 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
         for target in cat.targets:
             removed_total += _delete_purge_target(target)
 
-    # ── Phase 5: Report ───────────────────────────────────────────────────────
+    # ── Phase 6: Report ───────────────────────────────────────────────────────
     console.print(f"\n[green]✓ Purged {removed_total} items[/]")
     kept = []
     if keep_memory:
