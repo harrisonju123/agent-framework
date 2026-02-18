@@ -587,7 +587,17 @@ class Agent:
 
             if claimed:
                 task, lock = claimed
-                await self._handle_task(task, lock=lock)
+                try:
+                    await self._handle_task(task, lock=lock)
+                except Exception as e:
+                    # Should not happen — _handle_task has its own finally guard — but if it does,
+                    # log and continue polling rather than crashing the agent process.
+                    self.logger.error(f"Unhandled exception in _handle_task for {task.id}: {e}", exc_info=True)
+                    # The finally guard in _handle_task also failed, so the lock was never released.
+                    try:
+                        self.queue.release_lock(lock)
+                    except Exception:
+                        pass
             else:
                 self.logger.debug(
                     f"No tasks available for {self.config.id}, "
@@ -1370,7 +1380,18 @@ class Agent:
             self._context_window_manager = None
             self._session_logger.close()
             self._session_logger = noop_logger()
-            self._cleanup_task_execution(task, lock)
+            try:
+                self._cleanup_task_execution(task, lock)
+            except Exception as e:
+                # Cleanup failed mid-way. The worktree and activity state may be inconsistent,
+                # but release the lock so the task doesn't stay locked forever.
+                self.logger.error(f"Cleanup failed for task {task.id}, releasing lock directly: {e}")
+                if lock:
+                    try:
+                        self.queue.release_lock(lock)
+                    except Exception as lock_err:
+                        self.logger.debug(f"Also failed to release lock for {task.id}: {lock_err}")
+                self._current_task_id = None
 
     async def _handle_failure(self, task: Task) -> None:
         """
