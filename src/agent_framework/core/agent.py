@@ -198,6 +198,7 @@ class Agent:
     def _init_state_tracking(self):
         """Initialize heartbeat, activity tracking, and caches."""
         self.heartbeat_file = self.workspace / ".agent-communication" / "heartbeats" / self.config.id
+        self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
         self.activity_manager = ActivityManager(self.workspace)
         self._paused = False
 
@@ -2129,7 +2130,6 @@ class Agent:
 
     def _write_heartbeat(self) -> None:
         """Write current Unix timestamp to heartbeat file."""
-        self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
         self.heartbeat_file.write_text(str(int(time.time())))
 
     def _check_pause_signal(self) -> bool:
