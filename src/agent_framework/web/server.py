@@ -364,6 +364,24 @@ def register_routes(app: FastAPI):
         """Get system health status."""
         return app.state.data_provider.get_health_status()
 
+    @app.get("/api/metrics/agentics")
+    async def get_agentics_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Return agentic observability metrics (memory, self-eval, replan, context budget).
+
+        Scans session logs from the last `hours` hours and aggregates counts/rates
+        for each agentic feature.  Results are also persisted to
+        .agent-communication/metrics/agentics.json for offline inspection.
+        """
+        from ..analytics.agentic_metrics import AgenticsMetrics
+
+        try:
+            reporter = AgenticsMetrics(app.state.workspace)
+            report = reporter.generate_report(hours=hours)
+            return report.model_dump()
+        except Exception as e:
+            logger.exception(f"Error generating agentics metrics: {e}")
+            raise HTTPException(status_code=500, detail="Failed to generate agentics metrics")
+
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():
         """Pause all agents."""
