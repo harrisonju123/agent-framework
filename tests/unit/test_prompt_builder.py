@@ -538,6 +538,55 @@ class TestRejectionFeedback:
         assert "UPSTREAM AGENT FINDINGS" in result
 
 
+class TestSelfEvalContext:
+    """Test _inject_self_eval_context feeds critique back on self-eval retry."""
+
+    def test_injects_critique_when_present(self, prompt_builder, sample_task):
+        """Critique in context produces a SELF-EVALUATION FEEDBACK section."""
+        sample_task.context["_self_eval_critique"] = "Missing error handling for expired tokens"
+        sample_task.context["_self_eval_count"] = 1
+
+        result = prompt_builder._inject_self_eval_context("Base prompt", sample_task)
+
+        assert "SELF-EVALUATION FEEDBACK (attempt 1)" in result
+        assert "Missing error handling for expired tokens" in result
+        assert "acceptance criteria" in result
+        assert result.startswith("Base prompt")
+
+    def test_no_op_without_critique(self, prompt_builder, sample_task):
+        """No critique in context → prompt unchanged."""
+        result = prompt_builder._inject_self_eval_context("Base prompt", sample_task)
+
+        assert result == "Base prompt"
+
+    def test_skipped_when_revised_plan_present(self, prompt_builder, sample_task):
+        """Both critique + _revised_plan → defers to inject_replan_context."""
+        sample_task.context["_self_eval_critique"] = "Missing tests"
+        sample_task.context["_revised_plan"] = "Try approach B"
+
+        result = prompt_builder._inject_self_eval_context("Base prompt", sample_task)
+
+        assert result == "Base prompt"
+
+    def test_defaults_attempt_to_1_when_count_missing(self, prompt_builder, sample_task):
+        """Missing _self_eval_count defaults to attempt 1."""
+        sample_task.context["_self_eval_critique"] = "Needs work"
+
+        result = prompt_builder._inject_self_eval_context("Base", sample_task)
+
+        assert "attempt 1)" in result
+
+    def test_in_full_build_pipeline(self, prompt_builder, sample_task):
+        """Integration: build() includes self-eval section when critique is set."""
+        sample_task.context["_self_eval_critique"] = "Did not handle edge case"
+        sample_task.context["_self_eval_count"] = 2
+
+        prompt = prompt_builder.build(sample_task)
+
+        assert "SELF-EVALUATION FEEDBACK (attempt 2)" in prompt
+        assert "Did not handle edge case" in prompt
+
+
 class TestMemoryBudgetIntegration:
     """Integration tests: _inject_memories respects ContextWindowManager budget tiers."""
 

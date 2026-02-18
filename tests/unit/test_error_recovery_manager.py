@@ -360,6 +360,21 @@ class TestInjectReplanContext:
         assert "Self-Evaluation Feedback" in result
         assert "Missing test coverage" in result
 
+    def test_critique_alone_not_injected_by_replan(self):
+        """Standalone critique (no _revised_plan) is correctly ignored by replan path.
+
+        Self-eval critique without a revised plan is handled by
+        _inject_self_eval_context in prompt_builder, not here.
+        """
+        manager = _make_manager()
+        task = _make_task(
+            context={"_self_eval_critique": "Missing test coverage for edge case"}
+        )
+
+        result = manager.inject_replan_context("original prompt", task)
+
+        assert result == "original prompt"
+
     def test_displays_enriched_attempt_history(self):
         """Test that inject_replan_context shows error_type, approach_tried, and files."""
         manager = _make_manager()

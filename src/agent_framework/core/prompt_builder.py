@@ -167,6 +167,9 @@ class PromptBuilder:
         # Inject structural codebase overview and relevant symbols
         prompt = self._inject_codebase_index(prompt, task)
 
+        # Inject self-eval critique if retrying after failed self-evaluation
+        prompt = self._inject_self_eval_context(prompt, task)
+
         # Inject replan history if retrying with revised approach
         prompt = self._inject_replan_context(prompt, task)
 
@@ -180,11 +183,13 @@ class PromptBuilder:
         if self.ctx.session_logger:
             prompt_hash = hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
             has_replan = "_revised_plan" in task.context
+            has_self_eval = "_self_eval_critique" in task.context and "_revised_plan" not in task.context
             self.ctx.session_logger.log(
                 "prompt_built",
                 prompt_length=len(prompt),
                 prompt_hash=prompt_hash,
                 replan_injected=has_replan,
+                self_eval_injected=has_self_eval,
                 retry=task.retry_count,
             )
             self.ctx.session_logger.log_prompt(prompt)
@@ -976,6 +981,34 @@ If a tool call fails:
             for file_path in findings.keys():
                 parts.append(file_path)
         return " ".join(parts)
+
+    def _inject_self_eval_context(self, prompt: str, task: Task) -> str:
+        """Append self-evaluation critique from a previous attempt.
+
+        Self-eval retries store critique in task.context but don't set
+        _revised_plan or increment retry_count, so neither inject_replan_context
+        nor _inject_retry_context picks it up. This method bridges that gap.
+
+        Skips when _revised_plan exists — that combined case is already
+        handled by inject_replan_context which includes the critique.
+        """
+        critique = task.context.get("_self_eval_critique")
+        if not critique:
+            return prompt
+
+        # When replan also fired, inject_replan_context already includes critique
+        if task.context.get("_revised_plan"):
+            return prompt
+
+        attempt = task.context.get("_self_eval_count", 1)
+
+        section = (
+            f"\n\n## SELF-EVALUATION FEEDBACK (attempt {attempt})\n\n"
+            "Your previous output was reviewed against the acceptance criteria "
+            "and found lacking. Address the gaps below:\n\n"
+            f"{critique[:4000]}\n"
+        )
+        return prompt + section
 
     def _inject_replan_context(self, prompt: str, task: Task) -> str:
         """Append revised plan and attempt history to prompt if available.
