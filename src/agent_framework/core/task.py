@@ -55,15 +55,16 @@ class PlanDocument(BaseModel):
         for field in list_fields:
             val = data.get(field)
             if isinstance(val, dict):
-                data[field] = list(val.values())
-            elif isinstance(val, list):
+                val = list(val.values())
+                data[field] = val
+            if isinstance(val, list):
                 coerced = []
                 for item in val:
                     if isinstance(item, dict):
                         parts = [str(v) for v in item.values()]
                         coerced.append(" - ".join(parts))
                     else:
-                        coerced.append(item)
+                        coerced.append(str(item) if not isinstance(item, str) else item)
                 data[field] = coerced
         return data
 

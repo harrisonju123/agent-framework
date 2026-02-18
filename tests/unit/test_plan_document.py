@@ -158,6 +158,28 @@ class TestPlanDocumentDictCoercion:
         ]
 
 
+    def test_dict_of_dicts_fully_coerced(self):
+        """Dict values that are themselves dicts get flattened to strings."""
+        plan = PlanDocument(
+            objectives=["Build feature"],
+            approach={
+                "step_1": {"desc": "Clone repo", "cmd": "git clone"},
+                "step_2": {"desc": "Edit", "cmd": "vim"},
+            },
+            success_criteria=["Tests pass"],
+        )
+        assert plan.approach == ["Clone repo - git clone", "Edit - vim"]
+
+    def test_dict_with_nested_non_string_values(self):
+        """Dict values that are ints/bools still coerce to strings."""
+        plan = PlanDocument(
+            objectives=["Build feature"],
+            approach={"1": 100, "2": True, "3": "normal"},
+            success_criteria=["Tests pass"],
+        )
+        assert plan.approach == ["100", "True", "normal"]
+
+
 class TestTaskWithPlan:
     """Tests for Task model with PlanDocument."""
 
