@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 class RetryAttempt(BaseModel):
@@ -163,12 +163,14 @@ class Task(BaseModel):
     parent_task_id: Optional[str] = None
     subtask_ids: list[str] = Field(default_factory=list)
 
-    class Config:
-        """Pydantic config."""
-        use_enum_values = True
-        json_encoders = {
-            datetime: lambda v: v.isoformat() if v else None
-        }
+    model_config = ConfigDict(use_enum_values=True)
+
+    @field_serializer(
+        "created_at", "last_failed_at", "started_at",
+        "completed_at", "failed_at", "approved_at",
+    )
+    def serialize_datetime(self, v: Optional[datetime], _info) -> Optional[str]:
+        return v.isoformat() if v else None
 
     def mark_in_progress(self, agent_id: str) -> None:
         """Mark task as in progress."""
