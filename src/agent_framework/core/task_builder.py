@@ -127,9 +127,9 @@ def _build_planning_instructions(
 ) -> str:
     """Build instructions for planning task based on JIRA availability."""
     jira_note = (
-        "6. Create appropriate JIRA ticket and queue tasks"
+        "6. Create appropriate JIRA ticket to track this work"
         if jira_project
-        else "6. No JIRA project configured - write tasks directly to local queues"
+        else "6. No JIRA project configured — skip JIRA operations"
     )
     return f"""User Goal: {goal}
 
@@ -138,7 +138,7 @@ Instructions for Architect Agent:
 2. Search for keywords and concepts from the goal — grep for relevant function names, class names, and config keys
 3. Stop exploring once you have enough context to produce a concrete plan — do not map the entire codebase
 4. Produce a PlanDocument with: objectives, approach (step-by-step), files_to_modify, risks, success_criteria
-5. Create detailed implementation plan and queue to engineer
+5. Store plan in task.plan — the framework routes to Engineer automatically
 {jira_note}"""
 
 

@@ -12,9 +12,13 @@ from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.queue.file_queue import FileQueue
 
 
-def _make_task_json(task_id, assigned_to="engineer"):
-    """Create a minimal task JSON dict."""
-    return {
+def _make_task_json(task_id, assigned_to="engineer", chain_step=True, parent_task_id=None):
+    """Create a minimal task JSON dict.
+
+    Framework tasks always have chain_step or parent_task_id — include chain_step
+    by default so the orphan guard doesn't reject them.
+    """
+    data = {
         "id": task_id,
         "type": "implementation",
         "status": "pending",
@@ -24,7 +28,13 @@ def _make_task_json(task_id, assigned_to="engineer"):
         "created_at": datetime.now(timezone.utc).isoformat(),
         "title": f"Task {task_id}",
         "description": "A test task",
+        "context": {},
     }
+    if chain_step:
+        data["context"]["chain_step"] = True
+    if parent_task_id is not None:
+        data["parent_task_id"] = parent_task_id
+    return data
 
 
 @pytest.fixture
@@ -255,3 +265,52 @@ class TestSyncWorktreeQueuedTasks:
 
         # Worktree copy should still be cleaned up
         assert not (wt_queue / "impl-done.json").exists()
+
+    def test_rejects_orphaned_tasks(self, agent, queue, tmp_path):
+        """LLM-created tasks without chain_step or parent_task_id are rejected."""
+        worktree = tmp_path / "worktree"
+        wt_queue = worktree / ".agent-communication" / "queues" / "engineer"
+        wt_queue.mkdir(parents=True)
+
+        # Orphan: no chain_step, no parent_task_id (LLM wrote this directly)
+        orphan_data = _make_task_json("orphan-001", chain_step=False)
+        (wt_queue / "orphan-001.json").write_text(json.dumps(orphan_data))
+
+        # Legitimate chain task alongside it
+        chain_data = _make_task_json("chain-001", chain_step=True)
+        (wt_queue / "chain-001.json").write_text(json.dumps(chain_data))
+
+        agent._active_worktree = worktree
+        agent._git_ops._active_worktree = worktree
+        agent._git_ops.sync_worktree_queued_tasks()
+
+        # Orphan should be rejected and deleted from worktree
+        assert not (wt_queue / "orphan-001.json").exists()
+        assert not (queue.queue_dir / "engineer" / "orphan-001.json").exists()
+
+        # Chain task should be synced normally
+        assert (queue.queue_dir / "engineer" / "chain-001.json").exists()
+
+        # Warning logged for the orphan
+        assert any(
+            "Rejecting orphaned task" in str(call) and "orphan-001" in str(call)
+            for call in agent.logger.warning.call_args_list
+        )
+
+    def test_allows_subtask_with_parent_task_id(self, agent, queue, tmp_path):
+        """Tasks with parent_task_id but no chain_step are legitimate subtasks."""
+        worktree = tmp_path / "worktree"
+        wt_queue = worktree / ".agent-communication" / "queues" / "engineer"
+        wt_queue.mkdir(parents=True)
+
+        subtask_data = _make_task_json(
+            "sub-001", chain_step=False, parent_task_id="parent-001"
+        )
+        (wt_queue / "sub-001.json").write_text(json.dumps(subtask_data))
+
+        agent._active_worktree = worktree
+        agent._git_ops._active_worktree = worktree
+        agent._git_ops.sync_worktree_queued_tasks()
+
+        # Subtask should be synced (parent_task_id makes it legitimate)
+        assert (queue.queue_dir / "engineer" / "sub-001.json").exists()

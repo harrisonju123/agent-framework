@@ -7,29 +7,13 @@
 | Small | <100 | 1-3 | Ship it |
 | Medium | 100-300 | 4-8 | Reviewable, proceed |
 | Large | 300-500 | 9-15 | Consider splitting |
-| Too Large | >500 | >15 | **Must split** — escalate to Architect |
+| Too Large | >500 | >15 | **Must split** — framework auto-decomposes |
 
-## Escalation: Too-Large Changes
+## Too-Large Changes
 
-If >500 lines, do NOT create PR. Create escalation task for Architect:
-
-```json
-{
-  "task_type": "breakdown",
-  "assigned_to": "architect",
-  "title": "Break down large implementation: {feature_name}",
-  "context": {
-    "original_task_id": "impl-xxx",
-    "total_lines": 750,
-    "total_files": 18,
-    "suggested_split": [
-      "Part 1: Database schema (100 lines, 2 files)",
-      "Part 2: Core service (300 lines, 6 files)",
-      "Part 3: API endpoints (200 lines, 5 files)"
-    ]
-  }
-}
-```
+Changes exceeding 500 lines are automatically decomposed by the framework based on
+the plan's files_to_modify list. Architects should ensure this list is accurate.
+Engineers discovering unexpectedly large scope should note it in their output.
 
 ## Splitting Strategies
 

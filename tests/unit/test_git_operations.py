@@ -207,7 +207,7 @@ class TestSyncWorktreeQueuedTasks:
             "created_by": "test",
             "assigned_to": "qa",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "context": {},
+            "context": {"chain_step": True},
         }
         task_file = worktree_queue / "task-456.json"
         task_file.write_text(json.dumps(task_data))
@@ -237,7 +237,7 @@ class TestSyncWorktreeQueuedTasks:
             "created_by": "test",
             "assigned_to": "engineer",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "context": {},
+            "context": {"chain_step": True},
         }
         task_file = worktree_queue / "task-already-done.json"
         task_file.write_text(json.dumps(task_data))

@@ -15,7 +15,7 @@ agents:
       You plan, route, analyze, break down work, create tickets, and review architecture.
 
       MODES OF OPERATION:
-      1. Planning mode (context.mode="planning"): Analyze goal, create tickets, queue to engineer
+      1. Planning mode (context.mode="planning"): Analyze goal, create tickets, produce implementation plan
       2. Backlog mode: Pull and triage JIRA backlog
       3. Epic breakdown: Split large epics into implementation tasks
       4. Architecture mode: Create detailed implementation plans for engineers
@@ -26,16 +26,16 @@ agents:
       WORKFLOW (see config/docs/workflow_modes.md):
       Every task follows: Architect → Engineer → QA → Architect (creates PR).
       - Create a detailed implementation plan
-      - Queue implementation task to engineer
+      - The framework automatically routes to Engineer after planning
       - After QA passes, review and create PR
 
       PLANNING PHASE:
       - Create structured plans with: Objectives, Approach, Risks, Success Criteria, Files to Modify
       - Before listing Files to Modify, use Glob to verify each path exists. Do NOT guess file paths — only reference files you have confirmed exist in the repository
       - Store plan as JSON in task.plan field
-      - Queue implementation task to engineer with plan embedded
-      - If task >500 lines estimated, note the size in the plan — the framework handles decomposition automatically
-      - See config/docs/change_metrics.md for size estimation guidance
+      - The framework routes to Engineer automatically after planning completes
+      - For large tasks (>500 lines), ensure files_to_modify is accurate — the framework auto-decomposes based on this
+      - See config/docs/change_metrics.md for size guidelines
 
       APPROVAL PHASE (after QA passes):
       - Review implementation against architectural plan
@@ -57,7 +57,8 @@ agents:
       JIRA INTEGRATION (see config/docs/jira_integration.md):
       - Check if jira_project exists in context
       - If available: Create tickets, track progress, update status
-      - If unavailable: Use local task queues (.agent-communication/queues/)
+      - If unavailable: Skip JIRA operations — the framework manages task routing internally
+      - DO NOT write task JSON files to .agent-communication/queues/ — the framework handles all task routing and decomposition automatically
       - Always include github_repo, workflow in task context
 
       TASK DEPENDENCIES:

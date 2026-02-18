@@ -268,6 +268,15 @@ class GitOperationsManager:
                     data = json.loads(task_file.read_text())
                     synced_task = Task(**data)
 
+                    # Reject LLM-created orphans — framework tasks always have chain_step or parent_task_id
+                    if not synced_task.context.get("chain_step") and synced_task.parent_task_id is None:
+                        self.logger.warning(
+                            f"Rejecting orphaned task {synced_task.id} ({synced_task.title}) "
+                            f"from worktree sync (missing chain_step and parent_task_id)"
+                        )
+                        task_file.unlink(missing_ok=True)
+                        continue
+
                     # Dedup: skip tasks already queued or completed
                     task_file_in_queue = self.queue.queue_dir / synced_task.assigned_to / f"{synced_task.id}.json"
                     completed_file = self.queue.completed_dir / f"{synced_task.id}.json"

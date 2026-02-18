@@ -891,12 +891,12 @@ class TestPlanningInstructions:
         assert "JIRA ticket" in result
 
     def test_no_jira_project(self):
-        """Without JIRA project, instructions mention local queues."""
+        """Without JIRA project, instructions skip JIRA operations."""
         from agent_framework.core.task_builder import _build_planning_instructions
 
         result = _build_planning_instructions("Add auth", "default", None)
 
-        assert "local queues" in result
+        assert "skip JIRA operations" in result
         assert "JIRA ticket" not in result
 
     def test_goal_embedded_in_instructions(self):
