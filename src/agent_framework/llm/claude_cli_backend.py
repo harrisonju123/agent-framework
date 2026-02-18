@@ -286,8 +286,8 @@ class ClaudeCLIBackend(LLMBackend):
         try:
             # Open file inside try block so finally always closes it
             if log_file_path:
-                log_file = open(log_file_path, "w")
-                log_file.write(f"=== Claude CLI Task: {task_id} ===\n")
+                log_file = open(log_file_path, "a")
+                log_file.write(f"=== Claude CLI Task: {task_id} (attempt {request.retry_count + 1}) ===\n")
                 log_file.write(f"Model: {model}\n")
                 log_file.write(f"Working Directory: {request.working_dir or 'current directory'}\n")
                 log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")

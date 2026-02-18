@@ -95,8 +95,8 @@ class LiteLLMBackend(LLMBackend):
             if task_id:
                 self.logs_dir.mkdir(parents=True, exist_ok=True)
                 log_file_path = self.logs_dir / f"litellm-{task_id}.log"
-                log_file = open(log_file_path, "w")
-                log_file.write(f"=== LiteLLM Task: {task_id} ===\n")
+                log_file = open(log_file_path, "a")
+                log_file.write(f"=== LiteLLM Task: {task_id} (attempt {request.retry_count + 1}) ===\n")
                 log_file.write(f"Model: {model}\n")
                 log_file.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 log_file.write("=" * 50 + "\n\n")
