@@ -85,6 +85,14 @@ class ErrorRecoveryManager:
             task.mark_failed(self.config.id, error_message=task.last_error, error_type=error_type)
             self.queue.mark_failed(task)
 
+            # Teach the system about what didn't work so future tasks skip dead ends
+            repo_slug = self._get_repo_slug(task)
+            if repo_slug:
+                try:
+                    self.store_failure_antipattern(task, repo_slug)
+                except Exception as e:
+                    self.logger.warning(f"Failed to store failure antipattern: {e}")
+
             # Notify JIRA about permanent failure (no status change, just a comment)
             jira_key = task.context.get("jira_key")
             if jira_key and self.jira_client:
@@ -471,9 +479,12 @@ breaking the task into smaller steps, or working around the root cause."""
         """Build memory context specifically for replanning.
 
         Prioritizes categories that help with task recovery:
+        - past_failures: tag-filtered by error type so the LLM sees patterns
+          relevant to the current failure mode (falls back to unfiltered)
         - conventions: coding standards, patterns to follow
         - test_commands: how to run/fix tests
         - repo_structure: where key files live
+        - shared namespace: cross-agent conventions and decisions
 
         Returns empty string if memory disabled or no relevant memories found.
         """
@@ -484,19 +495,52 @@ breaking the task into smaller steps, or working around the root cause."""
         if not repo_slug:
             return ""
 
-        # Prioritize categories useful for recovery — past_failures first so
-        # the LLM sees what recovery strategies worked before
-        priority_categories = ["past_failures", "conventions", "test_commands", "repo_structure"]
+        error_type = self._categorize_error(task.last_error or "") if task.last_error else None
         memories = []
+        seen_content: set[str] = set()
 
-        for category in priority_categories:
-            category_memories = self.memory_store.recall(
+        def _add(mems):
+            for m in mems:
+                if m.content not in seen_content:
+                    memories.append(m)
+                    seen_content.add(m.content)
+
+        # past_failures: tag-filtered first so error-specific patterns rank higher;
+        # only fall back to unfiltered when the filter was actually applied
+        tags = [error_type] if error_type else None
+        past_failures = self.memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type=self.config.base_id,
+            category="past_failures",
+            tags=tags,
+            limit=5,
+        )
+        if tags and not past_failures:
+            past_failures = self.memory_store.recall(
+                repo_slug=repo_slug,
+                agent_type=self.config.base_id,
+                category="past_failures",
+                limit=5,
+            )
+        _add(past_failures)
+
+        # Shared-namespace memories (architectural decisions, cross-agent conventions)
+        # collected before the broad agent-scoped categories so they aren't crowded out
+        for category in ("past_failures", "conventions"):
+            _add(self.memory_store.recall(
+                repo_slug=repo_slug,
+                agent_type="shared",
+                category=category,
+                limit=3,
+            ))
+
+        for category in ("conventions", "test_commands", "repo_structure"):
+            _add(self.memory_store.recall(
                 repo_slug=repo_slug,
                 agent_type=self.config.base_id,
                 category=category,
                 limit=5,
-            )
-            memories.extend(category_memories)
+            ))
 
         if not memories:
             return ""
@@ -539,6 +583,44 @@ breaking the task into smaller steps, or working around the root cause."""
             plan_summary = revised_plan[:100]
 
         content = f"{error_type} in {files_str}: {plan_summary} → resolved"
+
+        self.memory_store.remember(
+            repo_slug=repo_slug,
+            agent_type=self.config.base_id,
+            category="past_failures",
+            content=content,
+            task_id=task.id,
+            tags=[error_type],
+        )
+
+    def store_failure_antipattern(self, task: Task, repo_slug: str) -> None:
+        """Persist an unresolved failure pattern as a past_failures memory.
+
+        Called when a task exhausts all retries. Stores what was tried and
+        that it didn't work, so future tasks can avoid repeating the same
+        dead ends.
+        """
+        if not self.memory_store or not self.memory_store.enabled:
+            return
+
+        # Nothing to learn if the task never reached replanning
+        if not task.replan_history:
+            return
+
+        error_type = self._categorize_error(task.last_error or "") or "unknown"
+        approaches = [
+            entry.get("approach_tried", "unknown")
+            for entry in task.replan_history
+            if entry.get("approach_tried")
+        ]
+        files = task.replan_history[-1].get("files_involved", [])
+        files_str = ", ".join(files[:3]) if files else "unknown files"
+
+        approaches_str = "; ".join(approaches) if approaches else "unknown approaches"
+        content = (
+            f"{error_type} in {files_str}: "
+            f"tried [{approaches_str}] → unresolved after {task.retry_count} retries"
+        )
 
         self.memory_store.remember(
             repo_slug=repo_slug,

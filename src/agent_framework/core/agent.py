@@ -1641,49 +1641,6 @@ class Agent:
         """Extract repo slug from task context."""
         return task.context.get("github_repo")
 
-    def _build_replan_memory_context(self, task: Task) -> str:
-        """Build memory context specifically for replanning.
-
-        Prioritizes categories that help with task recovery:
-        - conventions: coding standards, patterns to follow
-        - test_commands: how to run/fix tests
-        - repo_structure: where key files live
-
-        Returns empty string if memory disabled or no relevant memories found.
-        """
-        if not self._memory_enabled:
-            return ""
-
-        repo_slug = self._get_repo_slug(task)
-        if not repo_slug:
-            return ""
-
-        # Prioritize categories useful for recovery
-        priority_categories = ["conventions", "test_commands", "repo_structure"]
-        memories = []
-
-        for category in priority_categories:
-            category_memories = self._memory_store.recall(
-                repo_slug=repo_slug,
-                agent_type=self.config.base_id,
-                category=category,
-                limit=5,
-            )
-            memories.extend(category_memories)
-
-        if not memories:
-            return ""
-
-        # Format as a context section
-        lines = ["\n## Relevant Context from Previous Work"]
-        lines.append("You've worked on this repo before. Here's what you know:\n")
-
-        for mem in memories[:10]:  # Cap at 10 total memories
-            lines.append(f"- [{mem.category}] {mem.content}")
-
-        lines.append("")  # trailing newline
-        return "\n".join(lines)
-
     def _extract_and_store_memories(self, task: Task, response) -> None:
         """Extract learnings from successful response and store as memories."""
         if not self._memory_enabled:
