@@ -530,6 +530,8 @@ breaking the task into smaller steps, or working around the root cause."""
         # collected before the broad agent-scoped categories so they aren't crowded out.
         # Apply the same tag filter to shared past_failures for consistency — unrelated
         # error-type antipatterns from other agents shouldn't pollute this context.
+        # No unfiltered fallback here: shared is supplementary; an empty tag result just
+        # means no cross-agent patterns match this error type, which is fine.
         _add(self.memory_store.recall(
             repo_slug=repo_slug,
             agent_type="shared",

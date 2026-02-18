@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-MEMORY_BUDGET_RATIO = 3000 / 50_000  # 3000 chars at the 50K default implementation budget
+MEMORY_BUDGET_RATIO = 3000 / 50_000  # keeps parity with pre-scaling 3000-char constant at the 50K default budget (see AgentConfig.token_budget)
 MIN_MEMORY_CHARS = 800               # Floor: enough for 5-6 useful memory entries
 MAX_MEMORY_CHARS = 6000              # Ceiling: prevent excessive injection for huge budgets
 

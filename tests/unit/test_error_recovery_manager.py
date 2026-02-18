@@ -10,6 +10,7 @@ import pytest
 from agent_framework.core.error_recovery import ErrorRecoveryManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
+from agent_framework.memory.memory_store import MemoryEntry
 
 
 def _make_task(**overrides):
@@ -491,7 +492,6 @@ class TestReplanMemory:
         memory_store = MagicMock()
         memory_store.enabled = True
         # Return one match on the first (tag-filtered) call so we don't fall back
-        from agent_framework.memory.memory_store import MemoryEntry
         memory_store.recall = MagicMock(
             return_value=[MemoryEntry(category="past_failures", content="fix A")]
         )
@@ -513,7 +513,6 @@ class TestReplanMemory:
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
-        from agent_framework.memory.memory_store import MemoryEntry
 
         def recall_side_effect(**kwargs):
             # Return empty when tags filter is present, one memory otherwise
@@ -537,7 +536,7 @@ class TestReplanMemory:
         # Both filtered and unfiltered calls happen
         call_tags = [c.kwargs.get("tags") for c in memory_store.recall.call_args_list]
         assert ["type_error"] in call_tags
-        assert None in call_tags or any(t is None for t in call_tags)
+        assert None in call_tags
 
     def test_store_failure_antipattern_on_exhausted_retries(self):
         """Antipattern content records all attempted approaches and unions files across retries."""
@@ -575,8 +574,8 @@ class TestReplanMemory:
         assert "retry with backoff" in call_kwargs["content"]
         assert "switch endpoint" in call_kwargs["content"]
         assert "unresolved" in call_kwargs["content"]
-        # Files from both retry attempts should appear (union, not just last entry)
-        assert "src/client.py" in call_kwargs["content"] or "src/config.py" in call_kwargs["content"]
+        # Files from both retry attempts must appear (union, not just last entry)
+        assert "src/client.py" in call_kwargs["content"] and "src/config.py" in call_kwargs["content"]
         # "→ resolved" (without "un") is the success marker — must not appear here
         assert "→ resolved" not in call_kwargs["content"]
 
@@ -592,12 +591,22 @@ class TestReplanMemory:
 
         memory_store.remember.assert_not_called()
 
+    def test_store_failure_antipattern_noop_without_memory_store(self):
+        """No-op when memory store is None."""
+        manager = _make_manager()
+        assert manager.memory_store is None
+
+        task = _make_task(
+            replan_history=[{"attempt": 2, "approach_tried": "fix", "revised_plan": "plan"}]
+        )
+        # Should not raise
+        manager.store_failure_antipattern(task, "owner/repo", "logic_error")
+
     def test_replan_memory_shared_past_failures_apply_tag_filter(self):
         """Shared past_failures are tag-filtered by error type, same as agent-scoped ones."""
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
-        from agent_framework.memory.memory_store import MemoryEntry
         memory_store.recall = MagicMock(return_value=[])
         manager.memory_store = memory_store
         manager.escalation_handler.categorize_error = MagicMock(return_value="type_error")
@@ -621,7 +630,6 @@ class TestReplanMemory:
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
-        from agent_framework.memory.memory_store import MemoryEntry
 
         def recall_side_effect(**kwargs):
             if kwargs.get("agent_type") == "shared" and kwargs.get("category") == "conventions":
@@ -641,7 +649,6 @@ class TestReplanMemory:
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
-        from agent_framework.memory.memory_store import MemoryEntry
 
         shared_content = "Use black for formatting"
 
@@ -664,7 +671,6 @@ class TestReplanMemory:
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
-        from agent_framework.memory.memory_store import MemoryEntry
         memory_store.recall = MagicMock(
             return_value=[MemoryEntry(category="past_failures", content="some fix")]
         )
