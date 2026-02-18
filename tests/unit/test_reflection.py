@@ -55,6 +55,7 @@ def _make_agent(**overrides):
     error_recovery = MagicMock()
     error_recovery.self_evaluate = ErrorRecoveryManager.self_evaluate.__get__(error_recovery)
     error_recovery._gather_git_evidence = ErrorRecoveryManager._gather_git_evidence.__get__(error_recovery)
+    error_recovery._try_diff_strategies = ErrorRecoveryManager._try_diff_strategies.__get__(error_recovery)
     error_recovery._self_eval_max_retries = overrides.get("max_retries", 2)
     error_recovery._self_eval_model = overrides.get("model", "haiku")
     error_recovery.session_logger = MagicMock()
@@ -112,7 +113,7 @@ class TestSelfEvalFails:
         )
 
         task = _make_task()
-        result = await agent._self_evaluate(task, _llm_response("output"))
+        result = await agent._self_evaluate(task, _llm_response("output"), test_passed=True)
 
         assert result is False
         assert task.status == TaskStatus.PENDING
@@ -128,7 +129,7 @@ class TestSelfEvalFails:
         )
 
         task = _make_task()
-        await agent._self_evaluate(task, _llm_response("output"))
+        await agent._self_evaluate(task, _llm_response("output"), test_passed=True)
 
         assert any("Self-eval failed" in n for n in task.notes)
 
@@ -196,7 +197,7 @@ class TestSessionLogging:
         agent.llm.complete = AsyncMock(return_value=_llm_response("PASS"))
 
         task = _make_task()
-        await agent._self_evaluate(task, _llm_response("output"))
+        await agent._self_evaluate(task, _llm_response("output"), test_passed=True)
 
         agent._session_logger.log.assert_called_once()
         call_kwargs = agent._session_logger.log.call_args
@@ -206,30 +207,34 @@ class TestSessionLogging:
 class TestGatherGitEvidence:
     @patch("agent_framework.core.error_recovery.run_git_command")
     def test_returns_diff_summary(self, mock_git):
-        """Collects stat + diff and truncates to limits."""
+        """Collects stat + diff via multi-strategy approach (HEAD first)."""
         stat_out = "file.py | 10 ++++\n 1 file changed"
         diff_out = "+def foo():\n+    return 42"
         mock_git.side_effect = [
-            MagicMock(stdout=stat_out),
-            MagicMock(stdout=diff_out),
+            MagicMock(stdout=stat_out),  # diff --stat HEAD
+            MagicMock(stdout=diff_out),  # diff HEAD
         ]
 
         er = MagicMock()
         er._gather_git_evidence = ErrorRecoveryManager._gather_git_evidence.__get__(er)
+        er._try_diff_strategies = ErrorRecoveryManager._try_diff_strategies.__get__(er)
         result = er._gather_git_evidence(Path("/tmp/repo"))
 
         assert "Git Diff" in result
         assert "file.py" in result
         assert "+def foo()" in result
         assert mock_git.call_count == 2
+        # First call should be diff --stat HEAD (not HEAD~1)
+        assert mock_git.call_args_list[0][0][0] == ["diff", "--stat", "HEAD"]
 
     @patch("agent_framework.core.error_recovery.run_git_command")
     def test_returns_empty_on_error(self, mock_git):
-        """Non-fatal: returns empty string when git fails."""
+        """Non-fatal: returns empty string when all strategies fail."""
         mock_git.side_effect = RuntimeError("not a git repo")
 
         er = MagicMock()
         er._gather_git_evidence = ErrorRecoveryManager._gather_git_evidence.__get__(er)
+        er._try_diff_strategies = ErrorRecoveryManager._try_diff_strategies.__get__(er)
         result = er._gather_git_evidence(Path("/tmp/bad"))
 
         assert result == ""
@@ -245,8 +250,8 @@ class TestSelfEvalWithEvidence:
 
         with patch("agent_framework.core.error_recovery.run_git_command") as mock_git:
             mock_git.side_effect = [
-                MagicMock(stdout="main.py | 5 +++++"),
-                MagicMock(stdout="+print('hello')"),
+                MagicMock(stdout="main.py | 5 +++++"),  # diff --stat HEAD
+                MagicMock(stdout="+print('hello')"),     # diff HEAD
             ]
 
             task = _make_task()
@@ -261,6 +266,8 @@ class TestSelfEvalWithEvidence:
         prompt = call_args[0][0].prompt
         assert "Git Diff" in prompt
         assert "main.py" in prompt
+        # First git call should use HEAD strategy
+        assert mock_git.call_args_list[0][0][0] == ["diff", "--stat", "HEAD"]
 
     @pytest.mark.asyncio
     async def test_test_passed_in_prompt(self):

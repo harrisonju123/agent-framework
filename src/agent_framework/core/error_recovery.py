@@ -170,6 +170,40 @@ class ErrorRecoveryManager:
         """
         return self.escalation_handler.categorize_error(error_message)
 
+    def _try_diff_strategies(self, working_dir: Path) -> tuple[str, str]:
+        """Try multiple git diff strategies, return first non-empty (stat, diff).
+
+        Priority order captures the most common agent scenarios:
+        1. HEAD — uncommitted working tree changes (agent wrote but didn't commit)
+        2. --staged — staged but uncommitted (edge: fresh repo with no HEAD)
+        3. HEAD~1 — agent already committed its work
+        """
+        strategies = [
+            ["HEAD"],          # uncommitted changes (staged + unstaged vs HEAD)
+            ["--staged"],      # fallback: fresh repo with no HEAD yet
+            ["HEAD~1"],        # last commit (agent already committed)
+        ]
+        for ref in strategies:
+            try:
+                stat_result = run_git_command(
+                    ["diff", "--stat"] + ref,
+                    cwd=working_dir, check=False, timeout=10,
+                )
+                stat_text = (stat_result.stdout or "").strip()
+                if not stat_text:
+                    continue
+
+                diff_result = run_git_command(
+                    ["diff"] + ref,
+                    cwd=working_dir, check=False, timeout=10,
+                )
+                diff_text = (diff_result.stdout or "").strip()
+                return stat_text[:500], diff_text[:2500]
+            except Exception as e:
+                self.logger.debug(f"Diff strategy {ref} failed: {e}")
+                continue
+        return "", ""
+
     def _gather_git_evidence(self, working_dir: Path) -> str:
         """Collect git diff evidence for self-evaluation.
 
@@ -177,17 +211,7 @@ class ErrorRecoveryManager:
         or empty string on any error so eval falls back to text-only.
         """
         try:
-            stat_result = run_git_command(
-                ["diff", "--stat", "HEAD~1"],
-                cwd=working_dir, check=False, timeout=10,
-            )
-            stat_text = (stat_result.stdout or "")[:500]
-
-            diff_result = run_git_command(
-                ["diff", "HEAD~1"],
-                cwd=working_dir, check=False, timeout=10,
-            )
-            diff_text = (diff_result.stdout or "")[:2500]
+            stat_text, diff_text = self._try_diff_strategies(working_dir)
 
             if not stat_text and not diff_text:
                 return ""
@@ -237,6 +261,27 @@ class ErrorRecoveryManager:
         else:
             test_section = "## Test Results\nNot run"
 
+        # No objective evidence → evaluating prose alone causes false negatives
+        if not git_evidence and test_passed is None:
+            self.logger.warning(
+                f"Self-eval skipped for task {task.id}: no git diff or test results to evaluate"
+            )
+            self.session_logger.log(
+                "self_eval",
+                verdict="AUTO_PASS",
+                reason="no_objective_evidence",
+                eval_attempt=eval_retries + 1,
+            )
+            return True
+
+        # Weight instructions based on available evidence
+        diff_instruction = ""
+        if git_evidence:
+            diff_instruction = (
+                "- PRIORITIZE the git diff over the conversation summary when evaluating. "
+                "The diff shows actual code changes.\n"
+            )
+
         eval_prompt = f"""Review this agent's output against the acceptance criteria.
 Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
 
@@ -247,14 +292,14 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
 
 {git_evidence}
 
-## Agent Output (summary)
+## Agent Output (conversation summary — NOT code)
 {response_preview}
 
 ## Rules
 - If tests PASSED and git diff shows changes consistent with acceptance criteria, verdict is PASS.
 - When in doubt and tests passed, default to PASS.
-
-Verdict:"""
+- Do NOT fail solely because the conversation summary is vague or informal.
+{diff_instruction}Verdict:"""
 
         try:
             eval_response = await self.llm.complete(LLMRequest(

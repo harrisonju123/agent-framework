@@ -1,6 +1,7 @@
 """Tests for ErrorRecoveryManager."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 import json
 
@@ -25,6 +26,8 @@ def _make_task(**overrides):
         last_error="TypeError: expected str got int",
         retry_count=2,
         replan_history=[],
+        acceptance_criteria=[],
+        notes=[],
         context={},
     )
     defaults.update(overrides)
@@ -229,7 +232,7 @@ class TestSelfEvaluate:
             return_value=_llm_response("FAIL - missing test coverage")
         )
 
-        result = await manager.self_evaluate(task, response)
+        result = await manager.self_evaluate(task, response, test_passed=True)
 
         assert result is False
         assert task.status == TaskStatus.PENDING
@@ -466,3 +469,151 @@ class TestReplanMemory:
 
         # Should not raise
         manager.store_replan_outcome(task, "owner/repo")
+
+
+class TestTryDiffStrategies:
+    @patch("agent_framework.core.error_recovery.run_git_command")
+    def test_prefers_uncommitted_changes_over_last_commit(self, mock_git):
+        """HEAD strategy returns content — never reaches HEAD~1."""
+        mock_git.side_effect = [
+            MagicMock(stdout="file.py | 3 +++"),  # diff --stat HEAD
+            MagicMock(stdout="+new code"),          # diff HEAD
+        ]
+
+        manager = _make_manager()
+        stat, diff = manager._try_diff_strategies(Path("/tmp/repo"))
+
+        assert "file.py" in stat
+        assert "+new code" in diff
+        # Only 2 calls: stat HEAD + diff HEAD — never fell through to staged/HEAD~1
+        assert mock_git.call_count == 2
+        assert mock_git.call_args_list[0][0][0] == ["diff", "--stat", "HEAD"]
+
+    @patch("agent_framework.core.error_recovery.run_git_command")
+    def test_falls_back_to_last_commit_when_no_uncommitted(self, mock_git):
+        """HEAD and --staged empty, HEAD~1 has content."""
+        mock_git.side_effect = [
+            MagicMock(stdout=""),                   # diff --stat HEAD (empty)
+            MagicMock(stdout=""),                   # diff --stat --staged (empty)
+            MagicMock(stdout="app.py | 2 ++"),      # diff --stat HEAD~1
+            MagicMock(stdout="+committed change"),   # diff HEAD~1
+        ]
+
+        manager = _make_manager()
+        stat, diff = manager._try_diff_strategies(Path("/tmp/repo"))
+
+        assert "app.py" in stat
+        assert "+committed change" in diff
+
+    @patch("agent_framework.core.error_recovery.run_git_command")
+    def test_returns_empty_when_all_strategies_empty(self, mock_git):
+        """All strategies return empty — returns empty tuple."""
+        mock_git.return_value = MagicMock(stdout="")
+
+        manager = _make_manager()
+        stat, diff = manager._try_diff_strategies(Path("/tmp/repo"))
+
+        assert stat == ""
+        assert diff == ""
+
+
+class TestSelfEvalAutoPass:
+    @pytest.mark.asyncio
+    async def test_auto_passes_without_git_evidence_or_tests(self):
+        """No working_dir + test_passed=None → auto-pass, LLM not called."""
+        manager = _make_manager()
+        task = _make_task(acceptance_criteria=["Code compiles"])
+        response = MagicMock(content="Did the thing")
+
+        result = await manager.self_evaluate(
+            task, response, test_passed=None, working_dir=None,
+        )
+
+        assert result is True
+        manager.llm.complete.assert_not_called()
+        # Should log AUTO_PASS
+        manager.session_logger.log.assert_called_once()
+        call_kwargs = manager.session_logger.log.call_args
+        assert call_kwargs[1]["verdict"] == "AUTO_PASS"
+        assert call_kwargs[1]["reason"] == "no_objective_evidence"
+
+    @pytest.mark.asyncio
+    async def test_still_evaluates_when_tests_failed(self):
+        """test_passed=False + no git → LLM eval still runs (failed tests are evidence)."""
+        manager = _make_manager()
+        task = _make_task(acceptance_criteria=["Tests pass"])
+        response = MagicMock(content="Done")
+
+        manager.llm.complete = AsyncMock(
+            return_value=_llm_response("FAIL — tests did not pass")
+        )
+
+        result = await manager.self_evaluate(
+            task, response, test_passed=False, working_dir=None,
+        )
+
+        assert result is False
+        manager.llm.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_still_evaluates_when_tests_ran(self):
+        """test_passed=True + no git → LLM eval still runs."""
+        manager = _make_manager()
+        task = _make_task(acceptance_criteria=["Tests pass"])
+        response = MagicMock(content="Done")
+
+        manager.llm.complete = AsyncMock(
+            return_value=_llm_response("PASS — tests passed")
+        )
+
+        result = await manager.self_evaluate(
+            task, response, test_passed=True, working_dir=None,
+        )
+
+        assert result is True
+        manager.llm.complete.assert_called_once()
+
+
+class TestSelfEvalPrompt:
+    @pytest.mark.asyncio
+    async def test_prompt_labels_output_as_conversation_summary(self):
+        """Eval prompt should label agent output as 'conversation summary — NOT code'."""
+        manager = _make_manager()
+        task = _make_task(acceptance_criteria=["Feature works"])
+        response = MagicMock(content="I implemented the feature")
+
+        manager.llm.complete = AsyncMock(
+            return_value=_llm_response("PASS")
+        )
+
+        await manager.self_evaluate(
+            task, response, test_passed=True, working_dir=None,
+        )
+
+        prompt = manager.llm.complete.call_args[0][0].prompt
+        assert "conversation summary — NOT code" in prompt
+        assert "Do NOT fail solely because the conversation summary is vague" in prompt
+
+    @pytest.mark.asyncio
+    @patch("agent_framework.core.error_recovery.run_git_command")
+    async def test_prompt_prioritizes_diff_over_prose(self, mock_git):
+        """When git evidence exists, prompt instructs evaluator to weight diff."""
+        mock_git.side_effect = [
+            MagicMock(stdout="file.py | 5 +++++"),
+            MagicMock(stdout="+code"),
+        ]
+
+        manager = _make_manager()
+        task = _make_task(acceptance_criteria=["Feature works"])
+        response = MagicMock(content="Did stuff")
+
+        manager.llm.complete = AsyncMock(
+            return_value=_llm_response("PASS")
+        )
+
+        await manager.self_evaluate(
+            task, response, test_passed=True, working_dir=Path("/tmp/repo"),
+        )
+
+        prompt = manager.llm.complete.call_args[0][0].prompt
+        assert "PRIORITIZE the git diff over the conversation summary" in prompt
