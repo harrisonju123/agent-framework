@@ -20,6 +20,7 @@ from agent_framework.workflow.conditions import (
     FilesMatchCondition,
     PRSizeUnderCondition,
     SignalTargetCondition,
+    PreviewApprovedCondition,
 )
 
 
@@ -439,6 +440,63 @@ class TestSignalTargetCondition:
         assert evaluator.evaluate(condition, task, response, routing_signal=None) is False
 
 
+class TestPreviewApprovedCondition:
+    def test_preview_approved_verdict_in_task_context(self):
+        """True when task context has verdict=preview_approved."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="preview_approved")
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is True
+
+    def test_preview_approved_verdict_in_eval_context(self):
+        """Evaluation context verdict takes priority over task context."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="preview_rejected")
+        response = _make_response()
+        context = {"verdict": "preview_approved"}
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is True
+
+    def test_preview_rejected_returns_false(self):
+        """Returns False when verdict is not preview_approved."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="preview_rejected")
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_no_verdict_returns_false(self):
+        """Returns False when no verdict is present."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task()
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_regular_approved_verdict_returns_false(self):
+        """Regular 'approved' verdict does NOT satisfy preview_approved."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="approved")
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_registry_evaluates_preview_approved(self):
+        """Preview approved condition is registered and evaluable through the registry."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="preview_approved")
+        response = _make_response()
+
+        result = ConditionRegistry.evaluate(condition, task, response)
+        assert result is True
+
+
 class TestConditionRegistry:
     def test_evaluate_all_conditions(self):
         """Registry can evaluate all condition types."""
@@ -453,6 +511,7 @@ class TestConditionRegistry:
             EdgeConditionType.NEEDS_FIX,
             EdgeConditionType.TEST_PASSED,
             EdgeConditionType.TEST_FAILED,
+            EdgeConditionType.PREVIEW_APPROVED,
         ]
 
         for cond_type in condition_types:

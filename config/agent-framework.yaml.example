@@ -198,6 +198,51 @@ workflows:
       create_pr:
         agent: architect
 
+  # Preview workflow: architect plans, engineer previews (read-only), architect reviews,
+  # then engineer implements. Adds a preview gate before writing any code.
+  preview:
+    description: "Plan → Preview (read-only) → Architect Review → Implement → QA → PR"
+    start_step: plan
+    pr_creator: architect
+    auto_review: true
+    require_tests: true
+    steps:
+      plan:
+        agent: architect
+        checkpoint:
+          message: "Review architect's plan before preview begins"
+        next:
+          - target: preview
+      preview:
+        agent: engineer
+        task_type: preview
+        next:
+          - target: review_preview
+      review_preview:
+        agent: architect
+        next:
+          - target: implement
+            condition: preview_approved
+            priority: 10
+          - target: preview
+            condition: needs_fix
+            priority: 5
+      implement:
+        agent: engineer
+        next:
+          - target: qa_review
+      qa_review:
+        agent: qa
+        next:
+          - target: create_pr
+            condition: approved
+            priority: 10
+          - target: implement
+            condition: needs_fix
+            priority: 5
+      create_pr:
+        agent: architect
+
   analysis:
     description: "Repository analysis workflow"
     agents: [architect]

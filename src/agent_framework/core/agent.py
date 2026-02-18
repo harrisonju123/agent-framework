@@ -59,6 +59,10 @@ ERROR_HEAD_LINES = 20
 ERROR_TAIL_LINES = 10
 BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
 
+# Tool allowlist for PREVIEW tasks — excludes Write/Edit/NotebookEdit
+# Bash is included but prompt injection constrains it to read-only commands
+PREVIEW_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch"]
+
 # Model pricing (per 1M tokens, as of 2025-01)
 MODEL_PRICING = {
     "haiku": {"input": 0.25, "output": 1.25},
@@ -831,6 +835,9 @@ class Agent:
 
             # Race LLM execution against pause/stop signal watcher so we can
             # interrupt mid-task instead of waiting 30+ minutes for completion
+            # Enforce read-only tool restrictions for PREVIEW tasks
+            allowed_tools = PREVIEW_ALLOWED_TOOLS if task.type == TaskType.PREVIEW else None
+
             llm_coro = self.llm.complete(
                 LLMRequest(
                     prompt=prompt,
@@ -839,6 +846,7 @@ class Agent:
                     context=task.context,
                     working_dir=str(working_dir),
                     agents=team_agents,
+                    allowed_tools=allowed_tools,
                 ),
                 task_id=task.id,
                 on_tool_activity=_on_tool_activity,
@@ -1809,6 +1817,26 @@ This preview will be reviewed by the architect before implementation is authoriz
 """
         return preview_section + "\n\n" + prompt
 
+    def _inject_preview_artifact(self, prompt: str, task: Task) -> str:
+        """Inject architect-approved preview as implementation reference.
+
+        When a task follows a preview→review→implement workflow, the preview
+        artifact is stored in task context and injected here so the engineer
+        has the approved plan as context.
+        """
+        preview_artifact = task.context.get("preview_artifact") if task.context else None
+        if not preview_artifact:
+            return prompt
+
+        artifact_section = f"""
+## APPROVED PREVIEW — Implementation Reference
+
+The following execution preview was approved by the architect. Use it as your implementation guide:
+
+{preview_artifact}
+"""
+        return prompt + artifact_section
+
     def _categorize_error(self, error_message: str) -> Optional[str]:
         """Categorize error message for better diagnostics.
 
@@ -2025,6 +2053,9 @@ Fix the failing tests and ensure all tests pass.
         # Inject preview mode constraints when task is a preview
         if task.type == TaskType.PREVIEW:
             prompt = self._inject_preview_mode(prompt, task)
+
+        # Inject approved preview artifact as implementation reference
+        prompt = self._inject_preview_artifact(prompt, task)
 
         # Log prompt preview for debugging (sanitized)
         if self.logger.isEnabledFor(logging.DEBUG):
@@ -3240,8 +3271,12 @@ IMPORTANT:
                 self._decompose_and_queue_subtasks(task)
                 return
 
-        # Preview tasks route back to architect for review, not to QA
+        # Preview tasks route back to architect for review, not to QA.
+        # Store the preview output as an artifact for the architect to review
+        # and for the subsequent implementation task to reference.
         if task.type == TaskType.PREVIEW and self.config.base_id == 'engineer':
+            task.context["preview_artifact"] = task.result_summary or ""
+            self.queue.update(task)
             self._route_to_agent(task, 'architect', 'preview_review')
             return
 

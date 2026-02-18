@@ -27,6 +27,7 @@ class EdgeConditionType(str, Enum):
     FILES_MATCH = "files_match"
     PR_SIZE_UNDER = "pr_size_under"
     SIGNAL_TARGET = "signal_target"  # Use routing signal if present
+    PREVIEW_APPROVED = "preview_approved"  # Architect approved a preview execution
 
 
 @dataclass

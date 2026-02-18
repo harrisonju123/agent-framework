@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from ..core.task import TaskType
 
@@ -20,6 +20,7 @@ class LLMRequest:
     context: dict = None  # Task context (github_repo, jira_project, etc.)
     working_dir: Optional[str] = None  # Working directory for subprocess execution
     agents: Optional[dict] = None  # Teammate definitions for Claude Agent Teams (--agents flag)
+    allowed_tools: Optional[List[str]] = None  # Restrict tools the LLM can use (--allowedTools flag)
 
 
 @dataclass

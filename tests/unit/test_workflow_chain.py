@@ -782,6 +782,37 @@ class TestPreviewMode:
         assert "### Risks and Edge Cases" in result
         assert "### Estimated Total Change Size" in result
 
+    def test_preview_stores_artifact_in_context(self, agent, queue):
+        """PREVIEW routing stores result_summary as preview_artifact in task context."""
+        task = _make_task(workflow="default")
+        task.type = TaskType.PREVIEW
+        task.result_summary = "## Files to Modify\n- src/foo.py: add bar method"
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response)
+
+        assert task.context["preview_artifact"] == task.result_summary
+        queue.update.assert_called_once_with(task)
+
+    def test_preview_artifact_injected_in_implementation_prompt(self, agent):
+        """Implementation tasks with preview_artifact get it injected into prompt."""
+        task = _make_task()
+        task.context["preview_artifact"] = "Approved plan: modify foo.py"
+
+        result = agent._inject_preview_artifact("Build feature X.", task)
+
+        assert "APPROVED PREVIEW" in result
+        assert "Approved plan: modify foo.py" in result
+
+    def test_no_preview_artifact_leaves_prompt_unchanged(self, agent):
+        """Tasks without preview_artifact don't modify the prompt."""
+        task = _make_task()
+        original = "Build feature X."
+
+        result = agent._inject_preview_artifact(original, task)
+
+        assert result == original
+
 
 # -- Chain ID collision and title accumulation --
 

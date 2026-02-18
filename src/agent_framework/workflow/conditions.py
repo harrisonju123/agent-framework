@@ -215,6 +215,26 @@ class SignalTargetCondition(ConditionEvaluator):
         return routing_signal.target_agent == target
 
 
+class PreviewApprovedCondition(ConditionEvaluator):
+    """True if the architect approved a preview execution.
+
+    Checks for the 'preview_approved' verdict in task or evaluation context,
+    mirroring the pattern used by ApprovedCondition.
+    """
+
+    def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
+        verdict = None
+        if context and "verdict" in context:
+            verdict = context["verdict"]
+        elif task.context and "verdict" in task.context:
+            verdict = task.context["verdict"]
+
+        if verdict is not None:
+            return str(verdict).lower() == "preview_approved"
+
+        return False
+
+
 def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
     """Build a fresh evaluator map so ConditionRegistry.register() in tests
     doesn't pollute global state."""
@@ -229,6 +249,7 @@ def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
         EdgeConditionType.FILES_MATCH: FilesMatchCondition(),
         EdgeConditionType.PR_SIZE_UNDER: PRSizeUnderCondition(),
         EdgeConditionType.SIGNAL_TARGET: SignalTargetCondition(),
+        EdgeConditionType.PREVIEW_APPROVED: PreviewApprovedCondition(),
     }
 
 

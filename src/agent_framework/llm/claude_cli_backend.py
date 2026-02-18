@@ -243,6 +243,11 @@ class ClaudeCLIBackend(LLMBackend):
                 "--strict-mcp-config",  # Only use our MCP config, ignore global ~/.claude/mcp_settings.json
             ])
 
+        # Restrict available tools (e.g., read-only mode for PREVIEW tasks)
+        if request.allowed_tools:
+            cmd.extend(["--allowedTools", ",".join(request.allowed_tools)])
+            logger.debug(f"Tool restriction active: allowed={request.allowed_tools}")
+
         # Add agent teammates for Claude Agent Teams
         if request.agents:
             cmd.extend(["--agents", json.dumps(request.agents)])

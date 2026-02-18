@@ -227,6 +227,7 @@ class WorkflowStepDefinition(BaseModel):
     next: Optional[List[Dict[str, Any]]] = None  # List of edge definitions
     task_type: Optional[str] = None  # Override default task type
     checkpoint: Optional[Dict[str, str]] = None  # Parsed into CheckpointConfig in to_dag()
+    preview_required: bool = False  # When True, step produces a PREVIEW task type
 
 
 class WorkflowDefinition(BaseModel):
@@ -337,11 +338,16 @@ class WorkflowDefinition(BaseModel):
                     reason=step_def.checkpoint.get("reason"),
                 )
 
+            # preview_required is a convenience shorthand for task_type: preview
+            task_type = step_def.task_type
+            if step_def.preview_required and not task_type:
+                task_type = "preview"
+
             dag_steps[step_id] = WorkflowStep(
                 id=step_id,
                 agent=step_def.agent,
                 next=edges,
-                task_type_override=step_def.task_type,
+                task_type_override=task_type,
                 checkpoint=checkpoint
             )
 
