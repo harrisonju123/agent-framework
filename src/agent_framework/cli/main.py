@@ -4,7 +4,9 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Load .env file into environment before anything else
@@ -68,7 +70,6 @@ def init(ctx):
 
     # Copy example configs
     from pathlib import Path as P
-    import shutil
 
     example_configs = [
         "agents.yaml.example",
@@ -1404,13 +1405,265 @@ def clear(ctx, agent, completed, locks, yes):
             cleared += 1
 
     if locks and locks_dir.exists():
-        import shutil
         for lock_dir in locks_dir.glob("*.lock"):
             if lock_dir.is_dir():
                 shutil.rmtree(lock_dir)
                 cleared += 1
 
     console.print(f"[green]✓ Cleared {cleared} items[/]")
+
+
+# ── purge helpers ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _PurgeTarget:
+    """One deletion target: a single file, a glob under a directory, or a whole directory."""
+
+    path: Path
+    whole_dir: bool = False  # True → shutil.rmtree(path); only meaningful when glob is None
+    glob: str | None = None  # Pattern matched under path; each match deleted individually
+
+    def __post_init__(self) -> None:
+        if self.whole_dir and self.glob:
+            raise ValueError(f"_PurgeTarget({self.path}): whole_dir and glob are mutually exclusive")
+
+
+@dataclass
+class _PurgeCategory:
+    """Named group of deletion targets with an optional skip flag (from --keep-* flags)."""
+
+    name: str
+    targets: list[_PurgeTarget] = field(default_factory=list)
+    skip: bool = False
+
+
+def _count_purge_target(target: _PurgeTarget) -> int:
+    """Count items that would be removed for this target.
+
+    Glob targets: number of matching entries.
+    Whole-dir targets: number of files inside (at least 1 if the dir exists).
+    Single-file targets: 0 or 1.
+    """
+    if not target.path.exists():
+        return 0
+    if target.glob:
+        return sum(1 for _ in target.path.glob(target.glob))
+    if target.whole_dir:
+        # Count actual files so "Purged N items" reflects real content
+        return max(sum(1 for _ in target.path.rglob("*") if _.is_file()), 1)
+    return 1
+
+
+def _delete_purge_target(target: _PurgeTarget) -> int:
+    """Delete files/dirs described by target. Returns count of items removed.
+
+    Glob matches: delete each match individually (rmtree for dirs, unlink for files).
+    Whole dirs (whole_dir=True): shutil.rmtree; count files removed for accurate reporting.
+    Single files: unlink.
+    Permission errors are logged as warnings and skipped so a partial failure
+    does not abort the rest of the purge.
+    """
+    if not target.path.exists():
+        return 0
+
+    removed = 0
+    if target.glob:
+        for match in list(target.path.glob(target.glob)):
+            try:
+                if match.is_dir():
+                    shutil.rmtree(match)
+                else:
+                    match.unlink()
+                removed += 1
+            except OSError as exc:
+                console.print(f"[yellow]  Warning: {match.name}: {exc}[/]")
+    elif target.whole_dir:
+        try:
+            # Count before removal so the total reflects actual content deleted
+            file_count = max(sum(1 for _ in target.path.rglob("*") if _.is_file()), 1)
+            shutil.rmtree(target.path)
+            removed = file_count
+        except OSError as exc:
+            console.print(f"[yellow]  Warning: {target.path}: {exc}[/]")
+    else:
+        try:
+            target.path.unlink()
+            removed = 1
+        except OSError as exc:
+            console.print(f"[yellow]  Warning: {target.path}: {exc}[/]")
+    return removed
+
+
+@cli.command()
+@click.option("--keep-memory", is_flag=True, help="Preserve agent learned patterns (.agent-communication/memory/)")
+@click.option("--keep-worktrees", is_flag=True, help="Preserve repo clones and worktrees (~/.agent-workspaces/)")
+@click.option("--keep-indexes", is_flag=True, help="Preserve codebase indexes (.agent-communication/indexes/)")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed without deleting anything")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
+    """Full workspace reset: stop agents and remove all agent framework state.
+
+    Removes queues, completed tasks, locks, heartbeats, activity logs, session
+    logs, escalations, context artifacts, codebase indexes, agent memory,
+    worktrees, and everything else under .agent-communication/, .agent-context/,
+    and logs/.
+
+    Examples:
+        agent purge --dry-run          # see what would be removed
+        agent purge --keep-memory -y   # purge everything except learned patterns
+        agent purge -y                 # full purge, no confirmation
+    """
+    workspace = ctx.obj["workspace"]
+    comm_dir = workspace / ".agent-communication"
+
+    if not comm_dir.exists():
+        console.print("[green]Nothing to purge — .agent-communication/ does not exist[/]")
+        return
+
+    # ── Phase 1: Stop running agents ──────────────────────────────────────────
+    # Skipped for --dry-run: a preview should never have side effects.
+    # Best-effort otherwise: if config is missing or nothing is running, proceed
+    # anyway — PID files get cleaned in the deletion phase below.
+    if not dry_run:
+        console.print("[bold yellow]Stopping agents before purge...[/]")
+        try:
+            orchestrator = Orchestrator(workspace)
+            if orchestrator.get_dashboard_info():
+                orchestrator.stop_dashboard()
+            orchestrator.stop_all_agents(graceful=True)
+            console.print("[green]✓ Agents stopped[/]")
+        except Exception as e:
+            console.print(f"[yellow]Could not stop agents ({e}); continuing with file cleanup[/]")
+
+    # ── Phase 2: Build inventory ───────────────────────────────────────────────
+    queues_dir = comm_dir / "queues"
+    completed_dir = comm_dir / "completed"
+    locks_dir = comm_dir / "locks"
+    heartbeats_dir = comm_dir / "heartbeats"
+    activity_dir = comm_dir / "activity"
+    activity_stream = comm_dir / "activity-stream.jsonl"
+    malformed_dir = comm_dir / "malformed"
+    escalations_dir = comm_dir / "escalations"
+    teams_dir = comm_dir / "teams"
+    profile_registry_dir = comm_dir / "profile-registry"
+    memory_dir = comm_dir / "memory"
+    indexes_dir = comm_dir / "indexes"
+    context_dir = workspace / ".agent-context"
+    logs_dir = workspace / "logs"
+    workspaces_dir = Path.home() / ".agent-workspaces"
+
+    categories = [
+        _PurgeCategory("Task queues", [
+            _PurgeTarget(queues_dir, glob="**/*.json"),
+        ]),
+        _PurgeCategory("Completed tasks", [
+            _PurgeTarget(completed_dir, glob="*.json"),
+        ]),
+        _PurgeCategory("Locks", [
+            # Lock entries are directories (mkdir-based), not plain files
+            _PurgeTarget(locks_dir, glob="*.lock"),
+        ]),
+        _PurgeCategory("Heartbeats", [
+            _PurgeTarget(heartbeats_dir, glob="*.json"),
+        ]),
+        _PurgeCategory("Activity", [
+            _PurgeTarget(activity_dir, glob="*.json"),
+            _PurgeTarget(activity_stream),
+        ]),
+        _PurgeCategory("Malformed tasks", [
+            _PurgeTarget(malformed_dir, glob="*.json"),
+        ]),
+        _PurgeCategory("Escalations", [
+            _PurgeTarget(escalations_dir, glob="*.json"),
+        ]),
+        _PurgeCategory("Teams", [
+            _PurgeTarget(teams_dir, glob="*.json"),
+        ]),
+        _PurgeCategory("Profile registry", [
+            _PurgeTarget(profile_registry_dir, whole_dir=True),
+        ]),
+        _PurgeCategory("PID/signal files", [
+            _PurgeTarget(comm_dir / "pids.txt"),
+            _PurgeTarget(comm_dir / "dashboard.pid"),
+            _PurgeTarget(comm_dir / "pause"),
+            _PurgeTarget(comm_dir / "PAUSE_INTAKE"),
+        ]),
+        _PurgeCategory("Agent memory", [
+            _PurgeTarget(memory_dir, whole_dir=True),
+        ], skip=keep_memory),
+        _PurgeCategory("Codebase indexes", [
+            _PurgeTarget(indexes_dir, whole_dir=True),
+        ], skip=keep_indexes),
+        _PurgeCategory("Context artifacts", [
+            _PurgeTarget(context_dir, whole_dir=True),
+        ]),
+        _PurgeCategory("Logs", [
+            _PurgeTarget(logs_dir, glob="*.log"),
+            _PurgeTarget(logs_dir / "sessions", glob="*.jsonl"),
+        ]),
+        _PurgeCategory("Worktrees & clones", [
+            _PurgeTarget(workspaces_dir, whole_dir=True),
+        ], skip=keep_worktrees),
+    ]
+
+    # ── Phase 3: Display summary table ────────────────────────────────────────
+    table = Table(title="Purge Summary", show_header=True)
+    table.add_column("Category", style="bold")
+    table.add_column("Items", justify="right")
+    table.add_column("Status")
+
+    total_items = 0
+    for cat in categories:
+        count = sum(_count_purge_target(t) for t in cat.targets)
+        if cat.skip:
+            status = "[cyan]KEEP[/]"
+        elif count == 0:
+            status = "[dim]empty[/]"
+        elif dry_run:
+            status = "[yellow]DRY RUN[/]"
+            total_items += count
+        else:
+            status = "[red]REMOVE[/]"
+            total_items += count
+        table.add_row(cat.name, str(count) if count > 0 else "—", status)
+
+    console.print(table)
+
+    if total_items == 0:
+        console.print("[green]Nothing to purge[/]")
+        return
+
+    if dry_run:
+        console.print(f"\n[yellow]Dry run — {total_items} items would be removed[/]")
+        return
+
+    # ── Phase 4: Confirm and delete ───────────────────────────────────────────
+    console.print(f"\n[bold red]This will permanently remove {total_items} items.[/]")
+    if not yes:
+        if not click.confirm("Continue?"):
+            console.print("[yellow]Cancelled[/]")
+            return
+
+    removed_total = 0
+    for cat in categories:
+        if cat.skip:
+            continue
+        for target in cat.targets:
+            removed_total += _delete_purge_target(target)
+
+    # ── Phase 5: Report ───────────────────────────────────────────────────────
+    console.print(f"\n[green]✓ Purged {removed_total} items[/]")
+    kept = []
+    if keep_memory:
+        kept.append("memory")
+    if keep_indexes:
+        kept.append("indexes")
+    if keep_worktrees:
+        kept.append("worktrees")
+    if kept:
+        console.print(f"[cyan]Preserved: {', '.join(kept)}[/]")
 
 
 @cli.command()
