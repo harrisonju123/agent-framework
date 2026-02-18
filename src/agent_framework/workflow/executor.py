@@ -391,7 +391,7 @@ class WorkflowExecutor:
 
         if self._is_chain_task_already_queued(
             next_agent, task.id, chain_id=chain_task.id, title=chain_task.title,
-            root_task_id=task.context.get("_root_task_id", task.id),
+            root_task_id=task.root_id,
         ):
             self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
@@ -477,7 +477,7 @@ class WorkflowExecutor:
         chain_depth = task.context.get("_chain_depth", 0) + 1
 
         # Stable root identity — stamped on first hop, propagated forever
-        root_task_id = task.context.get("_root_task_id", task.id)
+        root_task_id = task.root_id
         chain_id = f"chain-{root_task_id}-{target_step.id}-d{chain_depth}"
 
         if target_step.task_type_override:
@@ -574,7 +574,7 @@ class WorkflowExecutor:
         """
         from ..core.task import Task
 
-        root_task_id = task.context.get("_root_task_id", task.id)
+        root_task_id = task.root_id
         impl_branch = task.context.get("implementation_branch")
         if not impl_branch:
             self.logger.debug(f"Skipping QA pre-scan: no implementation_branch for task {task.id}")

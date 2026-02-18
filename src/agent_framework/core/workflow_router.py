@@ -392,8 +392,9 @@ class WorkflowRouter:
             self.logger.debug(f"No implementation branch or PR for {task.id}, skipping PR creation")
             return
 
-        # Deterministic ID with -pr suffix to avoid collision with normal chain tasks
-        pr_task_id = f"chain-{task.id}-{pr_creator}-pr"
+        # Use the stable root ID so each review hop doesn't nest another "chain-" prefix
+        root_task_id = task.root_id
+        pr_task_id = f"chain-{root_task_id}-{pr_creator}-pr"
         queue_path = self.queue.queue_dir / pr_creator / f"{pr_task_id}.json"
         if queue_path.exists():
             self.logger.debug(f"PR creation task {pr_task_id} already queued, skipping")

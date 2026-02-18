@@ -397,8 +397,9 @@ class TestQueueReviewFix:
         task = _make_task()
         response = _make_response("REQUEST_CHANGES\nFix it")
 
-        # Pre-create the fix task file
-        fix_id = f"review-fix-{task.id[:12]}-c1"
+        # Pre-create the fix task file — ID now uses _root_task_id (falls back to task.id)
+        root_id = task.context.get("_root_task_id", task.id)
+        fix_id = f"review-fix-{root_id[:12]}-c1"
         engineer_dir = queue.queue_dir / "engineer"
         engineer_dir.mkdir()
         (engineer_dir / f"{fix_id}.json").write_text("{}")
@@ -1110,3 +1111,69 @@ class TestEscalationCarriesStructuredFindings:
 
         pushed_task = queue.push.call_args[0][0]
         assert "structured_findings" not in pushed_task.context
+
+
+# -- Chain ID stability for review and fix task IDs --
+
+class TestChainIdStability:
+    """Verify that review/fix task IDs don't nest 'chain-' on each cycle."""
+
+    def test_review_task_id_uses_root_task_id(self, engineer_agent):
+        """build_review_task uses _root_task_id so the review ID stays flat."""
+        task = _make_task(
+            task_type=TaskType.IMPLEMENTATION,
+            task_id="chain-chain-original-engineer-1",
+        )
+        task.context["_root_task_id"] = "original"
+        pr_info = {
+            "pr_number": 42,
+            "pr_url": "https://github.com/org/repo/pull/42",
+            "owner": "org",
+            "repo": "repo",
+            "github_repo": "org/repo",
+        }
+
+        review_task = engineer_agent._build_review_task(task, pr_info)
+
+        assert "chain-" not in review_task.id
+        assert review_task.id.startswith("review-original-")
+
+    def test_review_task_title_strips_chain_prefix(self, engineer_agent):
+        """build_review_task strips [chain] markers from the title."""
+        task = _make_task(
+            task_type=TaskType.IMPLEMENTATION,
+            task_id="chain-chain-original-engineer-1",
+        )
+        task.context["_root_task_id"] = "original"
+        task.title = "[chain] [chain] Fix auth bug"
+        pr_info = {
+            "pr_number": 7,
+            "pr_url": "https://github.com/org/repo/pull/7",
+            "owner": "org",
+            "repo": "repo",
+            "github_repo": "org/repo",
+        }
+
+        review_task = engineer_agent._build_review_task(task, pr_info)
+
+        assert "[chain]" not in review_task.title
+
+    def test_review_fix_id_uses_root_task_id(self, qa_agent):
+        """build_review_fix_task uses _root_task_id so the fix ID stays flat."""
+        from agent_framework.core.review_cycle import ReviewOutcome
+
+        task = _make_task(
+            task_id="chain-chain-rootid-qa-1",
+        )
+        task.context["_root_task_id"] = "rootid"
+        outcome = ReviewOutcome(
+            approved=False, has_critical_issues=True,
+            has_test_failures=False, has_change_requests=True,
+            findings_summary="CRITICAL: bug",
+        )
+
+        fix_task = qa_agent._build_review_fix_task(task, outcome, cycle_count=1)
+
+        # ID is anchored on "rootid", not the nested chain task ID
+        assert fix_task.id.startswith("review-fix-rootid")
+        assert "chain" not in fix_task.id

@@ -184,6 +184,16 @@ class Task(BaseModel):
     escalation_report: Optional[EscalationReport] = None
     retry_attempts: List[RetryAttempt] = Field(default_factory=list)
 
+    @property
+    def root_id(self) -> str:
+        """The stable root identity across a chain of review hops.
+
+        Chain tasks inherit _root_task_id from their parent so IDs like
+        "review-...", "review-fix-...", and worktree keys always anchor on the
+        original task rather than nesting another "chain-" prefix each cycle.
+        """
+        return self.context.get("_root_task_id", self.id)
+
     @field_serializer("created_at", "last_failed_at", "started_at", "completed_at", "failed_at", "approved_at")
     def serialize_datetime(self, v: Optional[datetime]) -> Optional[str]:
         return v.isoformat() if v else None

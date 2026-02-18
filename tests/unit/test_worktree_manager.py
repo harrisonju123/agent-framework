@@ -155,6 +155,15 @@ class TestWorktreeKeyGeneration:
         key = manager._get_worktree_key("engineer", "jira-ME-429-1770446158")
         assert key == "engineer-ME-429"
 
+    def test_get_worktree_key_truncates_long_ids(self, manager):
+        """Deeply nested chain IDs get capped before they blow up filesystem paths."""
+        long_id = "chain-" * 13 + "original"  # 86 chars
+        cap = manager._MAX_WORKTREE_KEY_LENGTH
+        assert len(long_id) > cap
+        key = manager._get_worktree_key("engineer", long_id)
+        ticket_part = key[len("engineer-"):]
+        assert len(ticket_part) <= cap
+
     def test_get_worktree_path(self, manager):
         """Test worktree path generation."""
         path = manager._get_worktree_path("owner/repo", "engineer", "task-12345678")

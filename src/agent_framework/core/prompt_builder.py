@@ -693,7 +693,7 @@ If a tool call fails:
         if not task.context.get("workflow_step"):
             return ""
 
-        root_task_id = task.context.get("_root_task_id", task.id)
+        root_task_id = task.root_id
         findings_file = (
             self.ctx.workspace / ".agent-communication" / "pre-scans" / f"{root_task_id}.json"
         )

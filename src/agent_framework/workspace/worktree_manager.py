@@ -80,6 +80,10 @@ class WorktreeConfig:
 class WorktreeManager:
     """Manages git worktrees for isolated agent workspaces."""
 
+    # Keeps worktree registry keys and filesystem path segments from blowing up
+    # when tasks accumulate nested "chain-" prefixes across review cycles.
+    _MAX_WORKTREE_KEY_LENGTH = 60
+
     def __init__(
         self,
         config: WorktreeConfig,
@@ -191,6 +195,8 @@ class WorktreeManager:
             parts = task_id.split("-")
             if len(parts) >= 3:
                 ticket_key = f"{parts[1]}-{parts[2]}"
+        if len(ticket_key) > self._MAX_WORKTREE_KEY_LENGTH:
+            ticket_key = ticket_key[:self._MAX_WORKTREE_KEY_LENGTH]
         return f"{agent_id}-{ticket_key}"
 
     def _get_worktree_path(self, owner_repo: str, agent_id: str, task_id: str) -> Path:

@@ -1584,7 +1584,7 @@ class Agent:
         try:
             from ..utils.atomic_io import atomic_write_text
 
-            root_task_id = task.context.get("_root_task_id", task.id)
+            root_task_id = task.root_id
             pre_scans_dir = self.workspace / ".agent-communication" / "pre-scans"
             pre_scans_dir.mkdir(parents=True, exist_ok=True)
 

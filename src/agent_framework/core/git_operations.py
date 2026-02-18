@@ -128,7 +128,8 @@ class GitOperationsManager:
                         base_repo=base_repo,
                         branch_name=branch_name,
                         agent_id=self.config.id,
-                        task_id=task.id,
+                        # Root ID keeps chain hops on the same worktree key
+                        task_id=task.root_id,
                         owner_repo=github_repo,
                         start_point=start_point,
                     )

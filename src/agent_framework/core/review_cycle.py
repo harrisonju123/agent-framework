@@ -150,18 +150,22 @@ class ReviewCycleManager:
 
     def build_review_task(self, task: Task, pr_info: dict) -> Task:
         """Build code review task for a PR."""
+        from ..workflow.executor import _strip_chain_prefixes
         jira_key = task.context.get("jira_key", "UNKNOWN")
         pr_number = pr_info["pr_number"]
+        # Stable root ID keeps review task IDs flat across chain hops
+        root_task_id = task.root_id
+        clean_title = _strip_chain_prefixes(task.title)[:50]
 
         return Task(
-            id=f"review-{task.id}-{pr_number}",
+            id=f"review-{root_task_id}-{pr_number}",
             type=TaskType.REVIEW,
             status=TaskStatus.PENDING,
             priority=task.priority,
             created_by=self.config.id,
             assigned_to="qa",
             created_at=datetime.now(timezone.utc),
-            title=f"Review PR #{pr_number} - [{jira_key}] {task.title[:50]}",
+            title=f"Review PR #{pr_number} - [{jira_key}] {clean_title}",
             description=f"""Automated code review request for PR #{pr_number}.
 
 ## PR Information
@@ -691,8 +695,9 @@ class ReviewCycleManager:
                 "Tests pass",
             ]
 
+        root_task_id = task.root_id
         return Task(
-            id=f"review-fix-{task.id[:12]}-c{cycle_count}",
+            id=f"review-fix-{root_task_id[:12]}-c{cycle_count}",
             type=TaskType.FIX,
             status=TaskStatus.PENDING,
             priority=task.priority,
@@ -709,7 +714,7 @@ class ReviewCycleManager:
         """Escalate to architect after too many failed review cycles."""
         jira_key = task.context.get("jira_key", "UNKNOWN")
 
-        root_task_id = task.context.get("_root_task_id", task.id)
+        root_task_id = task.root_id
         escalation_task = Task(
             id=f"review-escalation-{root_task_id[:20]}",
             type=TaskType.ESCALATION,

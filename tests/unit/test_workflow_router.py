@@ -424,6 +424,24 @@ class TestPRCreation:
 
         queue.push.assert_not_called()
 
+    def test_pr_task_id_uses_root_not_chain_prefix(self, router, queue):
+        """PR task ID anchors on _root_task_id so chain hops don't nest 'chain-' prefixes."""
+        router.config.base_id = "qa"
+        router._workflows_config["pr_workflow"] = PR_WORKFLOW
+        task = _make_task(
+            workflow="pr_workflow",
+            implementation_branch="feature/test",
+            task_id="chain-chain-original-qa-1",
+        )
+        task.context["_root_task_id"] = "original"
+
+        router.queue_pr_creation_if_needed(task, PR_WORKFLOW)
+
+        queue.push.assert_called_once()
+        pr_task = queue.push.call_args[0][0]
+        # Should be "chain-original-architect-pr", not "chain-chain-chain-...original-qa-1-..."
+        assert pr_task.id.count("chain-") == 1
+
 
 # -- Agent routing --
 
