@@ -1,7 +1,10 @@
 """Query interface for injecting index data into prompts."""
 
+import logging
 import re
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from agent_framework.indexing.models import CodebaseIndex, SymbolEntry
 from agent_framework.indexing.store import IndexStore
@@ -34,8 +37,10 @@ _ACTION_VERBS: frozenset[str] = frozenset({
 class IndexQuery:
     """Searches a stored CodebaseIndex and formats results for prompt injection."""
 
-    def __init__(self, store: IndexStore) -> None:
+    def __init__(self, store: IndexStore, embedder=None, n_semantic_results: int = 15) -> None:
         self._store = store
+        self._embedder = embedder
+        self._n_semantic_results = n_semantic_results
 
     def query_for_prompt(
         self, repo_slug: str, task_goal: str, max_chars: int = 4000
@@ -48,9 +53,31 @@ class IndexQuery:
         lines.extend(self._format_overview(index))
 
         keywords = self._extract_keywords(task_goal)
+        keyword_scored = []
         if keywords and index.symbols:
-            scored = self._score_symbols(index.symbols, keywords)
-            top = scored[:30]
+            keyword_scored = self._score_symbols(index.symbols, keywords)
+
+        # RRF merge with semantic results when embedder is available
+        semantic_results = self._try_semantic_query(repo_slug, task_goal)
+
+        if semantic_results:
+            from agent_framework.indexing.embeddings.semantic_query import SemanticQuery
+            if keyword_scored:
+                merged = SemanticQuery.merge_with_keyword_results(
+                    keyword_scored[:30], semantic_results,
+                )
+            else:
+                merged = semantic_results
+            if merged:
+                overview_text = "\n".join(lines)
+                remaining = max_chars - len(overview_text) - 2
+                symbol_text = SemanticQuery.format_results(merged, max_chars=remaining)
+                if symbol_text:
+                    lines.append("")
+                    lines.append(symbol_text)
+        elif keyword_scored:
+            # Keyword-only fallback (original behavior)
+            top = keyword_scored[:30]
             if top:
                 lines.append("")
                 lines.append("## Relevant Symbols")
@@ -64,6 +91,24 @@ class IndexQuery:
         if index is None:
             return ""
         return "\n".join(self._format_overview(index))
+
+    def _try_semantic_query(self, repo_slug: str, task_goal: str) -> list[dict]:
+        """Best-effort semantic search. Returns empty list on any failure."""
+        if self._embedder is None:
+            return []
+        try:
+            from agent_framework.indexing.embeddings.vector_store import VectorStore
+            from agent_framework.indexing.embeddings.semantic_query import SemanticQuery
+
+            store_path = self._store._slug_dir(repo_slug) / "lancedb"
+            if not store_path.exists():
+                return []
+            vector_store = VectorStore(store_path, dimensions=self._embedder.dimensions)
+            sq = SemanticQuery(vector_store, self._embedder)
+            return sq.query(task_goal, n_results=self._n_semantic_results)
+        except Exception:
+            logger.debug("Semantic query failed for %s", repo_slug, exc_info=True)
+            return []
 
     # ------------------------------------------------------------------
     # Formatting

@@ -58,10 +58,12 @@ class CodebaseIndexer:
         store: IndexStore,
         max_symbols: int = 500,
         exclude_patterns: list[str] | None = None,
+        embedder=None,
     ) -> None:
         self._store = store
         self._max_symbols = max_symbols
         self._exclude_patterns = exclude_patterns or []
+        self._embedder = embedder
 
     def ensure_indexed(
         self, repo_slug: str, repo_path: str
@@ -88,9 +90,20 @@ class CodebaseIndexer:
         if existing is not None and existing.commit_sha == head_sha:
             return existing
 
+        # Compute changed files for incremental embedding updates
+        changed_files = None
+        deleted_files = None
+        if existing is not None:
+            changed_files, deleted_files = self._diff_files(
+                repo_path, existing.commit_sha, head_sha
+            )
+
+        prior_sha = existing.commit_sha if existing else None
+
         index = self._build_index(repo_slug, repo_path, head_sha)
         if index is not None:
             self._store.save(index)
+            self._try_embed_index(index, changed_files, deleted_files, prior_sha=prior_sha)
         return index
 
     def _build_index(
@@ -255,3 +268,71 @@ class CodebaseIndexer:
                 parent = str(Path(f).parent)
                 test_dirs.add(parent if parent != "." else ".")
         return sorted(test_dirs)
+
+    # ------------------------------------------------------------------
+    # Embedding support
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _diff_files(
+        repo_path: Path, old_sha: str, new_sha: str
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """Compute changed and deleted files between two commits."""
+        try:
+            result = run_git_command(
+                ["diff", "--name-status", old_sha, new_sha],
+                cwd=repo_path,
+            )
+            changed: set[str] = set()
+            deleted: set[str] = set()
+            for line in result.stdout.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+                status = parts[0]
+                if status.startswith("D"):
+                    deleted.add(parts[1])
+                elif status.startswith("R") or status.startswith("C"):
+                    # Renames/copies: old_path\tnew_path — treat old as deleted, new as changed
+                    if len(parts) >= 3:
+                        deleted.add(parts[1])
+                        changed.add(parts[2])
+                else:
+                    changed.add(parts[1])
+            return changed, deleted
+        except Exception:
+            logger.debug("git diff failed between %s..%s", old_sha, new_sha, exc_info=True)
+            return None, None
+
+    def _try_embed_index(
+        self,
+        index: CodebaseIndex,
+        changed_files: Optional[set[str]] = None,
+        deleted_files: Optional[set[str]] = None,
+        prior_sha: Optional[str] = None,
+    ) -> None:
+        """Best-effort embedding of the index. Failure only logs, never blocks."""
+        if self._embedder is None:
+            return
+
+        try:
+            from agent_framework.indexing.embeddings.vector_store import VectorStore
+
+            store_path = self._store._slug_dir(index.repo_slug) / "lancedb"
+            vector_store = VectorStore(store_path, dimensions=self._embedder.dimensions)
+
+            # Incremental path: we have diff data AND the vector store matches the prior index
+            can_incremental = (
+                changed_files is not None
+                and prior_sha is not None
+                and not vector_store.is_stale(prior_sha)
+            )
+            if can_incremental:
+                vector_store.update_incremental(
+                    index, self._embedder,
+                    changed_files, deleted_files or set(),
+                )
+            else:
+                vector_store.rebuild(index, self._embedder)
+        except Exception:
+            logger.warning("Embedding index failed for %s, skipping", index.repo_slug, exc_info=True)

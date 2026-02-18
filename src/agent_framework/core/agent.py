@@ -291,14 +291,30 @@ class Agent:
         if not self._code_indexing_enabled:
             return
 
+        embedder = None
+        emb_cfg = cfg.get("embeddings", {})
+        if emb_cfg.get("enabled", False):
+            from ..indexing.embeddings import EMBEDDINGS_AVAILABLE
+            if EMBEDDINGS_AVAILABLE:
+                from ..indexing.embeddings.embedder import Embedder
+                embedder = Embedder(
+                    model_name=emb_cfg.get("model", "nomic-ai/nomic-embed-text-v1.5"),
+                    dimensions=emb_cfg.get("dimensions", 256),
+                )
+
         from ..indexing import IndexStore, CodebaseIndexer, IndexQuery
         store = IndexStore(self.workspace)
         self._code_indexer = CodebaseIndexer(
             store=store,
             max_symbols=cfg.get("max_symbols", 500),
             exclude_patterns=cfg.get("exclude_patterns", []),
+            embedder=embedder,
         )
-        self._code_index_query = IndexQuery(store)
+        self._code_index_query = IndexQuery(
+            store,
+            embedder=embedder,
+            n_semantic_results=emb_cfg.get("n_results", 15),
+        )
 
     def _try_index_codebase(self, task: Task, repo_path: Path) -> None:
         """Trigger indexing after repo checkout, before prompt building."""

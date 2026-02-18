@@ -458,6 +458,14 @@ class GitHubConfig(BaseModel):
     labels: List[str] = Field(default_factory=lambda: ["agent-pr"])
 
 
+class EmbeddingsConfig(BaseModel):
+    """Embedding-based semantic search configuration."""
+    enabled: bool = False
+    model: str = "nomic-ai/nomic-embed-text-v1.5"
+    dimensions: int = 256
+    n_results: int = 15
+
+
 class CodeIndexingConfig(BaseModel):
     """Codebase structural indexing configuration."""
     enabled: bool = True
@@ -472,6 +480,7 @@ class CodeIndexingConfig(BaseModel):
         "*.min.js", "*.min.css", "*.generated.*",
         "*.pb.go", "*_generated.go", "*.pb.rb",
     ])
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
 
 
 class FrameworkConfig(BaseSettings):
