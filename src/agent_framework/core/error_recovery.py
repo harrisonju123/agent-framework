@@ -528,10 +528,9 @@ breaking the task into smaller steps, or working around the root cause."""
 
         # Shared-namespace memories (architectural decisions, cross-agent conventions)
         # collected before the broad agent-scoped categories so they aren't crowded out.
-        # Apply the same tag filter to shared past_failures for consistency — unrelated
-        # error-type antipatterns from other agents shouldn't pollute this context.
-        # No unfiltered fallback here: shared is supplementary; an empty tag result just
-        # means no cross-agent patterns match this error type, which is fine.
+        # Tag-filtered for the same reason as agent-scoped past_failures — but no
+        # unfiltered fallback, since shared entries are supplementary and an empty result
+        # simply means no cross-agent pattern matches this error type.
         _add(self.memory_store.recall(
             repo_slug=repo_slug,
             agent_type="shared",
@@ -630,7 +629,9 @@ breaking the task into smaller steps, or working around the root cause."""
         all_files: set[str] = set()
         for entry in task.replan_history:
             all_files.update(entry.get("files_involved", []))
-        files_str = ", ".join(sorted(all_files)[:3]) if all_files else "unknown files"
+        top_files = sorted(all_files)[:3]
+        overflow = len(all_files) - len(top_files)
+        files_str = ", ".join(top_files) + (f" (+{overflow} more)" if overflow else "") if all_files else "unknown files"
 
         approaches_str = "; ".join(approaches) if approaches else "unknown approaches"
         content = (

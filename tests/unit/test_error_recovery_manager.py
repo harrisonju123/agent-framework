@@ -533,10 +533,18 @@ class TestReplanMemory:
         result = manager._build_replan_memory_context(task)
 
         assert "generic fix" in result
-        # Both filtered and unfiltered calls happen
-        call_tags = [c.kwargs.get("tags") for c in memory_store.recall.call_args_list]
-        assert ["type_error"] in call_tags
-        assert None in call_tags
+        # Confirm the filtered call was made and that the fallback was the agent-scoped
+        # past_failures call — not one of the always-unfiltered category calls (conventions, etc.)
+        calls = memory_store.recall.call_args_list
+        filtered = [c for c in calls if c.kwargs.get("tags") == ["type_error"]]
+        unfiltered_past_failures = [
+            c for c in calls
+            if c.kwargs.get("category") == "past_failures"
+            and c.kwargs.get("agent_type") != "shared"
+            and not c.kwargs.get("tags")
+        ]
+        assert filtered, "Expected a tag-filtered past_failures call"
+        assert unfiltered_past_failures, "Expected an unfiltered agent-scoped past_failures fallback call"
 
     def test_store_failure_antipattern_on_exhausted_retries(self):
         """Antipattern content records all attempted approaches and unions files across retries."""
@@ -592,15 +600,18 @@ class TestReplanMemory:
         memory_store.remember.assert_not_called()
 
     def test_store_failure_antipattern_noop_without_memory_store(self):
-        """No-op when memory store is None."""
+        """No-op when memory store is None — guard clause exits before any write."""
         manager = _make_manager()
         assert manager.memory_store is None
 
+        # Give the task real replan history so the only thing preventing a write is
+        # the missing memory store, not the empty-history guard.
         task = _make_task(
             replan_history=[{"attempt": 2, "approach_tried": "fix", "revised_plan": "plan"}]
         )
-        # Should not raise
         manager.store_failure_antipattern(task, "owner/repo", "logic_error")
+        # Nothing to assert on (no mock), but reaching here without AttributeError
+        # confirms the None guard short-circuits before touching memory_store.remember
 
     def test_replan_memory_shared_past_failures_apply_tag_filter(self):
         """Shared past_failures are tag-filtered by error type, same as agent-scoped ones."""
