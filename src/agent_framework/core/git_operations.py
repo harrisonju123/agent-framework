@@ -95,13 +95,22 @@ class GitOperationsManager:
             base_repo = self._get_base_repo_for_worktree(task, github_repo)
 
             if base_repo:
-                # Fix-cycle reuse: if a prior step already established a branch, reuse it
-                branch_name = task.context.get("worktree_branch") or task.context.get("implementation_branch")
+                # Reuse branch only if explicitly set for this step, or if
+                # the upstream implementation_branch belongs to the same agent role
+                branch_name = task.context.get("worktree_branch")
+                start_point = None
 
                 if not branch_name:
-                    jira_key = task.context.get("jira_key", "task")
-                    task_hash = hashlib.sha256(task.id.encode()).hexdigest()[:8]
-                    branch_name = f"agent/{self.config.id}/{jira_key}-{task_hash}"
+                    impl_branch = task.context.get("implementation_branch")
+                    if impl_branch and self._is_own_branch(impl_branch):
+                        branch_name = impl_branch
+                    else:
+                        jira_key = task.context.get("jira_key", "task")
+                        task_hash = hashlib.sha256(task.id.encode()).hexdigest()[:8]
+                        branch_name = f"agent/{self.config.id}/{jira_key}-{task_hash}"
+                        # Base new branch on upstream engineer's code
+                        if impl_branch:
+                            start_point = impl_branch
 
                 # Reload registry so we see worktrees created by other agent processes
                 self.worktree_manager.reload_registry()
@@ -121,6 +130,7 @@ class GitOperationsManager:
                         agent_id=self.config.id,
                         task_id=task.id,
                         owner_repo=github_repo,
+                        start_point=start_point,
                     )
                     self._active_worktree = worktree_path
                     task.context["worktree_branch"] = branch_name
@@ -605,6 +615,25 @@ class GitOperationsManager:
         except Exception as e:
             self.logger.debug(f"Failed to get changed files: {e}")
             return []
+
+    def _is_own_branch(self, branch_name: str) -> bool:
+        """Check if a branch was created by this agent (or a replica of the same role).
+
+        Matches patterns like:
+          - agent/engineer/PROJ-123-abc  (same agent)
+          - agent/engineer-2/PROJ-123    (replica of same base role)
+        Does NOT match:
+          - agent/architect/PROJ-123     (different agent role)
+        """
+        base = f"agent/{self.config.base_id}"
+        if not branch_name.startswith(base):
+            return False
+        rest = branch_name[len(base):]
+        # Exact base_id: rest starts with "/"
+        # Replica (e.g., engineer-2): rest starts with "-<digit>/"
+        return rest.startswith("/") or (
+            rest.startswith("-") and "/" in rest and rest[1:rest.index("/")].isdigit()
+        )
 
     def _is_at_terminal_workflow_step(self, task: Task) -> bool:
         """Check if the current agent is at the last step in the workflow DAG.

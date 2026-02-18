@@ -779,3 +779,112 @@ class TestCreateWorktreeBranchConflict:
                     task_id="task-none-stderr",
                     owner_repo="owner/repo",
                 )
+
+
+class TestCreateWorktreeStartPoint:
+    """Tests for create_worktree() with start_point parameter."""
+
+    def test_uses_start_point_when_available_on_remote(self, tmp_path):
+        """New branch is based on origin/<start_point> when it exists."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        def mock_branch_exists(repo, branch):
+            # agent/engineer/ME-1-abc exists (locally or on remote)
+            return branch == "agent/engineer/ME-1-abc"
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', side_effect=mock_branch_exists):
+            manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/architect/ME-1-def12345",
+                agent_id="architect",
+                task_id="task-review",
+                owner_repo="owner/repo",
+                start_point="agent/engineer/ME-1-abc",
+            )
+
+        # The worktree add command should use origin/<start_point> as base
+        worktree_add = [c for c in git_calls if c[0] == "worktree"]
+        assert len(worktree_add) == 1
+        assert "origin/agent/engineer/ME-1-abc" in worktree_add[0]
+
+    def test_falls_back_to_default_branch_when_start_point_not_on_remote(self, tmp_path):
+        """Falls back to default branch when start_point isn't pushed yet."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        def mock_branch_exists(repo, branch):
+            # start_point not on remote; only the named branch check returns False
+            if branch.startswith("origin/"):
+                return False
+            return False
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', side_effect=mock_branch_exists), \
+             patch.object(manager, '_get_default_branch', return_value="main"):
+            manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/architect/ME-1-def12345",
+                agent_id="architect",
+                task_id="task-review-fallback",
+                owner_repo="owner/repo",
+                start_point="agent/engineer/ME-1-abc",
+            )
+
+        worktree_add = [c for c in git_calls if c[0] == "worktree"]
+        assert len(worktree_add) == 1
+        assert "origin/main" in worktree_add[0]
+
+    def test_no_start_point_uses_default_branch(self, tmp_path):
+        """Without start_point, new branch is based on default branch (existing behavior)."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_get_default_branch', return_value="main"):
+            manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/engineer/ME-2-xyz",
+                agent_id="engineer",
+                task_id="task-normal",
+                owner_repo="owner/repo",
+            )
+
+        worktree_add = [c for c in git_calls if c[0] == "worktree"]
+        assert len(worktree_add) == 1
+        assert "origin/main" in worktree_add[0]

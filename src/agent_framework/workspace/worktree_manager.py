@@ -207,6 +207,7 @@ class WorktreeManager:
         agent_id: str,
         task_id: str,
         owner_repo: str,
+        start_point: Optional[str] = None,
     ) -> Path:
         """
         Create an isolated worktree for agent work.
@@ -217,6 +218,9 @@ class WorktreeManager:
             agent_id: Agent identifier
             task_id: Task identifier
             owner_repo: Repository in "owner/repo" format
+            start_point: Optional branch to base the new worktree on (e.g. an
+                upstream engineer's branch). Falls back to default branch if
+                the start_point isn't available on the remote.
 
         Returns:
             Path to the created worktree
@@ -269,10 +273,22 @@ class WorktreeManager:
                     timeout=60,
                 )
             else:
-                # Create worktree with new branch from default branch
-                default_branch = self._get_default_branch(base_repo)
+                # Create worktree with new branch, preferring start_point if available
+                base_ref = None
+                if start_point:
+                    # Check if start_point is available (locally or on remote)
+                    if self._branch_exists(base_repo, start_point):
+                        base_ref = f"origin/{start_point}"
+                    else:
+                        logger.debug(
+                            f"start_point {start_point} not on remote, falling back to default branch"
+                        )
+                if not base_ref:
+                    default_branch = self._get_default_branch(base_repo)
+                    base_ref = f"origin/{default_branch}"
+
                 self._run_git(
-                    ["worktree", "add", "-b", branch_name, str(worktree_path), f"origin/{default_branch}"],
+                    ["worktree", "add", "-b", branch_name, str(worktree_path), base_ref],
                     cwd=base_repo,
                     timeout=60,
                 )

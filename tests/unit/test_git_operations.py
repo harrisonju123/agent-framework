@@ -15,6 +15,7 @@ def mock_config():
     """Mock agent configuration."""
     config = MagicMock()
     config.id = "engineer"
+    config.base_id = "engineer"
     return config
 
 
@@ -468,10 +469,13 @@ class TestRegistryReloadInGetWorkingDirectory:
         find_idx = next(i for i, c in enumerate(calls) if c[0] == "find_worktree_by_branch")
         assert reload_idx < find_idx
 
-    def test_reuses_worktree_via_implementation_branch(
+    def test_architect_creates_own_worktree_from_engineer_branch(
         self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
     ):
-        """Chain task with implementation_branch finds engineer's worktree after reload."""
+        """Architect gets its own worktree based on the engineer's branch, not the engineer's worktree."""
+        # Simulate architect agent (different base_id than the engineer branch)
+        mock_config.id = "architect"
+        mock_config.base_id = "architect"
         git_ops = GitOperationsManager(
             config=mock_config, workspace=tmp_path, queue=mock_queue,
             logger=mock_logger, worktree_manager=mock_worktree_manager,
@@ -479,8 +483,9 @@ class TestRegistryReloadInGetWorkingDirectory:
         git_ops.multi_repo_manager = MagicMock()
         git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
 
-        worktree_path = Path("/worktrees/owner/repo/engineer-ME-1")
-        mock_worktree_manager.find_worktree_by_branch.return_value = worktree_path
+        new_worktree = Path("/worktrees/owner/repo/architect-task-chain")
+        mock_worktree_manager.find_worktree_by_branch.return_value = None
+        mock_worktree_manager.create_worktree.return_value = new_worktree
 
         from datetime import datetime, timezone
         task = Task(
@@ -495,6 +500,79 @@ class TestRegistryReloadInGetWorkingDirectory:
 
         result = git_ops.get_working_directory(task)
 
+        assert result == new_worktree
+        # Architect created its own branch, not reusing engineer's
+        create_call = mock_worktree_manager.create_worktree.call_args
+        assert create_call.kwargs.get("start_point") == "agent/engineer/ME-1-abc12345"
+        # Branch name should be the architect's own
+        assert create_call.kwargs["branch_name"].startswith("agent/architect/")
+
+    def test_engineer_reuses_own_implementation_branch(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """Engineer reuses its own implementation_branch in fix cycles."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        worktree_path = Path("/worktrees/owner/repo/engineer-ME-1")
+        mock_worktree_manager.find_worktree_by_branch.return_value = worktree_path
+
+        from datetime import datetime, timezone
+        task = Task(
+            id="task-fix", title="Fix", description="Fix", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={
+                "github_repo": "owner/repo",
+                "implementation_branch": "agent/engineer/ME-1-abc12345",
+            },
+        )
+
+        result = git_ops.get_working_directory(task)
+
         assert result == worktree_path
         assert git_ops._active_worktree == worktree_path
         mock_worktree_manager.create_worktree.assert_not_called()
+
+
+class TestIsOwnBranch:
+    """Tests for _is_own_branch method."""
+
+    def test_same_agent_branch(self, mock_config, mock_logger, mock_queue, tmp_path):
+        """Branch created by the same agent is recognized as own."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        assert git_ops._is_own_branch("agent/engineer/PROJ-123-abc") is True
+
+    def test_replica_branch(self, mock_config, mock_logger, mock_queue, tmp_path):
+        """Branch created by a replica (engineer-2) is recognized as own."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        assert git_ops._is_own_branch("agent/engineer-2/PROJ-123-abc") is True
+
+    def test_different_agent_branch(self, mock_config, mock_logger, mock_queue, tmp_path):
+        """Branch created by a different agent is not own."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        assert git_ops._is_own_branch("agent/architect/PROJ-123-abc") is False
+
+    def test_non_agent_branch(self, mock_config, mock_logger, mock_queue, tmp_path):
+        """Non-agent branch pattern is not own."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        assert git_ops._is_own_branch("feature/some-branch") is False
+
+    def test_partial_prefix_match_rejected(self, mock_config, mock_logger, mock_queue, tmp_path):
+        """agent/engineering/... should not match agent/engineer."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        assert git_ops._is_own_branch("agent/engineering/PROJ-123") is False
