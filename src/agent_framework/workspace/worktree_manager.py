@@ -792,6 +792,9 @@ class WorktreeManager:
         Returns:
             True if there are unpushed commits, False otherwise
         """
+        if not worktree_path.exists():
+            return False
+
         try:
             # Check for commits ahead of origin
             result = subprocess.run(
