@@ -71,7 +71,13 @@ class WorkflowRouter:
 
         # This is a subtask - check if all siblings are done
         parent = self.queue.find_task(task.parent_task_id)
-        if not parent or not parent.subtask_ids:
+        if not parent:
+            self.logger.warning(
+                f"Subtask {task.id} references parent {task.parent_task_id!r} "
+                f"which does not exist — possible phantom parent_task_id"
+            )
+            return
+        if not parent.subtask_ids:
             return
 
         if self.queue.check_subtasks_complete(parent.id, parent.subtask_ids):

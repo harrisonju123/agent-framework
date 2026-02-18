@@ -804,6 +804,20 @@ class Agent:
             self._log_task_completion_metrics(task, response, task_start_time)
             return
 
+        # Validate parent actually exists before fan-in — LLMs can
+        # fabricate parent references when they directly write task JSON.
+        # A phantom parent_task_id causes the guard below to skip the
+        # workflow chain with no fan-in ever firing.
+        if task.parent_task_id is not None:
+            parent = self._workflow_router.queue.find_task(task.parent_task_id)
+            if parent is None:
+                self.logger.warning(
+                    f"Task {task.id} has phantom parent_task_id "
+                    f"{task.parent_task_id!r} — not found in queue/completed. "
+                    f"Clearing to allow normal workflow routing."
+                )
+                task.parent_task_id = None
+
         # Fan-in check: if this is a subtask, check if all siblings are done
         self._workflow_router.check_and_create_fan_in_task(task)
 

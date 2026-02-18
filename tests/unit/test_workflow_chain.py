@@ -2281,3 +2281,59 @@ class TestPushAfterChainRouting:
         assert "push" in call_order
         assert "chain" in call_order
         assert call_order.index("chain") < call_order.index("push")
+
+
+# -- Phantom parent_task_id guard --
+
+class TestPhantomParentTaskIdGuard:
+    """LLMs can fabricate parent_task_id when writing task JSON directly.
+    The guard in _run_post_completion_flow must clear phantom references
+    so the task flows through the normal workflow chain."""
+
+    @pytest.fixture(autouse=True)
+    def _bind_post_completion(self, agent):
+        """Bind the real method and stub side-effects for all tests."""
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+        agent._enforce_workflow_chain = MagicMock()
+        agent._git_ops.push_and_create_pr_if_needed = MagicMock()
+
+    def test_phantom_parent_cleared_and_task_flows_through_chain(self, agent, queue):
+        """Phantom parent_task_id gets cleared, task routes through normal workflow."""
+        task = _make_task(workflow="default")
+        task.parent_task_id = "planning-phantom-1739894400"
+        response = _make_response("Done.")
+
+        queue.find_task.return_value = None
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.parent_task_id is None
+        agent._enforce_workflow_chain.assert_called_once()
+
+    def test_real_parent_preserves_subtask_behavior(self, agent, queue):
+        """Valid parent_task_id still skips workflow chain (fan-in handles it)."""
+        task = _make_task(workflow="default")
+        task.parent_task_id = "real-parent-123"
+        response = _make_response("Done.")
+
+        real_parent = _make_task(task_id="real-parent-123")
+        queue.find_task.return_value = real_parent
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        assert task.parent_task_id == "real-parent-123"
+        agent._enforce_workflow_chain.assert_not_called()
+
+    def test_no_validation_when_parent_task_id_is_none(self, agent, queue):
+        """Regular tasks (no parent) skip the phantom validation entirely."""
+        task = _make_task(workflow="default")
+        assert task.parent_task_id is None
+        response = _make_response("Done.")
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        queue.find_task.assert_not_called()
+        agent._enforce_workflow_chain.assert_called_once()

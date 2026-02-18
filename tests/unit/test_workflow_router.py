@@ -163,6 +163,21 @@ class TestFanInTaskCreation:
 
         queue.find_task.assert_not_called()
 
+    def test_logs_warning_when_parent_not_found(self, router, queue):
+        """Phantom parent triggers warning log."""
+        subtask = _make_task(task_id="sub-orphan")
+        subtask.parent_task_id = "phantom-parent-999"
+
+        queue.find_task.return_value = None
+
+        router.check_and_create_fan_in_task(subtask)
+
+        queue.create_fan_in_task.assert_not_called()
+        router.logger.warning.assert_called_once()
+        warning_msg = router.logger.warning.call_args[0][0]
+        assert "phantom-parent-999" in warning_msg
+        assert "does not exist" in warning_msg
+
 
 # -- Task decomposition --
 
