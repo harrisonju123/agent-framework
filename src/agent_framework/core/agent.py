@@ -789,6 +789,12 @@ class Agent:
                     task.context["verdict"] = "approved"
                 elif outcome.needs_fix:
                     task.context["verdict"] = "needs_fix"
+                else:
+                    # No explicit approval keywords AND no rejection signals —
+                    # treat as implicit approval so condition evaluators don't
+                    # fall through to the NeedsFixCondition keyword fallback,
+                    # which defaults to True and loops back to implement.
+                    task.context["verdict"] = "approved"
 
             # Detect "no changes needed" — architect at plan step determines
             # the work is already done or not applicable

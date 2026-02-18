@@ -131,10 +131,16 @@ def _process_stream_line(
                     on_session_tool_call(tool_name, tool_input)
 
     elif event_type == "result":
-        # Final event — authoritative usage overwrites per-turn accumulation
+        # Result event carries authoritative session cost, but its usage field
+        # may only reflect the final turn — not the full multi-turn session.
+        # Use the larger of accumulated vs result to avoid under-reporting.
         usage = event.get("usage", {})
-        usage_result["input_tokens"] = usage.get("input_tokens", 0)
-        usage_result["output_tokens"] = usage.get("output_tokens", 0)
+        usage_result["input_tokens"] = max(
+            usage_result.get("input_tokens", 0), usage.get("input_tokens", 0)
+        )
+        usage_result["output_tokens"] = max(
+            usage_result.get("output_tokens", 0), usage.get("output_tokens", 0)
+        )
         usage_result["total_cost_usd"] = event.get("total_cost_usd")
 
         result_text = event.get("result", "")

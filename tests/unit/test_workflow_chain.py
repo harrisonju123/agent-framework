@@ -1090,6 +1090,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
+            workflow_step="qa_review",
             _dag_review_cycles=2,
             _chain_depth=4,
             _root_task_id="root-1",
@@ -1118,6 +1119,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
+            workflow_step="qa_review",
             _dag_review_cycles=1,
             _chain_depth=2,
             _root_task_id="root-1",
@@ -1151,6 +1153,7 @@ class TestUpstreamSummaryInChainTask:
 
         task = _make_task(
             workflow="default",
+            workflow_step="qa_review",
             upstream_summary="Tests failing in module X",
             _chain_depth=1,
             _root_task_id="root-1",
@@ -1188,6 +1191,7 @@ class TestUpstreamSummaryInChainTask:
 
         task = _make_task(
             workflow="default",
+            workflow_step="qa_review",
             _chain_depth=1,
             _root_task_id="root-1",
             _global_cycle_count=1,
@@ -1201,6 +1205,148 @@ class TestUpstreamSummaryInChainTask:
 
         chain_task = queue.push.call_args[0][0]
         assert chain_task.description == "Build the thing."
+
+
+# -- Code review cycle cap and findings header --
+
+class TestCodeReviewCycleCap:
+    """Verify code_review→engineer fix cycles share the same cap as QA."""
+
+    def test_code_review_routes_to_pr_after_two_fix_cycles(self, queue, tmp_path):
+        """After 2 fix cycles, architect at code_review→engineer redirects to create_pr."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="code_review",
+            _dag_review_cycles=2,
+            _chain_depth=4,
+            _root_task_id="root-1",
+            _global_cycle_count=4,
+        )
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        workflow = MagicMock()
+        workflow.steps = {"implement": engineer_step, "create_pr": pr_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "architect", None)
+
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "architect"
+
+    def test_code_review_allows_first_two_fix_cycles(self, queue, tmp_path):
+        """First 2 fix cycles from code_review route normally to engineer."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="code_review",
+            _dag_review_cycles=1,
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"implement": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "architect", None)
+
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "engineer"
+        assert chain_task.context["_dag_review_cycles"] == 2
+
+    def test_shared_counter_across_review_stages(self, queue, tmp_path):
+        """Counter from code_review carries into qa_review cap."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        # code_review used 1 cycle, now qa_review tries to use another
+        task = _make_task(
+            workflow="default",
+            workflow_step="qa_review",
+            _dag_review_cycles=2,
+            _chain_depth=5,
+            _root_task_id="root-1",
+            _global_cycle_count=5,
+        )
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        workflow = MagicMock()
+        workflow.steps = {"implement": engineer_step, "create_pr": pr_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        queue.push.assert_called_once()
+        target_queue = queue.push.call_args[0][1]
+        # Counter is 2 + 1 = 3 > MAX_DAG_REVIEW_CYCLES(2), redirect to PR
+        assert target_queue == "architect"
+
+    def test_code_review_injects_upstream_summary_with_header(self, queue, tmp_path):
+        """code_review→engineer uses 'CODE REVIEW FINDINGS' header."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="code_review",
+            upstream_summary="Missing error handling in auth module",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"implement": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "architect", None)
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.description.startswith("## CODE REVIEW FINDINGS TO ADDRESS")
+        assert "Missing error handling in auth module" in chain_task.description
+        assert "## ORIGINAL TASK" in chain_task.description
+
+    def test_plan_to_engineer_does_not_increment(self, queue, tmp_path):
+        """plan→implement doesn't touch the review cycle counter."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            _chain_depth=0,
+            _root_task_id="root-1",
+            _global_cycle_count=0,
+        )
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"implement": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "architect", None)
+
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        assert "_dag_review_cycles" not in chain_task.context
 
 
 # -- Fix 4: PR creation skipped for planning-only tasks --

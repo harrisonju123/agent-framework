@@ -76,7 +76,7 @@ def resume_after_checkpoint(task: "Task", queue: "FileQueue", workspace: Path) -
 # Hard ceiling on chain depth to prevent runaway loops regardless of routing logic
 MAX_CHAIN_DEPTH = 10
 
-# Cap QA→engineer fix cycles. Each increment = one fix round.
+# Cap review→engineer fix cycles (both code_review and qa_review share one counter).
 # Value of 2: initial review + 2 fix rounds + final review = 6 chain hops max.
 MAX_DAG_REVIEW_CYCLES = 2
 
@@ -348,18 +348,18 @@ class WorkflowExecutor:
             )
             return
 
-        # Cap QA→engineer review cycles to prevent infinite bounce loops.
-        # QA routing back to engineer (needs_fix) increments the counter.
-        qa_cycles = task.context.get("_dag_review_cycles", 0)
-        is_qa_to_engineer = (
-            current_agent_id in ("qa", "qa-1", "qa-2")
-            and target_step.agent == "engineer"
+        # Cap review→engineer fix cycles to prevent infinite bounce loops.
+        # Both code_review and qa_review stages share a single counter.
+        review_cycles = task.context.get("_dag_review_cycles", 0)
+        is_review_to_engineer = (
+            target_step.agent == "engineer"
+            and task.context.get("workflow_step") in ("code_review", "qa_review")
         )
-        if is_qa_to_engineer:
-            qa_cycles += 1
-            if qa_cycles > MAX_DAG_REVIEW_CYCLES:
+        if is_review_to_engineer:
+            review_cycles += 1
+            if review_cycles > MAX_DAG_REVIEW_CYCLES:
                 self.logger.warning(
-                    f"QA→engineer review cycle {qa_cycles} exceeds max ({MAX_DAG_REVIEW_CYCLES}) "
+                    f"Review→engineer cycle {review_cycles} exceeds max ({MAX_DAG_REVIEW_CYCLES}) "
                     f"for task {task.id} — routing to PR creation instead of another fix cycle"
                 )
                 # Try to route to create_pr step instead of looping back
@@ -371,7 +371,7 @@ class WorkflowExecutor:
                     return
 
         chain_task = self._build_chain_task(
-            task, target_step, current_agent_id, is_qa_to_engineer=is_qa_to_engineer,
+            task, target_step, current_agent_id, is_review_to_engineer=is_review_to_engineer,
         )
 
         if self._is_chain_task_already_queued(
@@ -381,8 +381,8 @@ class WorkflowExecutor:
             self.logger.debug(f"Chain task for {next_agent} already queued from {task.id}")
             return
 
-        if is_qa_to_engineer:
-            chain_task.context["_dag_review_cycles"] = qa_cycles
+        if is_review_to_engineer:
+            chain_task.context["_dag_review_cycles"] = review_cycles
 
         try:
             self.queue.push(chain_task, next_agent)
@@ -447,7 +447,7 @@ class WorkflowExecutor:
 
     def _build_chain_task(
         self, task: "Task", target_step: WorkflowStep, current_agent_id: str,
-        *, is_qa_to_engineer: bool = False,
+        *, is_review_to_engineer: bool = False,
     ) -> "Task":
         """Create a continuation task for the target step."""
         from ..core.task import Task
@@ -491,12 +491,14 @@ class WorkflowExecutor:
             context["parent_task_id"] = task.context.get("parent_task_id")
             context["subtask_count"] = task.context.get("subtask_count")
 
-        # Prepend QA findings so the fix-cycle engineer sees what to address
+        # Prepend review findings so the fix-cycle engineer sees what to address
         description = task.description
-        if is_qa_to_engineer:
+        if is_review_to_engineer:
             upstream = task.context.get("upstream_summary", "")
             if upstream:
-                description = f"## QA FINDINGS TO ADDRESS\n{upstream}\n\n## ORIGINAL TASK\n{description}"
+                workflow_step = task.context.get("workflow_step", "")
+                header = "CODE REVIEW FINDINGS TO ADDRESS" if workflow_step == "code_review" else "QA FINDINGS TO ADDRESS"
+                description = f"## {header}\n{upstream}\n\n## ORIGINAL TASK\n{description}"
 
         return Task(
             id=chain_id,

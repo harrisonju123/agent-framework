@@ -114,6 +114,8 @@ class NeedsFixCondition(ConditionEvaluator):
     """True if QA found issues that need fixing.
 
     Mirrors ApprovedCondition: prefers structured verdict, falls back to keywords.
+    When neither verdict nor keywords give a clear signal, defaults to False
+    so the chain doesn't loop back to implement spuriously.
     """
 
     def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
@@ -127,8 +129,15 @@ class NeedsFixCondition(ConditionEvaluator):
         if verdict is not None:
             return str(verdict).lower() in ("needs_fix", "needs fix", "rejected", "changes_requested")
 
-        approved_condition = ApprovedCondition()
-        return not approved_condition.evaluate(condition, task, response, routing_signal, context)
+        # Fall back to rejection keyword heuristic — check independently
+        # instead of inverting ApprovedCondition, which defaults False and
+        # would make NeedsFixCondition default True (looping back to implement).
+        if hasattr(response, "content") and response.content:
+            content = str(response.content)
+            if any(p.search(content) for p in _REJECTION_PATTERNS):
+                return True
+
+        return False
 
 
 class TestPassedCondition(ConditionEvaluator):

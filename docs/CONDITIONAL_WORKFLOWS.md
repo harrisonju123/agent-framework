@@ -125,7 +125,7 @@ qa_review:
       priority: 5
 ```
 
-Review cycles are capped at `MAX_DAG_REVIEW_CYCLES` (default 2) to prevent infinite loops.
+Review-to-engineer cycles (both `code_review` and `qa_review`) share a single counter capped at `MAX_DAG_REVIEW_CYCLES` (default 2) to prevent infinite loops.
 
 ## Backward Compatibility
 

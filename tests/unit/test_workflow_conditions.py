@@ -271,6 +271,24 @@ class TestNeedsFixCondition:
         evaluator = NeedsFixCondition()
         assert evaluator.evaluate(condition, task, response) is False
 
+    def test_ambiguous_response_defaults_false(self):
+        """No verdict + no rejection keywords → False, not looping back to implement."""
+        condition = EdgeCondition(EdgeConditionType.NEEDS_FIX)
+        task = _make_task()
+        response = _make_response("Reviewed the code, implementation looks reasonable")
+
+        evaluator = NeedsFixCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_no_response_content_defaults_false(self):
+        """Empty response without verdict → False."""
+        condition = EdgeCondition(EdgeConditionType.NEEDS_FIX)
+        task = _make_task()
+        response = _make_response("")
+
+        evaluator = NeedsFixCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
 
 class TestTestPassedCondition:
     def test_test_passed_in_response(self):

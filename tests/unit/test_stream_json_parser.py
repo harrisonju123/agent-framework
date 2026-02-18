@@ -236,8 +236,8 @@ class TestProcessStreamLine:
         assert usage_result["input_tokens"] == 300
         assert usage_result["output_tokens"] == 130
 
-    def test_result_event_overwrites_accumulated_usage(self):
-        """Result event's authoritative totals replace per-turn accumulation."""
+    def test_result_event_uses_larger_of_accumulated_or_reported(self):
+        """When result event has larger totals, those win."""
         events = [
             {
                 "type": "assistant",
@@ -259,9 +259,44 @@ class TestProcessStreamLine:
         for event in events:
             _process_stream_line(json.dumps(event), text_chunks, usage_result)
 
-        # Result event's authoritative totals should win
         assert usage_result["input_tokens"] == 500
         assert usage_result["output_tokens"] == 200
+
+    def test_result_event_does_not_undercount_accumulated_tokens(self):
+        """Result event with only final-turn usage doesn't erase accumulated totals."""
+        events = [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Turn 1"}],
+                    "usage": {"input_tokens": 5000, "output_tokens": 1200},
+                }
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Turn 2"}],
+                    "usage": {"input_tokens": 8000, "output_tokens": 800},
+                }
+            },
+            {
+                "type": "result",
+                "usage": {"input_tokens": 3, "output_tokens": 77},
+                "total_cost_usd": 3.38,
+                "result": "Final",
+            },
+        ]
+        text_chunks = []
+        usage_result = {}
+
+        for event in events:
+            _process_stream_line(json.dumps(event), text_chunks, usage_result)
+
+        # Accumulated per-turn totals (13000 in, 2000 out) should be preserved
+        # over the result event's final-turn-only values (3 in, 77 out)
+        assert usage_result["input_tokens"] == 13000
+        assert usage_result["output_tokens"] == 2000
+        assert usage_result["total_cost_usd"] == 3.38
 
     def test_assistant_without_usage_field(self):
         """Assistant events without message.usage don't affect token counts."""
