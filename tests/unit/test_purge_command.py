@@ -48,7 +48,7 @@ def _populate_workspace(base: Path) -> dict[str, list[Path]]:
     # Heartbeats
     hb = comm / "heartbeats"
     hb.mkdir()
-    f = hb / "engineer.json"
+    f = hb / "engineer"
     f.write_text("{}")
     created["heartbeats"] = [f]
 
@@ -286,7 +286,7 @@ def test_purge_handles_permission_errors(mock_orch_cls, tmp_path, monkeypatch):
 
     def flaky_unlink(self, missing_ok=False):
         # Simulate a permission error on a specific file
-        if self.name == "engineer.json":
+        if self.name == "engineer":
             raise PermissionError("Permission denied")
         original_unlink(self, missing_ok=missing_ok)
 

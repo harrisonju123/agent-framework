@@ -1547,7 +1547,7 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
             _PurgeTarget(locks_dir, glob="*.lock"),
         ]),
         _PurgeCategory("Heartbeats", [
-            _PurgeTarget(heartbeats_dir, glob="*.json"),
+            _PurgeTarget(heartbeats_dir, glob="*"),
         ]),
         _PurgeCategory("Activity", [
             _PurgeTarget(activity_dir, glob="*.json"),
