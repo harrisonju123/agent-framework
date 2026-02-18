@@ -378,3 +378,60 @@ class TestCleanupWorktreeInactiveMarking:
         # Worktree not removed, but still marked inactive
         mock_worktree_manager.remove_worktree.assert_not_called()
         mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+
+
+class TestDetectImplementationBranch:
+    """Tests for detect_implementation_branch method."""
+
+    @patch("agent_framework.utils.subprocess_utils.run_git_command")
+    def test_sets_branch_from_worktree(self, mock_run_git, git_ops, sample_task, tmp_path):
+        """Feature branch is stored in task context."""
+        git_ops._active_worktree = tmp_path / "worktree"
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "agent/engineer/PROJ-123-abc\n"
+        mock_run_git.return_value = mock_result
+
+        git_ops.detect_implementation_branch(sample_task)
+
+        assert sample_task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc"
+
+    @patch("agent_framework.utils.subprocess_utils.run_git_command")
+    def test_skips_main_branch(self, mock_run_git, git_ops, sample_task, tmp_path):
+        """main/master branches are not stored — they're not feature branches."""
+        git_ops._active_worktree = tmp_path / "worktree"
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "main\n"
+        mock_run_git.return_value = mock_result
+
+        git_ops.detect_implementation_branch(sample_task)
+
+        assert "implementation_branch" not in sample_task.context
+
+    def test_skips_when_already_set(self, git_ops, sample_task, tmp_path):
+        """Does not overwrite an existing implementation_branch."""
+        git_ops._active_worktree = tmp_path / "worktree"
+        sample_task.context["implementation_branch"] = "existing-branch"
+
+        git_ops.detect_implementation_branch(sample_task)
+
+        assert sample_task.context["implementation_branch"] == "existing-branch"
+
+    def test_skips_when_no_worktree(self, git_ops, sample_task):
+        """No active worktree → no-op."""
+        git_ops.detect_implementation_branch(sample_task)
+
+        assert "implementation_branch" not in sample_task.context
+
+    @patch("agent_framework.utils.subprocess_utils.run_git_command")
+    def test_handles_git_failure(self, mock_run_git, git_ops, sample_task, tmp_path):
+        """Git command failure is handled gracefully."""
+        git_ops._active_worktree = tmp_path / "worktree"
+        mock_result = MagicMock()
+        mock_result.returncode = 128
+        mock_run_git.return_value = mock_result
+
+        git_ops.detect_implementation_branch(sample_task)
+
+        assert "implementation_branch" not in sample_task.context

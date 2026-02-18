@@ -93,6 +93,9 @@ class PromptBuilder:
     # QA handles testing at qa_review; running tests at review/PR steps wastes budget.
     _TEST_SUPPRESSED_STEPS = frozenset({"code_review", "create_pr"})
 
+    # Steps where the LLM must review only — no file writes or implementation
+    _REVIEW_ONLY_STEPS = frozenset({"code_review"})
+
     def __init__(self, context: PromptContext):
         """Initialize prompt builder with context.
 
@@ -277,6 +280,10 @@ Focus on reviewing the code changes.
 
 """
 
+        # Review-only steps must not modify code — only inspect the diff
+        if workflow_step in self._REVIEW_ONLY_STEPS:
+            mcp_guidance += self._build_review_only_guidance()
+
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
@@ -350,6 +357,10 @@ IMPORTANT:
         workflow_step = task.context.get("workflow_step")
         if workflow_step in self._TEST_SUPPRESSED_STEPS:
             chain_note += "\nIMPORTANT: Do NOT run the test suite (pytest, go test, npm test, etc.) during this step.\nTesting is handled by the QA agent at the qa_review step — running tests here wastes time and budget.\nFocus on reviewing the code changes.\n"
+
+        # Review-only steps must not modify code — only inspect the diff
+        if workflow_step in self._REVIEW_ONLY_STEPS:
+            chain_note += "\n" + self._build_review_only_guidance()
 
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
@@ -566,6 +577,26 @@ Workflow coordination:
 """
         self._guidance_cache[cache_key] = result
         return result
+
+    def _build_review_only_guidance(self) -> str:
+        """Build constraints for review-only steps (e.g. code_review).
+
+        Prevents the reviewer from re-implementing code instead of reviewing it.
+        """
+        return """IMPORTANT — CODE REVIEW CONSTRAINTS:
+You are a REVIEWER, not an implementer. You must NOT modify any files.
+
+- Do NOT use Write, Edit, or NotebookEdit tools
+- Do NOT use Bash to create, modify, or delete files
+- Do NOT spawn implementation subagents or delegate fixes
+- Only explore files that appear in the diff (use Read, Grep, Glob, git diff)
+- If changes are missing or incorrect, report them as findings — do NOT fix them yourself
+
+Your output MUST end with exactly one of:
+  VERDICT: APPROVE
+  VERDICT: REQUEST_CHANGES
+
+"""
 
     def _build_error_handling_guidance(self) -> str:
         """Build error handling guidance for MCP tools."""

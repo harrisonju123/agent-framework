@@ -1633,8 +1633,8 @@ class TestNoChangesVerdict:
 
         assert task.context.get("verdict") != "no_changes"
 
-    def test_no_changes_skips_enforce_chain(self, agent, queue):
-        """When verdict is no_changes, _enforce_workflow_chain should NOT be called."""
+    def test_no_changes_still_calls_enforce_chain(self, agent, queue):
+        """Even when verdict is no_changes, _enforce_workflow_chain is called so the DAG routes properly."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="plan")
@@ -1649,7 +1649,7 @@ class TestNoChangesVerdict:
         agent._run_post_completion_flow(task, response, None, 0)
 
         assert task.context.get("verdict") == "no_changes"
-        agent._enforce_workflow_chain.assert_not_called()
+        agent._enforce_workflow_chain.assert_called_once()
 
     def test_no_changes_pattern_variants(self):
         """Various 'no changes' phrases are detected by _is_no_changes_response."""

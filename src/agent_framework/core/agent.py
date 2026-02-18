@@ -798,12 +798,8 @@ class Agent:
                 if self._is_no_changes_response(content):
                     task.context["verdict"] = "no_changes"
 
-            if task.context.get("verdict") == "no_changes":
-                self.logger.info(
-                    f"No changes needed for task {task.id}, terminating workflow chain"
-                )
-            else:
-                self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
+            self._git_ops.detect_implementation_branch(task)
+            self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
             # Safety net: create PR if LLM pushed but didn't create one.
             # Runs AFTER workflow chain so pr_url doesn't short-circuit the executor.

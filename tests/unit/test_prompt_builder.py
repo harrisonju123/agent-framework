@@ -834,3 +834,60 @@ class TestPlanningInstructions:
         result = _build_planning_instructions("Implement SSO login", "default", None)
 
         assert "Implement SSO login" in result
+
+
+class TestCodeReviewConstraints:
+    """Test that code_review steps inject review-only constraints."""
+
+    def _make_task_with_step(self, sample_task, step_name):
+        """Set up a chain task at the given workflow step."""
+        sample_task.context["chain_step"] = True
+        sample_task.context["workflow_step"] = step_name
+        return sample_task
+
+    def test_code_review_injects_constraints_legacy(self, prompt_builder, sample_task):
+        """code_review step injects review-only guidance in legacy prompt."""
+        task = self._make_task_with_step(sample_task, "code_review")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "REVIEWER" in prompt
+        assert "Do NOT use Write, Edit" in prompt
+        assert "VERDICT: APPROVE" in prompt
+        assert "VERDICT: REQUEST_CHANGES" in prompt
+
+    def test_code_review_injects_constraints_optimized(self, prompt_builder, sample_task):
+        """code_review step injects review-only guidance in optimized prompt."""
+        task = self._make_task_with_step(sample_task, "code_review")
+        prompt = prompt_builder._build_prompt_optimized(task)
+
+        assert "REVIEWER" in prompt
+        assert "Do NOT use Write, Edit" in prompt
+        assert "VERDICT: APPROVE" in prompt
+
+    def test_implement_step_no_review_constraints(self, prompt_builder, sample_task):
+        """implement step should NOT have review-only constraints."""
+        task = self._make_task_with_step(sample_task, "implement")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "REVIEWER" not in prompt
+        assert "VERDICT: APPROVE" not in prompt
+
+    def test_plan_step_no_review_constraints(self, prompt_builder, sample_task):
+        """plan step should NOT have review-only constraints."""
+        task = self._make_task_with_step(sample_task, "plan")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "REVIEWER" not in prompt
+
+    def test_qa_review_step_no_review_constraints(self, prompt_builder, sample_task):
+        """qa_review step should NOT have review-only constraints."""
+        task = self._make_task_with_step(sample_task, "qa_review")
+        prompt = prompt_builder._build_prompt_legacy(task)
+
+        assert "REVIEWER" not in prompt
+
+    def test_standalone_task_no_review_constraints(self, prompt_builder, sample_task):
+        """Standalone tasks (no workflow_step) should NOT have review constraints."""
+        prompt = prompt_builder._build_prompt_legacy(sample_task)
+
+        assert "REVIEWER" not in prompt

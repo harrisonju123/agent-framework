@@ -136,6 +136,38 @@ class GitOperationsManager:
             # No repo context, use framework workspace
             return self.workspace
 
+    def detect_implementation_branch(self, task: Task) -> None:
+        """Snapshot the current worktree branch into task context.
+
+        Downstream chain steps use `implementation_branch` to check out the
+        upstream branch instead of creating a fresh worktree from main.
+        Skips if already set, no active worktree, or HEAD is main/master.
+        """
+        if task.context.get("implementation_branch"):
+            return
+
+        if not self._active_worktree:
+            return
+
+        from ..utils.subprocess_utils import run_git_command
+
+        try:
+            result = run_git_command(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=self._active_worktree,
+                check=False,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return
+            branch = result.stdout.strip()
+            if branch in ("main", "master", "HEAD"):
+                return
+            task.context["implementation_branch"] = branch
+            self.logger.info(f"Detected implementation branch: {branch}")
+        except Exception as e:
+            self.logger.debug(f"Failed to detect implementation branch: {e}")
+
     def _should_use_worktree(self, task: Task) -> bool:
         """Determine if worktree mode should be used for this task.
 
