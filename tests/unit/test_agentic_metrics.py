@@ -124,6 +124,30 @@ class TestSelfEvalMetrics:
 class TestReplanMetrics:
     """Collector correctly aggregates replan events and correlates with task outcomes."""
 
+    def test_replan_success_rate_uses_task_count_not_event_count(self, tmp_path):
+        """replan_success_rate denominator is distinct tasks, not replan event count.
+
+        t1 replans twice and succeeds → success rate should be 100% (1/1 task),
+        not 50% (1/2 events).
+        """
+        now = _utc_now()
+        session_events = [
+            {"event": "replan", "ts": _iso(now), "task_id": "t1"},
+            {"event": "replan", "ts": _iso(now), "task_id": "t1"},  # second replan, same task
+        ]
+        activity_events = [
+            {"type": "start", "task_id": "t1", "timestamp": _iso(now), "agent": "eng"},
+            {"type": "complete", "task_id": "t1", "timestamp": _iso(now), "agent": "eng"},
+        ]
+        _write_jsonl(tmp_path / "logs" / "sessions" / "s.jsonl", session_events)
+        _write_jsonl(tmp_path / ".agent-communication" / "activity-stream.jsonl", activity_events)
+
+        metrics = AgenticMetricsCollector(tmp_path).collect(hours=24)
+
+        assert metrics.replan.total_replans == 2          # event count preserved
+        assert metrics.replan.success_after_replan == 1   # 1 distinct task succeeded
+        assert metrics.replan.replan_success_rate == pytest.approx(100.0)
+
     def test_replan_success_and_failure(self, tmp_path):
         now = _utc_now()
         session_events = [
@@ -214,14 +238,38 @@ class TestTimeWindowFiltering:
             # Outside window (48h ago, window is 24h)
             {"type": "start", "task_id": "t2", "timestamp": _iso(old), "agent": "eng"},
         ]
+        session_events = [
+            # Replan only for the in-window task
+            {"event": "replan", "ts": _iso(now), "task_id": "t1"},
+        ]
         _write_jsonl(tmp_path / ".agent-communication" / "activity-stream.jsonl", activity_events)
+        _write_jsonl(tmp_path / "logs" / "sessions" / "s.jsonl", session_events)
 
-        collector = AgenticMetricsCollector(tmp_path)
-        # Only t1 is within the 24h window
-        metrics = collector.collect(hours=24)
+        metrics = AgenticMetricsCollector(tmp_path).collect(hours=24)
 
-        # Only 1 task in window; recall_rate denominator should be 1 not 2
-        assert metrics.memory.recall_rate == 0.0  # no recalls, but denominator is 1
+        # Only t1 is in the window → total_tasks=1, total_replans=1 → trigger_rate=100%.
+        # If t2 were counted (filter broken), total_tasks=2 → trigger_rate=50%.
+        assert metrics.replan.trigger_rate == pytest.approx(100.0)
+
+    def test_malformed_lines_skipped(self, tmp_path):
+        """Malformed JSONL lines are silently skipped; valid lines still counted."""
+        now = _utc_now()
+        stream = tmp_path / ".agent-communication" / "activity-stream.jsonl"
+        stream.parent.mkdir(parents=True, exist_ok=True)
+        stream.write_text(
+            "{bad json\n"
+            + json.dumps({"type": "start", "task_id": "t1", "timestamp": _iso(now), "agent": "eng"}) + "\n"
+            + "also bad\n"
+            + json.dumps({"type": "start", "task_id": "t2", "timestamp": _iso(now), "agent": "eng"}) + "\n"
+        )
+
+        metrics = AgenticMetricsCollector(tmp_path).collect(hours=24)
+
+        # Bad lines don't crash or contribute to counts; 2 valid tasks recognised
+        assert isinstance(metrics, AgenticMetrics)
+        # trigger_rate = 0 replans / 2 tasks → 0% (denominator proves 2 tasks were read)
+        assert metrics.replan.trigger_rate == 0.0
+        assert metrics.replan.total_replans == 0
 
     def test_output_file_written(self, tmp_path):
         collector = AgenticMetricsCollector(tmp_path)

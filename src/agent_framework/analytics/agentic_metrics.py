@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from ..utils.atomic_io import atomic_write_model
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,7 +104,7 @@ class AgenticMetricsCollector:
             context_budget=self._aggregate_context_budget(session_events, activity_events),
         )
 
-        self.output_file.write_text(metrics.model_dump_json(indent=2))
+        atomic_write_model(self.output_file, metrics)
         logger.info(f"Agentic metrics saved to {self.output_file}")
 
         return metrics
@@ -115,16 +117,18 @@ class AgenticMetricsCollector:
             return []
 
         events: List[Dict[str, Any]] = []
-        for line in self.stream_file.read_text().strip().split("\n"):
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                ts = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
-                if ts >= cutoff:
-                    events.append(event)
-            except (json.JSONDecodeError, KeyError, ValueError) as exc:
-                logger.debug(f"Skipping malformed activity event: {exc}")
+        with self.stream_file.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                    ts = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00"))
+                    if ts >= cutoff:
+                        events.append(event)
+                except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                    logger.debug(f"Skipping malformed activity event: {exc}")
         return events
 
     def _read_session_events(self, cutoff: datetime) -> List[Dict[str, Any]]:
@@ -146,20 +150,22 @@ class AgenticMetricsCollector:
             except OSError:
                 continue
 
-            for line in session_file.read_text().strip().split("\n"):
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                    # Session logs use "ts" not "timestamp"
-                    raw_ts = event.get("ts", "")
-                    if raw_ts:
-                        ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-                        if ts < cutoff:
-                            continue
-                    events.append(event)
-                except (json.JSONDecodeError, KeyError, ValueError) as exc:
-                    logger.debug(f"Skipping malformed session event: {exc}")
+            with session_file.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        # Session logs use "ts" not "timestamp"
+                        raw_ts = event.get("ts", "")
+                        if raw_ts:
+                            ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                            if ts < cutoff:
+                                continue
+                        events.append(event)
+                    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+                        logger.debug(f"Skipping malformed session event: {exc}")
 
         return events
 
@@ -238,7 +244,9 @@ class AgenticMetricsCollector:
         replans = [e for e in session_events if e.get("event") == "replan"]
         total_replans = len(replans)
 
-        # Determine post-replan task outcome from activity events
+        # Determine post-replan task outcome from activity events.
+        # Use distinct task IDs for success/failure so a task that replans multiple
+        # times counts once — avoiding a denominator mismatch with the set intersection.
         replanned_task_ids = {e.get("task_id") for e in replans if e.get("task_id")}
         completed_ids = {e.get("task_id") for e in activity_events if e.get("type") == "complete"}
         failed_ids = {e.get("task_id") for e in activity_events if e.get("type") == "fail"}
@@ -246,7 +254,8 @@ class AgenticMetricsCollector:
         success_after = len(replanned_task_ids & completed_ids)
         failure_after = len(replanned_task_ids & failed_ids)
 
-        replan_success_rate = (success_after / total_replans * 100) if total_replans > 0 else 0.0
+        total_replanned_tasks = len(replanned_task_ids)
+        replan_success_rate = (success_after / total_replanned_tasks * 100) if total_replanned_tasks > 0 else 0.0
         trigger_rate = (total_replans / total_tasks * 100) if total_tasks > 0 else 0.0
 
         return ReplanMetrics(

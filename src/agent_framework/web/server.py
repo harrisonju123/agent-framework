@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
+from ..analytics.agentic_metrics import AgenticMetrics, AgenticMetricsCollector
 from ..core.orchestrator import Orchestrator
 from ..queue.file_queue import FileQueue
 from .data_provider import DashboardDataProvider
@@ -308,13 +309,11 @@ def register_routes(app: FastAPI):
         """Get system health status."""
         return app.state.data_provider.get_health_status()
 
-    @app.get("/api/analytics/agentic")
+    @app.get("/api/analytics/agentic", response_model=AgenticMetrics)
     async def get_agentic_metrics(hours: int = Query(default=24, ge=1, le=168)):
         """Aggregate and return agentic feature metrics for the given time window."""
-        from ..analytics.agentic_metrics import AgenticMetricsCollector
         collector = AgenticMetricsCollector(app.state.workspace)
-        metrics = collector.collect(hours=hours)
-        return metrics.model_dump(mode="json")
+        return await asyncio.to_thread(collector.collect, hours)
 
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():
