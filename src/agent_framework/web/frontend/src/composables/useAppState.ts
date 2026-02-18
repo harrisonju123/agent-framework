@@ -50,6 +50,7 @@ export interface AppState {
   health: ComputedRef<any>
   agentIds: ComputedRef<string[]>
   queueSummary: ComputedRef<string>
+  agenticMetrics: ComputedRef<any>
 
   // Setup
   setupComplete: Ref<boolean>
@@ -117,6 +118,8 @@ export function provideAppState(): AppState {
   const queueSummary = computed(() => {
     return queues.value.map((q: any) => `${q.queue_id}(${q.pending_count})`).join(' ')
   })
+
+  const agenticMetrics = computed(() => state.value?.agentic_metrics ?? null)
 
   // Toast wrapper
   function showToast(message: string, type: 'success' | 'error' | 'info') {
@@ -277,7 +280,7 @@ export function provideAppState(): AppState {
     startAllAgents, stopAllAgents, createWork, analyzeRepo, runTicket,
     loading, apiError,
     isPaused, agents, queues, events, failedTasks, pendingCheckpoints,
-    health, agentIds, queueSummary,
+    health, agentIds, queueSummary, agenticMetrics,
     setupComplete, showSetupPrompt, checkSetupStatus, handleSetupComplete, dismissSetupPrompt,
     handleRestart, handleStart, handleStop, handlePause, handleRetryAll, handleApproveAll, handleRetryTask, handleCancelTask, handleDeleteTask,
     showWorkDialog, showAnalyzeDialog, showTicketDialog, showCreateTaskDialog,

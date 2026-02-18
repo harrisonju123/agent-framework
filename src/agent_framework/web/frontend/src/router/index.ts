@@ -5,6 +5,7 @@ const routes = [
   { path: '/agents', name: 'agents', component: () => import('../pages/AgentsPage.vue'), meta: { title: 'Agents' } },
   { path: '/tasks', name: 'tasks', component: () => import('../pages/TasksPage.vue'), meta: { title: 'Tasks' } },
   { path: '/logs', name: 'logs', component: () => import('../pages/LogsPage.vue'), meta: { title: 'Logs' } },
+  { path: '/insights', name: 'insights', component: () => import('../pages/InsightsPage.vue'), meta: { title: 'Insights' } },
   { path: '/settings', name: 'settings', component: () => import('../pages/SettingsPage.vue'), meta: { title: 'Settings' } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

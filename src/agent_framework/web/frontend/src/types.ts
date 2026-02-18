@@ -92,6 +92,50 @@ export interface HealthReport {
   warnings: string[]
 }
 
+export interface MemoryMetrics {
+  total_entries: number
+  stores_count: number
+  categories: Record<string, number>
+}
+
+export interface SelfEvalMetrics {
+  total_evals: number
+  passed: number
+  failed: number
+  sessions_scanned: number
+}
+
+export interface ReplanMetrics {
+  total_replans: number
+  sessions_with_replans: number
+  sessions_scanned: number
+}
+
+export interface SpecializationMetrics {
+  profile_counts: Record<string, number>
+  sessions_scanned: number
+}
+
+export interface DebateMetrics {
+  total_debates: number
+  sessions_scanned: number
+}
+
+export interface ContextBudgetMetrics {
+  budget_exceeded_count: number
+  exceeded_by_agent: Record<string, number>
+}
+
+export interface AgenticMetrics {
+  memory: MemoryMetrics
+  self_eval: SelfEvalMetrics
+  replan: ReplanMetrics
+  specialization: SpecializationMetrics
+  debates: DebateMetrics
+  context_budget: ContextBudgetMetrics
+  computed_at: string | null
+}
+
 export interface DashboardState {
   agents: Agent[]
   queues: QueueStats[]
@@ -101,6 +145,7 @@ export interface DashboardState {
   health: HealthReport
   is_paused: boolean
   uptime_seconds: number
+  agentic_metrics?: AgenticMetrics
 }
 
 // API Response types
