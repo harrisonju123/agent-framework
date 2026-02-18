@@ -544,14 +544,36 @@ class TestDetectImplementationBranch:
 
         assert "implementation_branch" not in sample_task.context
 
-    def test_skips_when_already_set(self, git_ops, sample_task, tmp_path):
-        """Does not overwrite an existing implementation_branch."""
+    @patch("agent_framework.utils.subprocess_utils.run_git_command")
+    def test_overwrites_stale_branch(self, mock_run_git, git_ops, sample_task, tmp_path):
+        """Stale architect branch is replaced by the engineer's actual branch."""
         git_ops._active_worktree = tmp_path / "worktree"
-        sample_task.context["implementation_branch"] = "existing-branch"
+        sample_task.context["implementation_branch"] = "agent/architect/task-old"
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "agent/engineer/task-new\n"
+        mock_run_git.return_value = mock_result
 
         git_ops.detect_implementation_branch(sample_task)
 
-        assert sample_task.context["implementation_branch"] == "existing-branch"
+        assert sample_task.context["implementation_branch"] == "agent/engineer/task-new"
+        git_ops.logger.info.assert_called_once_with(
+            "Updated implementation branch: agent/architect/task-old → agent/engineer/task-new"
+        )
+
+    @patch("agent_framework.utils.subprocess_utils.run_git_command")
+    def test_preserves_branch_when_worktree_matches(self, mock_run_git, git_ops, sample_task, tmp_path):
+        """No unnecessary churn when worktree HEAD matches what's already stored."""
+        git_ops._active_worktree = tmp_path / "worktree"
+        sample_task.context["implementation_branch"] = "agent/engineer/task-abc"
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "agent/engineer/task-abc\n"
+        mock_run_git.return_value = mock_result
+
+        git_ops.detect_implementation_branch(sample_task)
+
+        assert sample_task.context["implementation_branch"] == "agent/engineer/task-abc"
 
     def test_skips_when_no_worktree(self, git_ops, sample_task):
         """No active worktree → no-op."""

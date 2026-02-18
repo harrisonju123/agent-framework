@@ -156,10 +156,9 @@ class GitOperationsManager:
 
         Downstream chain steps use `implementation_branch` to check out the
         upstream branch instead of creating a fresh worktree from main.
-        Skips if already set, no active worktree, or HEAD is main/master.
+        Skips if no active worktree or HEAD is main/master.
         """
-        if task.context.get("implementation_branch"):
-            return
+        old_branch = task.context.get("implementation_branch")
 
         if not self._active_worktree:
             return
@@ -179,7 +178,12 @@ class GitOperationsManager:
             if branch in ("main", "master", "HEAD"):
                 return
             task.context["implementation_branch"] = branch
-            self.logger.info(f"Detected implementation branch: {branch}")
+            if old_branch and old_branch != branch:
+                self.logger.info(
+                    f"Updated implementation branch: {old_branch} → {branch}"
+                )
+            else:
+                self.logger.info(f"Detected implementation branch: {branch}")
         except Exception as e:
             self.logger.debug(f"Failed to detect implementation branch: {e}")
 
