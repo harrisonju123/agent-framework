@@ -567,32 +567,20 @@ class Orchestrator:
         logger.info("Cleanup complete")
 
     def _reset_in_progress_tasks(self) -> None:
-        """Reset all in_progress tasks to pending."""
-        import json
-        from ..core.task import Task, TaskStatus
+        """Recover orphaned in_progress tasks using smart 3-tier detection."""
+        from ..queue.file_queue import FileQueue
 
-        queue_dir = self.comm_dir / "queues"
-        if not queue_dir.exists():
-            return
+        queue = FileQueue(self.workspace)
+        result = queue.recover_orphaned_tasks()
 
-        reset_count = 0
-        for agent_dir in queue_dir.iterdir():
-            if not agent_dir.is_dir():
-                continue
-
-            for task_file in agent_dir.glob("*.json"):
-                try:
-                    task_data = json.loads(task_file.read_text())
-                    if task_data.get("status") == "in_progress":
-                        task = Task(**task_data)
-                        task.reset_to_pending()
-                        task_file.write_text(task.model_dump_json(indent=2))
-                        reset_count += 1
-                except Exception as e:
-                    logger.error(f"Error resetting task {task_file}: {e}")
-
-        if reset_count > 0:
-            logger.info(f"Reset {reset_count} in_progress tasks to pending")
+        auto_completed = len(result["auto_completed"])
+        reset = len(result["reset_to_pending"])
+        total = auto_completed + reset
+        if total > 0:
+            logger.info(
+                f"Startup recovery: {auto_completed} auto-completed, "
+                f"{reset} reset to pending"
+            )
 
     def check_system_health(self):
         """Check system health using circuit breaker.

@@ -127,15 +127,11 @@ class FileQueue:
                 # Recover orphaned in_progress tasks (agent crashed/restarted)
                 if task.status == TaskStatus.IN_PROGRESS:
                     if self._is_orphaned(task):
-                        logger.warning(
-                            f"Recovering orphaned task {task.id} "
-                            f"(was in_progress by {task.started_by})"
-                        )
-                        task.status = TaskStatus.PENDING
-                        task.started_at = None
-                        task.started_by = None
-                        atomic_write_model(task_file, task)
-                        # Fall through to pending processing below
+                        outcome = self._recover_single_orphan(task_file, task)
+                        if outcome == "auto_completed":
+                            non_pending.add(task_file.name)
+                            continue
+                        # "reset_to_pending" — fall through to pending processing
                     else:
                         non_pending.add(task_file.name)
                         continue
@@ -243,14 +239,11 @@ class FileQueue:
 
                 if task.status == TaskStatus.IN_PROGRESS:
                     if self._is_orphaned(task):
-                        logger.warning(
-                            f"Recovering orphaned task {task.id} "
-                            f"(was in_progress by {task.started_by})"
-                        )
-                        task.status = TaskStatus.PENDING
-                        task.started_at = None
-                        task.started_by = None
-                        atomic_write_model(task_file, task)
+                        outcome = self._recover_single_orphan(task_file, task)
+                        if outcome == "auto_completed":
+                            non_pending.add(task_file.name)
+                            continue
+                        # "reset_to_pending" — fall through to pending check
                     else:
                         non_pending.add(task_file.name)
                         continue
@@ -781,6 +774,110 @@ class FileQueue:
 
         if self.completed_dir.exists():
             yield from self.completed_dir.glob("*.json")
+
+    def _is_already_completed(self, task_id: str) -> bool:
+        """Check if a task already exists in the completed directory."""
+        return (self.completed_dir / f"{task_id}.json").exists()
+
+    def _has_successor_chain_task(self, task_id: str) -> bool:
+        """Check if any queued or completed task is a chain successor of this task.
+
+        A successor is a task with context["source_task_id"] == task_id
+        AND context["chain_step"] == True.
+        """
+        for task_file in self._iter_all_task_files():
+            try:
+                data = json.loads(task_file.read_text())
+                ctx = data.get("context", {})
+                if ctx.get("source_task_id") == task_id and ctx.get("chain_step"):
+                    return True
+            except (json.JSONDecodeError, OSError, KeyError):
+                continue
+        return False
+
+    def _auto_complete_orphan(self, task_file: Path, task: Task, reason: str) -> None:
+        """Auto-complete an orphaned task and move it to completed/."""
+        task.status = TaskStatus.COMPLETED
+        task.context["completed_by"] = "recovery"
+        task.context["recovery_reason"] = reason
+        completed_file = self.completed_dir / f"{task.id}.json"
+        atomic_write_model(completed_file, task)
+        if task_file.exists():
+            task_file.unlink()
+
+    def _recover_single_orphan(self, task_file: Path, task: Task) -> str:
+        """Apply 3-tier recovery to one orphaned IN_PROGRESS task.
+
+        Tier 1: Already in completed/ → remove stale queue copy
+        Tier 2: Chain task with successor queued/completed → auto-complete
+        Tier 3: Genuine orphan → reset to PENDING
+
+        Returns "auto_completed" or "reset_to_pending".
+        """
+        if self._is_already_completed(task.id):
+            task_file.unlink()
+            logger.debug(f"Removed stale queue copy of completed task {task.id}")
+            return "auto_completed"
+
+        if task.context.get("chain_step") and self._has_successor_chain_task(task.id):
+            self._auto_complete_orphan(task_file, task, "successor chain task already exists")
+            logger.debug(f"Auto-completed orphan {task.id}: successor exists")
+            return "auto_completed"
+
+        task.status = TaskStatus.PENDING
+        task.started_at = None
+        task.started_by = None
+        atomic_write_model(task_file, task)
+        logger.debug(f"Reset genuine orphan {task.id} to pending")
+        return "reset_to_pending"
+
+    def recover_orphaned_tasks(self, queue_ids: list[str] | None = None) -> dict:
+        """Unified recovery for orphaned in_progress tasks.
+
+        Delegates to _recover_single_orphan() for the 3-tier check.
+
+        Does NOT check heartbeats — assumes all agents for the scanned
+        queues are dead. Callers are responsible for ensuring this
+        (e.g., at startup or after killing an agent).
+
+        Args:
+            queue_ids: If provided, only scan these queue directories.
+                       Otherwise scan all queues.
+
+        Returns:
+            {"auto_completed": [...], "reset_to_pending": [...], "errors": [...]}
+        """
+        result = {"auto_completed": [], "reset_to_pending": [], "errors": []}
+
+        if not self.queue_dir.exists():
+            return result
+
+        dirs_to_scan = []
+        if queue_ids:
+            for qid in queue_ids:
+                qdir = self.queue_dir / qid
+                if qdir.exists() and qdir.is_dir():
+                    dirs_to_scan.append(qdir)
+        else:
+            for qdir in self.queue_dir.iterdir():
+                if qdir.is_dir():
+                    dirs_to_scan.append(qdir)
+
+        for queue_path in dirs_to_scan:
+            for task_file in queue_path.glob("*.json"):
+                try:
+                    task = self._load_task(task_file)
+                    if task.status != TaskStatus.IN_PROGRESS:
+                        continue
+
+                    outcome = self._recover_single_orphan(task_file, task)
+                    result[outcome].append(task.id)
+
+                except Exception as e:
+                    result["errors"].append(str(task_file))
+                    logger.error(f"Error recovering task {task_file}: {e}")
+
+        return result
 
     def _fan_in_already_created(self, parent_task_id: str) -> bool:
         """Check if fan-in task already exists (prevent duplicate creation)."""

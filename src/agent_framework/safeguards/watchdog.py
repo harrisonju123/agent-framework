@@ -1,7 +1,6 @@
 """Watchdog for monitoring agent heartbeats and restarting dead agents."""
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -12,7 +11,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ..core.task import Task, TaskStatus
 from ..core.activity import ActivityManager, AgentActivity, AgentStatus
 from ..utils.process_utils import kill_process_tree
 
@@ -185,39 +183,24 @@ class Watchdog:
         self._update_pid(agent_id, proc.pid)
 
     async def reset_in_progress_tasks(self, agent_id: str) -> None:
-        """
-        Reset in_progress tasks for a dead agent to pending.
+        """Recover orphaned in_progress tasks for a dead agent using smart 3-tier detection.
 
         Args:
             agent_id: Agent identifier
         """
-        agent_queue = self.queue_dir / agent_id
-        if not agent_queue.exists():
-            return
+        from ..queue.file_queue import FileQueue
 
-        reset_count = 0
-        for task_file in agent_queue.glob("*.json"):
-            try:
-                task_data = json.loads(task_file.read_text())
+        queue = FileQueue(self.workspace)
+        result = queue.recover_orphaned_tasks(queue_ids=[agent_id])
 
-                if task_data.get("status") == "in_progress":
-                    # Reset to pending
-                    task = Task(**task_data)
-                    task.reset_to_pending()
-
-                    # Write back
-                    tmp_file = task_file.with_suffix(".tmp")
-                    tmp_file.write_text(task.model_dump_json(indent=2))
-                    tmp_file.rename(task_file)
-
-                    reset_count += 1
-                    logger.info(f"Reset task {task.id} to pending")
-
-            except Exception as e:
-                logger.error(f"Error resetting task {task_file}: {e}")
-
-        if reset_count > 0:
-            logger.info(f"Reset {reset_count} tasks for {agent_id}")
+        auto_completed = len(result["auto_completed"])
+        reset = len(result["reset_to_pending"])
+        total = auto_completed + reset
+        if total > 0:
+            logger.info(
+                f"Recovery for {agent_id}: {auto_completed} auto-completed, "
+                f"{reset} reset to pending"
+            )
 
     async def handle_dead_agent(self, agent_id: str) -> None:
         """
