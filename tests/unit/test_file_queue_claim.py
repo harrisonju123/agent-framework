@@ -119,3 +119,39 @@ class TestClaim:
         claimed_task, lock = result
         assert claimed_task.id == "task-1"
         lock.release()
+
+
+class TestPushCompletedGuard:
+    """push() rejects tasks that already exist in completed/."""
+
+    def test_push_rejects_already_completed_task(self, queue, caplog):
+        """A task in completed/ must not be re-pushed into the queue."""
+        task = _make_task(task_id="task-done")
+        queue.push(task, "engineer")
+
+        # Complete the task
+        task.status = TaskStatus.COMPLETED
+        queue.mark_completed(task)
+
+        # Try pushing the same task again (simulates stale worktree sync)
+        stale_copy = _make_task(task_id="task-done")
+        queue.push(stale_copy, "engineer")
+
+        # Should not appear in queue
+        task_file = queue.queue_dir / "engineer" / "task-done.json"
+        assert not task_file.exists()
+        assert "Rejecting push for already-completed task task-done" in caplog.text
+
+    def test_push_allows_task_after_requeue_removes_completed(self, queue):
+        """requeue_task() removes from completed/ first, so push succeeds."""
+        task = _make_task(task_id="task-retry")
+        queue.push(task, "engineer")
+
+        # Complete and then requeue
+        task.status = TaskStatus.COMPLETED
+        queue.mark_completed(task)
+        queue.requeue_task(task)
+
+        # Task should now be in the queue again
+        task_file = queue.queue_dir / "engineer" / "task-retry.json"
+        assert task_file.exists()

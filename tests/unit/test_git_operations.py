@@ -30,6 +30,7 @@ def mock_queue():
     """Mock file queue."""
     queue = MagicMock()
     queue.queue_dir = Path("/mock/queue")
+    queue.get_completed.return_value = None
     return queue
 
 
@@ -213,6 +214,39 @@ class TestSyncWorktreeQueuedTasks:
 
         assert git_ops.queue.push.called
         assert not task_file.exists()  # File should be deleted after sync
+
+    def test_skips_completed_tasks(self, git_ops, tmp_path):
+        """Completed tasks in worktree queue are skipped but cleaned up."""
+        from datetime import datetime, timezone
+
+        worktree_path = tmp_path / "worktree"
+        git_ops._active_worktree = worktree_path
+
+        worktree_queue = worktree_path / ".agent-communication" / "queues" / "engineer"
+        worktree_queue.mkdir(parents=True)
+
+        task_data = {
+            "id": "task-already-done",
+            "title": "Completed Task",
+            "description": "Test",
+            "type": "implementation",
+            "status": "pending",
+            "priority": 1,
+            "created_by": "test",
+            "assigned_to": "engineer",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "context": {},
+        }
+        task_file = worktree_queue / "task-already-done.json"
+        task_file.write_text(json.dumps(task_data))
+
+        # Simulate task already completed
+        git_ops.queue.get_completed.return_value = MagicMock()
+
+        git_ops.sync_worktree_queued_tasks()
+
+        git_ops.queue.push.assert_not_called()
+        assert not task_file.exists()  # Stale file still cleaned up
 
 
 class TestCleanupWorktree:

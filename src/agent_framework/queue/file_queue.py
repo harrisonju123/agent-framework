@@ -67,7 +67,16 @@ class FileQueue:
         Add a task to a queue.
 
         Uses atomic write: write to .tmp then mv.
+        Rejects tasks that already exist in completed/ to prevent
+        stale worktree copies from resurrecting finished work.
         """
+        completed_file = self.completed_dir / f"{task.id}.json"
+        if completed_file.exists():
+            logger.warning(
+                f"Rejecting push for already-completed task {task.id}"
+            )
+            return
+
         queue_path = self.queue_dir / queue_id
         queue_path.mkdir(parents=True, exist_ok=True)
 

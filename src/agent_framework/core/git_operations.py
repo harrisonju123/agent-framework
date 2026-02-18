@@ -261,6 +261,15 @@ class GitOperationsManager:
                 try:
                     data = json.loads(task_file.read_text())
                     synced_task = Task(**data)
+
+                    # Skip tasks that already completed — stale worktree copies
+                    if self.queue.get_completed(synced_task.id):
+                        self.logger.info(
+                            f"Skipping already-completed task {synced_task.id} during worktree sync"
+                        )
+                        task_file.unlink(missing_ok=True)
+                        continue
+
                     self.queue.push(synced_task, synced_task.assigned_to)
                     task_file.unlink()
                     synced += 1

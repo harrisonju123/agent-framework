@@ -195,3 +195,28 @@ class TestSyncWorktreeQueuedTasks:
         assert synced.id == "impl-xyz789"
         assert synced.assigned_to == "engineer"
         assert synced.depends_on == ["impl-abc123"]
+
+    def test_skips_already_completed_tasks(self, agent, queue, tmp_path):
+        """Stale worktree copies of completed tasks are cleaned up, not re-pushed."""
+        worktree = tmp_path / "worktree"
+        wt_queue = worktree / ".agent-communication" / "queues" / "engineer"
+        wt_queue.mkdir(parents=True)
+
+        task_data = _make_task_json("impl-done")
+        (wt_queue / "impl-done.json").write_text(json.dumps(task_data))
+
+        # Mark the task as completed in the main queue
+        completed_task = Task(**task_data)
+        completed_task.status = TaskStatus.COMPLETED
+        queue.mark_completed(completed_task)
+
+        agent._active_worktree = worktree
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
+
+        # Task should NOT appear in the main queue
+        main_task_file = queue.queue_dir / "engineer" / "impl-done.json"
+        assert not main_task_file.exists()
+
+        # Worktree copy should still be cleaned up
+        assert not (wt_queue / "impl-done.json").exists()
