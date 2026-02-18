@@ -531,17 +531,18 @@ class DashboardDataProvider:
 
         try:
             routed = resume_after_checkpoint(task, self.queue, self.workspace)
-            if not routed:
-                logger.warning(
-                    f"Could not route checkpoint task {task_id} to next step, "
-                    "re-queuing to same agent"
+            if routed:
+                checkpoint_file.unlink(missing_ok=True)
+            else:
+                logger.error(
+                    f"Checkpoint approved but could not route task {task_id} "
+                    "to next step — preserving checkpoint for retry"
                 )
-                self.queue.push(task, task.assigned_to)
-            checkpoint_file.unlink(missing_ok=True)
         except Exception as e:
             logger.error(f"Error routing checkpoint task {task_id}: {e}")
             return False
 
+        # The approval itself succeeded regardless of routing outcome
         return True
 
     def reject_checkpoint(self, task_id: str, feedback: str) -> bool:

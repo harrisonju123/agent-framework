@@ -4,6 +4,7 @@ import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.web.data_provider import DashboardDataProvider
@@ -148,12 +149,10 @@ class TestGetPendingCheckpoints:
 
 
 class TestApproveCheckpoint:
-    def test_approve_success(self):
+    @patch("agent_framework.workflow.executor.resume_after_checkpoint", return_value=True)
+    def test_approve_success(self, mock_resume):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = _make_workspace(tmpdir)
-            # Create queue dirs for re-queuing
-            queue_dir = workspace / ".agent-communication" / "queues" / "engineer"
-            queue_dir.mkdir(parents=True)
 
             task = _make_checkpoint_task()
             checkpoint_file = _write_checkpoint(workspace, task)
@@ -162,22 +161,30 @@ class TestApproveCheckpoint:
             result = provider.approve_checkpoint(task.id)
 
             assert result is True
-            # Checkpoint file should be deleted
+            # Checkpoint file deleted on successful routing
             assert not checkpoint_file.exists()
-            # Task should be re-queued to the agent's queue
-            queued_files = list(queue_dir.glob("*.json"))
-            assert len(queued_files) == 1
+            mock_resume.assert_called_once()
 
-            # Verify re-queued task has COMPLETED status (LLM work is done)
-            requeued = json.loads(queued_files[0].read_text())
-            assert requeued["status"] == TaskStatus.COMPLETED.value
-            assert requeued["approved_by"] is not None
-
-    def test_approve_with_message(self):
+    @patch("agent_framework.workflow.executor.resume_after_checkpoint", return_value=False)
+    def test_approve_preserves_checkpoint_on_routing_failure(self, mock_resume):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = _make_workspace(tmpdir)
-            queue_dir = workspace / ".agent-communication" / "queues" / "engineer"
-            queue_dir.mkdir(parents=True)
+
+            task = _make_checkpoint_task()
+            checkpoint_file = _write_checkpoint(workspace, task)
+
+            provider = DashboardDataProvider(workspace)
+            result = provider.approve_checkpoint(task.id)
+
+            # Approval itself succeeds even if routing failed
+            assert result is True
+            # Checkpoint preserved for retry
+            assert checkpoint_file.exists()
+
+    @patch("agent_framework.workflow.executor.resume_after_checkpoint", return_value=True)
+    def test_approve_with_message(self, mock_resume):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = _make_workspace(tmpdir)
 
             task = _make_checkpoint_task()
             _write_checkpoint(workspace, task)
@@ -186,10 +193,6 @@ class TestApproveCheckpoint:
             result = provider.approve_checkpoint(task.id, message="Looks good")
 
             assert result is True
-            # Verify note was added
-            queued_files = list(queue_dir.glob("*.json"))
-            requeued = json.loads(queued_files[0].read_text())
-            assert any("Looks good" in n for n in requeued["notes"])
 
     def test_approve_nonexistent_task(self):
         with tempfile.TemporaryDirectory() as tmpdir:

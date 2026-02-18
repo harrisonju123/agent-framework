@@ -57,12 +57,20 @@ def resume_after_checkpoint(task: "Task", queue: "FileQueue", workspace: Path) -
     queue_dir = workspace / ".agent-communication" / "queues"
     executor = WorkflowExecutor(queue, queue_dir)
 
-    return executor.execute_step(
+    routed = executor.execute_step(
         workflow=workflow_dag,
         task=task,
         response=None,
         current_agent_id=task.assigned_to,
     )
+    if routed:
+        logger.info(f"Task {task.id} resumed after checkpoint — routed to next step")
+    else:
+        logger.warning(
+            f"Task {task.id} could not be routed after checkpoint approval "
+            f"(workflow={workflow_name}, step={task.context.get('workflow_step')})"
+        )
+    return routed
 
 
 # Hard ceiling on chain depth to prevent runaway loops regardless of routing logic

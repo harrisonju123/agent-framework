@@ -5,7 +5,7 @@ import os
 import pytest
 from datetime import datetime, UTC
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, MagicMock, patch, AsyncMock
 
 from click.testing import CliRunner
 
@@ -416,8 +416,9 @@ def test_cli_approve_nonexistent_task(tmp_path):
     assert "No task found" in result.output
 
 
-def test_cli_approve_specific_task(tmp_path):
-    """'agent approve <id>' with confirmation re-queues and removes checkpoint file."""
+@patch("agent_framework.workflow.executor.resume_after_checkpoint", return_value=True)
+def test_cli_approve_specific_task(mock_resume, tmp_path):
+    """'agent approve <id>' deletes checkpoint on successful routing."""
     from agent_framework.cli.main import cli
 
     task = create_test_task(task_id="cp-task-1", status=TaskStatus.AWAITING_APPROVAL)
@@ -425,10 +426,6 @@ def test_cli_approve_specific_task(tmp_path):
     task.checkpoint_message = "Review required"
     checkpoint_dir = tmp_path / ".agent-communication" / "queues" / "checkpoints"
     cp_file = _write_checkpoint_file(checkpoint_dir, task)
-
-    # Also need the engineer queue dir for FileQueue.push
-    engineer_dir = tmp_path / ".agent-communication" / "queues" / "engineer"
-    engineer_dir.mkdir(parents=True)
 
     runner = CliRunner()
     result = runner.invoke(
@@ -439,8 +436,34 @@ def test_cli_approve_specific_task(tmp_path):
 
     assert result.exit_code == 0
     assert "Checkpoint approved" in result.output
-    # Checkpoint file removed after successful re-queue
+    assert "routed to next workflow step" in result.output
     assert not cp_file.exists()
+    mock_resume.assert_called_once()
+
+
+@patch("agent_framework.workflow.executor.resume_after_checkpoint", return_value=False)
+def test_cli_approve_preserves_checkpoint_on_routing_failure(mock_resume, tmp_path):
+    """Checkpoint preserved when routing to next step fails."""
+    from agent_framework.cli.main import cli
+
+    task = create_test_task(task_id="cp-task-1", status=TaskStatus.AWAITING_APPROVAL)
+    task.checkpoint_reached = "wf-engineer"
+    task.checkpoint_message = "Review required"
+    checkpoint_dir = tmp_path / ".agent-communication" / "queues" / "checkpoints"
+    cp_file = _write_checkpoint_file(checkpoint_dir, task)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--workspace", str(tmp_path), "approve", "cp-task-1"],
+        input="y\n",
+    )
+
+    assert result.exit_code == 0
+    assert "routing to next step failed" in result.output
+    assert "Checkpoint preserved" in result.output
+    # Checkpoint NOT deleted — available for retry
+    assert cp_file.exists()
 
 
 def test_cli_approve_cancelled(tmp_path):
@@ -591,3 +614,80 @@ def test_checkpoint_saves_workflow_step(tmp_path):
     checkpoint_file = queue_dir / "checkpoints" / f"{task.id}.json"
     saved = json.loads(checkpoint_file.read_text())
     assert saved["context"]["workflow_step"] == "engineer"
+
+
+# -- _is_checkpoint_approved guard tests --
+
+
+def test_guard_skips_llm_for_approved_task():
+    """Checkpoint-approved task routes forward without LLM execution."""
+    from agent_framework.core.agent import Agent
+
+    agent = MagicMock()
+    agent._is_checkpoint_approved = Agent._is_checkpoint_approved.__get__(agent)
+
+    task = create_test_task(status=TaskStatus.COMPLETED)
+    task.approved_at = datetime.now(UTC)
+    task.checkpoint_reached = "wf-engineer"
+
+    assert agent._is_checkpoint_approved(task) is True
+
+
+def test_guard_runs_llm_for_normal_task():
+    """Normal tasks (no approval, no checkpoint) are not short-circuited."""
+    from agent_framework.core.agent import Agent
+
+    agent = MagicMock()
+    agent._is_checkpoint_approved = Agent._is_checkpoint_approved.__get__(agent)
+
+    task = create_test_task()
+    task.approved_at = None
+    task.checkpoint_reached = None
+
+    assert agent._is_checkpoint_approved(task) is False
+
+
+def test_guard_runs_llm_when_only_checkpoint_set():
+    """Task with checkpoint but no approval (awaiting) is not short-circuited."""
+    from agent_framework.core.agent import Agent
+
+    agent = MagicMock()
+    agent._is_checkpoint_approved = Agent._is_checkpoint_approved.__get__(agent)
+
+    task = create_test_task(status=TaskStatus.AWAITING_APPROVAL)
+    task.approved_at = None
+    task.checkpoint_reached = "wf-engineer"
+
+    assert agent._is_checkpoint_approved(task) is False
+
+
+@pytest.mark.asyncio
+async def test_handle_task_skips_llm_for_checkpoint_approved():
+    """_handle_task routes forward without LLM for checkpoint-approved tasks."""
+    from agent_framework.core.agent import Agent
+
+    agent = MagicMock()
+    agent._is_checkpoint_approved = Agent._is_checkpoint_approved.__get__(agent)
+    agent._handle_task = Agent._handle_task.__get__(agent)
+    agent.queue.acquire_lock.return_value = MagicMock()
+    agent._initialize_task_execution = MagicMock()
+    agent._setup_task_context = MagicMock()
+    agent._setup_context_window_manager_for_task = MagicMock()
+    agent._cleanup_task_execution = MagicMock()
+    agent._session_logger = MagicMock()
+    agent._context_window_manager = None
+    agent.config.id = "engineer"
+
+    task = create_test_task(status=TaskStatus.COMPLETED)
+    task.approved_at = datetime.now(UTC)
+    task.checkpoint_reached = "wf-engineer"
+
+    await agent._handle_task(task, lock=MagicMock())
+
+    # LLM should NOT be called
+    agent._execute_llm_with_interruption_watch.assert_not_called()
+    # Task should be marked completed and routed forward
+    agent.queue.mark_completed.assert_called_once_with(task)
+    agent._enforce_workflow_chain.assert_called_once_with(
+        task, response=None, routing_signal=None
+    )

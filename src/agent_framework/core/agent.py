@@ -1210,6 +1210,18 @@ class Agent:
             # Initialize task execution state
             self._initialize_task_execution(task, task_start_time)
 
+            # Belt-and-suspenders: if a checkpoint-approved task somehow ended
+            # up back in the queue, skip the LLM and route forward immediately
+            if self._is_checkpoint_approved(task):
+                self.logger.info(
+                    f"Task {task.id} already approved at checkpoint "
+                    f"{task.checkpoint_reached} — routing forward without LLM"
+                )
+                task.mark_completed(self.config.id)
+                self.queue.mark_completed(task)
+                self._enforce_workflow_chain(task, response=None, routing_signal=None)
+                return
+
             # Get working directory for task (worktree, target repo, or framework workspace)
             working_dir = self._git_ops.get_working_directory(task)
             self.logger.info(f"Working directory: {working_dir}")
@@ -2145,6 +2157,13 @@ This preview will be reviewed by the architect before implementation is authoriz
     # Review cycle methods moved to ReviewCycleManager
 
     # -- Workflow routing methods moved to WorkflowRouter --
+    def _is_checkpoint_approved(self, task: Task) -> bool:
+        """Check if task already passed a checkpoint and just needs routing."""
+        return (
+            task.approved_at is not None
+            and task.checkpoint_reached is not None
+        )
+
     # Backwards compatibility shims that delegate to WorkflowRouter
 
     def _check_and_create_fan_in_task(self, task: Task) -> None:
