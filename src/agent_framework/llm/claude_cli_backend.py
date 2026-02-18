@@ -263,7 +263,8 @@ class ClaudeCLIBackend(LLMBackend):
             logger.debug(f"Team mode active: teammates={list(request.agents.keys())}")
 
         # Restrict tool access for PREVIEW tasks — enforces read-only mode at the
-        # CLI level so the model physically cannot write files regardless of prompt.
+        # CLI level. Bash is still allowed for read-only exploration (git log, ls, etc.)
+        # so this is defense-in-depth alongside the prompt injection, not airtight.
         if request.allowed_tools:
             cmd.extend(["--allowedTools", ",".join(request.allowed_tools)])
             logger.debug(f"Tool restriction active: allowed_tools={request.allowed_tools}")
