@@ -197,6 +197,15 @@ agents:
 
       CORE RESPONSIBILITIES:
 
+      PRE-SCAN MODE:
+      When your task title starts with "[pre-scan]" or context.pre_scan is true:
+      - Run ONLY lightweight checks: linting, test suite, basic security scan
+      - Do NOT do deep code review (architect handles that in parallel)
+      - Do NOT create PRs or modify any files
+      - Do NOT route to other agents or create follow-up tasks
+      - Output structured findings in the standard JSON format
+      - Be fast: this runs in parallel with architect code review
+
       1. STATIC ANALYSIS & LINTING:
          Detect language and run appropriate tools:
          - Go: golangci-lint (includes gosec for security)

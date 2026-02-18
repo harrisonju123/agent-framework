@@ -405,6 +405,12 @@ class WorkflowExecutor:
             self.logger.info(f"🔗 Workflow: queued {next_agent} for task {task.id} ({reason})")
         except Exception as e:
             self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
+            return
+
+        # Side-channel: queue QA pre-scan in parallel with code review
+        if (task.context.get("workflow_step") == "implement"
+                and target_step.id == "code_review"):
+            self._queue_qa_pre_scan(task)
 
     def _is_chain_task_already_queued(
         self, next_agent: str, source_task_id: str, *,
@@ -558,6 +564,82 @@ class WorkflowExecutor:
         checkpoint_file = checkpoint_queue_dir / f"{task.id}.json"
         atomic_write_model(checkpoint_file, task)
         self.logger.debug(f"Saved checkpoint state for task {task.id}")
+
+    def _queue_qa_pre_scan(self, task: "Task") -> None:
+        """Queue a lightweight QA pre-scan in parallel with code review.
+
+        Fire-and-forget side task — the workflow chain continues regardless.
+        Deduped by root_task_id so only the first implement→code_review
+        transition triggers a scan.
+        """
+        from ..core.task import Task
+
+        root_task_id = task.context.get("_root_task_id", task.id)
+        impl_branch = task.context.get("implementation_branch")
+        if not impl_branch:
+            self.logger.debug(f"Skipping QA pre-scan: no implementation_branch for task {task.id}")
+            return
+
+        if self._is_prescan_already_queued(root_task_id):
+            self.logger.debug(f"QA pre-scan already queued for root {root_task_id}")
+            return
+
+        prescan_id = f"prescan-{root_task_id}"
+        prescan_context = {
+            k: v for k, v in task.context.items()
+            if k in (
+                "github_repo", "jira_key", "jira_project", "workflow",
+                "implementation_branch", "_root_task_id", "_chain_depth",
+            )
+        }
+        prescan_context.update({
+            "pre_scan": True,
+            "_root_task_id": root_task_id,
+            "source_task_id": task.id,
+        })
+
+        prescan_task = Task(
+            id=prescan_id,
+            type=TaskType.QA_VERIFICATION,
+            status=TaskStatus.PENDING,
+            priority=task.priority,
+            created_by=task.assigned_to or "executor",
+            assigned_to="qa",
+            created_at=datetime.now(timezone.utc),
+            title=f"[pre-scan] {task.title}",
+            description=(
+                "QA PRE-SCAN: Run lightweight checks in parallel with architect code review.\n\n"
+                "Run ONLY:\n"
+                "1. Linting (language-appropriate linter)\n"
+                "2. Test suite execution\n"
+                "3. Basic security scan (if available)\n\n"
+                "Do NOT:\n"
+                "- Do deep code review (architect handles that)\n"
+                "- Create PRs or modify files\n"
+                "- Route to other agents or create follow-up tasks\n\n"
+                "Output structured findings in JSON format.\n\n"
+                f"Branch: {impl_branch}\n"
+                f"Original task: {task.title}"
+            ),
+            context=prescan_context,
+        )
+
+        try:
+            self.queue.push(prescan_task, "qa")
+            self.logger.info(f"🔍 Pre-scan: queued QA pre-scan for root {root_task_id}")
+        except Exception as e:
+            self.logger.warning(f"Failed to queue QA pre-scan (non-fatal): {e}")
+
+    def _is_prescan_already_queued(self, root_task_id: str) -> bool:
+        """Check if a pre-scan task already exists for this root task."""
+        prescan_id = f"prescan-{root_task_id}"
+        queue_path = self.queue_dir / "qa" / f"{prescan_id}.json"
+        if queue_path.exists():
+            return True
+        completed_path = self.queue.completed_dir / f"{prescan_id}.json"
+        if completed_path.exists():
+            return True
+        return False
 
     def get_execution_state(self, task: "Task", current_step: str) -> WorkflowExecutionState:
         """Get current execution state for a task."""

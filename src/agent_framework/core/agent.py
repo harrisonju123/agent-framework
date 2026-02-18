@@ -110,6 +110,8 @@ class AgentConfig:
         return parts[0] if len(parts) == 2 and parts[1].isdigit() else self.id
 
 
+_JSON_FENCE_PATTERN = re.compile(r'```json\s*\n(.*?)\n?\s*```', re.DOTALL)
+
 _NO_CHANGES_PATTERNS = [
     re.compile(r'\balready\s+(\w+\s+)?(exists?|merged|implemented|shipped|completed|done)\b', re.IGNORECASE),
     re.compile(r'\bno\s+(code\s+)?changes?\s+(needed|required|necessary)\b', re.IGNORECASE),
@@ -774,6 +776,15 @@ class Agent:
             ceiling = self._resolve_budget_ceiling(task)
             if ceiling is not None:
                 task.context["_budget_ceiling"] = ceiling
+
+        # Pre-scan tasks are fire-and-forget — save findings and skip all
+        # workflow routing (no enforce_chain, no legacy review, no PR creation)
+        if task.context.get("pre_scan"):
+            self._save_pre_scan_findings(task, response)
+            self._extract_and_store_memories(task, response)
+            self._analyze_tool_patterns(task)
+            self._log_task_completion_metrics(task, response, task_start_time)
+            return
 
         # Fan-in check: if this is a subtask, check if all siblings are done
         self._workflow_router.check_and_create_fan_in_task(task)
@@ -1539,6 +1550,62 @@ class Agent:
             self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
+
+    def _save_pre_scan_findings(self, task: Task, response) -> None:
+        """Persist QA pre-scan results so downstream agents can load them.
+
+        Writes to .agent-communication/pre-scans/{root_task_id}.json.
+        Non-fatal — workflow continues even if this fails.
+        """
+        try:
+            from ..utils.atomic_io import atomic_write_text
+
+            root_task_id = task.context.get("_root_task_id", task.id)
+            pre_scans_dir = self.workspace / ".agent-communication" / "pre-scans"
+            pre_scans_dir.mkdir(parents=True, exist_ok=True)
+
+            content = getattr(response, "content", "") or ""
+            structured = self._extract_structured_findings_from_content(content)
+
+            findings_data = {
+                "root_task_id": root_task_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "raw_summary": content[:4000],
+                "structured_findings": structured,
+            }
+
+            findings_file = pre_scans_dir / f"{root_task_id}.json"
+            atomic_write_text(findings_file, json.dumps(findings_data, indent=2))
+            self.logger.info(f"Saved pre-scan findings to {findings_file}")
+        except Exception as e:
+            self.logger.warning(f"Failed to save pre-scan findings for {task.id}: {e}")
+
+    @staticmethod
+    def _extract_structured_findings_from_content(content: str) -> dict:
+        """Parse structured findings JSON from LLM response content.
+
+        Looks for ```json ... ``` blocks and parses the last one as findings.
+        Returns {"findings": [...], "summary": "..."} or empty dict.
+        """
+        if not content:
+            return {}
+
+        matches = _JSON_FENCE_PATTERN.findall(content)
+        if not matches:
+            return {}
+
+        # Parse the last JSON block (most likely the findings output)
+        try:
+            parsed = json.loads(matches[-1])
+            if isinstance(parsed, list):
+                return {"findings": parsed, "summary": ""}
+            if isinstance(parsed, dict):
+                if "findings" not in parsed:
+                    parsed["findings"] = []
+                return parsed
+            return {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     def _get_repo_slug(self, task: Task) -> Optional[str]:
         """Extract repo slug from task context."""

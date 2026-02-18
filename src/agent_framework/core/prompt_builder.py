@@ -287,6 +287,9 @@ Focus on reviewing the code changes.
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
+        # Load pre-scan findings from parallel QA scan if available
+        prescan_context = self._load_pre_scan_findings(task)
+
         # Render plan as human-readable section (empty string when no plan)
         plan_section = self._render_plan_section(task)
 
@@ -295,7 +298,7 @@ Focus on reviewing the code changes.
 TASK DETAILS:
 {task_json}
 
-{mcp_guidance}{upstream_context}{plan_section}
+{mcp_guidance}{upstream_context}{prescan_context}{plan_section}
 YOUR RESPONSIBILITIES:
 {agent_prompt}
 
@@ -347,7 +350,7 @@ IMPORTANT:
         # Intermediate chain steps must not create PRs
         chain_note = ""
         if task.context.get("chain_step") and not self._is_at_terminal_workflow_step(task):
-            chain_note = "\nIMPORTANT: You are an intermediate step in the workflow chain.\nPush your commits but do NOT create a pull request.\n"
+            chain_note += "\nIMPORTANT: You are an intermediate step in the workflow chain.\nPush your commits but do NOT create a pull request.\n"
 
         # Subtasks must not create PRs — fan-in handles it
         if task.parent_task_id is not None:
@@ -365,6 +368,9 @@ IMPORTANT:
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
+        # Load pre-scan findings from parallel QA scan if available
+        prescan_context = self._load_pre_scan_findings(task)
+
         # Render plan as human-readable section (empty string when no plan)
         plan_section = self._render_plan_section(task)
 
@@ -375,7 +381,7 @@ IMPORTANT:
 TASK:
 {task_json}
 
-{context_note}{dep_context}{chain_note}{upstream_context}{plan_section}
+{context_note}{dep_context}{chain_note}{upstream_context}{prescan_context}{plan_section}
 {agent_prompt}
 
 IMPORTANT:
@@ -669,6 +675,86 @@ If a tool call fails:
         except Exception as e:
             self.logger.debug(f"Failed to load upstream context: {e}")
             return ""
+
+    def _load_pre_scan_findings(self, task: Task) -> str:
+        """Load QA pre-scan findings from disk for injection into prompts.
+
+        Only injects for engineer and qa agents on chain tasks (has workflow_step).
+        Formats differently per agent role.
+        """
+        # Only inject for engineer and qa on workflow chain tasks
+        if self.ctx.config.base_id not in ("engineer", "qa"):
+            return ""
+        if not task.context.get("workflow_step"):
+            return ""
+
+        root_task_id = task.context.get("_root_task_id", task.id)
+        findings_file = (
+            self.ctx.workspace / ".agent-communication" / "pre-scans" / f"{root_task_id}.json"
+        )
+
+        if not findings_file.exists():
+            return ""
+
+        try:
+            data = json.loads(findings_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            self.logger.debug(f"Failed to load pre-scan findings: {e}")
+            return ""
+
+        findings = data.get("structured_findings", {})
+        findings_list = findings.get("findings", [])
+        raw_summary = data.get("raw_summary", "")
+
+        if not findings_list and not raw_summary:
+            return ""
+
+        if self.ctx.config.base_id == "engineer":
+            return self._format_prescan_for_engineer(findings_list, raw_summary)
+        else:
+            return self._format_prescan_for_qa(findings_list, raw_summary)
+
+    def _format_prescan_for_engineer(self, findings: list, raw_summary: str) -> str:
+        """Format pre-scan findings as actionable items for the engineer."""
+        lines = ["\n## QA PRE-SCAN FINDINGS (from parallel scan)\n"]
+        lines.append("These findings were detected by an automated QA pre-scan running "
+                      "in parallel with code review. Address them alongside architect feedback.\n")
+
+        if findings:
+            for i, f in enumerate(findings, 1):
+                severity = f.get("severity", "UNKNOWN")
+                desc = f.get("description", "")
+                file_path = f.get("file", "")
+                line_no = f.get("line_number") or f.get("line")
+                location = f"{file_path}:{line_no}" if line_no else file_path
+                lines.append(f"{i}. [{severity}] {location} — {desc}")
+                suggested = f.get("suggested_fix")
+                if suggested:
+                    lines.append(f"   Fix: {suggested}")
+        elif raw_summary:
+            lines.append(raw_summary[:2000])
+
+        lines.append("")
+        return "\n".join(lines)
+
+    def _format_prescan_for_qa(self, findings: list, raw_summary: str) -> str:
+        """Format pre-scan results for the QA agent's full review."""
+        lines = ["\n## PRE-SCAN RESULTS (your earlier parallel scan)\n"]
+        lines.append("You ran a pre-scan earlier. These findings may be stale if "
+                      "the engineer made fixes since then. Focus on deeper issues "
+                      "and re-verify any pre-scan items that weren't addressed.\n")
+
+        if findings:
+            for i, f in enumerate(findings, 1):
+                severity = f.get("severity", "UNKNOWN")
+                desc = f.get("description", "")
+                file_path = f.get("file", "")
+                lines.append(f"{i}. [{severity}] {file_path} — {desc}")
+        elif raw_summary:
+            lines.append(raw_summary[:2000])
+
+        lines.append("")
+        return "\n".join(lines)
 
     def _format_structured_findings(self, structured: dict) -> str:
         """Format structured QA findings as a file-grouped actionable checklist.
