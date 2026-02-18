@@ -160,6 +160,34 @@ class TestHandleFailure:
         manager.queue.update.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_skips_retry_when_task_already_completed(self):
+        """Completed task with retries remaining — no queue.update(), status stays COMPLETED."""
+        manager = _make_manager()
+        task = _make_task(status=TaskStatus.COMPLETED, retry_count=1)
+
+        manager.queue.find_task.return_value = task
+
+        await manager.handle_failure(task)
+
+        assert task.status == TaskStatus.COMPLETED
+        manager.queue.update.assert_not_called()
+        manager.queue.mark_failed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_escalation_when_task_already_completed(self):
+        """Completed task at max retries — no mark_failed(), no escalation created."""
+        manager = _make_manager()
+        task = _make_task(status=TaskStatus.COMPLETED, retry_count=3)
+
+        manager.queue.find_task.return_value = task
+
+        await manager.handle_failure(task)
+
+        assert task.status == TaskStatus.COMPLETED
+        manager.queue.mark_failed.assert_not_called()
+        manager.escalation_handler.create_escalation.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_handle_failure_clears_upstream_context(self):
         """Stale upstream context from a failed attempt is cleared before retry."""
         manager = _make_manager()

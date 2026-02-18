@@ -1374,7 +1374,12 @@ class Agent:
                 error_message=task.last_error
             ))
 
-            await self._handle_failure(task)
+            if task.status == TaskStatus.COMPLETED:
+                self.logger.warning(
+                    f"Post-completion error for task {task.id} (already completed): {e}"
+                )
+            else:
+                await self._handle_failure(task)
 
         finally:
             self._context_window_manager = None

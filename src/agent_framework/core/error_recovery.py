@@ -75,6 +75,13 @@ class ErrorRecoveryManager:
             self.queue.move_to_completed(refreshed)
             return
 
+        if task.status == TaskStatus.COMPLETED:
+            self.logger.warning(
+                f"Task {task.id} is already completed — skipping error recovery. "
+                f"Last error: {task.last_error}"
+            )
+            return
+
         if task.retry_count >= self.retry_handler.max_retries:
             # Max retries exceeded - mark as failed
             self.logger.error(
