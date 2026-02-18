@@ -19,6 +19,7 @@ from ..queue.file_queue import FileQueue
 from .data_provider import DashboardDataProvider
 from .models import (
     AgentData,
+    AgenticMetrics,
     QueueStats,
     EventData,
     FailedTaskData,
@@ -463,6 +464,13 @@ def register_routes(app: FastAPI):
             "task_title": task_data.title,
         }
 
+    # ============== Agentic Metrics API ==============
+
+    @app.get("/api/metrics/agentic", response_model=AgenticMetrics)
+    async def get_agentic_metrics():
+        """Get aggregated agentic feature metrics (memory, self-eval, replan, etc.)."""
+        return app.state.data_provider.get_agentic_metrics()
+
     # ============== Operations API ==============
 
     @app.post("/api/operations/work", response_model=OperationResponse)
@@ -660,6 +668,7 @@ def register_routes(app: FastAPI):
                     is_paused=app.state.data_provider.is_paused(),
                     uptime_seconds=int(uptime),
                     active_teams=app.state.data_provider.get_active_teams(),
+                    agentic_metrics=app.state.data_provider.get_agentic_metrics(),
                 )
 
                 await websocket.send_json(state.model_dump(mode="json"))

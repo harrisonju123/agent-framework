@@ -125,6 +125,57 @@ class TeamSessionData(BaseModel):
     status: str = "active"
 
 
+class MemoryMetrics(BaseModel):
+    """Metrics for the persistent memory system."""
+    total_entries: int
+    stores_count: int  # number of (repo, agent) pairs with memory
+    categories: Dict[str, int]  # category -> entry count
+
+
+class SelfEvalMetrics(BaseModel):
+    """Metrics for the self-evaluation loop."""
+    # Derived from completed tasks that have context["_self_eval_count"] > 0
+    tasks_evaluated: int
+    total_retries: int
+
+
+class ReplanMetrics(BaseModel):
+    """Metrics for dynamic replanning."""
+    # Derived from tasks with non-empty replan_history
+    tasks_replanned: int
+    total_replan_attempts: int
+
+
+class SpecializationMetrics(BaseModel):
+    """Metrics for engineer specialization profiles."""
+    profiles_cached: int
+    total_matches: int  # sum of match_count across all profiles
+
+
+class DebateMetrics(BaseModel):
+    """Metrics for architectural debates stored in memory."""
+    # Derived from memory entries tagged "debate"
+    debates_recorded: int
+    high_confidence_count: int
+
+
+class ContextBudgetMetrics(BaseModel):
+    """Metrics for context budget warnings."""
+    # Derived from activity events of type "context_budget_critical"
+    critical_events: int
+
+
+class AgenticMetrics(BaseModel):
+    """Aggregated metrics for all agentic features."""
+    memory: MemoryMetrics
+    self_eval: SelfEvalMetrics
+    replan: ReplanMetrics
+    specialization: SpecializationMetrics
+    debate: DebateMetrics
+    context_budget: ContextBudgetMetrics
+    computed_at: datetime
+
+
 class DashboardState(BaseModel):
     """Complete dashboard state for WebSocket updates."""
     agents: List[AgentData]
@@ -135,6 +186,7 @@ class DashboardState(BaseModel):
     is_paused: bool
     uptime_seconds: int
     active_teams: List[TeamSessionData] = []
+    agentic_metrics: Optional[AgenticMetrics] = None
 
 
 # API Response models

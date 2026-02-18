@@ -14,7 +14,11 @@ from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
 from .models import (
     AgentData,
+    AgenticMetrics,
     AgentStatusEnum,
+    ContextBudgetMetrics,
+    DebateMetrics,
+    MemoryMetrics,
     QueueStats,
     EventData,
     FailedTaskData,
@@ -22,6 +26,9 @@ from .models import (
     HealthReport,
     CurrentTaskData,
     LogEntry,
+    ReplanMetrics,
+    SelfEvalMetrics,
+    SpecializationMetrics,
     TeamSessionData,
     ToolActivityData,
 )
@@ -46,6 +53,8 @@ class DashboardDataProvider:
         self._cache_ttl_seconds = 5  # Refresh config/teams every 5 seconds
         self._teams_cache: Optional[List[TeamSessionData]] = None
         self._teams_cache_time: Optional[datetime] = None
+        self._agentic_metrics_cache: Optional[AgenticMetrics] = None
+        self._agentic_metrics_cache_time: Optional[datetime] = None
 
     def _get_agents_config(self) -> List[AgentDefinition]:
         """Get agents config with caching."""
@@ -351,6 +360,191 @@ class DashboardDataProvider:
         self._teams_cache = sessions
         self._teams_cache_time = now
         return sessions
+
+    # ============== Agentic Metrics ==============
+
+    def get_agentic_metrics(self) -> AgenticMetrics:
+        """Aggregate metrics across all agentic features.
+
+        Reads from existing data sources without new storage:
+        - Memory: scans .agent-communication/memory/**/*.json
+        - Self-eval: reads context["_self_eval_count"] from completed tasks
+        - Replan: counts non-empty replan_history across completed/queued tasks
+        - Specialization: reads .agent-communication/profile-registry/profiles.json
+        - Debate: counts memory entries tagged "debate"
+        - Context budget: counts "context_budget_critical" events from activity log
+
+        Results are cached for 5 seconds (same TTL as agents config cache).
+        """
+        now = datetime.now(timezone.utc)
+        if (
+            self._agentic_metrics_cache is not None
+            and self._agentic_metrics_cache_time is not None
+            and (now - self._agentic_metrics_cache_time).total_seconds() <= self._cache_ttl_seconds
+        ):
+            return self._agentic_metrics_cache
+
+        metrics = AgenticMetrics(
+            memory=self._compute_memory_metrics(),
+            self_eval=self._compute_self_eval_metrics(),
+            replan=self._compute_replan_metrics(),
+            specialization=self._compute_specialization_metrics(),
+            debate=self._compute_debate_metrics(),
+            context_budget=self._compute_context_budget_metrics(),
+            computed_at=now,
+        )
+
+        self._agentic_metrics_cache = metrics
+        self._agentic_metrics_cache_time = now
+        return metrics
+
+    def _compute_memory_metrics(self) -> MemoryMetrics:
+        """Count memory entries across all (repo, agent) store files."""
+        memory_base = self.workspace / ".agent-communication" / "memory"
+        total_entries = 0
+        stores_count = 0
+        categories: Dict[str, int] = {}
+
+        if not memory_base.exists():
+            return MemoryMetrics(total_entries=0, stores_count=0, categories={})
+
+        for store_file in memory_base.rglob("*.json"):
+            try:
+                data = json.loads(store_file.read_text())
+                if not isinstance(data, list):
+                    continue
+                stores_count += 1
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    total_entries += 1
+                    cat = entry.get("category", "unknown")
+                    categories[cat] = categories.get(cat, 0) + 1
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        return MemoryMetrics(
+            total_entries=total_entries,
+            stores_count=stores_count,
+            categories=categories,
+        )
+
+    def _compute_self_eval_metrics(self) -> SelfEvalMetrics:
+        """Count tasks that triggered at least one self-evaluation retry."""
+        tasks_evaluated = 0
+        total_retries = 0
+
+        for task_file in self._iter_all_task_files():
+            try:
+                data = json.loads(task_file.read_text())
+                count = data.get("context", {}).get("_self_eval_count", 0)
+                if count and count > 0:
+                    tasks_evaluated += 1
+                    total_retries += count
+            except (json.JSONDecodeError, OSError, AttributeError):
+                continue
+
+        return SelfEvalMetrics(
+            tasks_evaluated=tasks_evaluated,
+            total_retries=total_retries,
+        )
+
+    def _compute_replan_metrics(self) -> ReplanMetrics:
+        """Count tasks with non-empty replan_history."""
+        tasks_replanned = 0
+        total_attempts = 0
+
+        for task_file in self._iter_all_task_files():
+            try:
+                data = json.loads(task_file.read_text())
+                history = data.get("replan_history", [])
+                if history:
+                    tasks_replanned += 1
+                    total_attempts += len(history)
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        return ReplanMetrics(
+            tasks_replanned=tasks_replanned,
+            total_replan_attempts=total_attempts,
+        )
+
+    def _compute_specialization_metrics(self) -> SpecializationMetrics:
+        """Read the profile registry to count cached specialization profiles."""
+        registry_file = (
+            self.workspace / ".agent-communication" / "profile-registry" / "profiles.json"
+        )
+        if not registry_file.exists():
+            return SpecializationMetrics(profiles_cached=0, total_matches=0)
+
+        try:
+            data = json.loads(registry_file.read_text())
+            if not isinstance(data, list):
+                return SpecializationMetrics(profiles_cached=0, total_matches=0)
+            profiles_cached = len(data)
+            total_matches = sum(
+                entry.get("match_count", 0)
+                for entry in data
+                if isinstance(entry, dict)
+            )
+            return SpecializationMetrics(
+                profiles_cached=profiles_cached,
+                total_matches=total_matches,
+            )
+        except (json.JSONDecodeError, OSError):
+            return SpecializationMetrics(profiles_cached=0, total_matches=0)
+
+    def _compute_debate_metrics(self) -> DebateMetrics:
+        """Count memory entries tagged 'debate' across all stores."""
+        memory_base = self.workspace / ".agent-communication" / "memory"
+        debates_recorded = 0
+        high_confidence_count = 0
+
+        if not memory_base.exists():
+            return DebateMetrics(debates_recorded=0, high_confidence_count=0)
+
+        for store_file in memory_base.rglob("*.json"):
+            try:
+                data = json.loads(store_file.read_text())
+                if not isinstance(data, list):
+                    continue
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    tags = entry.get("tags", [])
+                    if "debate" not in (tags or []):
+                        continue
+                    debates_recorded += 1
+                    # Confidence is stored as "Confidence: high|medium|low" in content
+                    for line in entry.get("content", "").splitlines():
+                        if line.startswith("Confidence:"):
+                            level = line.split(":", 1)[1].strip().lower()
+                            if level == "high":
+                                high_confidence_count += 1
+                            break
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        return DebateMetrics(
+            debates_recorded=debates_recorded,
+            high_confidence_count=high_confidence_count,
+        )
+
+    def _compute_context_budget_metrics(self) -> ContextBudgetMetrics:
+        """Count 'context_budget_critical' events from the activity event log."""
+        events = self.activity_manager.get_recent_events(limit=1000)
+        critical_count = sum(
+            1 for e in events if e.type == "context_budget_critical"
+        )
+        return ContextBudgetMetrics(critical_events=critical_count)
+
+    def _iter_all_task_files(self):
+        """Yield all task JSON files from queue and completed directories."""
+        comm_dir = self.workspace / ".agent-communication"
+        for search_dir in [comm_dir / "queues", comm_dir / "completed"]:
+            if not search_dir.exists():
+                continue
+            yield from search_dir.rglob("*.json")
 
     # ============== Log Reading Methods ==============
 
