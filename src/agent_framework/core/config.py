@@ -230,6 +230,7 @@ class WorkflowStepDefinition(BaseModel):
     next: Optional[List[Dict[str, Any]]] = None  # List of edge definitions
     task_type: Optional[str] = None  # Override default task type
     checkpoint: Optional[Dict[str, str]] = None  # Parsed into CheckpointConfig in to_dag()
+    preview_required: bool = False  # When True, step produces a PREVIEW task instead of default
 
 
 class WorkflowDefinition(BaseModel):

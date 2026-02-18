@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from ..core.task import TaskType
 
@@ -22,6 +22,7 @@ class LLMRequest:
     agents: Optional[dict] = None  # Teammate definitions for Claude Agent Teams (--agents flag)
     specialization_profile: Optional[str] = None  # Specialization ID (backend, frontend, infrastructure)
     file_count: int = 0  # Number of files involved (for complexity-based routing)
+    allowed_tools: Optional[List[str]] = None  # Restrict LLM to these tools (e.g. read-only for PREVIEW)
 
 
 @dataclass

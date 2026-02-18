@@ -148,6 +148,9 @@ class PromptBuilder:
         if task.type == TaskType.PREVIEW:
             prompt = self._inject_preview_mode(prompt, task)
 
+        # Inject approved preview artifact for implementation tasks
+        prompt = self._inject_preview_artifact(prompt, task)
+
         # Log prompt preview for debugging (sanitized)
         if self.logger.isEnabledFor(logging.DEBUG):
             prompt_preview = prompt[:500].replace(task.id, "TASK_ID")
@@ -948,6 +951,19 @@ If a tool call fails:
             )
 
         return prompt + "\n\n" + "\n".join(sections)
+
+    def _inject_preview_artifact(self, prompt: str, task: Task) -> str:
+        """Inject the approved preview artifact as implementation reference."""
+        preview_artifact = task.context.get("preview_artifact")
+        if not preview_artifact:
+            return prompt
+        return prompt + f"""
+
+## APPROVED PREVIEW — Implementation Reference
+The following execution preview was approved by the architect. Use it as your implementation guide:
+
+{preview_artifact}
+"""
 
     def _inject_preview_mode(self, prompt: str, _task: Task) -> str:
         """Inject preview mode constraints when task is a preview."""

@@ -874,6 +874,37 @@ class TestPreviewMode:
         assert "### Risks and Edge Cases" in result
         assert "### Estimated Total Change Size" in result
 
+    def test_preview_stores_artifact_before_routing(self, agent, queue):
+        """Preview task stores result_summary as preview_artifact in context."""
+        task = _make_task(workflow="default")
+        task.type = TaskType.PREVIEW
+        task.result_summary = "Preview: modify 3 files, add auth module"
+        response = _make_response()
+
+        agent._enforce_workflow_chain(task, response)
+
+        assert task.context.get("preview_artifact") == "Preview: modify 3 files, add auth module"
+
+    def test_preview_artifact_injected_in_implementation_prompt(self, agent):
+        """Implementation task with preview_artifact gets it injected into prompt."""
+        task = _make_task()
+        task.context["preview_artifact"] = "Modify src/auth.py: add JWT validation"
+        prompt = "Base prompt"
+
+        result = agent._prompt_builder._inject_preview_artifact(prompt, task)
+
+        assert "APPROVED PREVIEW" in result
+        assert "Modify src/auth.py" in result
+
+    def test_preview_artifact_not_injected_when_absent(self, agent):
+        """No preview artifact section when context lacks preview_artifact."""
+        task = _make_task()
+        prompt = "Base prompt"
+
+        result = agent._prompt_builder._inject_preview_artifact(prompt, task)
+
+        assert result == prompt
+
 
 # -- Chain ID collision and title accumulation --
 

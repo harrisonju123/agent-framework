@@ -21,6 +21,7 @@ from agent_framework.workflow.conditions import (
     PRSizeUnderCondition,
     SignalTargetCondition,
     NoChangesCondition,
+    PreviewApprovedCondition,
 )
 
 
@@ -553,6 +554,62 @@ class TestNoChangesCondition:
         """NO_CHANGES condition evaluates through the registry."""
         condition = EdgeCondition(EdgeConditionType.NO_CHANGES)
         task = _make_task(verdict="no_changes")
+        response = _make_response()
+
+        assert ConditionRegistry.evaluate(condition, task, response) is True
+
+
+class TestPreviewApprovedCondition:
+    def test_preview_approved_verdict_returns_true(self):
+        """verdict='preview_approved' in task context → True."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="preview_approved")
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is True
+
+    def test_approved_verdict_returns_false(self):
+        """verdict='approved' (generic) → False for preview_approved condition."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="approved")
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_no_verdict_returns_false(self):
+        """No verdict in context → False."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task()
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_needs_fix_verdict_returns_false(self):
+        """verdict='needs_fix' → False."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="needs_fix")
+        response = _make_response()
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_context_verdict_takes_priority(self):
+        """Evaluation context verdict overrides task context."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="needs_fix")
+        response = _make_response()
+        context = {"verdict": "preview_approved"}
+
+        evaluator = PreviewApprovedCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is True
+
+    def test_registry_evaluates_preview_approved(self):
+        """PREVIEW_APPROVED condition evaluates through the registry."""
+        condition = EdgeCondition(EdgeConditionType.PREVIEW_APPROVED)
+        task = _make_task(verdict="preview_approved")
         response = _make_response()
 
         assert ConditionRegistry.evaluate(condition, task, response) is True

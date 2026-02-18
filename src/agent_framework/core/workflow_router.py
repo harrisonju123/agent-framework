@@ -179,8 +179,12 @@ class WorkflowRouter:
             )
             return
 
-        # Preview tasks route back to architect for review, not to QA
+        # Preview tasks route back to architect for review, not to QA.
+        # Store the preview output as an artifact so it can be referenced
+        # by the subsequent implementation task.
         if task.type == TaskType.PREVIEW and self.config.base_id == 'engineer':
+            if task.result_summary:
+                task.context['preview_artifact'] = task.result_summary
             self.route_to_agent(task, 'architect', 'preview_review')
             return
 

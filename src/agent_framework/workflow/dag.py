@@ -28,6 +28,7 @@ class EdgeConditionType(str, Enum):
     PR_SIZE_UNDER = "pr_size_under"
     SIGNAL_TARGET = "signal_target"  # Use routing signal if present
     NO_CHANGES = "no_changes"  # Task completed with no code changes needed
+    PREVIEW_APPROVED = "preview_approved"  # Architect approved the execution preview
 
 
 @dataclass

@@ -386,6 +386,24 @@ class TestPromptInjections:
         # Preview mode section is prepended, possibly with a newline
         assert "PREVIEW MODE" in result[:100]
 
+    def test_inject_preview_artifact_when_present(self, prompt_builder, sample_task):
+        """Preview artifact is injected into implementation task prompt."""
+        sample_task.context["preview_artifact"] = "Files: src/auth.py (+50 lines), src/middleware.py (+30 lines)"
+        prompt = "Base prompt"
+        result = prompt_builder._inject_preview_artifact(prompt, sample_task)
+
+        assert "APPROVED PREVIEW" in result
+        assert "Implementation Reference" in result
+        assert "src/auth.py" in result
+
+    def test_inject_preview_artifact_skipped_when_absent(self, prompt_builder, sample_task):
+        """No preview artifact section when context has no preview_artifact."""
+        prompt = "Base prompt"
+        result = prompt_builder._inject_preview_artifact(prompt, sample_task)
+
+        assert result == prompt
+        assert "APPROVED PREVIEW" not in result
+
     def test_inject_retry_context_skipped_on_first_attempt(self, prompt_builder, sample_task):
         """No retry context injected on first attempt."""
         sample_task.retry_count = 0

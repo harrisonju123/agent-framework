@@ -237,6 +237,22 @@ class NoChangesCondition(ConditionEvaluator):
         return str(verdict).lower() == "no_changes" if verdict else False
 
 
+class PreviewApprovedCondition(ConditionEvaluator):
+    """True if the architect approved the execution preview.
+
+    Checks verdict == "preview_approved" from task context, set by architect
+    after reviewing the engineer's preview output.
+    """
+
+    def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
+        verdict = None
+        if context and "verdict" in context:
+            verdict = context["verdict"]
+        elif task.context and "verdict" in task.context:
+            verdict = task.context["verdict"]
+        return str(verdict).lower() == "preview_approved" if verdict else False
+
+
 def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
     """Build a fresh evaluator map so ConditionRegistry.register() in tests
     doesn't pollute global state."""
@@ -252,6 +268,7 @@ def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
         EdgeConditionType.PR_SIZE_UNDER: PRSizeUnderCondition(),
         EdgeConditionType.SIGNAL_TARGET: SignalTargetCondition(),
         EdgeConditionType.NO_CHANGES: NoChangesCondition(),
+        EdgeConditionType.PREVIEW_APPROVED: PreviewApprovedCondition(),
     }
 
 
