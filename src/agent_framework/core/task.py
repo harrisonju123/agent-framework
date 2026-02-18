@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Optional, List
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 
 class RetryAttempt(BaseModel):
@@ -39,6 +39,33 @@ class PlanDocument(BaseModel):
     success_criteria: list[str]  # How to verify the work is complete
     files_to_modify: list[str] = Field(default_factory=list)  # Affected files
     dependencies: list[str] = Field(default_factory=list)  # External dependencies
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_dict_to_list(cls, data: Any) -> Any:
+        """Prevent silent data corruption when LLM writes dicts instead of lists.
+
+        Pydantic v2 lax mode iterates dicts (yielding only keys) for list[str],
+        silently discarding the values. This validator intercepts that case.
+        """
+        if not isinstance(data, dict):
+            return data
+        list_fields = ("objectives", "approach", "risks", "success_criteria",
+                       "files_to_modify", "dependencies")
+        for field in list_fields:
+            val = data.get(field)
+            if isinstance(val, dict):
+                data[field] = list(val.values())
+            elif isinstance(val, list):
+                coerced = []
+                for item in val:
+                    if isinstance(item, dict):
+                        parts = [str(v) for v in item.values()]
+                        coerced.append(" - ".join(parts))
+                    else:
+                        coerced.append(item)
+                data[field] = coerced
+        return data
 
 
 class TaskStatus(str, Enum):

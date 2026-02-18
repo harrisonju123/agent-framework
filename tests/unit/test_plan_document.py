@@ -79,6 +79,85 @@ class TestPlanDocument:
         assert plan.dependencies == ["dep>=1.0"]
 
 
+class TestPlanDocumentDictCoercion:
+    """Tests for PlanDocument dict-to-list coercion validator."""
+
+    def test_approach_as_dict_coerced_to_list_of_values(self):
+        """Dict approach should yield values, not keys."""
+        plan = PlanDocument(
+            objectives=["Build feature"],
+            approach={"step_1": "Clone repo", "step_2": "Implement logic"},
+            success_criteria=["Tests pass"],
+        )
+        assert plan.approach == ["Clone repo", "Implement logic"]
+
+    def test_approach_as_list_of_dicts_flattened(self):
+        """List-of-dicts entries should be flattened to strings."""
+        plan = PlanDocument(
+            objectives=["Build feature"],
+            approach=[
+                {"step": "Clone repo", "detail": "Use git clone"},
+                {"step": "Implement", "detail": "Write code"},
+            ],
+            success_criteria=["Tests pass"],
+        )
+        assert plan.approach == [
+            "Clone repo - Use git clone",
+            "Implement - Write code",
+        ]
+
+    def test_multiple_fields_as_dicts(self):
+        """All list[str] fields should handle dict input."""
+        plan = PlanDocument(
+            objectives={"obj_1": "First objective", "obj_2": "Second objective"},
+            approach=["Normal step"],
+            risks={"risk_a": "Timeout risk", "risk_b": "Data loss"},
+            success_criteria={"crit_1": "All tests pass"},
+        )
+        assert plan.objectives == ["First objective", "Second objective"]
+        assert plan.risks == ["Timeout risk", "Data loss"]
+        assert plan.success_criteria == ["All tests pass"]
+
+    def test_normal_list_input_unchanged(self):
+        """Normal list[str] input passes through untouched."""
+        plan = PlanDocument(
+            objectives=["Objective A", "Objective B"],
+            approach=["Step 1", "Step 2"],
+            success_criteria=["Criterion 1"],
+            files_to_modify=["src/main.py"],
+            dependencies=["requests>=2.0"],
+        )
+        assert plan.objectives == ["Objective A", "Objective B"]
+        assert plan.approach == ["Step 1", "Step 2"]
+        assert plan.files_to_modify == ["src/main.py"]
+        assert plan.dependencies == ["requests>=2.0"]
+
+    def test_model_validate_with_dict_approach(self):
+        """model_validate() path also triggers coercion."""
+        data = {
+            "objectives": ["Build"],
+            "approach": {"s1": "Clone", "s2": "Implement"},
+            "success_criteria": ["Pass"],
+        }
+        plan = PlanDocument.model_validate(data)
+        assert plan.approach == ["Clone", "Implement"]
+
+    def test_mixed_list_with_dicts_and_strings(self):
+        """List containing both strings and dicts should coerce only dicts."""
+        plan = PlanDocument(
+            objectives=["Build feature"],
+            approach=[
+                "Plain string step",
+                {"step": "Dict step", "note": "with details"},
+            ],
+            success_criteria=["Done"],
+        )
+        assert plan.approach == [
+            "Plain string step",
+            "Dict step - with details",
+        ]
+
+
 class TestTaskWithPlan:
     """Tests for Task model with PlanDocument."""
 
