@@ -94,6 +94,18 @@ def test_task_reset_to_pending():
     assert task.started_by is None
 
 
+def test_root_id_uses_context_when_set():
+    """root_id returns _root_task_id from context for chain tasks."""
+    task = _make_task(id="chain-chain-original-engineer-1", context={"_root_task_id": "original"})
+    assert task.root_id == "original"
+
+
+def test_root_id_falls_back_to_own_id():
+    """root_id returns task.id when no parent chain has been established."""
+    task = _make_task(id="my-task", context={})
+    assert task.root_id == "my-task"
+
+
 def test_preview_task_type():
     """PREVIEW task type exists and serializes correctly."""
     assert TaskType.PREVIEW == "preview"

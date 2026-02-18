@@ -30,6 +30,8 @@ def mock_queue():
     """Mock file queue."""
     queue = MagicMock()
     queue.queue_dir = Path("/mock/queue")
+    # completed_dir must be a real Path so .exists() returns False rather than a truthy MagicMock
+    queue.completed_dir = Path("/mock/queue/completed")
     queue.get_completed.return_value = None
     return queue
 
@@ -240,8 +242,11 @@ class TestSyncWorktreeQueuedTasks:
         task_file = worktree_queue / "task-already-done.json"
         task_file.write_text(json.dumps(task_data))
 
-        # Simulate task already completed
-        git_ops.queue.get_completed.return_value = MagicMock()
+        # Simulate task already completed by placing its file in the completed_dir
+        completed_dir = tmp_path / "completed"
+        completed_dir.mkdir()
+        (completed_dir / "task-already-done.json").write_text(json.dumps(task_data))
+        git_ops.queue.completed_dir = completed_dir
 
         git_ops.sync_worktree_queued_tasks()
 

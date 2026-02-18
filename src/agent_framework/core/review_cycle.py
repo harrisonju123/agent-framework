@@ -157,6 +157,10 @@ class ReviewCycleManager:
         root_task_id = task.root_id
         clean_title = strip_chain_prefixes(task.title)[:50]
 
+        # ID is stable per (root task, PR number). If a PR is closed and a new
+        # one opened for the same root task with the same number (rare GitHub
+        # reuse), the second review would be silently skipped by the dedup guard
+        # in queue_pr_creation_if_needed — acceptable given how unlikely this is.
         return Task(
             id=f"review-{root_task_id}-{pr_number}",
             type=TaskType.REVIEW,

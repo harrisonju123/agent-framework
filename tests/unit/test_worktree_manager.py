@@ -163,6 +163,7 @@ class TestWorktreeKeyGeneration:
         key = manager._get_worktree_key("engineer", long_id)
         ticket_part = key[len("engineer-"):]
         assert len(ticket_part) <= cap
+        assert not ticket_part.endswith("-")  # rstrip cleans up dash-terminated truncations
 
     def test_get_worktree_path(self, manager):
         """Test worktree path generation."""
