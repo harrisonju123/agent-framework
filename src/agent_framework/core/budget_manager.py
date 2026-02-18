@@ -125,14 +125,15 @@ class BudgetManager:
 
     def derive_effort_from_plan(self, plan: Optional["PlanDocument"]) -> str:
         """Derive t-shirt size from plan when architect didn't set estimated_effort."""
-        if not plan or not plan.files_to_modify:
+        if not plan or (not plan.files_to_modify and not plan.approach):
             return "M"
-        estimated_lines = len(plan.files_to_modify) * 15
-        if estimated_lines < 50:
+        from .task_decomposer import estimate_plan_lines
+        estimated_lines = estimate_plan_lines(plan)
+        if estimated_lines < 150:
             return "XS"
-        elif estimated_lines < 200:
+        elif estimated_lines < 350:
             return "S"
-        elif estimated_lines < 500:
+        elif estimated_lines < 600:
             return "M"
         elif estimated_lines < 1000:
             return "L"

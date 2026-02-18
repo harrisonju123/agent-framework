@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from agent_framework.core.task import Task, TaskStatus, TaskType, PlanDocument
-from agent_framework.core.task_decomposer import TaskDecomposer, SubtaskBoundary
+from agent_framework.core.task_decomposer import TaskDecomposer, SubtaskBoundary, estimate_plan_lines
 
 
 def _make_task(**overrides) -> Task:
@@ -38,6 +38,52 @@ def _make_plan(**overrides) -> PlanDocument:
     )
     defaults.update(overrides)
     return PlanDocument(**defaults)
+
+
+class TestEstimatePlanLines:
+    """Tests for the estimate_plan_lines() shared estimator."""
+
+    def test_files_only(self):
+        plan = _make_plan(files_to_modify=["a.py", "b.py", "c.py"], approach=[])
+        assert estimate_plan_lines(plan) == 150  # 3 * 50
+
+    def test_steps_only(self):
+        plan = _make_plan(files_to_modify=[], approach=["s1", "s2", "s3", "s4"])
+        assert estimate_plan_lines(plan) == 100  # 4 * 25
+
+    def test_combined(self):
+        plan = _make_plan(
+            files_to_modify=["a.py", "b.py"],
+            approach=["s1", "s2", "s3"],
+        )
+        assert estimate_plan_lines(plan) == 175  # 2*50 + 3*25
+
+    def test_empty_plan(self):
+        plan = _make_plan(files_to_modify=[], approach=[])
+        assert estimate_plan_lines(plan) == 0
+
+    def test_threshold_integration(self):
+        """7 files + 6 steps = 500, exactly at threshold."""
+        decomposer = TaskDecomposer()
+        plan = _make_plan(
+            files_to_modify=[f"f{i}.py" for i in range(7)],
+            approach=[f"step {i}" for i in range(6)],
+        )
+        estimated = estimate_plan_lines(plan)
+        assert estimated == 500  # 7*50 + 6*25
+        # Threshold is >= 500, need at least 2 files
+        assert decomposer.should_decompose(plan, estimated) is True
+
+    def test_below_threshold(self):
+        """5 files + 4 steps = 350, below threshold."""
+        plan = _make_plan(
+            files_to_modify=[f"f{i}.py" for i in range(5)],
+            approach=[f"step {i}" for i in range(4)],
+        )
+        estimated = estimate_plan_lines(plan)
+        assert estimated == 350  # 5*50 + 4*25
+        decomposer = TaskDecomposer()
+        assert decomposer.should_decompose(plan, estimated) is False
 
 
 class TestTaskDecomposer:

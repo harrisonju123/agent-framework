@@ -66,9 +66,10 @@ def _make_executor():
     )
 
 
-def _make_plan(file_count):
+def _make_plan(file_count, step_count=0):
     plan = MagicMock(spec=PlanDocument)
     plan.files_to_modify = [f"file_{i}.py" for i in range(file_count)]
+    plan.approach = [f"step_{i}" for i in range(step_count)]
     return plan
 
 
@@ -85,35 +86,69 @@ class TestDeriveEffortFromPlan:
         bm = _make_budget_manager()
         plan = MagicMock(spec=PlanDocument)
         plan.files_to_modify = []
+        plan.approach = []
         assert bm.derive_effort_from_plan(plan) == "M"
 
-    def test_xs_boundary(self):
-        """< 50 lines → XS (< ~3 files at 15 lines/file)."""
+    def test_steps_only_sizes_correctly(self):
+        """Plans with approach steps but no files still get sized."""
         bm = _make_budget_manager()
-        assert bm.derive_effort_from_plan(_make_plan(3)) == "XS"  # 45 lines
+        # 0 files + 8 steps = 200 → S
+        assert bm.derive_effort_from_plan(_make_plan(0, step_count=8)) == "S"
+
+    def test_xs_boundary(self):
+        """< 150 lines → XS. 2 files + 1 step = 125."""
+        bm = _make_budget_manager()
+        assert bm.derive_effort_from_plan(_make_plan(2, step_count=1)) == "XS"  # 125
+
+    def test_xs_to_s_exact_boundary(self):
+        """Exactly 150 → S (not XS)."""
+        bm = _make_budget_manager()
+        # 3 files + 0 steps = 150
+        assert bm.derive_effort_from_plan(_make_plan(3, step_count=0)) == "S"
 
     def test_s_boundary(self):
-        """50–199 lines → S."""
+        """150–349 lines → S."""
         bm = _make_budget_manager()
-        assert bm.derive_effort_from_plan(_make_plan(5)) == "S"  # 75 lines
-        assert bm.derive_effort_from_plan(_make_plan(13)) == "S"  # 195 lines
+        # 3 files + 1 step = 175
+        assert bm.derive_effort_from_plan(_make_plan(3, step_count=1)) == "S"
+        # 5 files + 3 steps = 325
+        assert bm.derive_effort_from_plan(_make_plan(5, step_count=3)) == "S"
+
+    def test_s_to_m_exact_boundary(self):
+        """Exactly 350 → M (not S)."""
+        bm = _make_budget_manager()
+        # 7 files + 0 steps = 350
+        assert bm.derive_effort_from_plan(_make_plan(7, step_count=0)) == "M"
 
     def test_m_boundary(self):
-        """200–499 lines → M."""
+        """350–599 lines → M."""
         bm = _make_budget_manager()
-        assert bm.derive_effort_from_plan(_make_plan(14)) == "M"  # 210 lines
-        assert bm.derive_effort_from_plan(_make_plan(33)) == "M"  # 495 lines
+        # 10 files + 3 steps = 575
+        assert bm.derive_effort_from_plan(_make_plan(10, step_count=3)) == "M"
+
+    def test_m_to_l_exact_boundary(self):
+        """Exactly 600 → L (not M)."""
+        bm = _make_budget_manager()
+        # 12 files + 0 steps = 600
+        assert bm.derive_effort_from_plan(_make_plan(12, step_count=0)) == "L"
 
     def test_l_boundary(self):
-        """500–999 lines → L."""
+        """600–999 lines → L."""
         bm = _make_budget_manager()
-        assert bm.derive_effort_from_plan(_make_plan(34)) == "L"  # 510 lines
-        assert bm.derive_effort_from_plan(_make_plan(66)) == "L"  # 990 lines
+        # 18 files + 3 steps = 975
+        assert bm.derive_effort_from_plan(_make_plan(18, step_count=3)) == "L"
+
+    def test_l_to_xl_exact_boundary(self):
+        """Exactly 1000 → XL (not L)."""
+        bm = _make_budget_manager()
+        # 20 files + 0 steps = 1000
+        assert bm.derive_effort_from_plan(_make_plan(20, step_count=0)) == "XL"
 
     def test_xl_boundary(self):
         """≥ 1000 lines → XL."""
         bm = _make_budget_manager()
-        assert bm.derive_effort_from_plan(_make_plan(67)) == "XL"  # 1005 lines
+        # 18 files + 5 steps = 1025
+        assert bm.derive_effort_from_plan(_make_plan(18, step_count=5)) == "XL"
 
 
 # ---------------------------------------------------------------------------

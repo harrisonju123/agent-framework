@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from ..workflow.executor import WorkflowExecutor
 
 from .task import Task, TaskStatus, TaskType
+from .task_decomposer import TaskDecomposer, estimate_plan_lines
 from .routing import validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
 from ..utils.type_helpers import get_type_str, strip_chain_prefixes
 
@@ -110,10 +111,7 @@ class WorkflowRouter:
         if task.parent_task_id:
             return False
 
-        # Estimate lines: files_to_modify count * 15 lines/file (rough heuristic)
-        estimated_lines = len(task.plan.files_to_modify) * 15 if task.plan.files_to_modify else 0
-
-        from .task_decomposer import TaskDecomposer
+        estimated_lines = estimate_plan_lines(task.plan)
         decomposer = TaskDecomposer()
         return decomposer.should_decompose(task.plan, estimated_lines)
 
@@ -123,14 +121,13 @@ class WorkflowRouter:
         Replaces normal workflow routing - subtasks will each flow through
         the workflow individually, and fan-in will aggregate them at completion.
         """
-        from .task_decomposer import TaskDecomposer
-
         decomposer = TaskDecomposer()
-        estimated_lines = len(task.plan.files_to_modify) * 15 if task.plan.files_to_modify else 0
+        estimated_lines = estimate_plan_lines(task.plan)
 
         self.logger.info(
             f"Decomposing task {task.id} into parallel subtasks "
-            f"(estimated {estimated_lines} lines across {len(task.plan.files_to_modify)} files)"
+            f"(estimated {estimated_lines} lines from "
+            f"{len(task.plan.files_to_modify)} files + {len(task.plan.approach)} steps)"
         )
 
         subtasks = decomposer.decompose(task, task.plan, estimated_lines)

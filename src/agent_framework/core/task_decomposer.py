@@ -8,6 +8,17 @@ from pathlib import Path
 from agent_framework.core.task import Task, PlanDocument, TaskType, TaskStatus
 
 
+def estimate_plan_lines(plan: "PlanDocument") -> int:
+    """Estimate total implementation lines from plan signals.
+
+    Combines file count (50 lines/file) and approach step count (25 lines/step).
+    Used by both task decomposition and budget sizing.
+    """
+    file_estimate = len(plan.files_to_modify) * 50 if plan.files_to_modify else 0
+    step_estimate = len(plan.approach) * 25 if plan.approach else 0
+    return file_estimate + step_estimate
+
+
 @dataclass
 class SubtaskBoundary:
     """A natural split point identified in a plan."""

@@ -187,9 +187,10 @@ class TestTaskDecomposition:
         task = _make_task()
         task.plan = MagicMock()
         task.plan.files_to_modify = ["file1.py", "file2.py", "file3.py", "file4.py"]
+        task.plan.approach = ["step1", "step2", "step3"]
         task.parent_task_id = None
 
-        with patch("agent_framework.core.task_decomposer.TaskDecomposer") as mock_decomposer:
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_decomposer:
             decomposer_instance = MagicMock()
             decomposer_instance.should_decompose.return_value = True
             mock_decomposer.return_value = decomposer_instance
@@ -203,6 +204,7 @@ class TestTaskDecomposition:
         task = _make_task()
         task.plan = MagicMock()
         task.plan.files_to_modify = ["file1.py", "file2.py"]
+        task.plan.approach = ["step1"]
         task.parent_task_id = "parent-123"
 
         result = router.should_decompose_task(task)
@@ -223,11 +225,12 @@ class TestTaskDecomposition:
         task = _make_task(task_id="parent-123")
         task.plan = MagicMock()
         task.plan.files_to_modify = ["file1.py", "file2.py"]
+        task.plan.approach = ["step1"]
 
         subtask1 = _make_task(task_id="parent-123-sub-0")
         subtask2 = _make_task(task_id="parent-123-sub-1")
 
-        with patch("agent_framework.core.task_decomposer.TaskDecomposer") as mock_decomposer:
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_decomposer:
             decomposer_instance = MagicMock()
             decomposer_instance.decompose.return_value = [subtask1, subtask2]
             mock_decomposer.return_value = decomposer_instance
@@ -242,6 +245,7 @@ class TestTaskDecomposition:
         task = _make_task(task_id="parent-456")
         task.plan = MagicMock()
         task.plan.files_to_modify = ["file1.py"]
+        task.plan.approach = ["step1"]
 
         subtask1 = _make_task(task_id="parent-456-sub-0")
 
@@ -249,7 +253,7 @@ class TestTaskDecomposition:
         completed_file = queue.completed_dir / f"{task.id}.json"
         completed_file.write_text(task.model_dump_json(indent=2))
 
-        with patch("agent_framework.core.task_decomposer.TaskDecomposer") as mock_decomposer:
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_decomposer:
             decomposer_instance = MagicMock()
             decomposer_instance.decompose.return_value = [subtask1]
             mock_decomposer.return_value = decomposer_instance
@@ -269,11 +273,12 @@ class TestTaskDecomposition:
         task = _make_task(task_id="parent-789")
         task.plan = MagicMock()
         task.plan.files_to_modify = ["file1.py"]
+        task.plan.approach = ["step1"]
 
         subtask1 = _make_task(task_id="parent-789-sub-0")
 
         # No completed file — simulate task still in queue dir
-        with patch("agent_framework.core.task_decomposer.TaskDecomposer") as mock_decomposer:
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_decomposer:
             decomposer_instance = MagicMock()
             decomposer_instance.decompose.return_value = [subtask1]
             mock_decomposer.return_value = decomposer_instance
