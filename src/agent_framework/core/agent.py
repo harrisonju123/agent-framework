@@ -1020,6 +1020,7 @@ class Agent:
         the asyncio.wait race in _handle_task to cancel the LLM call.
         """
         while self._running and not self._check_pause_signal():
+            self._write_heartbeat()
             await asyncio.sleep(2)
 
     @staticmethod
