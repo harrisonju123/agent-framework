@@ -5,7 +5,8 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -17,6 +18,7 @@ from ..core.task import Task, TaskStatus, TaskType
 from .models import (
     ActiveTaskData,
     AgentData,
+    AgenticsMetrics,
     AgentStatusEnum,
     CheckpointData,
     QueueStats,
@@ -26,6 +28,7 @@ from .models import (
     HealthReport,
     CurrentTaskData,
     LogEntry,
+    SpecializationCount,
     TeamSessionData,
     ToolActivityData,
 )
@@ -822,6 +825,172 @@ class DashboardDataProvider:
                     positions[task_id] = 0
 
         return positions
+
+    # ============== Agentic Feature Metrics ==============
+
+    # Token budget limits per task type — mirrors core/budget_manager.py defaults.
+    # Used to estimate context utilisation when the exact budget isn't recorded.
+    _TASK_TYPE_BUDGETS: Dict[str, int] = {
+        "implementation": 50000,
+        "planning": 30000,
+        "review": 25000,
+        "testing": 20000,
+        "escalation": 80000,
+    }
+    _DEFAULT_BUDGET = 50000
+
+    def compute_agentics_metrics(self, hours: int = 24) -> AgenticsMetrics:
+        """Compute agentic-feature usage metrics from the activity stream and task files.
+
+        Scans the last `hours` worth of activity-stream events plus all task JSON
+        files currently on disk to surface how heavily each agentic feature
+        (memory, self-eval, replan, specialization, context budget) was used.
+
+        Args:
+            hours: Look-back window in hours (default 24).
+
+        Returns:
+            AgenticsMetrics with all computed rates.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        # --- Activity stream: collect completed/failed events in the window ---
+        stream_events = self._read_activity_events(cutoff)
+
+        # Index by task_id so we can join with task-file data
+        complete_events: Dict[str, Dict] = {}
+        for ev in stream_events:
+            if ev.get("type") in ("complete", "fail"):
+                complete_events[ev["task_id"]] = ev
+
+        total = len(complete_events)
+
+        # --- Per-task stats gathered from task files ---
+        replan_count = 0
+        replan_success_count = 0  # replanned tasks that completed
+        memory_used_count = 0
+        specialization_counts: Dict[str, int] = defaultdict(int)
+
+        for task_id, ev in complete_events.items():
+            task = self._load_task_by_id(task_id)
+            if task is None:
+                continue
+
+            # Memory: any task that had a revised plan or self-eval critique
+            # injected had memory context available during the run.
+            ctx = task.context or {}
+            if ctx.get("_revised_plan") or ctx.get("_self_eval_critique"):
+                memory_used_count += 1
+
+            # Replan: track tasks with at least one replan entry
+            if task.replan_history:
+                replan_count += 1
+                if ev.get("type") == "complete":
+                    replan_success_count += 1
+
+            # Specialization: prefer context hint, fall back to activity-file
+            spec = ctx.get("specialization_hint") or ctx.get("_specialization")
+            if not spec:
+                activity = self.activity_manager.get_activity(ev.get("agent", ""))
+                if activity and activity.specialization:
+                    spec = activity.specialization
+            if spec:
+                specialization_counts[spec] += 1
+
+        # --- Self-eval retry rate from activity stream retry_count field ---
+        self_eval_retried = sum(
+            1 for ev in complete_events.values()
+            if (ev.get("retry_count") or 0) > 0
+        )
+
+        # --- Context budget utilisation from token counts on complete events ---
+        utilizations: List[float] = []
+        for ev in complete_events.values():
+            input_tok = ev.get("input_tokens") or 0
+            output_tok = ev.get("output_tokens") or 0
+            total_tok = input_tok + output_tok
+            if total_tok <= 0:
+                continue
+            # Use a generic budget (50k) — the task type isn't always available
+            # in the activity stream event, so we apply the implementation default.
+            budget = self._DEFAULT_BUDGET
+            utilizations.append(min((total_tok / budget) * 100.0, 100.0))
+
+        avg_utilization = sum(utilizations) / len(utilizations) if utilizations else 0.0
+        high_util_count = sum(1 for u in utilizations if u >= 80.0)
+        high_util_rate = (high_util_count / len(utilizations) * 100.0) if utilizations else 0.0
+
+        # --- Assemble rates ---
+        memory_usage_rate = (memory_used_count / total * 100.0) if total else 0.0
+        self_eval_retry_rate = (self_eval_retried / total * 100.0) if total else 0.0
+        replan_trigger_rate = (replan_count / total * 100.0) if total else 0.0
+        replan_success_rate = (
+            replan_success_count / replan_count * 100.0 if replan_count else 0.0
+        )
+
+        spec_distribution = [
+            SpecializationCount(profile=profile, count=count)
+            for profile, count in sorted(
+                specialization_counts.items(), key=lambda x: x[1], reverse=True
+            )
+        ]
+
+        return AgenticsMetrics(
+            generated_at=datetime.now(timezone.utc),
+            time_range_hours=hours,
+            memory_usage_rate=round(memory_usage_rate, 1),
+            self_eval_retry_rate=round(self_eval_retry_rate, 1),
+            self_eval_retry_count=self_eval_retried,
+            replan_trigger_rate=round(replan_trigger_rate, 1),
+            replan_trigger_count=replan_count,
+            replan_success_rate=round(replan_success_rate, 1),
+            specialization_distribution=spec_distribution,
+            avg_context_budget_utilization=round(avg_utilization, 1),
+            high_budget_utilization_rate=round(high_util_rate, 1),
+            total_tasks_in_window=total,
+        )
+
+    def _read_activity_events(self, cutoff: datetime) -> List[Dict]:
+        """Read activity-stream events at or after `cutoff`."""
+        stream_file = self.workspace / ".agent-communication" / "activity-stream.jsonl"
+        if not stream_file.exists():
+            return []
+
+        events = []
+        try:
+            for line in stream_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    raw_ts = ev.get("timestamp", "")
+                    ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                    if ts >= cutoff:
+                        events.append(ev)
+                except (json.JSONDecodeError, ValueError, KeyError):
+                    continue
+        except OSError:
+            logger.warning("Could not read activity stream for agentics metrics")
+
+        return events
+
+    def _load_task_by_id(self, task_id: str) -> Optional[object]:
+        """Load a task object from any queue directory by task_id.
+
+        Returns the Task object, or None if not found / unparseable.
+        """
+        if not self.queue.queue_dir.exists():
+            return None
+
+        # Search all queue sub-directories including done/failed
+        for task_file in self.queue.queue_dir.rglob(f"{task_id}.json"):
+            try:
+                return FileQueue.load_task_file(task_file)
+            except Exception:
+                return None
+
+        return None
 
     def get_active_claude_cli_tasks(self) -> Dict[str, str]:
         """Get mapping of agent_id to current task_id for active agents.

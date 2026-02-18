@@ -20,6 +20,7 @@ from .data_provider import DashboardDataProvider
 from .models import (
     ActiveTaskData,
     AgentData,
+    AgenticsMetrics,
     CheckpointData,
     QueueStats,
     EventData,
@@ -363,6 +364,16 @@ def register_routes(app: FastAPI):
     async def get_health():
         """Get system health status."""
         return app.state.data_provider.get_health_status()
+
+    @app.get("/api/metrics/agentics", response_model=AgenticsMetrics)
+    async def get_agentics_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Get agentic feature usage metrics for the dashboard.
+
+        Returns aggregated rates for memory usage, self-eval retries, replanning,
+        specialization distribution, and context budget utilisation over the
+        requested time window (default: last 24 h, max: 7 days / 168 h).
+        """
+        return app.state.data_provider.compute_agentics_metrics(hours=hours)
 
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():
@@ -803,8 +814,28 @@ def register_routes(app: FastAPI):
         await websocket.accept()
         logger.info("WebSocket client connected")
 
+        # Agentics metrics are expensive to recompute (filesystem scan) so we
+        # refresh them at most once per minute rather than every 500ms tick.
+        _agentics_cache = None
+        _agentics_last_refresh: Optional[float] = None
+        _AGENTICS_REFRESH_SECONDS = 60
+
         try:
             while True:
+                now = time.time()
+
+                # Refresh agentics metrics on first call and every minute thereafter
+                if (
+                    _agentics_cache is None
+                    or _agentics_last_refresh is None
+                    or now - _agentics_last_refresh >= _AGENTICS_REFRESH_SECONDS
+                ):
+                    try:
+                        _agentics_cache = app.state.data_provider.compute_agentics_metrics()
+                        _agentics_last_refresh = now
+                    except Exception as e:
+                        logger.warning(f"Could not compute agentics metrics: {e}")
+
                 # Build full dashboard state
                 uptime = (datetime.now(timezone.utc) - app.state.start_time).total_seconds()
 
@@ -818,6 +849,7 @@ def register_routes(app: FastAPI):
                     is_paused=app.state.data_provider.is_paused(),
                     uptime_seconds=int(uptime),
                     active_teams=app.state.data_provider.get_active_teams(),
+                    agentics_metrics=_agentics_cache,
                 )
 
                 await websocket.send_json(state.model_dump(mode="json"))

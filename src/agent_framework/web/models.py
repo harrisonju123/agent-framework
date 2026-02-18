@@ -159,6 +159,7 @@ class DashboardState(BaseModel):
     is_paused: bool
     uptime_seconds: int
     active_teams: List[TeamSessionData] = []
+    agentics_metrics: Optional["AgenticsMetrics"] = None
 
 
 # API Response models
@@ -309,3 +310,45 @@ class SetupStatusResponse(BaseModel):
     repositories_registered: int
     mcp_enabled: bool
     ready_to_start: bool
+
+
+class SpecializationCount(BaseModel):
+    """Task count for a single specialization profile."""
+    profile: str
+    count: int
+
+
+class AgenticsMetrics(BaseModel):
+    """Aggregated agentic feature usage metrics surfaced on the dashboard.
+
+    All rates are expressed as percentages (0–100). Counts are raw integers.
+    Time range is configurable; defaults to the last 24 hours.
+    """
+    generated_at: datetime
+    time_range_hours: int
+
+    # How often tasks had any memory context available when they ran.
+    memory_usage_rate: float
+
+    # Percentage of completed tasks that triggered a self-eval retry
+    # (i.e. retry_count > 0 on the activity-stream "complete" event).
+    self_eval_retry_rate: float
+    self_eval_retry_count: int
+
+    # Percentage of tasks that issued at least one replan.
+    replan_trigger_rate: float
+    replan_trigger_count: int
+    # Of tasks that replanned and eventually completed, their success rate.
+    replan_success_rate: float
+
+    # Distribution of engineer specialization profiles across completed tasks.
+    specialization_distribution: List[SpecializationCount]
+
+    # Average context-budget utilisation at task completion, as a percentage.
+    # Computed from (input_tokens + output_tokens) / per-type budget.
+    avg_context_budget_utilization: float
+    # Percentage of tasks that hit ≥80% budget utilisation.
+    high_budget_utilization_rate: float
+
+    # Raw task counts used to compute the rates above.
+    total_tasks_in_window: int
