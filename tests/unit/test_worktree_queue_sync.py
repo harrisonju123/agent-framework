@@ -196,6 +196,41 @@ class TestSyncWorktreeQueuedTasks:
         assert synced.assigned_to == "engineer"
         assert synced.depends_on == ["impl-abc123"]
 
+    def test_skips_task_already_in_queue(self, agent, queue, tmp_path):
+        """Re-syncing a task that's already queued doesn't overwrite it."""
+        worktree = tmp_path / "worktree"
+        wt_queue = worktree / ".agent-communication" / "queues" / "engineer"
+        wt_queue.mkdir(parents=True)
+
+        task_data = _make_task_json("impl-dup")
+        worktree_copy = wt_queue / "impl-dup.json"
+        worktree_copy.write_text(json.dumps(task_data))
+
+        # Pre-push the task to main queue so it already exists
+        original_task = Task(**task_data)
+        original_task.title = "Original title"
+        queue.push(original_task, "engineer")
+        main_task_file = queue.queue_dir / "engineer" / "impl-dup.json"
+        original_mtime = main_task_file.stat().st_mtime
+
+        agent._active_worktree = worktree
+        agent._git_ops._active_worktree = agent._active_worktree
+        agent._git_ops.sync_worktree_queued_tasks()
+
+        # Main queue task should not have been overwritten
+        assert main_task_file.stat().st_mtime == original_mtime
+        reloaded = FileQueue.load_task_file(main_task_file)
+        assert reloaded.title == "Original title"
+
+        # Worktree copy should still be cleaned up
+        assert not worktree_copy.exists()
+
+        # Skip should be logged
+        assert any(
+            "already-existing" in str(call) and "impl-dup" in str(call)
+            for call in agent.logger.info.call_args_list
+        )
+
     def test_skips_already_completed_tasks(self, agent, queue, tmp_path):
         """Stale worktree copies of completed tasks are cleaned up, not re-pushed."""
         worktree = tmp_path / "worktree"

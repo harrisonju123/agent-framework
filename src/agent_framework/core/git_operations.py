@@ -262,10 +262,12 @@ class GitOperationsManager:
                     data = json.loads(task_file.read_text())
                     synced_task = Task(**data)
 
-                    # Skip tasks that already completed — stale worktree copies
-                    if self.queue.get_completed(synced_task.id):
+                    # Dedup: skip tasks already queued or completed
+                    task_file_in_queue = self.queue.queue_dir / synced_task.assigned_to / f"{synced_task.id}.json"
+                    completed_file = self.queue.completed_dir / f"{synced_task.id}.json"
+                    if task_file_in_queue.exists() or completed_file.exists():
                         self.logger.info(
-                            f"Skipping already-completed task {synced_task.id} during worktree sync"
+                            f"Skipping already-existing task {synced_task.id} during worktree sync"
                         )
                         task_file.unlink(missing_ok=True)
                         continue
