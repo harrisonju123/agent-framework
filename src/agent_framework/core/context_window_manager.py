@@ -11,6 +11,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+MEMORY_BUDGET_RATIO = 3000 / 50_000  # 3000 chars at the 50K default implementation budget
+MIN_MEMORY_CHARS = 800               # Floor: enough for 5-6 useful memory entries
+MAX_MEMORY_CHARS = 6000              # Ceiling: prevent excessive injection for huge budgets
+
 
 class ContextPriority(Enum):
     """Priority levels for context inclusion."""
@@ -375,18 +379,28 @@ class ContextWindowManager:
         return False
 
     def compute_memory_budget(self) -> int:
-        """Compute memory budget based on current context utilization.
+        """Compute memory budget proportional to the task's token budget.
 
-        Returns character limit for memory injection based on utilization tiers:
-        - < 70% used: 3000 chars (full memory context)
-        - 70-90% used: 1000 chars (summarized memory context)
-        - >= 90% used: 0 chars (omit memories to preserve critical context)
+        Scales with total_budget so larger tasks (escalation, architecture) get more
+        memory context, while small tasks (status_report) don't waste their budget.
+        Decays linearly from 70-90% utilization rather than cliff-dropping at 70%.
+
+        - < 70% used:  base proportional allocation (clamped to MIN/MAX_MEMORY_CHARS)
+        - 70-90% used: linear decay from base → 0 (continuous at 70% boundary)
+        - >= 90% used: 0 (omit memories to preserve critical context)
+
+        Note: tasks at MIN_MEMORY_CHARS floor (small budgets) reach effectively zero
+        allocation around 87-88% utilization rather than 90%, because the decay
+        formula produces sub-useful char counts before the hard cutoff.
         """
-        utilization = self.budget.utilization_percent
+        base = int(self.budget.total_budget * MEMORY_BUDGET_RATIO)
+        base = max(MIN_MEMORY_CHARS, min(MAX_MEMORY_CHARS, base))
 
+        utilization = self.budget.utilization_percent
         if utilization < 70.0:
-            return 3000
+            return base
         elif utilization < 90.0:
-            return 1000
+            # Linear decay from base → 0 between 70% and 90%
+            return int(base * (90.0 - utilization) / 20.0)
         else:
             return 0

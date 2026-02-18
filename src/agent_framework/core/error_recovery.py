@@ -85,14 +85,6 @@ class ErrorRecoveryManager:
             task.mark_failed(self.config.id, error_message=task.last_error, error_type=error_type)
             self.queue.mark_failed(task)
 
-            # Teach the system about what didn't work so future tasks skip dead ends
-            repo_slug = self._get_repo_slug(task)
-            if repo_slug:
-                try:
-                    self.store_failure_antipattern(task, repo_slug)
-                except Exception as e:
-                    self.logger.warning(f"Failed to store failure antipattern: {e}")
-
             # Notify JIRA about permanent failure (no status change, just a comment)
             jira_key = task.context.get("jira_key")
             if jira_key and self.jira_client:
@@ -121,6 +113,16 @@ class ErrorRecoveryManager:
                     "Logging to escalations directory for human intervention."
                 )
                 self._log_failed_escalation(task)
+
+                # Only record the antipattern when no escalation path exists. If an
+                # escalation is created it may resolve the issue — we shouldn't label
+                # approaches "unresolved dead ends" that the escalation might fix.
+                repo_slug = self._get_repo_slug(task)
+                if repo_slug:
+                    try:
+                        self.store_failure_antipattern(task, repo_slug, error_type)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to store failure antipattern: {e}")
         else:
             # Dynamic replanning: generate revised approach on retry 2+
             if self._replan_enabled and task.retry_count >= self._replan_min_retry:
@@ -525,14 +527,22 @@ breaking the task into smaller steps, or working around the root cause."""
         _add(past_failures)
 
         # Shared-namespace memories (architectural decisions, cross-agent conventions)
-        # collected before the broad agent-scoped categories so they aren't crowded out
-        for category in ("past_failures", "conventions"):
-            _add(self.memory_store.recall(
-                repo_slug=repo_slug,
-                agent_type="shared",
-                category=category,
-                limit=3,
-            ))
+        # collected before the broad agent-scoped categories so they aren't crowded out.
+        # Apply the same tag filter to shared past_failures for consistency — unrelated
+        # error-type antipatterns from other agents shouldn't pollute this context.
+        _add(self.memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="past_failures",
+            tags=tags,
+            limit=3,
+        ))
+        _add(self.memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="conventions",
+            limit=3,
+        ))
 
         for category in ("conventions", "test_commands", "repo_structure"):
             _add(self.memory_store.recall(
@@ -593,12 +603,12 @@ breaking the task into smaller steps, or working around the root cause."""
             tags=[error_type],
         )
 
-    def store_failure_antipattern(self, task: Task, repo_slug: str) -> None:
+    def store_failure_antipattern(self, task: Task, repo_slug: str, error_type: str) -> None:
         """Persist an unresolved failure pattern as a past_failures memory.
 
-        Called when a task exhausts all retries. Stores what was tried and
-        that it didn't work, so future tasks can avoid repeating the same
-        dead ends.
+        Called only when no escalation path exists — if an escalation is created,
+        the approaches tried here might still succeed at a higher level. Only true
+        dead ends (no escalation, no recovery) are worth recording as antipatterns.
         """
         if not self.memory_store or not self.memory_store.enabled:
             return
@@ -607,14 +617,18 @@ breaking the task into smaller steps, or working around the root cause."""
         if not task.replan_history:
             return
 
-        error_type = self._categorize_error(task.last_error or "") or "unknown"
         approaches = [
             entry.get("approach_tried", "unknown")
             for entry in task.replan_history
             if entry.get("approach_tried")
         ]
-        files = task.replan_history[-1].get("files_involved", [])
-        files_str = ", ".join(files[:3]) if files else "unknown files"
+
+        # Union files across all retry attempts — earlier attempts may have touched
+        # different files than the last one
+        all_files: set[str] = set()
+        for entry in task.replan_history:
+            all_files.update(entry.get("files_involved", []))
+        files_str = ", ".join(sorted(all_files)[:3]) if all_files else "unknown files"
 
         approaches_str = "; ".join(approaches) if approaches else "unknown approaches"
         content = (

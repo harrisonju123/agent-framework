@@ -7,6 +7,9 @@ from agent_framework.core.context_window_manager import (
     ContextPriority,
     ContextItem,
     ContextBudget,
+    MEMORY_BUDGET_RATIO,
+    MIN_MEMORY_CHARS,
+    MAX_MEMORY_CHARS,
 )
 
 
@@ -302,38 +305,44 @@ class TestContextWindowManager:
         assert "HIGH" in metadata["priority_breakdown"]
 
     def test_compute_memory_budget_healthy(self, manager):
-        """Verify full memory budget when utilization is healthy (<70%)."""
+        """Verify full (floor-clamped) memory budget when utilization is healthy (<70%).
+
+        10K budget → base = int(10000 * 0.06) = 600, clamped to MIN_MEMORY_CHARS = 800.
+        """
         # No usage yet — 0% utilization
-        assert manager.compute_memory_budget() == 3000
+        assert manager.compute_memory_budget() == MIN_MEMORY_CHARS
 
         # 50% utilization
         manager.update_token_usage(2500, 2500)
-        assert manager.compute_memory_budget() == 3000
+        assert manager.compute_memory_budget() == MIN_MEMORY_CHARS
 
         # Right at 69% boundary
         manager.budget.peak_input_tokens = 3450
         manager.budget.cumulative_output_tokens = 3450
         assert manager.budget.utilization_percent == 69.0
-        assert manager.compute_memory_budget() == 3000
+        assert manager.compute_memory_budget() == MIN_MEMORY_CHARS
 
     def test_compute_memory_budget_tight(self, manager):
-        """Verify reduced memory budget when utilization is tight (70-90%)."""
-        # Exactly 70% utilization
+        """Verify linearly-decayed memory budget when utilization is tight (70-90%).
+
+        10K budget → base = 800 (floor). Decay: int(800 * (90 - util) / 20).
+        """
+        # Exactly 70% utilization — top of decay range, returns full base
         manager.update_token_usage(3500, 3500)
         assert manager.budget.utilization_percent == 70.0
-        assert manager.compute_memory_budget() == 1000
+        assert manager.compute_memory_budget() == 800  # int(800 * 20/20)
 
-        # 80% utilization
+        # 80% utilization — midpoint of decay range
         manager.budget.peak_input_tokens = 4000
         manager.budget.cumulative_output_tokens = 4000
         assert manager.budget.utilization_percent == 80.0
-        assert manager.compute_memory_budget() == 1000
+        assert manager.compute_memory_budget() == 400  # int(800 * 10/20)
 
-        # Right below 90% boundary
+        # Right below 90% boundary — nearly zero
         manager.budget.peak_input_tokens = 4499
         manager.budget.cumulative_output_tokens = 4499
         assert manager.budget.utilization_percent == 89.98
-        assert manager.compute_memory_budget() == 1000
+        assert manager.compute_memory_budget() == 0  # int(800 * 0.02/20) = 0
 
     def test_compute_memory_budget_critical(self, manager):
         """Verify memory budget is zero when utilization is critical (>=90%)."""
@@ -355,27 +364,68 @@ class TestContextWindowManager:
         assert manager.compute_memory_budget() == 0
 
     def test_compute_memory_budget_edge_cases(self, manager):
-        """Verify memory budget at critical boundaries."""
-        # Just below 70% threshold (69.99%)
+        """Verify memory budget at tier boundaries (10K budget, base=800)."""
+        # Just below 70% threshold (69.99%) — still in healthy tier
         manager.budget.peak_input_tokens = 3499
         manager.budget.cumulative_output_tokens = 3500
         assert 69.9 <= manager.budget.utilization_percent < 70.0
-        assert manager.compute_memory_budget() == 3000
+        assert manager.compute_memory_budget() == MIN_MEMORY_CHARS
 
-        # Exactly 70% threshold
+        # Exactly 70% — enters decay range but (90-70)/20 = 1.0, so full base returned
         manager.budget.peak_input_tokens = 3500
         manager.budget.cumulative_output_tokens = 3500
         assert manager.budget.utilization_percent == 70.0
-        assert manager.compute_memory_budget() == 1000
+        assert manager.compute_memory_budget() == 800  # int(800 * 20/20)
 
-        # Just below 90% threshold (89.99%)
+        # Just below 90% threshold (89.99%) — decay is nearly zero
         manager.budget.peak_input_tokens = 4499
         manager.budget.cumulative_output_tokens = 4500
         assert 89.9 <= manager.budget.utilization_percent < 90.0
-        assert manager.compute_memory_budget() == 1000
+        assert manager.compute_memory_budget() == 0  # int(800 * 0.01/20) = 0
 
-        # Exactly 90% threshold
+        # Exactly 90% threshold — hard cutoff
         manager.budget.peak_input_tokens = 4500
         manager.budget.cumulative_output_tokens = 4500
         assert manager.budget.utilization_percent == 90.0
         assert manager.compute_memory_budget() == 0
+
+    @pytest.mark.parametrize("total_budget,expected_chars", [
+        (10_000, 800),   # 600 raw → clamped to MIN_MEMORY_CHARS floor
+        (30_000, 1800),  # 1800 raw → unclamped
+        (50_000, 3000),  # 3000 raw → unclamped (matches pre-scaling default)
+        (80_000, 4800),  # 4800 raw → unclamped
+    ])
+    def test_compute_memory_budget_scales_with_budget(self, total_budget, expected_chars):
+        """Verify memory allocation scales proportionally with the task's token budget."""
+        m = ContextWindowManager(total_budget=total_budget, output_reserve=2000)
+        assert m.compute_memory_budget() == expected_chars
+
+    def test_compute_memory_budget_linear_decay(self):
+        """Verify smooth linear decay between 70-90% utilization (50K budget, base=3000)."""
+        m = ContextWindowManager(total_budget=50_000, output_reserve=10_000)
+        base = 3000
+
+        cases = [
+            (70.0, int(base * 20 / 20)),  # 3000
+            (75.0, int(base * 15 / 20)),  # 2250
+            (80.0, int(base * 10 / 20)),  # 1500
+            (85.0, int(base * 5 / 20)),   # 750
+        ]
+        for utilization, expected in cases:
+            # Set peak and cumulative to yield the target utilization
+            half = int(utilization / 100 * m.budget.total_budget / 2)
+            m.budget.peak_input_tokens = half
+            m.budget.cumulative_output_tokens = half
+            assert m.compute_memory_budget() == expected, f"Expected {expected} at {utilization}% utilization"
+
+    def test_compute_memory_budget_min_clamp(self):
+        """Verify MIN_MEMORY_CHARS floor prevents starvation on very small budgets."""
+        m = ContextWindowManager(total_budget=1_000, output_reserve=200)
+        # Raw: int(1000 * 0.06) = 60 — well below floor
+        assert m.compute_memory_budget() == MIN_MEMORY_CHARS
+
+    def test_compute_memory_budget_max_clamp(self):
+        """Verify MAX_MEMORY_CHARS ceiling prevents excessive injection on huge budgets."""
+        m = ContextWindowManager(total_budget=200_000, output_reserve=40_000)
+        # Raw: int(200000 * 0.06) = 12000 — above ceiling
+        assert m.compute_memory_budget() == MAX_MEMORY_CHARS

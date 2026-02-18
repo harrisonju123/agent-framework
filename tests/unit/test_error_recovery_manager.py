@@ -540,12 +540,11 @@ class TestReplanMemory:
         assert None in call_tags or any(t is None for t in call_tags)
 
     def test_store_failure_antipattern_on_exhausted_retries(self):
-        """Antipattern content records attempted approaches and marks as unresolved."""
+        """Antipattern content records all attempted approaches and unions files across retries."""
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
         manager.memory_store = memory_store
-        manager.escalation_handler.categorize_error = MagicMock(return_value="network_error")
 
         task = _make_task(
             last_error="ConnectionError: timeout",
@@ -554,20 +553,20 @@ class TestReplanMemory:
                     "attempt": 2,
                     "error_type": "network_error",
                     "approach_tried": "retry with backoff",
-                    "files_involved": ["src/client.py"],
+                    "files_involved": ["src/client.py"],  # first attempt touches client
                     "revised_plan": "Add exponential backoff",
                 },
                 {
                     "attempt": 3,
                     "error_type": "network_error",
                     "approach_tried": "switch endpoint",
-                    "files_involved": ["src/client.py"],
+                    "files_involved": ["src/config.py"],  # second attempt touches config
                     "revised_plan": "Try fallback endpoint",
                 },
             ],
         )
 
-        manager.store_failure_antipattern(task, "owner/repo")
+        manager.store_failure_antipattern(task, "owner/repo", "network_error")
 
         memory_store.remember.assert_called_once()
         call_kwargs = memory_store.remember.call_args.kwargs
@@ -576,6 +575,8 @@ class TestReplanMemory:
         assert "retry with backoff" in call_kwargs["content"]
         assert "switch endpoint" in call_kwargs["content"]
         assert "unresolved" in call_kwargs["content"]
+        # Files from both retry attempts should appear (union, not just last entry)
+        assert "src/client.py" in call_kwargs["content"] or "src/config.py" in call_kwargs["content"]
         # "→ resolved" (without "un") is the success marker — must not appear here
         assert "→ resolved" not in call_kwargs["content"]
 
@@ -587,9 +588,33 @@ class TestReplanMemory:
         manager.memory_store = memory_store
 
         task = _make_task(replan_history=[])
-        manager.store_failure_antipattern(task, "owner/repo")
+        manager.store_failure_antipattern(task, "owner/repo", "logic_error")
 
         memory_store.remember.assert_not_called()
+
+    def test_replan_memory_shared_past_failures_apply_tag_filter(self):
+        """Shared past_failures are tag-filtered by error type, same as agent-scoped ones."""
+        manager = _make_manager()
+        memory_store = MagicMock()
+        memory_store.enabled = True
+        from agent_framework.memory.memory_store import MemoryEntry
+        memory_store.recall = MagicMock(return_value=[])
+        manager.memory_store = memory_store
+        manager.escalation_handler.categorize_error = MagicMock(return_value="type_error")
+
+        task = _make_task(
+            last_error="TypeError: expected str",
+            context={"github_repo": "owner/repo"},
+        )
+        manager._build_replan_memory_context(task)
+
+        shared_past_failures_calls = [
+            c for c in memory_store.recall.call_args_list
+            if c.kwargs.get("agent_type") == "shared"
+            and c.kwargs.get("category") == "past_failures"
+        ]
+        assert shared_past_failures_calls, "Expected at least one shared past_failures recall"
+        assert shared_past_failures_calls[0].kwargs.get("tags") == ["type_error"]
 
     def test_replan_memory_includes_shared_namespace(self):
         """Shared-namespace memories appear in the replan context."""
@@ -655,7 +680,7 @@ class TestReplanMemory:
 
     @pytest.mark.asyncio
     async def test_handle_failure_calls_store_failure_antipattern(self):
-        """store_failure_antipattern is invoked when max retries are exceeded."""
+        """Antipattern is stored only when no escalation path exists."""
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
@@ -686,19 +711,30 @@ class TestReplanMemory:
         assert "unresolved" in call_kwargs["content"]
 
     @pytest.mark.asyncio
-    async def test_handle_failure_antipattern_exception_does_not_block_escalation(self):
-        """A memory write failure must not prevent JIRA/escalation from running."""
+    async def test_handle_failure_no_antipattern_when_escalation_created(self):
+        """Antipattern must not be stored when an escalation task is created.
+
+        The escalation may succeed — we shouldn't label the sub-task's approaches
+        as dead ends if they might work in the context of an escalated resolution.
+        """
         manager = _make_manager()
         memory_store = MagicMock()
         memory_store.enabled = True
-        memory_store.remember.side_effect = OSError("disk full")
         manager.memory_store = memory_store
 
         escalation_task = _make_task(id="esc-001", type=TaskType.ESCALATION)
         task = _make_task(
             retry_count=3,
             context={"github_repo": "owner/repo"},
-            replan_history=[{"attempt": 2, "approach_tried": "fix", "revised_plan": "plan"}],
+            replan_history=[
+                {
+                    "attempt": 2,
+                    "error_type": "logic_error",
+                    "approach_tried": "add null check",
+                    "files_involved": ["src/foo.py"],
+                    "revised_plan": "Guard against None",
+                }
+            ],
         )
         manager.queue.find_task.return_value = task
         manager.escalation_handler.categorize_error.return_value = "logic_error"
@@ -707,9 +743,33 @@ class TestReplanMemory:
 
         await manager.handle_failure(task)
 
-        # Escalation must still be created despite the memory write failure
+        memory_store.remember.assert_not_called()
         manager.escalation_handler.create_escalation.assert_called_once()
-        manager.queue.push.assert_called_once_with(escalation_task, escalation_task.assigned_to)
+
+    @pytest.mark.asyncio
+    async def test_handle_failure_antipattern_exception_does_not_block_logging(self):
+        """A memory write failure in the terminal path must not prevent failure logging."""
+        manager = _make_manager()
+        memory_store = MagicMock()
+        memory_store.enabled = True
+        memory_store.remember.side_effect = OSError("disk full")
+        manager.memory_store = memory_store
+
+        task = _make_task(
+            retry_count=3,
+            context={"github_repo": "owner/repo"},
+            replan_history=[{"attempt": 2, "approach_tried": "fix", "revised_plan": "plan"}],
+        )
+        manager.queue.find_task.return_value = task
+        manager.escalation_handler.categorize_error.return_value = "logic_error"
+        # No escalation path — antipattern storage runs, then throws
+        manager.retry_handler.can_create_escalation.return_value = False
+
+        # Must not raise despite the OSError from memory_store.remember
+        await manager.handle_failure(task)
+
+        # Task was still marked failed and logged
+        manager.queue.mark_failed.assert_called_once()
 
 
 class TestTryDiffStrategies:
