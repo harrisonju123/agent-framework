@@ -603,8 +603,7 @@ class Agent:
                     f"No tasks available for {self.config.id}, "
                     f"sleeping for {self.config.poll_interval}s"
                 )
-
-            await asyncio.sleep(self.config.poll_interval)
+                await asyncio.sleep(self.config.poll_interval)
 
     async def stop(self) -> None:
         """Stop the polling loop gracefully."""
