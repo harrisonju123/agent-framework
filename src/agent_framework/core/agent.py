@@ -1066,6 +1066,15 @@ class Agent:
             retry=task.retry_count,
         )
 
+        # PREVIEW tasks get tool-level read-only enforcement so the model cannot write
+        # files even if it ignores the prompt instructions. This supplements (not replaces)
+        # the prompt injection in _inject_preview_mode().
+        preview_allowed_tools: list[str] | None = None
+        if task.type == TaskType.PREVIEW:
+            preview_allowed_tools = [
+                "Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch",
+            ]
+
         # Race LLM execution against pause/stop signal watcher
         llm_coro = self.llm.complete(
             LLMRequest(
@@ -1077,6 +1086,7 @@ class Agent:
                 agents=team_agents,
                 specialization_profile=self._current_specialization.id if self._current_specialization else None,
                 file_count=self._current_file_count,
+                allowed_tools=preview_allowed_tools,
             ),
             task_id=task.id,
             on_tool_activity=_on_tool_activity,
