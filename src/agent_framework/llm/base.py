@@ -68,6 +68,10 @@ class LLMBackend(ABC):
         don't support cancellation."""
         pass
 
+    def get_partial_output(self) -> str:
+        """Return accumulated output from the in-flight LLM call."""
+        return ""
+
     @abstractmethod
     def select_model(
         self,

@@ -1053,10 +1053,16 @@ If a tool call fails:
             sections.append(prev_summary)
             sections.append("")
 
-        sections.append(
-            "Do NOT restart from scratch. Continue from the progress above, "
-            "fixing the error that caused the previous attempt to fail."
-        )
+        if task.last_error and task.last_error.startswith("Interrupted"):
+            sections.append(
+                "Do NOT restart from scratch. The previous attempt was interrupted "
+                "before completion. Continue from the progress above."
+            )
+        else:
+            sections.append(
+                "Do NOT restart from scratch. Continue from the progress above, "
+                "fixing the error that caused the previous attempt to fail."
+            )
 
         # Disambiguate upstream context if present
         if task.context.get("upstream_summary"):

@@ -1180,6 +1180,15 @@ class Agent:
             except Exception as e:
                 self.logger.debug(f"LLM task raised during cancellation: {e}")
 
+            # Harvest partial output so retry can continue from where we left off
+            partial = self.llm.get_partial_output()
+            if partial:
+                summary = self._extract_partial_progress(partial)
+                if summary:
+                    task.context["_previous_attempt_summary"] = summary
+                    self.logger.debug(f"Preserved {len(summary)} chars of partial progress from interruption")
+
+            task.last_error = "Interrupted during LLM execution"
             task.reset_to_pending()
             self.queue.update(task)
             self.activity_manager.append_event(ActivityEvent(

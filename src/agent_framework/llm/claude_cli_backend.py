@@ -200,6 +200,7 @@ class ClaudeCLIBackend(LLMBackend):
         )
         self.logs_dir = logs_dir or Path("logs")
         self._current_process: Optional[asyncio.subprocess.Process] = None
+        self._partial_output: list[str] = []
 
         # Clean up stale MCP cache files from terminated processes
         self._cleanup_stale_cache_files()
@@ -340,6 +341,7 @@ class ClaudeCLIBackend(LLMBackend):
 
             # Stream output with timeout
             text_chunks = []     # Human-readable text extracted from JSON events
+            self._partial_output = text_chunks  # Alias so partial output survives cancellation
             usage_result = {}    # Token usage and cost from final result event
             stderr_chunks = []
             timed_out = False
@@ -589,6 +591,10 @@ class ClaudeCLIBackend(LLMBackend):
                 proc.kill()
             except ProcessLookupError:
                 pass
+
+    def get_partial_output(self) -> str:
+        """Return accumulated output from the in-flight LLM call."""
+        return "".join(self._partial_output) if self._partial_output else ""
 
     def select_model(
         self,

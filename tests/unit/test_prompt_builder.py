@@ -418,6 +418,29 @@ class TestPromptInjections:
 
         assert "previous agent in the workflow chain" in result
 
+    def test_inject_retry_context_interrupted_wording(self, prompt_builder, sample_task):
+        """Interruption gets 'continue' wording instead of 'fix the error'."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Interrupted during LLM execution"
+        sample_task.context["_previous_attempt_summary"] = "Reviewed 3 files, started writing feedback"
+
+        prompt = "Base prompt"
+        result = prompt_builder._inject_retry_context(prompt, sample_task)
+
+        assert "interrupted before completion" in result
+        assert "fixing the error" not in result
+
+    def test_inject_retry_context_error_wording_unchanged(self, prompt_builder, sample_task):
+        """Non-interruption errors still get the 'fix the error' wording."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Connection refused at line 42"
+
+        prompt = "Base prompt"
+        result = prompt_builder._inject_retry_context(prompt, sample_task)
+
+        assert "fixing the error" in result
+        assert "interrupted before completion" not in result
+
 
 class TestStructuredFindings:
     """Test structured QA findings formatting for engineer prompts."""
