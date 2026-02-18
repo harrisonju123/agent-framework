@@ -209,6 +209,48 @@ class TestCIPolling:
         result = manager._fetch_ci_status("org/repo", "10")
         assert result.status == CIStatus.ERROR
 
+    @patch("agent_framework.core.pr_lifecycle.run_command")
+    def test_nonzero_exit_with_valid_json_parses_checks(self, mock_run, manager):
+        """gh exits 1 when checks fail but still writes valid JSON — must parse it."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout=json.dumps([
+                {"name": "tests", "state": "COMPLETED", "conclusion": "FAILURE"},
+            ]),
+            stderr="Some checks were not successful",
+        )
+        result = manager._fetch_ci_status("org/repo", "10")
+        assert result.status == CIStatus.FAILING
+        assert "tests" in result.failed_checks
+
+    @patch("agent_framework.core.pr_lifecycle.run_command")
+    def test_error_conclusion_treated_as_failure(self, mock_run, manager):
+        """conclusion=ERROR must be classified as failing, not silently ignored."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {"name": "deploy", "state": "COMPLETED", "conclusion": "ERROR"},
+            ]),
+            stderr="",
+        )
+        result = manager._fetch_ci_status("org/repo", "10")
+        assert result.status == CIStatus.FAILING
+        assert "deploy" in result.failed_checks
+
+    @patch("agent_framework.core.pr_lifecycle.run_command")
+    def test_startup_failure_conclusion_treated_as_failure(self, mock_run, manager):
+        """conclusion=STARTUP_FAILURE must be classified as failing."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([
+                {"name": "build", "state": "COMPLETED", "conclusion": "STARTUP_FAILURE"},
+            ]),
+            stderr="",
+        )
+        result = manager._fetch_ci_status("org/repo", "10")
+        assert result.status == CIStatus.FAILING
+        assert "build" in result.failed_checks
+
 
 # ===========================================================================
 # CI fix task creation
@@ -498,6 +540,78 @@ class TestManageFlow:
             return MagicMock(returncode=0, stdout="FAILED", stderr="")
 
         mock_run.side_effect = route_command
+        assert manager.manage(task, "engineer") is False
+        esc_task = manager._queue.push.call_args[0][0]
+        assert esc_task.type == TaskType.ESCALATION
+
+    @patch("agent_framework.core.pr_lifecycle.run_command")
+    def test_check_error_conclusion_queues_fix(self, mock_run, manager):
+        """conclusion=ERROR on a check (→ CIStatus.FAILING) queues a fix task."""
+        task = _make_task(pr_url="https://github.com/org/repo/pull/10")
+
+        def route_command(cmd, **kwargs):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if "pr checks" in cmd_str and "--json" in cmd_str:
+                return MagicMock(
+                    returncode=1,
+                    stdout=json.dumps([
+                        {"name": "tests", "state": "COMPLETED", "conclusion": "ERROR"},
+                    ]),
+                    stderr="Some checks were not successful",
+                )
+            return MagicMock(returncode=0, stdout="error details", stderr="")
+
+        mock_run.side_effect = route_command
+        assert manager.manage(task, "engineer") is False
+        manager._queue.push.assert_called_once()
+        fix_task = manager._queue.push.call_args[0][0]
+        assert fix_task.type == TaskType.FIX
+
+    @patch("agent_framework.core.pr_lifecycle.run_command")
+    def test_check_error_conclusion_exhausted_fixes_escalates(self, mock_run, manager):
+        """conclusion=ERROR on a check (→ CIStatus.FAILING) escalates when fixes exhausted."""
+        task = _make_task(
+            pr_url="https://github.com/org/repo/pull/10",
+            ci_fix_count=3,
+        )
+
+        def route_command(cmd, **kwargs):
+            cmd_str = " ".join(cmd) if isinstance(cmd, list) else cmd
+            if "pr checks" in cmd_str and "--json" in cmd_str:
+                return MagicMock(
+                    returncode=1,
+                    stdout=json.dumps([
+                        {"name": "tests", "state": "COMPLETED", "conclusion": "ERROR"},
+                    ]),
+                    stderr="Some checks were not successful",
+                )
+            return MagicMock(returncode=0, stdout="error details", stderr="")
+
+        mock_run.side_effect = route_command
+        assert manager.manage(task, "engineer") is False
+        esc_task = manager._queue.push.call_args[0][0]
+        assert esc_task.type == TaskType.ESCALATION
+
+    def test_infrastructure_error_ci_queues_fix(self, manager):
+        """True CIStatus.ERROR (gh CLI failure, no parseable JSON) queues a fix rather than silent abandonment."""
+        task = _make_task(pr_url="https://github.com/org/repo/pull/10")
+        manager._poll_ci_checks = MagicMock(return_value=CICheckResult(
+            status=CIStatus.ERROR, failed_checks=[], failure_logs="gh: authentication failed"
+        ))
+        assert manager.manage(task, "engineer") is False
+        manager._queue.push.assert_called_once()
+        fix_task = manager._queue.push.call_args[0][0]
+        assert fix_task.type == TaskType.FIX
+
+    def test_infrastructure_error_ci_exhausted_fixes_escalates(self, manager):
+        """True CIStatus.ERROR escalates when fix attempts are exhausted."""
+        task = _make_task(
+            pr_url="https://github.com/org/repo/pull/10",
+            ci_fix_count=3,
+        )
+        manager._poll_ci_checks = MagicMock(return_value=CICheckResult(
+            status=CIStatus.ERROR, failed_checks=[], failure_logs="gh: authentication failed"
+        ))
         assert manager.manage(task, "engineer") is False
         esc_task = manager._queue.push.call_args[0][0]
         assert esc_task.type == TaskType.ESCALATION

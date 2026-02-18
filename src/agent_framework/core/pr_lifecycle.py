@@ -117,7 +117,7 @@ class PRLifecycleManager:
         # 1. Poll CI
         ci_result = self._poll_ci_checks(github_repo, pr_number)
 
-        if ci_result.status == CIStatus.FAILING:
+        if ci_result.status in (CIStatus.FAILING, CIStatus.ERROR):
             if ci_fix_count < max_ci_fixes:
                 self._create_ci_fix_task(
                     task, ci_result, ci_fix_count + 1, agent_id
@@ -129,10 +129,10 @@ class PRLifecycleManager:
                 )
                 return False
 
-        if ci_result.status in (CIStatus.ERROR, CIStatus.PENDING):
+        if ci_result.status == CIStatus.PENDING:
             self._log.warning(
-                f"CI ended with status={ci_result.status.value} for {pr_url}, "
-                "leaving PR open for manual review"
+                f"CI timed out (still pending after {self._ci_poll_max_wait}s) "
+                f"for {pr_url}, leaving PR open for manual review"
             )
             return False
 
@@ -207,18 +207,15 @@ class PRLifecycleManager:
                 status=CIStatus.ERROR, failed_checks=[], failure_logs=""
             )
 
-        if result.returncode != 0:
-            return CICheckResult(
-                status=CIStatus.ERROR,
-                failed_checks=[],
-                failure_logs=result.stderr[:self.MAX_LOG_CHARS],
-            )
-
+        # gh exits non-zero when checks fail but still writes valid JSON to stdout.
+        # Parse first; only treat as infrastructure error when we have no usable output.
         try:
             checks = json.loads(result.stdout)
         except (json.JSONDecodeError, TypeError):
             return CICheckResult(
-                status=CIStatus.ERROR, failed_checks=[], failure_logs=""
+                status=CIStatus.ERROR,
+                failed_checks=[],
+                failure_logs=result.stderr[:self.MAX_LOG_CHARS] if result.returncode != 0 else "",
             )
 
         if not checks:
@@ -235,7 +232,9 @@ class PRLifecycleManager:
 
             if state == "PENDING" or state == "QUEUED" or state == "IN_PROGRESS":
                 any_pending = True
-            elif conclusion in ("FAILURE", "TIMED_OUT", "CANCELLED"):
+            # "ERROR"/"STARTUP_FAILURE" are GitHub check conclusions, distinct from
+            # CIStatus.ERROR which means the gh CLI itself failed.
+            elif conclusion in ("FAILURE", "TIMED_OUT", "CANCELLED", "ERROR", "STARTUP_FAILURE"):
                 failed.append(check.get("name", "unknown"))
 
         if failed:
