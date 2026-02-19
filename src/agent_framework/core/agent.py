@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 if TYPE_CHECKING:
     from .config import AgentDefinition, RepositoryConfig, WorkflowDefinition
 
-from .task import Task, TaskStatus, TaskType
+from .task import PlanDocument, Task, TaskStatus, TaskType
 from .task_validator import validate_task, ValidationResult
 from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase, ToolActivity
 from .routing import read_routing_signal, validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
@@ -751,6 +751,21 @@ class Agent:
         # Save upstream context after validation passes, before workflow chain
         if task.context.get("workflow") or task.context.get("chain_step"):
             self._save_upstream_context(task, response)
+
+        # Extract structured plan from architect's planning response
+        if (task.plan is None
+                and self.config.base_id == "architect"
+                and task.context.get("workflow_step", task.type) in ("plan", "planning")):
+            content = getattr(response, "content", "") or ""
+            extracted = self._extract_plan_from_response(content)
+            if extracted:
+                task.plan = extracted
+                self.logger.info(
+                    f"Extracted plan from response: {len(extracted.files_to_modify)} files, "
+                    f"{len(extracted.approach)} steps"
+                )
+            else:
+                self.logger.warning("Architect plan step completed but no PlanDocument found in response")
 
         # Mark completed
         self.logger.debug(f"Marking task {task.id} as completed")
@@ -1860,6 +1875,39 @@ class Agent:
             return {}
         except (json.JSONDecodeError, TypeError):
             return {}
+
+    @staticmethod
+    def _extract_plan_from_response(content: str) -> Optional[PlanDocument]:
+        """Parse PlanDocument JSON from architect's planning response.
+
+        Looks for ```json blocks containing PlanDocument fields (objectives,
+        approach, success_criteria). Returns the first valid match, or None.
+        """
+        if not content:
+            return None
+
+        matches = _JSON_FENCE_PATTERN.findall(content)
+        if not matches:
+            return None
+
+        for raw in matches:
+            try:
+                parsed = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            # Unwrap {"plan": {...}} wrapper if present
+            if "plan" in parsed and isinstance(parsed["plan"], dict):
+                parsed = parsed["plan"]
+            # Discriminate: must have the 3 required PlanDocument fields
+            if not all(k in parsed for k in ("objectives", "approach", "success_criteria")):
+                continue
+            try:
+                return PlanDocument.model_validate(parsed)
+            except Exception:
+                continue
+        return None
 
     def _get_repo_slug(self, task: Task) -> Optional[str]:
         """Extract repo slug from task context."""
