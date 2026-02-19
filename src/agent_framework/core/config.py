@@ -135,6 +135,9 @@ class OptimizationConfig(BaseModel):
         "XL": 50.0,
     })
 
+    # Hard cap on all tasks regardless of t-shirt size — safety net when effort estimation is imprecise
+    absolute_budget_ceiling_usd: Optional[float] = None
+
     context_window: ContextWindowConfig = Field(default_factory=ContextWindowConfig)
 
     # Token budgets by task type (configurable)
@@ -180,6 +183,16 @@ class OptimizationConfig(BaseModel):
                 raise ValueError(
                     f"Effort budget ceiling for '{size}' must be positive, got {ceiling}"
                 )
+        return v
+
+    @field_validator('absolute_budget_ceiling_usd')
+    @classmethod
+    def validate_absolute_ceiling(cls, v: Optional[float]) -> Optional[float]:
+        """Reject zero/negative values — None means no absolute cap."""
+        if v is not None and v <= 0:
+            raise ValueError(
+                f"absolute_budget_ceiling_usd must be positive, got {v}"
+            )
         return v
 
     @field_validator('canary_percentage')

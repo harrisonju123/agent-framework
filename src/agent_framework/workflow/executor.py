@@ -268,20 +268,16 @@ class WorkflowExecutor:
             )
             return
 
-        # Per-task budget ceiling: fast-forward to PR when spend exceeds limit
+        # Per-task budget ceiling: terminate chain cleanly (branch is in git, work not lost)
         budget_action = self._check_budget_ceiling(task)
         if budget_action == "halt":
             self.logger.warning(
                 f"Cumulative cost ${task.context.get('_cumulative_cost', 0):.2f} "
                 f"exceeds ceiling ${task.context.get('_budget_ceiling', 0):.2f} "
-                f"for task {task.id} — fast-forwarding to PR creation"
+                f"for task {task.id} — halting workflow (budget exceeded)"
             )
-            pr_step = workflow.steps.get("create_pr")
-            if pr_step and pr_step != target_step:
-                target_step = pr_step
-                next_agent = pr_step.agent
-            else:
-                return
+            task.context["budget_halted"] = True
+            return
 
         # Cap review→engineer fix cycles to prevent infinite bounce loops.
         # code_review, qa_review, and preview_review share a single counter.

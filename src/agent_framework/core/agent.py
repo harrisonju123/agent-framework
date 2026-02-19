@@ -935,16 +935,23 @@ class Agent:
         return _NO_CHANGES_MARKER in content[:200]
 
     def _resolve_budget_ceiling(self, task: Task) -> Optional[float]:
-        """Resolve USD budget ceiling from task effort or plan heuristic.
+        """Resolve USD budget ceiling from task effort and/or absolute cap.
 
-        Returns None when the feature is disabled or no ceiling applies.
+        Returns the tighter of the two when both are set, or whichever is
+        available when only one is configured.  Returns None when neither applies.
         """
-        if not self._optimization_config.get("enable_effort_budget_ceilings", False):
-            return None
-        effort = task.estimated_effort
-        if not effort:
-            effort = self._budget.derive_effort_from_plan(task.plan)
-        return self._budget.get_effort_ceiling(effort.upper())
+        effort_ceiling = None
+        if self._optimization_config.get("enable_effort_budget_ceilings", False):
+            effort = task.estimated_effort
+            if not effort:
+                effort = self._budget.derive_effort_from_plan(task.plan)
+            effort_ceiling = self._budget.get_effort_ceiling(effort.upper())
+
+        absolute = self._optimization_config.get("absolute_budget_ceiling_usd")
+
+        if effort_ceiling is not None and absolute is not None:
+            return min(effort_ceiling, absolute)
+        return effort_ceiling if effort_ceiling is not None else absolute
 
     @staticmethod
     def _extract_partial_progress(content: str, max_bytes: int = 2048) -> str:

@@ -464,12 +464,12 @@ class TestCeilingStamping:
 
 
 # ---------------------------------------------------------------------------
-# Fast-forward routing on budget breach
+# Clean halt on budget breach (no chain task queued)
 # ---------------------------------------------------------------------------
 
-class TestBudgetFastForward:
-    def test_fast_forwards_to_create_pr_on_halt(self):
-        """When ceiling breached, _route_to_step routes to create_pr instead."""
+class TestBudgetHalt:
+    def test_halt_terminates_chain_without_create_pr(self):
+        """When ceiling breached, _route_to_step returns without queuing any chain task."""
         from agent_framework.workflow.dag import WorkflowDAG, WorkflowStep, WorkflowEdge, EdgeCondition, EdgeConditionType
 
         executor = _make_executor()
@@ -501,17 +501,44 @@ class TestBudgetFastForward:
             "implementation_branch": "feature/xyz",
         })
 
-        # Patch _build_chain_task and _is_chain_task_already_queued
         executor._build_chain_task = MagicMock(return_value=_make_task(task_id="chain-1"))
         executor._is_chain_task_already_queued = MagicMock(return_value=False)
 
         executor._route_to_step(task, qa_step, workflow, "qa", None)
 
-        # Should have built chain task targeting create_pr, not qa_review's normal next
-        call_args = executor._build_chain_task.call_args
-        assert call_args[0][1] == create_pr_step  # target_step is create_pr
+        # No chain task should be built — clean halt
+        executor._build_chain_task.assert_not_called()
 
-    def test_no_fast_forward_when_under_ceiling(self):
+    def test_budget_halted_flag_set_in_context(self):
+        """Halt sets budget_halted=True for observability."""
+        from agent_framework.workflow.dag import WorkflowDAG, WorkflowStep
+
+        executor = _make_executor()
+
+        implement_step = WorkflowStep(id="implement", agent="engineer")
+        qa_step = WorkflowStep(id="qa_review", agent="qa")
+
+        workflow = WorkflowDAG(
+            name="default",
+            description="test",
+            steps={"implement": implement_step, "qa_review": qa_step},
+            start_step="implement",
+        )
+
+        task = _make_task(context={
+            "_budget_ceiling": 5.0,
+            "_cumulative_cost": 7.0,
+            "workflow": "default",
+        })
+
+        executor._build_chain_task = MagicMock()
+        executor._is_chain_task_already_queued = MagicMock(return_value=False)
+
+        executor._route_to_step(task, qa_step, workflow, "engineer", None)
+
+        assert task.context["budget_halted"] is True
+
+    def test_no_halt_when_under_ceiling(self):
         """Normal routing when cost is under ceiling."""
         from agent_framework.workflow.dag import WorkflowDAG, WorkflowStep
 
@@ -538,9 +565,10 @@ class TestBudgetFastForward:
 
         executor._route_to_step(task, qa_step, workflow, "engineer", None)
 
-        # Should route to qa_step, not create_pr
+        # Should route to qa_step normally
         call_args = executor._build_chain_task.call_args
         assert call_args[0][1] == qa_step
+        assert "budget_halted" not in task.context
 
 
 # ---------------------------------------------------------------------------
@@ -625,3 +653,69 @@ class TestOptimizationConfigValidation:
         config = OptimizationConfig(effort_budget_ceilings={"TINY": 1.0, "HUGE": 100.0})
         assert config.effort_budget_ceilings["TINY"] == 1.0
         assert config.effort_budget_ceilings["HUGE"] == 100.0
+
+    def test_absolute_ceiling_must_be_positive(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            OptimizationConfig(absolute_budget_ceiling_usd=0.0)
+        with pytest.raises(ValueError, match="must be positive"):
+            OptimizationConfig(absolute_budget_ceiling_usd=-5.0)
+
+    def test_absolute_ceiling_none_by_default(self):
+        config = OptimizationConfig()
+        assert config.absolute_budget_ceiling_usd is None
+
+    def test_absolute_ceiling_accepted(self):
+        config = OptimizationConfig(absolute_budget_ceiling_usd=25.0)
+        assert config.absolute_budget_ceiling_usd == 25.0
+
+
+# ---------------------------------------------------------------------------
+# _resolve_budget_ceiling with absolute ceiling
+# ---------------------------------------------------------------------------
+
+class TestResolveBudgetCeilingWithAbsolute:
+    """Test min(effort, absolute) logic in _resolve_budget_ceiling."""
+
+    def _make_agent(self, *, enable_ceilings=True, absolute=None, effort_ceiling_return=None):
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent._budget = MagicMock()
+        agent._budget.get_effort_ceiling.return_value = effort_ceiling_return
+        agent._budget.derive_effort_from_plan.return_value = "M"
+        agent._optimization_config = MappingProxyType({
+            "enable_effort_budget_ceilings": enable_ceilings,
+            "absolute_budget_ceiling_usd": absolute,
+        })
+        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
+        return agent
+
+    def test_absolute_overrides_effort_ceiling_when_lower(self):
+        """absolute=$10 < M=$15 → use $10."""
+        agent = self._make_agent(absolute=10.0, effort_ceiling_return=15.0)
+        task = _make_task(estimated_effort="M")
+        assert agent._resolve_budget_ceiling(task) == 10.0
+
+    def test_effort_ceiling_wins_when_lower_than_absolute(self):
+        """M=$15 < absolute=$25 → use $15."""
+        agent = self._make_agent(absolute=25.0, effort_ceiling_return=15.0)
+        task = _make_task(estimated_effort="M")
+        assert agent._resolve_budget_ceiling(task) == 15.0
+
+    def test_absolute_alone_when_effort_not_in_config(self):
+        """No per-effort ceiling configured, absolute=$25 used as fallback."""
+        agent = self._make_agent(enable_ceilings=True, absolute=25.0, effort_ceiling_return=None)
+        task = _make_task(estimated_effort="M")
+        assert agent._resolve_budget_ceiling(task) == 25.0
+
+    def test_absolute_alone_when_ceilings_disabled(self):
+        """effort ceilings disabled but absolute set → absolute used."""
+        agent = self._make_agent(enable_ceilings=False, absolute=25.0)
+        task = _make_task(estimated_effort="M")
+        assert agent._resolve_budget_ceiling(task) == 25.0
+
+    def test_none_when_both_absent(self):
+        """Neither ceiling configured → None."""
+        agent = self._make_agent(enable_ceilings=False, absolute=None)
+        task = _make_task(estimated_effort="M")
+        assert agent._resolve_budget_ceiling(task) is None
