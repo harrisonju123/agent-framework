@@ -1396,3 +1396,152 @@ class TestRequirementsChecklistInjection:
         ]
         prompt = prompt_builder.build(sample_task)
         assert "REQUIRED DELIVERABLES" in prompt
+
+
+class TestChainStateIntegration:
+    """Test chain state context loading in prompt builder."""
+
+    def _make_chain_task(self, tmp_path):
+        """Create a chain task that triggers chain state loading."""
+        return Task(
+            id="chain-root-1-implement-d2",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="[chain] Implement auth",
+            description="Implement the auth feature",
+            context={
+                "_root_task_id": "root-1",
+                "workflow": "default",
+                "workflow_step": "implement",
+                "chain_step": True,
+                "github_repo": "company/api",
+                "user_goal": "Add JWT authentication",
+            },
+        )
+
+    def test_chain_state_takes_priority_over_upstream_summary(self, agent_config, tmp_path):
+        """Chain state context should override raw upstream_summary."""
+        import json
+        from agent_framework.core.chain_state import ChainState, StepRecord, save_chain_state
+
+        # Write chain state with plan step
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Add JWT authentication",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan",
+                    agent_id="architect",
+                    task_id="chain-root-1-plan-d1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="Planned auth feature",
+                    verdict="approved",
+                    plan={
+                        "objectives": ["Add JWT auth"],
+                        "approach": ["Create auth service"],
+                        "files_to_modify": ["src/auth.py"],
+                        "risks": [],
+                        "success_criteria": ["Tests pass"],
+                    },
+                ),
+            ],
+        )
+        save_chain_state(tmp_path, state)
+
+        task = self._make_chain_task(tmp_path)
+        # Also set upstream_summary — chain state should win
+        task.context["upstream_summary"] = "RAW LLM PROSE THAT SHOULD NOT APPEAR"
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        context = builder._load_upstream_context(task)
+
+        assert "CHAIN STATE" in context
+        assert "Add JWT auth" in context
+        assert "RAW LLM PROSE" not in context
+
+    def test_falls_through_when_no_chain_state(self, agent_config, tmp_path):
+        """Without chain state file, falls through to upstream_summary."""
+        task = self._make_chain_task(tmp_path)
+        task.context["upstream_summary"] = "Upstream findings here"
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        context = builder._load_upstream_context(task)
+
+        assert "UPSTREAM AGENT FINDINGS" in context
+        assert "Upstream findings here" in context
+
+    def test_non_workflow_task_skips_chain_state(self, agent_config, tmp_path):
+        """Tasks without workflow context should not attempt chain state loading."""
+        task = Task(
+            id="standalone-task",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Standalone task",
+            description="No workflow",
+            context={"github_repo": "company/api"},
+        )
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        context = builder._load_chain_state_context(task)
+
+        assert context == ""
+
+    def test_rejection_feedback_still_takes_priority(self, agent_config, tmp_path):
+        """Human rejection feedback should override even chain state."""
+        from agent_framework.core.chain_state import ChainState, StepRecord, save_chain_state
+
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect",
+                    task_id="t1", completed_at="2026-02-19T10:00:00+00:00",
+                    summary="Plan done",
+                ),
+            ],
+        )
+        save_chain_state(tmp_path, state)
+
+        task = self._make_chain_task(tmp_path)
+        task.context["rejection_feedback"] = "Please redo the auth approach"
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        context = builder._load_upstream_context(task)
+
+        assert "CHECKPOINT REJECTED" in context
+        assert "redo the auth approach" in context

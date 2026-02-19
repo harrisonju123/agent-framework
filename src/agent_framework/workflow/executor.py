@@ -462,9 +462,14 @@ class WorkflowExecutor:
             context["parent_task_id"] = task.context.get("parent_task_id")
             context["subtask_count"] = task.context.get("subtask_count")
 
+        # Ensure user_goal is always set — prevents chain steps from receiving
+        # the wrong instructions when user_goal wasn't set by the root task creator
+        if "user_goal" not in context:
+            context["user_goal"] = task.description
+
         # Prepend review findings so the fix-cycle engineer sees what to address
         description = task.description
-        user_goal = task.context.get("user_goal", "")
+        user_goal = context.get("user_goal", "")
 
         if is_review_to_engineer:
             upstream = task.context.get("upstream_summary", "")

@@ -700,10 +700,14 @@ If a tool call fails:
         return self._error_handling_guidance
 
     def _load_upstream_context(self, task: Task) -> str:
-        """Load upstream agent's findings from inline context or disk.
+        """Load upstream agent's findings from chain state, inline context, or disk.
 
-        When structured QA findings are available, formats them as an actionable
-        checklist grouped by file. Otherwise falls back to inline text or disk file.
+        Priority cascade:
+        1. Rejection feedback (human override)
+        2. Chain state file (structured, step-aware rendering)
+        3. Structured findings (QA checklist)
+        4. Inline upstream_summary (raw text fallback)
+        5. Disk file (last resort)
         """
         # Rejection feedback takes top priority — human said "redo this"
         rejection_feedback = task.context.get("rejection_feedback")
@@ -714,6 +718,11 @@ If a tool call fails:
                 "Address the following feedback:\n\n"
                 f"{rejection_feedback}\n"
             )
+
+        # Chain state: structured, step-appropriate context rendering
+        chain_context = self._load_chain_state_context(task)
+        if chain_context:
+            return chain_context
 
         # Structured findings take priority — they give the engineer precise, actionable items
         structured = task.context.get("structured_findings")
@@ -751,6 +760,38 @@ If a tool call fails:
         except Exception as e:
             self.logger.debug(f"Failed to load upstream context: {e}")
             return ""
+
+    def _load_chain_state_context(self, task: Task) -> str:
+        """Load chain state and render step-appropriate context.
+
+        Returns empty string if no chain state exists, letting the cascade
+        fall through to legacy mechanisms.
+        """
+        # Only applies to workflow chain tasks
+        if not (task.context.get("workflow") or task.context.get("chain_step")):
+            return ""
+
+        try:
+            from .chain_state import load_chain_state, render_for_step
+
+            root_task_id = task.root_id
+            state = load_chain_state(self.ctx.workspace, root_task_id)
+            if not state or not state.steps:
+                return ""
+
+            consumer_step = task.context.get("workflow_step", "")
+            rendered = render_for_step(state, consumer_step)
+
+            if rendered and rendered.strip():
+                self.logger.debug(
+                    f"Chain state: rendered {len(rendered)} chars for "
+                    f"step {consumer_step!r} ({len(state.steps)} steps in chain)"
+                )
+                return rendered
+        except Exception as e:
+            self.logger.debug(f"Failed to load chain state context: {e}")
+
+        return ""
 
     def _load_pre_scan_findings(self, task: Task) -> str:
         """Load QA pre-scan findings from disk for injection into prompts.

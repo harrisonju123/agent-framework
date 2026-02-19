@@ -764,10 +764,6 @@ class Agent:
             if not passed:
                 return  # Task was reset for self-eval retry
 
-        # Save upstream context after validation passes, before workflow chain
-        if task.context.get("workflow") or task.context.get("chain_step"):
-            self._save_upstream_context(task, response)
-
         # Extract structured plan from architect's planning response
         if (task.plan is None
                 and self.config.base_id == "architect"
@@ -791,6 +787,16 @@ class Agent:
 
         # Verdict must be set before serialization so it persists to disk
         self._set_structured_verdict(task, response)
+
+        # Save upstream context AFTER plan extraction + verdict so task.context
+        # has structured data when _build_chain_task copies it. The raw
+        # upstream_summary is superseded by chain state in prompt rendering.
+        if task.context.get("workflow") or task.context.get("chain_step"):
+            self._save_upstream_context(task, response)
+
+        # Append step to chain state file — structured data for step-aware rendering
+        if task.context.get("workflow") or task.context.get("chain_step"):
+            self._save_step_to_chain_state(task, response, working_dir=working_dir)
 
         # Mark completed
         self.logger.debug(f"Marking task {task.id} as completed")
@@ -1983,6 +1989,37 @@ class Agent:
             self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
+
+    def _save_step_to_chain_state(self, task: Task, response, *, working_dir: Optional[Path] = None) -> None:
+        """Append a structured step record to the chain state file.
+
+        Called AFTER plan extraction + verdict setting so all structured
+        data is available. Non-fatal — workflow continues on failure.
+        """
+        try:
+            from .chain_state import append_step
+
+            content = getattr(response, "content", "") or ""
+            state = append_step(
+                workspace=self.workspace,
+                task=task,
+                agent_id=self.config.base_id,
+                response_content=content,
+                working_dir=working_dir,
+            )
+
+            # Store files_modified in task context for chain propagation
+            if state.steps:
+                last_step = state.steps[-1]
+                if last_step.files_modified:
+                    task.context["files_modified"] = last_step.files_modified
+
+            self.logger.debug(
+                f"Chain state: appended step {task.context.get('workflow_step', 'unknown')} "
+                f"({len(state.steps)} total steps)"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to save chain state for {task.id}: {e}")
 
     def _populate_read_cache(self, task: Task, working_dir: Optional[Path] = None) -> None:
         """Populate shared read cache with files read during this session.

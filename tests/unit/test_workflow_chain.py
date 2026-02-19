@@ -1292,8 +1292,8 @@ class TestStepAwareDescriptions:
 
         assert chain.description == "Build the thing."
 
-    def test_no_user_goal_preserves_original(self, executor):
-        """Without user_goal, description passes through unchanged."""
+    def test_no_user_goal_auto_sets_from_description(self, executor):
+        """Without user_goal, it's auto-set from task.description and used for step directives."""
         from agent_framework.workflow.dag import WorkflowStep
         task = _make_task(
             workflow="default",
@@ -1306,7 +1306,10 @@ class TestStepAwareDescriptions:
 
         chain = executor._build_chain_task(task, step, "architect")
 
-        assert chain.description == "Build the thing."
+        # user_goal auto-populated from description, triggering step directive
+        assert "Implement the following changes" in chain.description
+        assert "Build the thing." in chain.description
+        assert chain.context["user_goal"] == "Build the thing."
 
     def test_review_to_engineer_uses_user_goal_in_original_section(self, executor):
         """QA→engineer description uses user_goal for ORIGINAL TASK section."""

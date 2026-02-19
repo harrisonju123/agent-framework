@@ -142,6 +142,9 @@ class ErrorRecoveryManager:
             task.context.pop("upstream_source_agent", None)
             task.context.pop("upstream_source_step", None)
 
+            # Increment chain state attempt counter so retries have full history
+            self._increment_chain_state_attempt(task)
+
             # Reset task to pending so it can be retried
             self.logger.warning(
                 f"Resetting task {task.id} to pending status "
@@ -636,6 +639,35 @@ breaking the task into smaller steps, or working around the root cause."""
 
         lines.append("")  # trailing newline
         return "\n".join(lines)
+
+    def _increment_chain_state_attempt(self, task: Task) -> None:
+        """Increment the chain state attempt counter on retry.
+
+        Non-fatal — chain state is supplementary to the retry mechanism.
+        """
+        try:
+            from .chain_state import load_chain_state, save_chain_state
+
+            root_task_id = task.root_id
+            state = load_chain_state(self.workspace, root_task_id)
+            if state is None:
+                return
+
+            state.attempt += 1
+
+            # Record the failed step's error
+            if state.steps:
+                last_step = state.steps[-1]
+                if not last_step.error and task.last_error:
+                    last_step.error = task.last_error[:500]
+
+            save_chain_state(self.workspace, state)
+            self.logger.debug(
+                f"Chain state: incremented attempt to {state.attempt} "
+                f"for root task {root_task_id}"
+            )
+        except Exception as e:
+            self.logger.debug(f"Failed to increment chain state attempt: {e}")
 
     def _get_repo_slug(self, task: Task) -> Optional[str]:
         """Extract github_repo from task context."""
