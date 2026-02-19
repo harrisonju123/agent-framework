@@ -255,10 +255,10 @@ class WorktreeConfig(BaseModel):
     """Git worktree configuration for isolated agent workspaces."""
     enabled: bool = False
     root: Path = Field(default=Path("~/.agent-workspaces/worktrees"))
-    cleanup_on_complete: bool = True
+    cleanup_on_complete: bool = False
     cleanup_on_failure: bool = False  # Keep failed worktrees for debugging
     max_age_hours: int = 24
-    max_worktrees: int = 20
+    max_worktrees: int = 200
 
     def to_manager_config(self):
         """Convert to WorktreeManager's WorktreeConfig dataclass.

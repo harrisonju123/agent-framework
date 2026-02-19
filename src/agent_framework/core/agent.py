@@ -43,7 +43,6 @@ from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
 from ..workflow.executor import PREVIEW_REVIEW_STEPS
 
-_WORKTREE_CLEANUP_INTERVAL_SECONDS = 2 * 3600  # 2 hours
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -1137,18 +1136,6 @@ class Agent:
         self._git_ops.sync_worktree_queued_tasks()
         self._git_ops.cleanup_worktree(task, success=task_succeeded)
 
-        # Skip periodic cleanup for intermediate chain steps — only the
-        # terminal step (or standalone tasks) should risk evicting worktrees
-        has_downstream_steps = not self._git_ops._is_at_terminal_workflow_step(task)
-        is_subtask = task.parent_task_id is not None
-        is_intermediate_chain = (
-            has_downstream_steps
-            and not is_subtask
-            and (task.context.get("chain_step") or task.context.get("workflow"))
-        )
-        if not is_intermediate_chain:
-            self._maybe_run_periodic_worktree_cleanup()
-
         self.activity_manager.update_activity(AgentActivity(
             agent_id=self.config.id,
             status=AgentStatus.IDLE,
@@ -1170,39 +1157,13 @@ class Agent:
         return working_dir
 
     def _maybe_run_periodic_worktree_cleanup(self) -> None:
-        """Run orphaned worktree cleanup at most every 2 hours.
+        """No-op. Automatic worktree deletion is disabled.
 
-        Long-running agent sessions accumulate stale worktrees because
-        cleanup_orphaned_worktrees() only runs at startup. This timer
-        ensures periodic cleanup without blocking the main loop.
+        Worktrees are only cleaned up via the explicit CLI command
+        `agent cleanup-worktrees`. This prevents race conditions where
+        active worktrees get deleted while agents are still using them.
         """
-        if not self.worktree_manager:
-            return
-        now = time.time()
-        if now - self._last_worktree_cleanup < _WORKTREE_CLEANUP_INTERVAL_SECONDS:
-            return
-        self._last_worktree_cleanup = now
-        try:
-            protected = self._get_protected_agent_ids()
-            result = self.worktree_manager.cleanup_orphaned_worktrees(
-                protected_agent_ids=protected,
-            )
-            if result.get("total", 0) > 0:
-                self.logger.info(f"Periodic worktree cleanup: removed {result['total']} stale worktree(s)")
-        except Exception as e:
-            self.logger.debug(f"Periodic worktree cleanup failed: {e}")
-
-    def _get_protected_agent_ids(self) -> set:
-        """Collect agent IDs that are actively working and must not have their worktrees evicted."""
-        protected = set()
-        try:
-            from .activity import AgentStatus
-            for activity in self.activity_manager.get_all_activities():
-                if activity.status not in (AgentStatus.IDLE, AgentStatus.DEAD):
-                    protected.add(activity.agent_id)
-        except Exception:
-            pass
-        return protected
+        return
 
     async def _watch_for_interruption(self) -> None:
         """Poll for pause/stop signals during LLM execution.
