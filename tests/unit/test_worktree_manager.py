@@ -1574,3 +1574,310 @@ class TestProtectedAgentIds:
         # Engineer's worktree survives, QA's gets evicted
         assert "eng-key" in manager._registry
         assert "qa-key" not in manager._registry
+
+
+class TestSwitchWorktreeBranch:
+    """Tests for _switch_worktree_branch()."""
+
+    @pytest.fixture
+    def manager(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        return WorktreeManager(config=config)
+
+    def test_switches_to_existing_branch(self, manager, tmp_path):
+        """Checks out an existing branch via git checkout."""
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=True):
+            result = manager._switch_worktree_branch(
+                wt_path, "agent/engineer/ME-1", base_repo
+            )
+
+        assert result is True
+        checkout_calls = [c for c in git_calls if c[0] == "checkout"]
+        assert checkout_calls == [["checkout", "agent/engineer/ME-1"]]
+
+    def test_creates_branch_from_remote_start_point(self, manager, tmp_path):
+        """Creates new branch from origin/<start_point> when branch doesn't exist."""
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_remote_branch_exists', return_value=True):
+            result = manager._switch_worktree_branch(
+                wt_path, "agent/architect/ME-1-review", base_repo,
+                start_point="agent/engineer/ME-1-impl",
+            )
+
+        assert result is True
+        checkout_calls = [c for c in git_calls if c[0] == "checkout"]
+        assert checkout_calls == [
+            ["checkout", "-b", "agent/architect/ME-1-review", "origin/agent/engineer/ME-1-impl"]
+        ]
+
+    def test_falls_back_to_default_when_start_point_not_on_remote(self, manager, tmp_path):
+        """Falls back to default branch when start_point isn't pushed."""
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_remote_branch_exists', return_value=False), \
+             patch.object(manager, '_get_default_branch', return_value="main"):
+            result = manager._switch_worktree_branch(
+                wt_path, "agent/architect/ME-1-review", base_repo,
+                start_point="agent/engineer/ME-1-impl",
+            )
+
+        assert result is True
+        checkout_calls = [c for c in git_calls if c[0] == "checkout"]
+        assert checkout_calls == [
+            ["checkout", "-b", "agent/architect/ME-1-review", "origin/main"]
+        ]
+
+    def test_falls_back_to_default_when_no_start_point(self, manager, tmp_path):
+        """Uses default branch when no start_point given."""
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_get_default_branch', return_value="main"):
+            result = manager._switch_worktree_branch(
+                wt_path, "new-branch", base_repo
+            )
+
+        assert result is True
+        checkout_calls = [c for c in git_calls if c[0] == "checkout"]
+        assert checkout_calls == [["checkout", "-b", "new-branch", "origin/main"]]
+
+    def test_fetch_failure_is_nonfatal(self, manager, tmp_path):
+        """Fetch failure doesn't prevent the branch switch."""
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+
+        call_count = {"n": 0}
+
+        def mock_run_git(args, cwd, timeout=30):
+            call_count["n"] += 1
+            if args == ["fetch", "origin"]:
+                raise subprocess.CalledProcessError(1, "git")
+            return MagicMock()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=True):
+            result = manager._switch_worktree_branch(
+                wt_path, "existing-branch", base_repo
+            )
+
+        assert result is True
+        assert call_count["n"] == 2  # fetch (failed) + checkout (success)
+
+    def test_returns_false_on_checkout_failure(self, manager, tmp_path):
+        """Checkout failure returns False (not raised to caller)."""
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        wt_path = tmp_path / "wt"
+        wt_path.mkdir()
+
+        def mock_run_git(args, cwd, timeout=30):
+            if args[0] == "checkout":
+                raise subprocess.CalledProcessError(1, "git")
+            return MagicMock()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=True):
+            result = manager._switch_worktree_branch(
+                wt_path, "bad-branch", base_repo
+            )
+
+        assert result is False
+
+
+class TestCreateWorktreeBranchMismatch:
+    """Tests for branch mismatch handling in create_worktree() reuse block."""
+
+    def test_same_branch_reuses_without_switch(self, tmp_path):
+        """Matching branch reuses worktree without calling _switch_worktree_branch."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        # Pre-create the worktree path and registry entry
+        wt_path = manager._get_worktree_path("owner/repo", "architect", "jira-ME-1-123")
+        wt_path.mkdir(parents=True)
+        key = manager._get_worktree_key("architect", "jira-ME-1-123")
+        manager._registry[key] = WorktreeInfo(
+            path=str(wt_path), branch="agent/architect/ME-1-plan",
+            agent_id="architect", task_id="jira-ME-1-123",
+            created_at="2025-01-01T00:00:00+00:00",
+            last_accessed="2025-01-01T00:00:00+00:00",
+            base_repo=str(base_repo),
+        )
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_switch_worktree_branch') as mock_switch:
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/architect/ME-1-plan",
+                agent_id="architect",
+                task_id="jira-ME-1-123",
+                owner_repo="owner/repo",
+            )
+
+        assert result == wt_path
+        mock_switch.assert_not_called()
+
+    def test_different_branch_triggers_switch_and_updates_registry(self, tmp_path):
+        """Branch mismatch calls _switch_worktree_branch and updates registry on success."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        wt_path = manager._get_worktree_path("owner/repo", "architect", "jira-ME-1-123")
+        wt_path.mkdir(parents=True)
+        key = manager._get_worktree_key("architect", "jira-ME-1-123")
+        manager._registry[key] = WorktreeInfo(
+            path=str(wt_path), branch="agent/architect/ME-1-plan",
+            agent_id="architect", task_id="jira-ME-1-123",
+            created_at="2025-01-01T00:00:00+00:00",
+            last_accessed="2025-01-01T00:00:00+00:00",
+            base_repo=str(base_repo),
+        )
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_switch_worktree_branch', return_value=True) as mock_switch:
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/architect/ME-1-review",
+                agent_id="architect",
+                task_id="jira-ME-1-123",
+                owner_repo="owner/repo",
+                start_point="agent/engineer/ME-1-impl",
+            )
+
+        assert result == wt_path
+        mock_switch.assert_called_once_with(
+            wt_path, "agent/architect/ME-1-review", base_repo, "agent/engineer/ME-1-impl"
+        )
+        assert manager._registry[key].branch == "agent/architect/ME-1-review"
+        assert manager._registry[key].active is True
+
+    def test_switch_failure_removes_worktree_and_recreates(self, tmp_path):
+        """Failed branch switch removes worktree and falls through to fresh creation."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        wt_path = manager._get_worktree_path("owner/repo", "architect", "jira-ME-1-123")
+        wt_path.mkdir(parents=True)
+        key = manager._get_worktree_key("architect", "jira-ME-1-123")
+        manager._registry[key] = WorktreeInfo(
+            path=str(wt_path), branch="agent/architect/ME-1-plan",
+            agent_id="architect", task_id="jira-ME-1-123",
+            created_at="2025-01-01T00:00:00+00:00",
+            last_accessed="2025-01-01T00:00:00+00:00",
+            base_repo=str(base_repo),
+        )
+
+        git_calls = []
+
+        def mock_run_git(args, cwd, timeout=30):
+            git_calls.append(args)
+            return MagicMock()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_switch_worktree_branch', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory', return_value=True), \
+             patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_get_default_branch', return_value="main"):
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/architect/ME-1-review",
+                agent_id="architect",
+                task_id="jira-ME-1-123",
+                owner_repo="owner/repo",
+            )
+
+        assert result == wt_path
+        # Registry should have the new branch after fresh creation
+        assert manager._registry[key].branch == "agent/architect/ME-1-review"
+
+    def test_switch_and_removal_failure_raises(self, tmp_path):
+        """When both switch and removal fail, raises RuntimeError."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        wt_path = manager._get_worktree_path("owner/repo", "architect", "jira-ME-1-123")
+        wt_path.mkdir(parents=True)
+        key = manager._get_worktree_key("architect", "jira-ME-1-123")
+        manager._registry[key] = WorktreeInfo(
+            path=str(wt_path), branch="agent/architect/ME-1-plan",
+            agent_id="architect", task_id="jira-ME-1-123",
+            created_at="2025-01-01T00:00:00+00:00",
+            last_accessed="2025-01-01T00:00:00+00:00",
+            base_repo=str(base_repo),
+        )
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_switch_worktree_branch', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory', return_value=False):
+            with pytest.raises(RuntimeError, match="Cannot switch branch and cannot remove"):
+                manager.create_worktree(
+                    base_repo=base_repo,
+                    branch_name="agent/architect/ME-1-review",
+                    agent_id="architect",
+                    task_id="jira-ME-1-123",
+                    owner_repo="owner/repo",
+                )

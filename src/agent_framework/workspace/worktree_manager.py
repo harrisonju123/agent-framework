@@ -248,14 +248,41 @@ class WorktreeManager:
         worktree_path = self._get_worktree_path(owner_repo, agent_id, task_id)
         worktree_key = self._get_worktree_key(agent_id, task_id)
 
-        # If worktree already exists, return it
+        # If worktree already exists, try to reuse it
         if worktree_path.exists():
             if worktree_key in self._registry:
-                logger.info(f"Reusing existing worktree: {worktree_path}")
-                self._registry[worktree_key].active = True
-                self._registry[worktree_key].last_accessed = datetime.now(timezone.utc).isoformat()
+                existing_branch = self._registry[worktree_key].branch
+                if existing_branch == branch_name:
+                    logger.info(f"Reusing existing worktree: {worktree_path}")
+                    self._registry[worktree_key].active = True
+                    self._registry[worktree_key].last_accessed = datetime.now(timezone.utc).isoformat()
+                    self._save_registry()
+                    return worktree_path
+
+                # Branch mismatch — try switching in place
+                logger.info(
+                    f"Worktree branch mismatch: have {existing_branch}, "
+                    f"want {branch_name} — switching"
+                )
+                if self._switch_worktree_branch(
+                    worktree_path, branch_name, base_repo, start_point
+                ):
+                    self._registry[worktree_key].branch = branch_name
+                    self._registry[worktree_key].active = True
+                    self._registry[worktree_key].last_accessed = datetime.now(timezone.utc).isoformat()
+                    self._save_registry()
+                    return worktree_path
+
+                # Switch failed — remove and recreate
+                logger.warning(
+                    f"Branch switch failed, removing worktree for fresh creation: {worktree_path}"
+                )
+                if not self._remove_worktree_directory(worktree_path, base_repo, force=True):
+                    raise RuntimeError(
+                        f"Cannot switch branch and cannot remove worktree: {worktree_path}"
+                    )
+                del self._registry[worktree_key]
                 self._save_registry()
-                return worktree_path
             else:
                 # Orphaned worktree, remove it first
                 logger.warning(f"Removing orphaned worktree: {worktree_path}")
@@ -382,6 +409,51 @@ class WorktreeManager:
             if Path(info.path).resolve() == resolved:
                 return info.agent_id
         return None
+
+    def _switch_worktree_branch(
+        self,
+        worktree_path: Path,
+        branch_name: str,
+        base_repo: Path,
+        start_point: Optional[str] = None,
+    ) -> bool:
+        """Switch an existing worktree to a different branch.
+
+        Returns True on success, False on failure.
+        Fetch is best-effort (non-fatal on failure).
+        """
+        try:
+            self._run_git(["fetch", "origin"], cwd=base_repo, timeout=60)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+
+        try:
+            if self._branch_exists(base_repo, branch_name):
+                self._run_git(
+                    ["checkout", branch_name],
+                    cwd=worktree_path,
+                    timeout=30,
+                )
+            else:
+                # Branch doesn't exist yet — create from start_point or default
+                base_ref = None
+                if start_point and self._remote_branch_exists(base_repo, start_point):
+                    base_ref = f"origin/{start_point}"
+                if not base_ref:
+                    default_branch = self._get_default_branch(base_repo)
+                    base_ref = f"origin/{default_branch}"
+
+                self._run_git(
+                    ["checkout", "-b", branch_name, base_ref],
+                    cwd=worktree_path,
+                    timeout=30,
+                )
+
+            logger.info(f"Switched worktree {worktree_path} to branch {branch_name}")
+            return True
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            logger.warning(f"Failed to switch worktree branch to {branch_name}: {e}")
+            return False
 
     def remove_worktree(self, path: Path, force: bool = False) -> bool:
         """
