@@ -257,6 +257,7 @@ def main():
             pr_lifecycle_config=framework_config.pr_lifecycle.model_dump(),
             code_indexing_config=framework_config.indexing.model_dump(),
             heartbeat_interval=framework_config.safeguards.heartbeat_interval,
+            max_consecutive_tool_calls=framework_config.safeguards.max_consecutive_tool_calls,
         )
 
         # Let SIGTERM trigger a clean exit through the polling loop

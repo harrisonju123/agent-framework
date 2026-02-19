@@ -365,9 +365,11 @@ class Agent:
         pr_lifecycle_config: Optional[dict] = None,
         code_indexing_config: Optional[dict] = None,
         heartbeat_interval: int = 15,
+        max_consecutive_tool_calls: int = 15,
     ):
         """Initialize Agent with modular subsystem setup."""
         self._heartbeat_interval = heartbeat_interval
+        self._max_consecutive_tool_calls = max_consecutive_tool_calls
 
         # Core dependencies and basic state
         self._init_core_dependencies(
@@ -1187,10 +1189,25 @@ class Agent:
         # Setup tool activity callback
         _tool_call_count = [0]
         _last_write_time = [0.0]
+        _consecutive_bash = [0]
+        _circuit_breaker_event = asyncio.Event()
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
             try:
                 _tool_call_count[0] += 1
+
+                # Circuit breaker: track consecutive Bash calls
+                if tool_name == "Bash":
+                    _consecutive_bash[0] += 1
+                    if _consecutive_bash[0] >= self._max_consecutive_tool_calls:
+                        self.logger.warning(
+                            f"Circuit breaker: {_consecutive_bash[0]} consecutive Bash calls, "
+                            f"threshold={self._max_consecutive_tool_calls}"
+                        )
+                        _circuit_breaker_event.set()
+                else:
+                    _consecutive_bash[0] = 0
+
                 now = time.time()
                 if now - _last_write_time[0] < 1.0:
                     return
@@ -1238,6 +1255,11 @@ class Agent:
                 "Before reading any file, call get_cached_reads() to check "
                 "if a previous agent already analyzed it."
             )
+        efficiency_parts.append(
+            "FAILURE CIRCUIT BREAKER: If 3+ consecutive bash/shell commands fail with errors, "
+            "STOP. Do not attempt more diagnostic commands. Instead, report what went wrong "
+            "and what you were trying to do."
+        )
         efficiency_directive = " ".join(efficiency_parts)
 
         # Race LLM execution against pause/stop signal watcher
@@ -1260,17 +1282,61 @@ class Agent:
         )
         llm_task = asyncio.create_task(llm_coro)
         watcher_task = asyncio.create_task(self._watch_for_interruption())
+        circuit_breaker_task = asyncio.create_task(_circuit_breaker_event.wait())
 
         done, pending = await asyncio.wait(
-            [llm_task, watcher_task],
+            [llm_task, watcher_task, circuit_breaker_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        if circuit_breaker_task in done:
+            # Stuck agent detected — kill subprocess and return synthetic failure
+            count = _consecutive_bash[0]
+            self.logger.warning(
+                f"Circuit breaker tripped for task {task.id}: "
+                f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls})"
+            )
+            self.llm.cancel()
+            llm_task.cancel()
+            watcher_task.cancel()
+            for t in [llm_task, watcher_task]:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            self._session_logger.log(
+                "circuit_breaker",
+                consecutive_bash=count,
+                threshold=self._max_consecutive_tool_calls,
+            )
+            self.activity_manager.append_event(ActivityEvent(
+                type="circuit_breaker",
+                agent=self.config.id,
+                task_id=task.id,
+                title=f"Circuit breaker: {count} consecutive Bash calls",
+                timestamp=datetime.now(timezone.utc),
+            ))
+            return LLMResponse(
+                content="",
+                model_used="",
+                input_tokens=0,
+                output_tokens=0,
+                finish_reason="circuit_breaker",
+                latency_ms=0,
+                success=False,
+                error=(
+                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types. "
+                    "Working directory may be deleted or inaccessible."
+                ),
+            )
 
         if watcher_task in done:
             # Pause or stop detected — cancel LLM and reset task
             self.logger.info(f"Interruption detected during task {task.id}, cancelling LLM")
             self.llm.cancel()
             llm_task.cancel()
+            circuit_breaker_task.cancel()
             try:
                 await llm_task
             except asyncio.CancelledError:
@@ -1299,8 +1365,9 @@ class Agent:
             self.logger.info(f"Task {task.id} reset to pending after interruption")
             return None
         else:
-            # LLM finished first — cancel watcher and return response
+            # LLM finished first — cancel watcher and circuit breaker, return response
             watcher_task.cancel()
+            circuit_breaker_task.cancel()
             try:
                 await watcher_task
             except asyncio.CancelledError:

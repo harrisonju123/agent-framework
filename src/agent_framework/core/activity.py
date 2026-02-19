@@ -97,6 +97,7 @@ class ActivityEvent(BaseModel):
     type: Literal[
         "start", "retry", "complete", "fail", "interrupted", "phase",
         "test_complete", "test_fail", "context_budget_critical", "token_budget_exceeded",
+        "circuit_breaker",
     ]
     agent: str
     task_id: str
