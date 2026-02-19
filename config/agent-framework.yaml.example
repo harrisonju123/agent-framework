@@ -168,6 +168,7 @@ workflows:
             priority: 5
       create_pr:
         agent: architect
+        task_type: pr_request
 
   # Preview workflow: engineer produces a read-only execution plan, architect
   # approves before any code is written. Use with: agent work --preview
@@ -226,6 +227,7 @@ workflows:
             priority: 5
       create_pr:
         agent: architect
+        task_type: pr_request
 
   analysis:
     description: "Repository analysis workflow"
