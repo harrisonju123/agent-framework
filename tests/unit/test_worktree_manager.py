@@ -1187,6 +1187,42 @@ class TestBranchConflictOwnershipValidation:
 
         assert result == existing_wt  # orphan reuse
 
+    def test_allows_cross_agent_conflict_when_flag_set(self, tmp_path):
+        """allow_cross_agent=True lets chain tasks reuse a worktree owned by another agent."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+        existing_wt = tmp_path / "existing-worktree"
+        existing_wt.mkdir()
+
+        # Register existing worktree as owned by architect
+        manager._registry["arch-key"] = WorktreeInfo(
+            path=str(existing_wt), branch="agent/architect/PROJ-123",
+            agent_id="architect", task_id="t-arch",
+            created_at="2025-01-01T00:00:00",
+            last_accessed="2025-01-01T00:00:00", base_repo=str(base_repo),
+        )
+
+        conflict_msg = f"fatal: 'agent/architect/PROJ-123' is already checked out at '{existing_wt}'"
+        error = subprocess.CalledProcessError(128, "git")
+        error.stderr = conflict_msg.encode()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=error):
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/architect/PROJ-123",
+                agent_id="engineer",
+                task_id="task-chain-impl",
+                owner_repo="owner/repo",
+                allow_cross_agent=True,
+            )
+
+        assert result == existing_wt
+
 
 class TestHasUnpushedCommitsFallback:
     """Tests for has_unpushed_commits() when no tracking branch is set."""

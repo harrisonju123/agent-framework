@@ -3,6 +3,7 @@
 import hashlib
 import json
 import pytest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch, call
 
@@ -772,6 +773,151 @@ class TestRegistryReloadInGetWorkingDirectory:
         assert result == worktree_path
         assert git_ops._active_worktree == worktree_path
         mock_worktree_manager.create_worktree.assert_not_called()
+
+
+class TestChainTaskWorktreeReuse:
+    """Chain tasks reuse the upstream agent's worktree and branch."""
+
+    def test_chain_task_reuses_cross_agent_implementation_branch(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """Chain task with cross-agent implementation_branch reuses it directly."""
+        mock_config.id = "engineer"
+        mock_config.base_id = "engineer"
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        worktree_path = tmp_path / "architect-PROJ-123"
+        worktree_path.mkdir()
+        mock_worktree_manager.find_worktree_by_branch.return_value = worktree_path
+
+        task = Task(
+            id="task-impl", title="Implement", description="Implement", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={
+                "github_repo": "owner/repo",
+                "implementation_branch": "agent/architect/PROJ-123-abc12345",
+                "chain_step": True,
+            },
+        )
+
+        result = git_ops.get_working_directory(task)
+
+        assert result == worktree_path
+        # Reused the architect's branch instead of creating a new one
+        mock_worktree_manager.find_worktree_by_branch.assert_called_with(
+            "agent/architect/PROJ-123-abc12345"
+        )
+        mock_worktree_manager.create_worktree.assert_not_called()
+
+    def test_chain_task_with_worktree_branch_finds_existing(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """Chain task with worktree_branch set finds and reuses existing worktree."""
+        mock_config.id = "qa"
+        mock_config.base_id = "qa"
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        worktree_path = tmp_path / "architect-PROJ-123"
+        worktree_path.mkdir()
+        mock_worktree_manager.find_worktree_by_branch.return_value = worktree_path
+
+        task = Task(
+            id="task-qa", title="QA Review", description="Review", type="review",
+            status="pending", priority=1, created_by="test", assigned_to="qa",
+            created_at=datetime.now(timezone.utc),
+            context={
+                "github_repo": "owner/repo",
+                "worktree_branch": "agent/architect/PROJ-123-abc12345",
+                "chain_step": True,
+            },
+        )
+
+        result = git_ops.get_working_directory(task)
+
+        assert result == worktree_path
+        mock_worktree_manager.find_worktree_by_branch.assert_called_with(
+            "agent/architect/PROJ-123-abc12345"
+        )
+        mock_worktree_manager.create_worktree.assert_not_called()
+
+    def test_chain_task_passes_allow_cross_agent(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """Chain task passes allow_cross_agent=True to create_worktree."""
+        mock_config.id = "engineer"
+        mock_config.base_id = "engineer"
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        # No existing worktree found — falls through to create_worktree
+        mock_worktree_manager.find_worktree_by_branch.return_value = None
+        new_worktree = tmp_path / "new-worktree"
+        mock_worktree_manager.create_worktree.return_value = new_worktree
+
+        task = Task(
+            id="task-impl", title="Implement", description="Implement", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={
+                "github_repo": "owner/repo",
+                "implementation_branch": "agent/architect/PROJ-123-abc12345",
+                "chain_step": True,
+            },
+        )
+
+        result = git_ops.get_working_directory(task)
+
+        assert result == new_worktree
+        create_call = mock_worktree_manager.create_worktree.call_args
+        assert create_call.kwargs.get("allow_cross_agent") is True
+
+    def test_non_chain_task_does_not_pass_allow_cross_agent(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """Non-chain task passes allow_cross_agent=False to create_worktree."""
+        mock_config.id = "architect"
+        mock_config.base_id = "architect"
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        mock_worktree_manager.find_worktree_by_branch.return_value = None
+        new_worktree = tmp_path / "new-worktree"
+        mock_worktree_manager.create_worktree.return_value = new_worktree
+
+        task = Task(
+            id="task-plan", title="Plan", description="Plan", type="planning",
+            status="pending", priority=1, created_by="test", assigned_to="architect",
+            created_at=datetime.now(timezone.utc),
+            context={
+                "github_repo": "owner/repo",
+                "implementation_branch": "agent/engineer/PROJ-123-abc12345",
+            },
+        )
+
+        result = git_ops.get_working_directory(task)
+
+        assert result == new_worktree
+        create_call = mock_worktree_manager.create_worktree.call_args
+        assert create_call.kwargs.get("allow_cross_agent") is False
 
 
 class TestIsOwnBranch:

@@ -438,8 +438,7 @@ class WorkflowExecutor:
             context["_step_instructions"] = target_step.instructions
         else:
             context.pop("_step_instructions", None)
-        # worktree_branch is ephemeral per-agent — each agent creates its own worktree
-        context.pop("worktree_branch", None)
+        # worktree_branch propagates through the chain — all steps share a single worktree
         # Prevent same-step self-referential upstream context — only clear when
         # the exact same workflow step produced the upstream (e.g. engineer→engineer).
         # Different steps on the same agent (plan→create_pr, both architect) keep context.

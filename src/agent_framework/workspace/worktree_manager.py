@@ -214,6 +214,7 @@ class WorktreeManager:
         task_id: str,
         owner_repo: str,
         start_point: Optional[str] = None,
+        allow_cross_agent: bool = False,
     ) -> Path:
         """
         Create an isolated worktree for agent work.
@@ -227,6 +228,8 @@ class WorktreeManager:
             start_point: Optional branch to base the new worktree on (e.g. an
                 upstream engineer's branch). Falls back to default branch if
                 the start_point isn't available on the remote.
+            allow_cross_agent: When True, reuse a worktree even if it's owned by
+                a different agent (used for chain tasks sharing one worktree).
 
         Returns:
             Path to the created worktree
@@ -364,11 +367,11 @@ class WorktreeManager:
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
 
-            # Branch already checked out in another worktree — reuse if same agent
+            # Branch already checked out in another worktree — reuse if same agent or chain
             conflict_path = self._parse_branch_conflict_path(error_msg)
             if conflict_path and conflict_path.exists():
                 owning_agent = self._find_worktree_agent(conflict_path)
-                if owning_agent and owning_agent != agent_id:
+                if owning_agent and owning_agent != agent_id and not allow_cross_agent:
                     logger.warning(
                         f"Branch {branch_name} checked out by agent '{owning_agent}' "
                         f"at {conflict_path} — refusing cross-agent reuse"

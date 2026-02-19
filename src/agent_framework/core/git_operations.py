@@ -100,10 +100,11 @@ class GitOperationsManager:
                 # the upstream implementation_branch belongs to the same agent role
                 branch_name = task.context.get("worktree_branch")
                 start_point = None
+                is_chain = task.context.get("chain_step", False)
 
                 if not branch_name:
                     impl_branch = task.context.get("implementation_branch")
-                    if impl_branch and self._is_own_branch(impl_branch):
+                    if impl_branch and (self._is_own_branch(impl_branch) or is_chain):
                         branch_name = impl_branch
                     else:
                         jira_key = task.context.get("jira_key", "task")
@@ -138,6 +139,7 @@ class GitOperationsManager:
                         task_id=task.root_id,
                         owner_repo=github_repo,
                         start_point=start_point,
+                        allow_cross_agent=is_chain,
                     )
                     self._active_worktree = worktree_path
                     task.context["worktree_branch"] = branch_name

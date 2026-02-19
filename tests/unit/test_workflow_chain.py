@@ -2291,11 +2291,11 @@ class TestPlanPropagation:
         assert chain_task.plan is None
 
 
-class TestWorktreeBranchClearing:
-    """worktree_branch is ephemeral per-agent and must not propagate through the chain."""
+class TestWorktreeBranchPropagation:
+    """worktree_branch propagates through the chain so all steps share one worktree."""
 
-    def test_chain_task_clears_worktree_branch(self, queue):
-        """_build_chain_task strips worktree_branch from context."""
+    def test_chain_task_propagates_worktree_branch(self, queue):
+        """_build_chain_task preserves worktree_branch in context."""
         from agent_framework.workflow.executor import WorkflowExecutor
         from agent_framework.workflow.dag import WorkflowStep
 
@@ -2313,7 +2313,7 @@ class TestWorktreeBranchClearing:
         engineer_step = WorkflowStep(id="engineer", agent="engineer")
         chain_task = executor._build_chain_task(task, engineer_step, "architect")
 
-        assert "worktree_branch" not in chain_task.context
+        assert chain_task.context["worktree_branch"] == "agent/architect/task-184b366e"
         assert chain_task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc12345"
 
     def test_pr_creation_task_clears_worktree_branch(self, queue, tmp_path):
