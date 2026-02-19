@@ -26,7 +26,7 @@ async def main_async():
 
     try:
         # Load config
-        framework_config = load_config(workspace / "agent-framework.yaml")
+        framework_config = load_config(workspace / "config" / "agent-framework.yaml")
 
         # Create watchdog
         watchdog = Watchdog(
