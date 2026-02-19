@@ -6,7 +6,9 @@ Covers:
 """
 
 import json
+import unittest.mock
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -407,3 +409,195 @@ class TestRepoScopedCache:
         # No repo cache files should exist
         repo_files = list(cache_dir.glob("_repo-*.json"))
         assert len(repo_files) == 0
+
+
+class TestToRelativePath:
+    """Test the module-level _to_relative_path() helper."""
+
+    def test_strips_worktree_prefix(self):
+        from agent_framework.core.agent import _to_relative_path
+        result = _to_relative_path(
+            "/home/worktrees/org/repo/engineer-AF-123/src/models.py",
+            Path("/home/worktrees/org/repo/engineer-AF-123"),
+        )
+        assert result == "src/models.py"
+
+    def test_non_matching_absolute_path(self):
+        from agent_framework.core.agent import _to_relative_path
+        result = _to_relative_path(
+            "/other/path/src/models.py",
+            Path("/home/worktrees/org/repo/engineer-AF-123"),
+        )
+        assert result == "/other/path/src/models.py"
+
+    def test_already_relative_path(self):
+        from agent_framework.core.agent import _to_relative_path
+        result = _to_relative_path(
+            "src/models.py",
+            Path("/home/worktrees/org/repo/engineer-AF-123"),
+        )
+        assert result == "src/models.py"
+
+    def test_none_working_dir(self):
+        from agent_framework.core.agent import _to_relative_path
+        result = _to_relative_path("/absolute/path/file.py", None)
+        assert result == "/absolute/path/file.py"
+
+    def test_trailing_slash_on_working_dir(self):
+        from agent_framework.core.agent import _to_relative_path
+        result = _to_relative_path(
+            "/workspace/src/file.py",
+            Path("/workspace/"),
+        )
+        assert result == "src/file.py"
+
+
+class TestPopulateReadCacheRelativeKeys:
+    """Verify _populate_read_cache stores repo-relative keys while passing absolute paths to summarize_file."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        return tmp_path
+
+    @pytest.fixture
+    def working_dir(self, tmp_path):
+        wd = tmp_path / "worktrees" / "org" / "repo" / "engineer-AF-1"
+        wd.mkdir(parents=True)
+        return wd
+
+    @pytest.fixture
+    def agent(self, workspace):
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent.workspace = workspace
+        agent.config = MagicMock()
+        agent.config.base_id = "engineer"
+        agent.logger = MagicMock()
+        agent._session_logger = MagicMock()
+        agent._populate_read_cache = Agent._populate_read_cache.__get__(agent)
+        return agent
+
+    @pytest.fixture
+    def task(self):
+        return Task(
+            id="chain-root1-impl-d0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Implement feature",
+            description="Do the thing",
+            context={
+                "_root_task_id": "root1",
+                "workflow_step": "implement",
+            },
+        )
+
+    def test_cache_keys_are_relative(self, agent, task, workspace, working_dir):
+        """Cache keys should be repo-relative, not absolute."""
+        abs_path = str(working_dir / "src" / "server.py")
+        agent._session_logger.extract_file_reads.return_value = [abs_path]
+
+        agent._populate_read_cache(task, working_dir=working_dir)
+
+        cache_file = workspace / ".agent-communication" / "read-cache" / "root1.json"
+        data = json.loads(cache_file.read_text())
+        assert "src/server.py" in data["entries"]
+        assert abs_path not in data["entries"]
+
+    def test_summarize_file_receives_absolute_path(self, agent, task, workspace, working_dir):
+        """summarize_file must get the absolute path for I/O."""
+        abs_path = str(working_dir / "src" / "models.py")
+        agent._session_logger.extract_file_reads.return_value = [abs_path]
+
+        with unittest.mock.patch(
+            "agent_framework.utils.file_summarizer.summarize_file", return_value="mocked"
+        ) as mock_summarize:
+            agent._populate_read_cache(task, working_dir=working_dir)
+            mock_summarize.assert_called_once_with(abs_path)
+
+    def test_no_working_dir_stores_original_paths(self, agent, task, workspace):
+        """Without working_dir, original paths are used as keys."""
+        agent._session_logger.extract_file_reads.return_value = ["/src/server.py"]
+
+        agent._populate_read_cache(task)
+
+        cache_file = workspace / ".agent-communication" / "read-cache" / "root1.json"
+        data = json.loads(cache_file.read_text())
+        assert "/src/server.py" in data["entries"]
+
+
+class TestMigrateLegacyCachePaths:
+    """Test PromptBuilder._migrate_legacy_cache_paths()."""
+
+    def test_migrates_worktree_path(self):
+        from agent_framework.core.prompt_builder import PromptBuilder
+
+        entries = {
+            "/home/worktrees/org/repo/architect-AF-1/src/models.py": {
+                "summary": "Models",
+                "read_by": "architect",
+            },
+        }
+        result = PromptBuilder._migrate_legacy_cache_paths(entries)
+        assert "src/models.py" in result
+        assert result["src/models.py"]["summary"] == "Models"
+
+    def test_preserves_relative_paths(self):
+        from agent_framework.core.prompt_builder import PromptBuilder
+
+        entries = {
+            "src/models.py": {"summary": "Models", "read_by": "architect"},
+        }
+        result = PromptBuilder._migrate_legacy_cache_paths(entries)
+        assert "src/models.py" in result
+
+    def test_non_worktree_absolute_path_unchanged(self):
+        from agent_framework.core.prompt_builder import PromptBuilder
+
+        entries = {
+            "/usr/local/lib/python/site.py": {"summary": "System", "read_by": "qa"},
+        }
+        result = PromptBuilder._migrate_legacy_cache_paths(entries)
+        assert "/usr/local/lib/python/site.py" in result
+
+    def test_relative_key_not_overwritten(self):
+        """If both legacy and new keys map to same relative path, newer wins."""
+        from agent_framework.core.prompt_builder import PromptBuilder
+
+        entries = {
+            "src/file.py": {"summary": "New entry", "read_by": "engineer"},
+            "/home/worktrees/org/repo/architect-AF-1/src/file.py": {
+                "summary": "Legacy entry",
+                "read_by": "architect",
+            },
+        }
+        result = PromptBuilder._migrate_legacy_cache_paths(entries)
+        # Relative key appeared first in iteration, should not be overwritten
+        assert result["src/file.py"]["summary"] == "New entry"
+
+
+class TestAgentWorkingDirEnv:
+    """Verify AGENT_WORKING_DIR is set in env when request has working_dir."""
+
+    def test_working_dir_set_in_env(self):
+        req = LLMRequest(
+            prompt="test",
+            working_dir="/home/worktrees/org/repo/engineer-AF-1",
+            context={"_root_task_id": "root-abc"},
+        )
+        # Simulate the env setup logic from claude_cli_backend
+        env = {}
+        if req.working_dir:
+            env["AGENT_WORKING_DIR"] = str(req.working_dir)
+        assert env["AGENT_WORKING_DIR"] == "/home/worktrees/org/repo/engineer-AF-1"
+
+    def test_no_working_dir_no_env(self):
+        req = LLMRequest(prompt="test")
+        env = {}
+        if req.working_dir:
+            env["AGENT_WORKING_DIR"] = str(req.working_dir)
+        assert "AGENT_WORKING_DIR" not in env

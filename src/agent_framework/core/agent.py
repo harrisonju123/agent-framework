@@ -73,6 +73,16 @@ def _repo_cache_slug(github_repo: str) -> str:
     """Convert 'owner/repo' to 'owner-repo' for cache file naming."""
     return github_repo.replace("/", "-")
 
+
+def _to_relative_path(file_path: str, working_dir: Optional[Path]) -> str:
+    """Strip worktree prefix for cache portability across chain steps."""
+    if not working_dir or not file_path.startswith("/"):
+        return file_path
+    prefix = str(working_dir).rstrip("/") + "/"
+    if file_path.startswith(prefix):
+        return file_path[len(prefix):]
+    return file_path
+
 # Model pricing (per 1M tokens, as of 2025-01)
 MODEL_PRICING = {
     "haiku": {"input": 0.25, "output": 1.25},
@@ -1683,7 +1693,7 @@ class Agent:
             # Handle response
             if response.success:
                 # Populate shared read cache for downstream chain steps
-                self._populate_read_cache(task)
+                self._populate_read_cache(task, working_dir=working_dir)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             elif self._can_salvage_verdict(task, response):
                 self.logger.warning(
@@ -1698,7 +1708,7 @@ class Agent:
                 )
                 response.success = True
                 response.finish_reason = "stop"
-                self._populate_read_cache(task)
+                self._populate_read_cache(task, working_dir=working_dir)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
                 await self._handle_failed_response(task, response, working_dir=working_dir)
@@ -1974,11 +1984,12 @@ class Agent:
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
 
-    def _populate_read_cache(self, task: Task) -> None:
+    def _populate_read_cache(self, task: Task, working_dir: Optional[Path] = None) -> None:
         """Populate shared read cache with files read during this session.
 
         Appends to .agent-communication/read-cache/{root_task_id}.json so
         downstream chain steps can skip re-reading the same files.
+        Cache keys are repo-relative so they match across worktrees.
         Non-fatal — workflow continues even if this fails.
         """
         try:
@@ -2009,8 +2020,10 @@ class Agent:
             # Only populate paths not already cached (preserve LLM-written summaries)
             added = 0
             for file_path in file_reads:
-                if file_path not in entries:
-                    entries[file_path] = {
+                # Store repo-relative key for cross-worktree portability
+                cache_key = _to_relative_path(file_path, working_dir)
+                if cache_key not in entries:
+                    entries[cache_key] = {
                         "summary": summarize_file(file_path),
                         "read_by": self.config.base_id,
                         "read_at": now_iso,

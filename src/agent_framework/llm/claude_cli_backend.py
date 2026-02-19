@@ -333,6 +333,9 @@ class ClaudeCLIBackend(LLMBackend):
                 if workflow_step:
                     env['WORKFLOW_STEP'] = workflow_step
 
+            if request.working_dir:
+                env['AGENT_WORKING_DIR'] = str(request.working_dir)
+
             # Determine working directory for subprocess
             # Use working_dir from request if provided, otherwise inherit current directory
             cwd = request.working_dir if request.working_dir else None

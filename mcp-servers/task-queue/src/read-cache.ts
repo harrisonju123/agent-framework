@@ -55,6 +55,18 @@ function sanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, MAX_ID_LENGTH);
 }
 
+/** Strip worktree prefix for cache portability across chain steps. */
+export function toRelativePath(filePath: string, workingDir?: string): string {
+  if (!workingDir || !filePath.startsWith("/")) {
+    return filePath;
+  }
+  const prefix = workingDir.replace(/\/+$/, "") + "/";
+  if (filePath.startsWith(prefix)) {
+    return filePath.substring(prefix.length);
+  }
+  return filePath;
+}
+
 export function cacheFileRead(
   workspace: string,
   rootTaskId: string,
@@ -73,6 +85,9 @@ export function cacheFileRead(
 
   const safeSummary = summary.substring(0, MAX_SUMMARY_LENGTH);
   const safeRootId = sanitizeId(rootTaskId);
+
+  // Normalize to repo-relative path for cross-worktree portability
+  const cacheKey = toRelativePath(filePath, process.env.AGENT_WORKING_DIR);
 
   const cacheDir = join(workspace, ".agent-communication", "read-cache");
   ensureDirectory(cacheDir);
@@ -94,7 +109,7 @@ export function cacheFileRead(
     }
   }
 
-  existing.entries[filePath] = {
+  existing.entries[cacheKey] = {
     summary: safeSummary,
     read_by: agentId,
     read_at: new Date().toISOString(),
@@ -117,8 +132,8 @@ export function cacheFileRead(
 
   return {
     success: true,
-    file_path: filePath,
-    message: `Cached read: ${filePath}`,
+    file_path: cacheKey,
+    message: `Cached read: ${cacheKey}`,
   };
 }
 

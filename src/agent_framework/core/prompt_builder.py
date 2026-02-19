@@ -1098,6 +1098,34 @@ If a tool call fails:
             return full_path[len(ws):].lstrip("/")
         return full_path
 
+    @staticmethod
+    def _migrate_legacy_cache_paths(entries: dict) -> dict:
+        """Convert legacy absolute-path cache keys to repo-relative.
+
+        Old cache entries used absolute worktree paths like:
+          /path/to/worktrees/owner/repo/agent-key/src/file.py
+        New entries use repo-relative paths: src/file.py
+
+        Read-time migration only — doesn't rewrite the cache file.
+        """
+        import re
+        migrated = {}
+        # Matches worktree paths: .../worktrees/<owner>/<repo>/<agent-key>/rest
+        worktree_pattern = re.compile(r".*/worktrees/[^/]+/[^/]+/[^/]+/(.*)")
+        for path, entry in entries.items():
+            if not path.startswith("/"):
+                migrated[path] = entry
+                continue
+            m = worktree_pattern.match(path)
+            if m:
+                rel = m.group(1)
+                # Don't overwrite an entry that already exists under the relative key
+                if rel not in migrated:
+                    migrated[rel] = entry
+            else:
+                migrated[path] = entry
+        return migrated
+
     def _seed_from_repo_cache(self, cache_dir: Path, cache_file: Path, task: Task) -> bool:
         """Seed task-specific cache from repo-scoped cache.
 
@@ -1167,6 +1195,9 @@ If a tool call fails:
         entries = data.get("entries", {})
         if not entries:
             return prompt
+
+        # Migrate legacy absolute-path keys to repo-relative
+        entries = self._migrate_legacy_cache_paths(entries)
 
         # Check if any entries have LLM-written summaries
         has_summaries = any(e.get("summary") for e in entries.values())
