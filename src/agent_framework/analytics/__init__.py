@@ -10,9 +10,12 @@ This package provides tools for:
 from .performance_metrics import PerformanceMetrics
 from .failure_analyzer import FailureAnalyzer
 from .shadow_mode_analyzer import ShadowModeAnalyzer
+from .agentic_metrics import AgenticMetrics, AgenticMetricsReport
 
 __all__ = [
     'PerformanceMetrics',
     'FailureAnalyzer',
     'ShadowModeAnalyzer',
+    'AgenticMetrics',
+    'AgenticMetricsReport',
 ]

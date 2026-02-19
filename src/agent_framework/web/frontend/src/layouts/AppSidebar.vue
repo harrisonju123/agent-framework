@@ -10,6 +10,7 @@ const navItems = [
   { to: '/agents', name: 'agents', label: 'Agents', icon: 'pi-server' },
   { to: '/tasks', name: 'tasks', label: 'Tasks', icon: 'pi-list-check' },
   { to: '/logs', name: 'logs', label: 'Logs', icon: 'pi-file' },
+  { to: '/insights', name: 'insights', label: 'Insights', icon: 'pi-chart-bar' },
   { to: '/settings', name: 'settings', label: 'Settings', icon: 'pi-cog' },
 ]
 

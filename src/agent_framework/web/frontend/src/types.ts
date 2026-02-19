@@ -159,3 +159,59 @@ export interface LogEntry {
   level: string | null
 }
 
+// Agentic metrics types (mirrors analytics.agentic_metrics Pydantic models)
+
+export interface MemoryMetrics {
+  total_recalls: number
+  tasks_with_recall: number
+  avg_chars_injected: number
+  recall_rate: number
+}
+
+export interface SelfEvalMetrics {
+  total_evals: number
+  pass_count: number
+  fail_count: number
+  auto_pass_count: number
+  catch_rate: number
+}
+
+export interface ReplanMetrics {
+  total_replans: number
+  tasks_with_replan: number
+  tasks_completed_after_replan: number
+  trigger_rate: number
+  success_rate_after_replan: number
+}
+
+export interface SpecializationMetrics {
+  distribution: Record<string, number>
+  total_active_agents: number
+}
+
+export interface DebateMetrics {
+  available: boolean
+  note: string
+}
+
+export interface ContextBudgetMetrics {
+  sample_count: number
+  avg_prompt_length: number
+  max_prompt_length: number
+  min_prompt_length: number
+  p50_prompt_length: number
+  p90_prompt_length: number
+}
+
+export interface AgenticMetricsReport {
+  generated_at: string
+  time_range_hours: number
+  total_observed_tasks: number
+  memory: MemoryMetrics
+  self_eval: SelfEvalMetrics
+  replan: ReplanMetrics
+  specialization: SpecializationMetrics
+  debate: DebateMetrics
+  context_budget: ContextBudgetMetrics
+}
+
