@@ -1159,6 +1159,23 @@ def up(ctx, port, no_browser, watchdog, replicas, log_level):
 
     console.print("[bold cyan]Starting Agent Framework[/]")
 
+    # --- Build MCP servers ---
+    mcp_dir = workspace / "mcp-servers"
+    if mcp_dir.is_dir():
+        for server_dir in sorted(mcp_dir.iterdir()):
+            pkg = server_dir / "package.json"
+            if pkg.is_file():
+                result = subprocess.run(
+                    ["npm", "run", "build"],
+                    cwd=str(server_dir),
+                    capture_output=True, text=True,
+                )
+                name = server_dir.name
+                if result.returncode == 0:
+                    console.print(f"[green]Built MCP server: {name}[/]")
+                else:
+                    console.print(f"[yellow]MCP build failed for {name}: {result.stderr.strip()}[/]")
+
     try:
         orchestrator = Orchestrator(workspace)
 

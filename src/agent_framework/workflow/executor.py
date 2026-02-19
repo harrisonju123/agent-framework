@@ -26,7 +26,7 @@ MAX_CHAIN_DEPTH = 10
 
 # Cap review→engineer fix cycles. The counter is shared across all review steps
 # (code_review, qa_review, preview_review) so the total budget is global per task.
-# Value of 2: initial review + 2 fix rounds + final review = 6 chain hops max.
+# Value of 2: initial review + 1 fix round + final review = 4 chain hops max.
 # Consequence: preview_review loops eat into the code_review/qa_review budget.
 MAX_DAG_REVIEW_CYCLES = 2
 
@@ -299,7 +299,7 @@ class WorkflowExecutor:
             review_cycles = 0
         elif is_review_to_engineer:
             review_cycles += 1
-            if review_cycles > MAX_DAG_REVIEW_CYCLES:
+            if review_cycles >= MAX_DAG_REVIEW_CYCLES:
                 self.logger.warning(
                     f"Review→engineer cycle {review_cycles} exceeds max ({MAX_DAG_REVIEW_CYCLES}) "
                     f"for task {task.id} — routing to PR creation instead of another fix cycle"
