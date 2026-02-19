@@ -197,7 +197,7 @@ class PRLifecycleManager:
                 [
                     "gh", "pr", "checks", pr_number,
                     "--repo", github_repo,
-                    "--json", "name,state,conclusion",
+                    "--json", "name,state,bucket",
                 ],
                 check=False,
                 timeout=30,
@@ -227,14 +227,11 @@ class PRLifecycleManager:
         failed = []
         any_pending = False
         for check in checks:
-            state = (check.get("state") or "").upper()
-            conclusion = (check.get("conclusion") or "").upper()
+            bucket = (check.get("bucket") or "").lower()
 
-            if state == "PENDING" or state == "QUEUED" or state == "IN_PROGRESS":
+            if bucket == "pending":
                 any_pending = True
-            # "ERROR"/"STARTUP_FAILURE" are GitHub check conclusions, distinct from
-            # CIStatus.ERROR which means the gh CLI itself failed.
-            elif conclusion in ("FAILURE", "TIMED_OUT", "CANCELLED", "ERROR", "STARTUP_FAILURE"):
+            elif bucket == "fail":
                 failed.append(check.get("name", "unknown"))
 
         if failed:

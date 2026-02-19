@@ -150,8 +150,8 @@ class TestCIPolling:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps([
-                {"name": "build", "state": "COMPLETED", "conclusion": "SUCCESS"},
-                {"name": "lint", "state": "COMPLETED", "conclusion": "SUCCESS"},
+                {"name": "build", "state": "COMPLETED", "bucket": "pass"},
+                {"name": "lint", "state": "COMPLETED", "bucket": "pass"},
             ]),
             stderr="",
         )
@@ -163,8 +163,8 @@ class TestCIPolling:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps([
-                {"name": "build", "state": "COMPLETED", "conclusion": "SUCCESS"},
-                {"name": "tests", "state": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "build", "state": "COMPLETED", "bucket": "pass"},
+                {"name": "tests", "state": "COMPLETED", "bucket": "fail"},
             ]),
             stderr="",
         )
@@ -177,8 +177,8 @@ class TestCIPolling:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps([
-                {"name": "build", "state": "COMPLETED", "conclusion": "SUCCESS"},
-                {"name": "deploy", "state": "PENDING", "conclusion": ""},
+                {"name": "build", "state": "COMPLETED", "bucket": "pass"},
+                {"name": "deploy", "state": "PENDING", "bucket": "pending"},
             ]),
             stderr="",
         )
@@ -215,7 +215,7 @@ class TestCIPolling:
         mock_run.return_value = MagicMock(
             returncode=1,
             stdout=json.dumps([
-                {"name": "tests", "state": "COMPLETED", "conclusion": "FAILURE"},
+                {"name": "tests", "state": "COMPLETED", "bucket": "fail"},
             ]),
             stderr="Some checks were not successful",
         )
@@ -229,7 +229,7 @@ class TestCIPolling:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps([
-                {"name": "deploy", "state": "COMPLETED", "conclusion": "ERROR"},
+                {"name": "deploy", "state": "COMPLETED", "bucket": "fail"},
             ]),
             stderr="",
         )
@@ -243,7 +243,7 @@ class TestCIPolling:
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout=json.dumps([
-                {"name": "build", "state": "COMPLETED", "conclusion": "STARTUP_FAILURE"},
+                {"name": "build", "state": "COMPLETED", "bucket": "fail"},
             ]),
             stderr="",
         )
@@ -479,7 +479,7 @@ class TestManageFlow:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps([
-                        {"name": "build", "state": "COMPLETED", "conclusion": "SUCCESS"},
+                        {"name": "build", "state": "COMPLETED", "bucket": "pass"},
                     ]),
                     stderr="",
                 )
@@ -506,7 +506,7 @@ class TestManageFlow:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps([
-                        {"name": "tests", "state": "COMPLETED", "conclusion": "FAILURE"},
+                        {"name": "tests", "state": "COMPLETED", "bucket": "fail"},
                     ]),
                     stderr="",
                 )
@@ -533,7 +533,7 @@ class TestManageFlow:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps([
-                        {"name": "tests", "state": "COMPLETED", "conclusion": "FAILURE"},
+                        {"name": "tests", "state": "COMPLETED", "bucket": "fail"},
                     ]),
                     stderr="",
                 )
@@ -555,7 +555,7 @@ class TestManageFlow:
                 return MagicMock(
                     returncode=1,
                     stdout=json.dumps([
-                        {"name": "tests", "state": "COMPLETED", "conclusion": "ERROR"},
+                        {"name": "tests", "state": "COMPLETED", "bucket": "fail"},
                     ]),
                     stderr="Some checks were not successful",
                 )
@@ -581,7 +581,7 @@ class TestManageFlow:
                 return MagicMock(
                     returncode=1,
                     stdout=json.dumps([
-                        {"name": "tests", "state": "COMPLETED", "conclusion": "ERROR"},
+                        {"name": "tests", "state": "COMPLETED", "bucket": "fail"},
                     ]),
                     stderr="Some checks were not successful",
                 )
@@ -773,7 +773,7 @@ class TestCIFixReentry:
                 return MagicMock(
                     returncode=0,
                     stdout=json.dumps([
-                        {"name": "tests", "state": "COMPLETED", "conclusion": "FAILURE"},
+                        {"name": "tests", "state": "COMPLETED", "bucket": "fail"},
                     ]),
                     stderr="",
                 )
