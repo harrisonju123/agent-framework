@@ -998,3 +998,72 @@ class TestSelfEvalPrompt:
 
         prompt = manager.llm.complete.call_args[0][0].prompt
         assert "PRIORITIZE the git diff over the conversation summary" in prompt
+
+
+class TestChecklistReport:
+    """Tests for _build_checklist_report() in self-evaluation."""
+
+    def test_report_with_matching_files(self):
+        manager = _make_manager()
+        task = _make_task(context={
+            "requirements_checklist": [
+                {"id": 1, "description": "Add dashboard panel", "files": ["src/dashboard.py"], "status": "pending"},
+                {"id": 2, "description": "Create config parser", "files": ["src/config.py"], "status": "pending"},
+            ],
+        })
+        git_evidence = "## Git Diff\n### Summary\nsrc/dashboard.py | 50 +++\nsrc/config.py | 30 +++"
+        report = manager._build_checklist_report(task, git_evidence)
+
+        assert "2/2 items appear in code changes" in report
+        assert "✅" in report
+        assert "❌" not in report
+
+    def test_report_with_missing_files(self):
+        manager = _make_manager()
+        task = _make_task(context={
+            "requirements_checklist": [
+                {"id": 1, "description": "Add dashboard panel", "files": ["src/dashboard.py"], "status": "pending"},
+                {"id": 2, "description": "Create debate metrics", "files": ["src/debate.py"], "status": "pending"},
+            ],
+        })
+        git_evidence = "## Git Diff\n### Summary\nsrc/dashboard.py | 50 +++"
+        report = manager._build_checklist_report(task, git_evidence)
+
+        assert "1/2 items appear in code changes" in report
+        assert "✅" in report
+        assert "❌" in report
+        assert "1 deliverable(s) appear to be missing" in report
+
+    def test_no_report_without_checklist(self):
+        manager = _make_manager()
+        task = _make_task(context={})
+        report = manager._build_checklist_report(task, "some diff")
+        assert report == ""
+
+    def test_keyword_matching_fallback(self):
+        """When no file matches, distinctive words (>6 chars) from description are used."""
+        manager = _make_manager()
+        task = _make_task(context={
+            "requirements_checklist": [
+                {"id": 1, "description": "Create workflow routing handler", "files": [], "status": "pending"},
+            ],
+        })
+        # "workflow" (8 chars) and "routing" (7 chars) both appear in diff
+        git_evidence = "diff --git a/src/routing.py\n+class WorkflowRoutingHandler:\n+    workflow routing handler"
+        report = manager._build_checklist_report(task, git_evidence)
+
+        assert "1/1 items appear in code changes" in report
+
+    def test_short_keywords_not_matched(self):
+        """Words <= 6 chars shouldn't trigger keyword fallback."""
+        manager = _make_manager()
+        task = _make_task(context={
+            "requirements_checklist": [
+                {"id": 1, "description": "Add new panel to app", "files": [], "status": "pending"},
+            ],
+        })
+        # "panel" (5 chars) and "app" (3 chars) are too short to match
+        git_evidence = "diff --git a/panel.py\n+panel = Panel()\n+app.register(panel)"
+        report = manager._build_checklist_report(task, git_evidence)
+
+        assert "0/1 items appear in code changes" in report

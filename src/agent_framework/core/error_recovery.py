@@ -223,6 +223,65 @@ class ErrorRecoveryManager:
                 continue
         return "", ""
 
+    def _build_checklist_report(self, task: Task, git_evidence: str) -> str:
+        """Cross-reference requirements checklist against git diff evidence.
+
+        Gives the self-eval LLM structured signal about which deliverables
+        appear in the code changes vs which are missing.
+        """
+        checklist = task.context.get("requirements_checklist")
+        if not checklist:
+            return ""
+
+        # Extract modified file names from git evidence for matching
+        diff_lower = git_evidence.lower() if git_evidence else ""
+
+        lines = ["## Requirements Checklist Status"]
+        matched = 0
+
+        for item in checklist:
+            item_id = item.get("id", "?")
+            desc = item.get("description", "")
+            files = item.get("files", [])
+
+            # Check if any associated file appears in the diff,
+            # or if keywords from the description appear
+            found = False
+            match_hint = ""
+
+            for f in files:
+                fname = Path(f).name.lower()
+                if fname in diff_lower:
+                    found = True
+                    match_hint = f"{f} modified"
+                    break
+
+            if not found:
+                # Keyword heuristic: check if distinctive words from description appear in diff
+                words = [w.lower() for w in desc.split() if len(w) > 6]
+                matching_words = [w for w in words[:5] if w in diff_lower]
+                if len(matching_words) >= 2:
+                    found = True
+                    match_hint = f"keywords matched: {', '.join(matching_words)}"
+
+            if found:
+                matched += 1
+                lines.append(f"  ✅ {item_id}. {desc} ({match_hint})")
+            else:
+                lines.append(f"  ❌ {item_id}. {desc} (no matching files in diff)")
+
+        total = len(checklist)
+        lines.insert(1, f"{matched}/{total} items appear in code changes:")
+
+        if matched < total:
+            lines.append(
+                f"\n⚠️  {total - matched} deliverable(s) appear to be missing. "
+                "FAIL unless the agent's output explains why they were intentionally omitted."
+            )
+
+        lines.append("")
+        return "\n".join(lines)
+
     def gather_git_evidence(self, working_dir: Path) -> str:
         """Collect git diff evidence for self-evaluation.
 
@@ -301,6 +360,9 @@ class ErrorRecoveryManager:
                 "The diff shows actual code changes.\n"
             )
 
+        # Build checklist completion report if requirements checklist exists
+        checklist_report = self._build_checklist_report(task, git_evidence)
+
         eval_prompt = f"""Review this agent's output against the acceptance criteria.
 Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
 
@@ -311,7 +373,7 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
 
 {git_evidence}
 
-## Agent Output (conversation summary — NOT code)
+{checklist_report}## Agent Output (conversation summary — NOT code)
 {response_preview}
 
 ## Rules

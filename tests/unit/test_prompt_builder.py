@@ -1363,3 +1363,36 @@ class TestReadCacheSeedFromRepo:
 
         result = builder._inject_read_cache("base prompt", task_with_repo)
         assert result == "base prompt"
+
+
+class TestRequirementsChecklistInjection:
+    """Tests for _inject_requirements_checklist()."""
+
+    def test_injects_checklist_when_present(self, prompt_builder, sample_task):
+        sample_task.context["requirements_checklist"] = [
+            {"id": 1, "description": "Add memory panel", "files": ["dashboard.py"], "status": "pending"},
+            {"id": 2, "description": "Create retry panel", "files": [], "status": "pending"},
+        ]
+        result = prompt_builder._inject_requirements_checklist("base prompt", sample_task)
+
+        assert "REQUIRED DELIVERABLES (2 items)" in result
+        assert "1. [ ] Add memory panel (dashboard.py)" in result
+        assert "2. [ ] Create retry panel" in result
+        assert "verify each item" in result.lower()
+
+    def test_no_injection_without_checklist(self, prompt_builder, sample_task):
+        result = prompt_builder._inject_requirements_checklist("base prompt", sample_task)
+        assert result == "base prompt"
+
+    def test_no_injection_with_empty_checklist(self, prompt_builder, sample_task):
+        sample_task.context["requirements_checklist"] = []
+        result = prompt_builder._inject_requirements_checklist("base prompt", sample_task)
+        assert result == "base prompt"
+
+    def test_checklist_in_full_build(self, prompt_builder, sample_task):
+        """Checklist injection appears in the full build() output."""
+        sample_task.context["requirements_checklist"] = [
+            {"id": 1, "description": "Build feature X", "files": [], "status": "pending"},
+        ]
+        prompt = prompt_builder.build(sample_task)
+        assert "REQUIRED DELIVERABLES" in prompt

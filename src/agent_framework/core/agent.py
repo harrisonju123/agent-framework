@@ -770,6 +770,12 @@ class Agent:
                     f"Extracted plan from response: {len(extracted.files_to_modify)} files, "
                     f"{len(extracted.approach)} steps"
                 )
+                # Build requirements checklist so downstream agents have a concrete contract
+                from .task_decomposer import extract_requirements_checklist
+                checklist = extract_requirements_checklist(extracted)
+                if checklist:
+                    task.context["requirements_checklist"] = checklist
+                    self.logger.info(f"Extracted {len(checklist)} requirements checklist items")
             else:
                 self.logger.warning("Architect plan step completed but no PlanDocument found in response")
 
@@ -1359,6 +1365,11 @@ class Agent:
                 "Before reading any file, call get_cached_reads() to check "
                 "if a previous agent already analyzed it."
             )
+        efficiency_parts.append(
+            "COMMIT DISCIPLINE: After completing each major deliverable, immediately "
+            "commit your work (git add + git commit). This preserves progress if you "
+            "run out of context. Prioritize shipping all deliverables over perfecting any single one."
+        )
         efficiency_parts.append(
             "FAILURE CIRCUIT BREAKER: If 3+ consecutive bash/shell commands fail with errors, "
             "STOP. Do not attempt more diagnostic commands. Instead, report what went wrong "

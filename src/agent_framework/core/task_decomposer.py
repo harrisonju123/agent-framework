@@ -1,11 +1,68 @@
 """Task decomposition logic for splitting large plans into subtasks."""
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Optional
 from pathlib import Path
 
 from agent_framework.core.task import Task, PlanDocument, TaskType, TaskStatus
+
+# Action verbs that signal a discrete deliverable in approach steps
+_ACTION_VERBS = re.compile(
+    r"^(add|create|implement|build|write|define|set\s?up|configure|integrate|"
+    r"update|modify|extend|refactor|migrate|register|wire|connect|expose|emit|"
+    r"introduce|extract|generate|render|display|mount)\b",
+    re.IGNORECASE,
+)
+
+# Preparatory/exploratory verbs that aren't deliverables
+_PREP_VERBS = re.compile(
+    r"^(read|understand|review|analyze|explore|check|examine|research|investigate|"
+    r"plan|decide|consider|evaluate|study|identify|gather|document)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_requirements_checklist(plan: PlanDocument) -> list[dict]:
+    """Parse plan approach steps into a numbered checklist of discrete deliverables.
+
+    Each checklist item represents something the engineer must ship.
+    Preparatory steps (read, understand, analyze) are excluded — only
+    action-oriented steps become deliverables.
+
+    Returns list of dicts: {"id": int, "description": str, "files": list[str], "status": "pending"}
+    """
+    checklist = []
+    item_id = 0
+
+    for step in (plan.approach or []):
+        # Strip leading numbering like "1. " or "- "
+        text = re.sub(r"^\d+\.\s*", "", step).strip()
+        text = re.sub(r"^[-*]\s*", "", text).strip()
+
+        if not text:
+            continue
+
+        # Skip preparatory steps — everything else is a deliverable
+        if _PREP_VERBS.match(text):
+            continue
+
+        item_id += 1
+        # Find files from plan that this step mentions
+        relevant_files = [
+            f for f in (plan.files_to_modify or [])
+            if Path(f).name.lower() in text.lower()
+            or (len(Path(f).stem) > 3 and Path(f).stem.lower() in text.lower())
+        ]
+        checklist.append({
+            "id": item_id,
+            "description": text,
+            "files": relevant_files,
+            "status": "pending",
+        })
+
+    return checklist
 
 
 def estimate_plan_lines(plan: "PlanDocument") -> int:
@@ -34,32 +91,46 @@ class TaskDecomposer:
     """Decomposes large tasks into smaller, independent subtasks."""
 
     # Configuration constants
-    DECOMPOSE_THRESHOLD = 500  # Lines above which decomposition triggers
+    DECOMPOSE_THRESHOLD = 350  # Lines above which decomposition triggers
     TARGET_SUBTASK_SIZE = 250  # Target lines per subtask
     MIN_SUBTASK_SIZE = 50  # Don't create subtasks smaller than this
     MAX_SUBTASKS = 5  # Cap on number of subtasks
     MAX_DEPTH = 1  # Subtasks cannot themselves decompose
 
-    def should_decompose(self, plan: PlanDocument, estimated_lines: int) -> bool:
+    # Medium tasks with many discrete deliverables should decompose even below
+    # the line threshold — the deliverable count signals complexity that a single
+    # context window may not reliably complete.
+    REQUIREMENTS_COUNT_TRIGGER = 6
+    REQUIREMENTS_MIN_LINES = 200
+
+    def should_decompose(
+        self, plan: PlanDocument, estimated_lines: int, requirements_count: int = 0
+    ) -> bool:
         """
         Determine if a task should be decomposed into subtasks.
 
         Args:
             plan: The task's plan document
             estimated_lines: Estimated total lines of code for the task
+            requirements_count: Number of discrete deliverables from checklist extraction
 
         Returns:
             True if task exceeds threshold and has enough files to split
         """
-        # Check if we're above the threshold
-        if estimated_lines < self.DECOMPOSE_THRESHOLD:
-            return False
-
         # Need at least 2 files to meaningfully split
         if len(plan.files_to_modify) < 2:
             return False
 
-        return True
+        # Primary trigger: estimated lines above threshold
+        if estimated_lines >= self.DECOMPOSE_THRESHOLD:
+            return True
+
+        # Secondary trigger: many discrete deliverables even if line count is moderate
+        if (requirements_count >= self.REQUIREMENTS_COUNT_TRIGGER
+                and estimated_lines >= self.REQUIREMENTS_MIN_LINES):
+            return True
+
+        return False
 
     def decompose(
         self, parent_task: Task, plan: PlanDocument, estimated_lines: int

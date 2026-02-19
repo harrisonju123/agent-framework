@@ -102,7 +102,8 @@ class WorkflowRouter:
         """Check if task should be decomposed into subtasks.
 
         Only applies to architect-created tasks with plans.
-        Uses TaskDecomposer heuristics (estimated lines > threshold).
+        Uses TaskDecomposer heuristics (estimated lines > threshold,
+        or many discrete deliverables in the requirements checklist).
         """
         if not task.plan:
             return False
@@ -112,8 +113,9 @@ class WorkflowRouter:
             return False
 
         estimated_lines = estimate_plan_lines(task.plan)
+        requirements_count = len(task.context.get("requirements_checklist", []))
         decomposer = TaskDecomposer()
-        return decomposer.should_decompose(task.plan, estimated_lines)
+        return decomposer.should_decompose(task.plan, estimated_lines, requirements_count)
 
     def decompose_and_queue_subtasks(self, task: Task) -> None:
         """Decompose task into subtasks and queue them to engineer.

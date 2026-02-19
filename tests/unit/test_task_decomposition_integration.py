@@ -289,20 +289,20 @@ def test_decomposition_threshold_edge_cases(task_decomposer):
     # Should decompose (510 > 500)
     assert task_decomposer.should_decompose(plan_500, estimated_510) is True
 
-    # Test just below threshold (499 lines = 33 files)
-    plan_499 = PlanDocument(
+    # Test just below threshold (345 lines)
+    plan_below = PlanDocument(
         objectives=["Implement feature below threshold"],
         approach=["Step 1"],
         risks=[],
         success_criteria=["Tests pass"],
-        files_to_modify=[f"src/module_{i}.py" for i in range(33)],  # 33 * 15 = 495 lines
+        files_to_modify=[f"src/module_{i}.py" for i in range(23)],  # 23 * 15 = 345 lines
         dependencies=[],
     )
 
-    estimated_495 = 33 * 15  # 495 lines
+    estimated_345 = 23 * 15  # 345 lines
 
-    # Should NOT decompose (495 < 500)
-    assert task_decomposer.should_decompose(plan_499, estimated_495) is False
+    # Should NOT decompose (345 < 350)
+    assert task_decomposer.should_decompose(plan_below, estimated_345) is False
 
 
 def test_subtask_routing_to_engineer_queue(task_decomposer):

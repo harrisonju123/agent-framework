@@ -6,7 +6,12 @@ from datetime import datetime, timezone
 import pytest
 
 from agent_framework.core.task import Task, TaskStatus, TaskType, PlanDocument
-from agent_framework.core.task_decomposer import TaskDecomposer, SubtaskBoundary, estimate_plan_lines
+from agent_framework.core.task_decomposer import (
+    TaskDecomposer,
+    SubtaskBoundary,
+    estimate_plan_lines,
+    extract_requirements_checklist,
+)
 
 
 def _make_task(**overrides) -> Task:
@@ -74,8 +79,8 @@ class TestEstimatePlanLines:
         # Threshold is >= 500, need at least 2 files
         assert decomposer.should_decompose(plan, estimated) is True
 
-    def test_below_threshold(self):
-        """5 files + 4 steps = 350, below threshold."""
+    def test_at_threshold(self):
+        """5 files + 4 steps = 350, exactly at threshold."""
         plan = _make_plan(
             files_to_modify=[f"f{i}.py" for i in range(5)],
             approach=[f"step {i}" for i in range(4)],
@@ -83,7 +88,7 @@ class TestEstimatePlanLines:
         estimated = estimate_plan_lines(plan)
         assert estimated == 350  # 5*50 + 4*25
         decomposer = TaskDecomposer()
-        assert decomposer.should_decompose(plan, estimated) is False
+        assert decomposer.should_decompose(plan, estimated) is True
 
 
 class TestTaskDecomposer:
@@ -106,8 +111,8 @@ class TestTaskDecomposer:
         decomposer = TaskDecomposer()
         plan = _make_plan(files_to_modify=["src/file1.py", "src/file2.py"])
 
-        # 400 lines < 500 threshold
-        result = decomposer.should_decompose(plan, estimated_lines=400)
+        # 300 lines < 350 threshold
+        result = decomposer.should_decompose(plan, estimated_lines=300)
 
         assert result is False
 
@@ -390,3 +395,145 @@ class TestTaskDecomposer:
         assert task_restored.parent_task_id == "parent-123"
         assert task_restored.subtask_ids == ["child-1", "child-2"]
         assert task_restored.decomposition_strategy == "by_feature"
+
+
+class TestExtractRequirementsChecklist:
+    """Tests for extract_requirements_checklist()."""
+
+    def test_action_steps_become_checklist_items(self):
+        plan = _make_plan(
+            approach=[
+                "Add memory hit rate panel with category breakdown",
+                "Create self-evaluation retry rate panel",
+                "Implement debate usage tracking panel",
+            ],
+            files_to_modify=["src/dashboard.py"],
+        )
+        checklist = extract_requirements_checklist(plan)
+
+        assert len(checklist) == 3
+        assert checklist[0]["id"] == 1
+        assert "memory hit rate" in checklist[0]["description"].lower()
+        assert checklist[0]["status"] == "pending"
+
+    def test_prep_steps_excluded(self):
+        plan = _make_plan(
+            approach=[
+                "Read existing dashboard code to understand patterns",
+                "Analyze the metrics schema",
+                "Add new metrics panel",
+                "Understand how routing works",
+            ],
+        )
+        checklist = extract_requirements_checklist(plan)
+
+        assert len(checklist) == 1
+        assert "metrics panel" in checklist[0]["description"].lower()
+
+    def test_file_matching(self):
+        plan = _make_plan(
+            approach=["Update dashboard.py with new panel"],
+            files_to_modify=["src/dashboard.py", "src/config.py"],
+        )
+        checklist = extract_requirements_checklist(plan)
+
+        assert len(checklist) == 1
+        assert "src/dashboard.py" in checklist[0]["files"]
+
+    def test_empty_approach_returns_empty(self):
+        plan = _make_plan(approach=[])
+        checklist = extract_requirements_checklist(plan)
+        assert checklist == []
+
+    def test_numbered_steps_stripped(self):
+        plan = _make_plan(
+            approach=[
+                "1. Add first feature",
+                "2. Create second feature",
+            ],
+        )
+        checklist = extract_requirements_checklist(plan)
+
+        assert len(checklist) == 2
+        assert checklist[0]["description"].startswith("Add")
+        assert checklist[1]["description"].startswith("Create")
+
+    def test_short_stem_not_matched(self):
+        """File stems <= 3 chars (like 'a.py') shouldn't match substring in description."""
+        plan = _make_plan(
+            approach=["Add a new panel to the dashboard"],
+            files_to_modify=["a.py", "src/dashboard.py"],
+        )
+        checklist = extract_requirements_checklist(plan)
+
+        assert len(checklist) == 1
+        # "a.py" should NOT match (stem "a" is too short)
+        assert "a.py" not in checklist[0]["files"]
+        # "dashboard.py" should match (name appears in text)
+        assert "src/dashboard.py" in checklist[0]["files"]
+
+    def test_six_item_plan_produces_six_items(self):
+        """Validates the specific scenario from PR #43: 6-panel dashboard."""
+        plan = _make_plan(
+            approach=[
+                "Add memory hit rate panel with category breakdown",
+                "Create self-evaluation retry rate panel",
+                "Build context budget utilization panel",
+                "Implement debate metrics panel",
+                "Add tool pattern efficiency panel",
+                "Create workflow success rate panel",
+            ],
+            files_to_modify=[
+                "src/dashboard.py",
+                "src/panels/memory.py",
+                "src/panels/self_eval.py",
+                "src/panels/budget.py",
+            ],
+        )
+        checklist = extract_requirements_checklist(plan)
+        assert len(checklist) == 6
+
+
+class TestDecomposeThresholdChange:
+    """Tests for the lowered decomposition threshold and requirements-count trigger."""
+
+    def test_old_threshold_350_now_decomposes(self):
+        """350 lines was below old threshold (500) but is at new threshold (350)."""
+        decomposer = TaskDecomposer()
+        plan = _make_plan(
+            files_to_modify=[f"f{i}.py" for i in range(5)],
+            approach=[f"step {i}" for i in range(4)],
+        )
+        estimated = estimate_plan_lines(plan)
+        assert estimated == 350
+        assert decomposer.should_decompose(plan, estimated) is True
+
+    def test_requirements_count_trigger(self):
+        """6+ requirements + 200+ lines triggers decomposition even below line threshold."""
+        decomposer = TaskDecomposer()
+        plan = _make_plan(
+            files_to_modify=["a.py", "b.py", "c.py"],
+            approach=["s1"],
+        )
+        estimated = estimate_plan_lines(plan)
+        assert estimated == 175  # below 350
+
+        # Without requirements count: no decomposition
+        assert decomposer.should_decompose(plan, estimated) is False
+
+        # With 6 requirements and est >= 200: triggers
+        assert decomposer.should_decompose(plan, 250, requirements_count=6) is True
+
+    def test_requirements_count_below_min_lines(self):
+        """Requirements count trigger doesn't fire below REQUIREMENTS_MIN_LINES."""
+        decomposer = TaskDecomposer()
+        plan = _make_plan(files_to_modify=["a.py", "b.py"])
+
+        assert decomposer.should_decompose(plan, 150, requirements_count=8) is False
+
+    def test_requirements_count_below_trigger(self):
+        """5 requirements (below 6) doesn't trigger decomposition."""
+        decomposer = TaskDecomposer()
+        plan = _make_plan(files_to_modify=["a.py", "b.py"])
+
+        assert decomposer.should_decompose(plan, 250, requirements_count=5) is False

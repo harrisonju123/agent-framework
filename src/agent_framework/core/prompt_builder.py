@@ -153,6 +153,9 @@ class PromptBuilder:
         else:
             prompt = self._build_prompt_legacy(task, prompt_override=prompt_text)
 
+        # Inject requirements checklist so engineer knows exactly what to deliver
+        prompt = self._inject_requirements_checklist(prompt, task)
+
         # Inject preview mode constraints when task is a preview
         if task.type == TaskType.PREVIEW:
             prompt = self._inject_preview_mode(prompt, task)
@@ -905,6 +908,36 @@ If a tool call fails:
 
         lines.append("")
         return "\n".join(lines)
+
+    def _inject_requirements_checklist(self, prompt: str, task: Task) -> str:
+        """Inject structured deliverables checklist from task context.
+
+        All agents (engineer, QA, code review) see the same checklist —
+        engineer uses it as a contract, reviewers use it for verification.
+        """
+        checklist = task.context.get("requirements_checklist")
+        if not checklist:
+            return prompt
+
+        count = len(checklist)
+        lines = [f"\n## REQUIRED DELIVERABLES ({count} items)"]
+        lines.append(
+            "You MUST implement ALL of the following. Commit after completing each one."
+        )
+
+        for item in checklist:
+            item_id = item.get("id", "?")
+            desc = item.get("description", "")
+            files = item.get("files", [])
+            file_hint = f" ({', '.join(files)})" if files else ""
+            lines.append(f"{item_id}. [ ] {desc}{file_hint}")
+
+        lines.append("")
+        lines.append(
+            "Before reporting completion, verify each item above was implemented.\n"
+        )
+
+        return prompt + "\n".join(lines)
 
     def _inject_memories(self, prompt: str, task: Task) -> str:
         """Append relevant memories from previous tasks to the prompt."""
