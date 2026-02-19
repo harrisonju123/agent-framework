@@ -592,19 +592,18 @@ class TestManageFlow:
         esc_task = manager._queue.push.call_args[0][0]
         assert esc_task.type == TaskType.ESCALATION
 
-    def test_infrastructure_error_ci_queues_fix(self, manager):
-        """True CIStatus.ERROR (gh CLI failure, no parseable JSON) queues a fix rather than silent abandonment."""
+    def test_infrastructure_error_ci_leaves_pr_for_manual_review(self, manager):
+        """CIStatus.ERROR (gh CLI failure) leaves PR for manual review — no fix task queued."""
         task = _make_task(pr_url="https://github.com/org/repo/pull/10")
         manager._poll_ci_checks = MagicMock(return_value=CICheckResult(
             status=CIStatus.ERROR, failed_checks=[], failure_logs="gh: authentication failed"
         ))
         assert manager.manage(task, "engineer") is False
-        manager._queue.push.assert_called_once()
-        fix_task = manager._queue.push.call_args[0][0]
-        assert fix_task.type == TaskType.FIX
+        manager._queue.push.assert_not_called()
+        manager._log.warning.assert_called()
 
-    def test_infrastructure_error_ci_exhausted_fixes_escalates(self, manager):
-        """True CIStatus.ERROR escalates when fix attempts are exhausted."""
+    def test_infrastructure_error_ci_exhausted_fixes_no_task(self, manager):
+        """CIStatus.ERROR with exhausted fixes still just leaves PR — no escalation."""
         task = _make_task(
             pr_url="https://github.com/org/repo/pull/10",
             ci_fix_count=3,
@@ -613,8 +612,18 @@ class TestManageFlow:
             status=CIStatus.ERROR, failed_checks=[], failure_logs="gh: authentication failed"
         ))
         assert manager.manage(task, "engineer") is False
-        esc_task = manager._queue.push.call_args[0][0]
-        assert esc_task.type == TaskType.ESCALATION
+        manager._queue.push.assert_not_called()
+        manager._log.warning.assert_called()
+
+    def test_failing_with_empty_checks_leaves_pr_for_manual_review(self, manager):
+        """FAILING + empty failed_checks → no fix task, left for manual review."""
+        task = _make_task(pr_url="https://github.com/org/repo/pull/10")
+        manager._poll_ci_checks = MagicMock(return_value=CICheckResult(
+            status=CIStatus.FAILING, failed_checks=[], failure_logs=""
+        ))
+        assert manager.manage(task, "engineer") is False
+        manager._queue.push.assert_not_called()
+        manager._log.warning.assert_called()
 
 
 # ===========================================================================

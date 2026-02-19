@@ -117,7 +117,21 @@ class PRLifecycleManager:
         # 1. Poll CI
         ci_result = self._poll_ci_checks(github_repo, pr_number)
 
-        if ci_result.status in (CIStatus.FAILING, CIStatus.ERROR):
+        if ci_result.status == CIStatus.ERROR:
+            self._log.warning(
+                f"CI status check errored for {pr_url} "
+                f"(gh CLI failure, not a real CI failure), "
+                f"leaving PR open for manual review"
+            )
+            return False
+
+        if ci_result.status == CIStatus.FAILING:
+            if not ci_result.failed_checks:
+                self._log.warning(
+                    f"CI reported failing for {pr_url} but no specific checks identified, "
+                    f"leaving PR open for manual review"
+                )
+                return False
             if ci_fix_count < max_ci_fixes:
                 self._create_ci_fix_task(
                     task, ci_result, ci_fix_count + 1, agent_id
