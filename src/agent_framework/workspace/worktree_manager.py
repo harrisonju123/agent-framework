@@ -526,6 +526,7 @@ class WorktreeManager:
                 shutil.rmtree(path)
 
             logger.info(f"Removed worktree: {path}")
+            self._guard_parent_directory(path)
             return True
 
         except subprocess.CalledProcessError as e:
@@ -541,11 +542,27 @@ class WorktreeManager:
                         except subprocess.CalledProcessError:
                             pass
                     logger.info(f"Force removed worktree: {path}")
+                    self._guard_parent_directory(path)
                     return True
                 except Exception:
                     pass
             logger.error(f"Failed to remove worktree {path}: {e}")
             return False
+
+    def _guard_parent_directory(self, removed_path: Path) -> None:
+        """Verify the parent directory still exists after worktree removal.
+
+        Git worktree removal or shutil.rmtree can sometimes take out the
+        parent directory, which destroys sibling worktrees. If we detect
+        this happened, recreate the parent immediately.
+        """
+        parent = removed_path.parent
+        if parent != self.config.root and not parent.exists():
+            logger.critical(
+                f"Parent directory deleted during worktree removal: {parent}. "
+                f"Recreating to protect sibling worktrees."
+            )
+            parent.mkdir(parents=True, exist_ok=True)
 
     def get_worktree_for_task(self, task_id: str) -> Optional[Path]:
         """
@@ -696,6 +713,16 @@ class WorktreeManager:
                                     continue
                                 git_marker = worktree_dir / ".git"
                                 if git_marker.exists() and worktree_dir.resolve() not in registered_paths:
+                                    # Don't delete recently created worktrees — races with
+                                    # worktree creation where the registry write hasn't propagated yet
+                                    try:
+                                        dir_age = time.time() - worktree_dir.stat().st_mtime
+                                        if dir_age < 3600:  # 1 hour
+                                            logger.debug(f"Skipping young unregistered worktree ({dir_age:.0f}s old): {worktree_dir}")
+                                            continue
+                                    except OSError:
+                                        continue
+
                                     # Skip if dir name matches a protected agent
                                     # Worktree dirs are "{agent_id}-{ticket_key}", so match with trailing hyphen
                                     if protected_agent_ids and any(
@@ -739,6 +766,15 @@ class WorktreeManager:
 
         if len(self._registry) < self.config.max_worktrees:
             return
+
+        # When caller doesn't specify protected agents (e.g. create_worktree),
+        # derive from registry so active agents aren't evicted by capacity limits
+        if protected_agent_ids is None:
+            protected_agent_ids = {
+                info.agent_id
+                for info in self._registry.values()
+                if info.active and not self._is_stale_active(info)
+            }
 
         # Only consider inactive or stale-active worktrees for eviction,
         # and never evict worktrees belonging to agents with active work

@@ -1964,8 +1964,8 @@ class TestNoChangesVerdict:
 
         assert task.context.get("verdict") != "no_changes"
 
-    def test_no_changes_still_calls_enforce_chain(self, agent, queue):
-        """Even when verdict is no_changes, _enforce_workflow_chain is called so the DAG routes properly."""
+    def test_no_changes_skips_enforce_chain(self, agent, queue):
+        """When verdict is no_changes at plan step, workflow terminates — no chain enforcement."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="plan")
@@ -1980,7 +1980,25 @@ class TestNoChangesVerdict:
         agent._run_post_completion_flow(task, response, None, 0)
 
         assert task.context.get("verdict") == "no_changes"
-        agent._enforce_workflow_chain.assert_called_once()
+        agent._enforce_workflow_chain.assert_not_called()
+
+    def test_missing_workflow_warning_on_root_task(self, agent, queue):
+        """Root task without workflow in context emits a warning log."""
+        task = _make_task()  # No workflow set
+        task.context.pop("workflow", None)
+        response = _make_response("Done.")
+
+        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
+        agent._extract_and_store_memories = MagicMock()
+        agent._analyze_tool_patterns = MagicMock()
+        agent._log_task_completion_metrics = MagicMock()
+
+        agent._run_post_completion_flow(task, response, None, 0)
+
+        agent.logger.warning.assert_any_call(
+            f"Task {task.id} has no workflow in context — "
+            f"expected for CLI/web-created tasks"
+        )
 
     def test_no_changes_marker_detected(self):
         """Responses starting with [NO_CHANGES_NEEDED] marker are detected."""
@@ -2048,76 +2066,52 @@ class TestNoChangesVerdict:
                 f"False positive no-changes on: {phrase}"
 
 
-# -- Plan→create_pr routing on no_changes --
+# -- No-changes workflow termination --
 
 class TestNoChangesRouting:
-    """Verify plan step routes to create_pr when verdict is no_changes."""
+    """Verify plan step with no_changes terminates workflow (no create_pr routing)."""
 
-    def test_plan_routes_to_create_pr_on_no_changes(self, queue, tmp_path):
-        """Plan step with verdict='no_changes' routes to create_pr, skipping implement."""
-        from agent_framework.workflow.executor import WorkflowExecutor
+    def test_no_changes_verdict_terminates_workflow(self, queue, tmp_path):
+        """Plan step with no_changes has no DAG edge to follow — workflow ends."""
         from agent_framework.workflow.dag import (
-            WorkflowDAG, WorkflowStep, WorkflowEdge,
+            WorkflowStep, WorkflowEdge,
             EdgeCondition, EdgeConditionType,
-        )
-
-        executor = WorkflowExecutor(queue, queue.queue_dir)
-
-        # Build a DAG matching our config: plan → no_changes → create_pr, plan → implement
-        plan_step = WorkflowStep(
-            id="plan", agent="architect",
-            next=[
-                WorkflowEdge(
-                    target="create_pr",
-                    condition=EdgeCondition(EdgeConditionType.NO_CHANGES),
-                    priority=10,
-                ),
-                WorkflowEdge(
-                    target="implement",
-                    condition=EdgeCondition(EdgeConditionType.ALWAYS),
-                ),
-            ],
-        )
-        implement_step = WorkflowStep(id="implement", agent="engineer")
-        create_pr_step = WorkflowStep(id="create_pr", agent="architect")
-
-        workflow = WorkflowDAG(
-            name="test",
-            description="test workflow",
-            steps={
-                "plan": plan_step,
-                "implement": implement_step,
-                "create_pr": create_pr_step,
-            },
-            start_step="plan",
         )
 
         task = _make_task(
             workflow="default",
             workflow_step="plan",
             verdict="no_changes",
-            _chain_depth=0,
-            _root_task_id="root-1",
-            _global_cycle_count=0,
         )
 
         response = _make_response("[NO_CHANGES_NEEDED]\nFeature already exists.")
 
-        from agent_framework.workflow.conditions import ConditionRegistry
-        # Evaluate edges in priority order — no_changes should match
-        matched_step = None
-        for edge in workflow.steps["plan"].next:
-            if ConditionRegistry.evaluate(edge.condition, task, response):
-                matched_step = workflow.steps[edge.target]
-                break
+        # Current config: plan only has always → implement (no no_changes edge)
+        edges = [
+            WorkflowEdge(
+                target="implement",
+                condition=EdgeCondition(EdgeConditionType.ALWAYS),
+            ),
+        ]
 
-        assert matched_step is not None
-        assert matched_step.id == "create_pr"
+        from agent_framework.workflow.conditions import ConditionRegistry
+        # ALWAYS edge would match, but agent.py's skip_chain prevents
+        # _enforce_workflow_chain from ever evaluating these edges.
+        # This test just documents that the DAG no longer has a
+        # no_changes → create_pr shortcut.
+        matched_target = None
+        for edge in edges:
+            if ConditionRegistry.evaluate(edge.condition, task, response):
+                matched_target = edge.target
+                break
+        # ALWAYS matches, but agent.py skip_chain guard prevents this
+        # from firing — tested in test_no_changes_skips_enforce_chain
+        assert matched_target == "implement"
 
     def test_plan_routes_to_implement_without_no_changes(self, queue, tmp_path):
         """Plan step without no_changes verdict falls through to implement."""
         from agent_framework.workflow.dag import (
-            WorkflowDAG, WorkflowStep, WorkflowEdge,
+            WorkflowEdge,
             EdgeCondition, EdgeConditionType,
         )
 
@@ -2129,20 +2123,12 @@ class TestNoChangesRouting:
 
         response = _make_response("Here is the implementation plan...")
 
-        # Build same DAG edges
         edges = [
-            WorkflowEdge(
-                target="create_pr",
-                condition=EdgeCondition(EdgeConditionType.NO_CHANGES),
-                priority=10,
-            ),
             WorkflowEdge(
                 target="implement",
                 condition=EdgeCondition(EdgeConditionType.ALWAYS),
             ),
         ]
-        # Edges are sorted by priority (highest first) in WorkflowStep.__post_init__
-        edges.sort(key=lambda e: e.priority, reverse=True)
 
         from agent_framework.workflow.conditions import ConditionRegistry
         matched_target = None
@@ -2561,8 +2547,8 @@ class TestNoDiffGuard:
         with patch("agent_framework.utils.subprocess_utils.run_git_command", return_value=mock_result):
             assert executor._has_diff_for_pr(task, step) is False
 
-    def test_git_failure_proceeds(self, queue, tmp_path):
-        """Layer 2: git command fails → fall through to True (graceful degradation)."""
+    def test_git_failure_blocks_create_pr(self, queue, tmp_path):
+        """Layer 2: git command fails → return False (fail closed)."""
         from agent_framework.workflow.executor import WorkflowExecutor
         from agent_framework.workflow.dag import WorkflowStep
         from unittest.mock import patch
@@ -2572,4 +2558,4 @@ class TestNoDiffGuard:
         step = WorkflowStep(id="create_pr", agent="architect")
 
         with patch("agent_framework.utils.subprocess_utils.run_git_command", side_effect=Exception("git error")):
-            assert executor._has_diff_for_pr(task, step) is True
+            assert executor._has_diff_for_pr(task, step) is False

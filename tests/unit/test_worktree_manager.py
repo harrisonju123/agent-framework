@@ -1,6 +1,7 @@
 """Unit tests for WorktreeManager."""
 
 import json
+import time
 import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1250,6 +1251,7 @@ class TestCleanupSafetyChecks:
 
     def _make_unregistered_worktree(self, tmp_path):
         """Set up a worktree root with one unregistered worktree directory."""
+        import os
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
@@ -1259,6 +1261,10 @@ class TestCleanupSafetyChecks:
         wt_dir = repo_dir / "orphan-wt"
         wt_dir.mkdir(parents=True)
         (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/orphan-wt")
+
+        # Set mtime to 2 hours ago so the age check in _cleanup_unregistered_worktrees passes
+        old_time = time.time() - 7200
+        os.utime(wt_dir, (old_time, old_time))
 
         return manager, wt_dir
 
@@ -1532,12 +1538,17 @@ class TestProtectedAgentIds:
 
     def test_cleanup_unregistered_does_not_match_different_agent(self, tmp_path):
         """Protecting 'qa' does not protect 'architect' worktrees."""
+        import os
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
         wt_dir = config.root / "owner" / "repo" / "architect-ME-1"
         wt_dir.mkdir(parents=True)
         (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/architect-ME-1")
+
+        # Set mtime to 2 hours ago so the age check passes
+        old_time = time.time() - 7200
+        os.utime(wt_dir, (old_time, old_time))
 
         with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
              patch.object(manager, 'has_unpushed_commits', return_value=False), \
@@ -1881,3 +1892,142 @@ class TestCreateWorktreeBranchMismatch:
                     task_id="jira-ME-1-123",
                     owner_repo="owner/repo",
                 )
+
+
+class TestEnforceCapacityDerivesProtected:
+    """Tests for _enforce_capacity_limit deriving protected agents from registry."""
+
+    def test_enforce_capacity_derives_protected_from_registry(self, tmp_path):
+        """Active agents' worktrees survive capacity eviction even without explicit protected_agent_ids."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_worktrees=2)
+        manager = WorktreeManager(config=config)
+
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(minutes=10)).isoformat()
+
+        # 3 worktrees (over limit of 2): 2 active, 1 inactive
+        manager._registry["eng-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt-eng"), branch="b1", agent_id="engineer", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+            active=True,
+        )
+        manager._registry["arch-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt-arch"), branch="b2", agent_id="architect", task_id="t2",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+            active=True,
+        )
+        manager._registry["qa-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt-qa"), branch="b3", agent_id="qa", task_id="t3",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+            active=False,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory', return_value=True), \
+             patch.object(manager, '_load_registry'):
+            # Call without protected_agent_ids — should derive from active entries
+            manager._enforce_capacity_limit()
+
+        # Both active agents survive, inactive one gets evicted
+        assert "eng-key" in manager._registry
+        assert "arch-key" in manager._registry
+        assert "qa-key" not in manager._registry
+
+
+class TestCleanupUnregisteredSkipsYoungWorktrees:
+    """Tests for age check on unregistered worktree cleanup."""
+
+    def test_cleanup_unregistered_skips_young_worktrees(self, tmp_path):
+        """Unregistered worktree with recent mtime is not removed."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        # Create owner/repo/worktree structure with .git marker (recent mtime)
+        wt_dir = config.root / "owner" / "repo" / "young-wt"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/young-wt")
+
+        with patch.object(manager, '_remove_worktree_directory') as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees()
+
+        assert removed == 0
+        mock_remove.assert_not_called()
+
+    def test_cleanup_unregistered_removes_old_worktrees(self, tmp_path):
+        """Unregistered worktree older than 1 hour is removed."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_dir = config.root / "owner" / "repo" / "old-wt"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/old-wt")
+
+        # Set mtime to 2 hours ago
+        old_time = time.time() - 7200
+        import os
+        os.utime(wt_dir, (old_time, old_time))
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory', return_value=True) as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees()
+
+        assert removed == 1
+        mock_remove.assert_called_once()
+
+
+class TestRemoveDirectoryRecreatesParent:
+    """Tests for parent directory recreation after worktree removal."""
+
+    def test_remove_directory_recreates_parent(self, tmp_path):
+        """After removal, if parent directory was deleted, it gets recreated."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        parent_dir = config.root / "owner" / "repo"
+        wt_path = parent_dir / "some-worktree"
+        parent_dir.mkdir(parents=True)
+        wt_path.mkdir()
+
+        # Simulate git worktree remove that also nukes the parent
+        def mock_run_git(args, cwd, timeout=30):
+            if args[0] == "worktree" and args[1] == "remove":
+                import shutil
+                # Remove the worktree AND the parent (simulating the bug)
+                shutil.rmtree(wt_path)
+                shutil.rmtree(parent_dir)
+            return MagicMock()
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git):
+            result = manager._remove_worktree_directory(wt_path, base_repo)
+
+        assert result is True
+        # Parent directory was recreated
+        assert parent_dir.exists()
+
+    def test_remove_directory_skips_guard_when_parent_survives(self, tmp_path):
+        """No-op when parent directory still exists after removal."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        parent_dir = config.root / "owner" / "repo"
+        wt_path = parent_dir / "normal-worktree"
+        parent_dir.mkdir(parents=True)
+        wt_path.mkdir()
+
+        def mock_run_git(args, cwd, timeout=30):
+            if args[0] == "worktree" and args[1] == "remove":
+                import shutil
+                shutil.rmtree(wt_path)
+            return MagicMock()
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        with patch.object(manager, '_run_git', side_effect=mock_run_git):
+            result = manager._remove_worktree_directory(wt_path, base_repo)
+
+        assert result is True
+        assert parent_dir.exists()

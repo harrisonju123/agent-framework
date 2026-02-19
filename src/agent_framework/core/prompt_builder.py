@@ -1053,12 +1053,61 @@ If a tool call fails:
     # Budget for read cache section — keeps prompt size under control
     _READ_CACHE_MAX_CHARS = 6000
 
+    @staticmethod
+    def _repo_cache_slug(github_repo: str) -> str:
+        """Convert 'owner/repo' to 'owner-repo' for cache file naming."""
+        return github_repo.replace("/", "-")
+
     def _display_path(self, full_path: str) -> str:
         """Strip workspace prefix for shorter table display."""
         ws = str(self.ctx.workspace)
         if full_path.startswith(ws):
             return full_path[len(ws):].lstrip("/")
         return full_path
+
+    def _seed_from_repo_cache(self, cache_dir: Path, cache_file: Path, task: Task) -> bool:
+        """Seed task-specific cache from repo-scoped cache.
+
+        On a new attempt, there's no task-specific cache yet. If a repo-scoped
+        cache exists from prior attempts, copy its entries so downstream steps
+        and MCP tools work transparently.
+
+        Returns True if seeded successfully.
+        """
+        try:
+            github_repo = task.context.get("github_repo") if task.context else None
+            if not github_repo:
+                return False
+
+            slug = self._repo_cache_slug(github_repo)
+            repo_cache_file = cache_dir / f"_repo-{slug}.json"
+            if not repo_cache_file.exists():
+                return False
+
+            repo_data = json.loads(repo_cache_file.read_text(encoding="utf-8"))
+            if not isinstance(repo_data, dict):
+                return False
+
+            entries = repo_data.get("entries", {})
+            if not entries:
+                return False
+
+            # Write as task-specific cache so MCP tools work transparently
+            from ..utils.atomic_io import atomic_write_text
+
+            cache_data = {
+                "root_task_id": task.root_id,
+                "entries": entries,
+            }
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(cache_file, json.dumps(cache_data))
+            self.logger.debug(
+                f"Seeded read cache from repo cache ({len(entries)} entries) for {task.root_id}"
+            )
+            return True
+        except Exception as e:
+            self.logger.debug(f"Failed to seed from repo cache: {e}")
+            return False
 
     def _inject_read_cache(self, prompt: str, task: Task) -> str:
         """Inject read cache manifest from previous chain steps.
@@ -1071,7 +1120,8 @@ If a tool call fails:
         cache_file = cache_dir / f"{root_task_id}.json"
 
         if not cache_file.exists():
-            return prompt
+            if not self._seed_from_repo_cache(cache_dir, cache_file, task):
+                return prompt
 
         try:
             data = json.loads(cache_file.read_text(encoding="utf-8"))

@@ -247,3 +247,163 @@ class TestDisplayPath:
     def test_strips_trailing_slash(self, builder, tmp_path):
         full = str(tmp_path) + "/file.py"
         assert builder._display_path(full) == "file.py"
+
+
+class TestRepoScopedCache:
+    """Test repo-scoped read cache written by Agent._update_repo_cache."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        return tmp_path
+
+    @pytest.fixture
+    def agent(self, workspace):
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent.workspace = workspace
+        agent.config = MagicMock()
+        agent.config.base_id = "architect"
+        agent.logger = MagicMock()
+        agent._session_logger = MagicMock()
+        agent._populate_read_cache = Agent._populate_read_cache.__get__(agent)
+        agent._update_repo_cache = Agent._update_repo_cache.__get__(agent)
+        return agent
+
+    @pytest.fixture
+    def task_with_repo(self):
+        return Task(
+            id="chain-root1-plan-d0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="architect",
+            created_at=datetime.now(timezone.utc),
+            title="Plan feature",
+            description="Plan",
+            context={
+                "_root_task_id": "root1",
+                "workflow_step": "plan",
+                "github_repo": "justworkshr/myrepo",
+            },
+        )
+
+    def test_populates_repo_cache(self, agent, task_with_repo, workspace):
+        """_populate_read_cache writes both task-specific and repo-scoped cache."""
+        agent._session_logger.extract_file_reads.return_value = [
+            "/src/server.py",
+            "/src/models.py",
+        ]
+
+        agent._populate_read_cache(task_with_repo)
+
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        # Task-specific cache
+        assert (cache_dir / "root1.json").exists()
+        # Repo-scoped cache
+        repo_file = cache_dir / "_repo-justworkshr-myrepo.json"
+        assert repo_file.exists()
+        data = json.loads(repo_file.read_text())
+        assert data["github_repo"] == "justworkshr/myrepo"
+        assert "/src/server.py" in data["entries"]
+        assert "/src/models.py" in data["entries"]
+
+    def test_repo_cache_merges_across_tasks(self, agent, workspace):
+        """Second task's entries merge into existing repo cache."""
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+
+        # Simulate first task's repo cache
+        existing_repo = {
+            "github_repo": "justworkshr/myrepo",
+            "entries": {
+                "/src/old_file.py": {
+                    "summary": "Old file",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T09:00:00+00:00",
+                    "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "_repo-justworkshr-myrepo.json").write_text(json.dumps(existing_repo))
+
+        # Second task adds new entries
+        new_entries = {
+            "/src/new_file.py": {
+                "summary": "New file",
+                "read_by": "engineer",
+                "read_at": "2026-02-18T10:00:00+00:00",
+                "workflow_step": "implement",
+            },
+        }
+        agent._update_repo_cache(cache_dir, "justworkshr/myrepo", new_entries)
+
+        data = json.loads((cache_dir / "_repo-justworkshr-myrepo.json").read_text())
+        assert "/src/old_file.py" in data["entries"]
+        assert "/src/new_file.py" in data["entries"]
+
+    def test_repo_cache_evicts_oldest(self, agent, workspace):
+        """Entries beyond _MAX_REPO_CACHE_ENTRIES are evicted by read_at age."""
+        from agent_framework.core.agent import _MAX_REPO_CACHE_ENTRIES
+
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+
+        # Create repo cache at the limit
+        entries = {}
+        for i in range(_MAX_REPO_CACHE_ENTRIES):
+            entries[f"/src/file_{i:04d}.py"] = {
+                "summary": f"File {i}",
+                "read_by": "architect",
+                "read_at": f"2026-02-18T{i // 60:02d}:{i % 60:02d}:00+00:00",
+                "workflow_step": "plan",
+            }
+        existing = {"github_repo": "org/repo", "entries": entries}
+        (cache_dir / "_repo-org-repo.json").write_text(json.dumps(existing))
+
+        # Add 10 more entries with newer timestamps
+        new_entries = {}
+        for i in range(10):
+            new_entries[f"/src/brand_new_{i}.py"] = {
+                "summary": f"Brand new {i}",
+                "read_by": "engineer",
+                "read_at": "2026-02-19T12:00:00+00:00",
+                "workflow_step": "implement",
+            }
+        agent._update_repo_cache(cache_dir, "org/repo", new_entries)
+
+        data = json.loads((cache_dir / "_repo-org-repo.json").read_text())
+        assert len(data["entries"]) == _MAX_REPO_CACHE_ENTRIES
+        # New entries should be present
+        for i in range(10):
+            assert f"/src/brand_new_{i}.py" in data["entries"]
+        # Oldest entries (lowest read_at) should have been evicted
+        assert "/src/file_0000.py" not in data["entries"]
+
+    def test_no_repo_cache_without_github_repo(self, agent, workspace):
+        """No repo cache when task lacks github_repo in context."""
+        task = Task(
+            id="chain-root2-plan-d0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="architect",
+            created_at=datetime.now(timezone.utc),
+            title="Plan feature",
+            description="Plan",
+            context={
+                "_root_task_id": "root2",
+                "workflow_step": "plan",
+            },
+        )
+        agent._session_logger.extract_file_reads.return_value = ["/src/file.py"]
+
+        agent._populate_read_cache(task)
+
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        assert (cache_dir / "root2.json").exists()
+        # No repo cache files should exist
+        repo_files = list(cache_dir.glob("_repo-*.json"))
+        assert len(repo_files) == 0

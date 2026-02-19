@@ -540,7 +540,11 @@ class WorkflowExecutor:
                     )
                     return False
             except Exception as e:
-                self.logger.debug(f"No-diff guard: git check failed ({e}), proceeding")
+                self.logger.warning(
+                    f"No-diff guard: git check failed ({e}) for task {task.id} — "
+                    f"blocking create_pr (fail closed)"
+                )
+                return False
 
         return True
 

@@ -1165,3 +1165,143 @@ class TestReadCacheInjection:
 
         result = builder._inject_read_cache("base prompt", task_with_root)
         assert result == "base prompt"
+
+
+class TestReadCacheSeedFromRepo:
+    """Tests for seeding task-specific cache from repo-scoped cache."""
+
+    @pytest.fixture
+    def cache_dir(self, tmp_path):
+        d = tmp_path / ".agent-communication" / "read-cache"
+        d.mkdir(parents=True)
+        return d
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    @pytest.fixture
+    def task_with_repo(self):
+        return Task(
+            id="planning-myrepo-20260219",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="architect",
+            created_at=datetime.now(timezone.utc),
+            title="Plan feature",
+            description="Plan",
+            context={
+                "_root_task_id": "planning-myrepo-20260219",
+                "github_repo": "justworkshr/myrepo",
+            },
+        )
+
+    def test_seeds_from_repo_cache(self, builder, cache_dir, task_with_repo):
+        """New task with no task cache seeds from repo cache and injects content."""
+        import json
+
+        repo_data = {
+            "github_repo": "justworkshr/myrepo",
+            "entries": {
+                "src/server.py": {
+                    "summary": "Express server with routes",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:00:00Z",
+                    "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "_repo-justworkshr-myrepo.json").write_text(json.dumps(repo_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_repo)
+
+        # Should have injected the cache content
+        assert "FILES ANALYZED BY PREVIOUS AGENTS" in result
+        assert "src/server.py" in result
+        assert "Express server" in result
+        # Task-specific cache should now exist
+        task_cache = cache_dir / "planning-myrepo-20260219.json"
+        assert task_cache.exists()
+        task_data = json.loads(task_cache.read_text())
+        assert "src/server.py" in task_data["entries"]
+
+    def test_no_seed_when_task_cache_exists(self, builder, cache_dir, task_with_repo):
+        """Existing task cache is used directly; repo cache not consulted."""
+        import json
+
+        # Task-specific cache with different content
+        task_data = {
+            "root_task_id": "planning-myrepo-20260219",
+            "entries": {
+                "src/task_specific.py": {
+                    "summary": "Task-specific file",
+                    "read_by": "engineer",
+                    "read_at": "2026-02-19T10:00:00Z",
+                    "workflow_step": "implement",
+                },
+            },
+        }
+        (cache_dir / "planning-myrepo-20260219.json").write_text(json.dumps(task_data))
+
+        # Repo cache with different content
+        repo_data = {
+            "github_repo": "justworkshr/myrepo",
+            "entries": {
+                "src/repo_file.py": {
+                    "summary": "Repo-level file",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:00:00Z",
+                    "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "_repo-justworkshr-myrepo.json").write_text(json.dumps(repo_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_repo)
+
+        # Should use task-specific content, not repo cache
+        assert "src/task_specific.py" in result
+        assert "src/repo_file.py" not in result
+
+    def test_no_seed_without_github_repo(self, builder, cache_dir):
+        """Task without github_repo returns prompt unchanged."""
+        task = Task(
+            id="planning-norepo-20260219",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="architect",
+            created_at=datetime.now(timezone.utc),
+            title="Plan feature",
+            description="Plan",
+            context={"_root_task_id": "planning-norepo-20260219"},
+        )
+
+        result = builder._inject_read_cache("base prompt", task)
+        assert result == "base prompt"
+
+    def test_seed_graceful_on_corrupted_repo_cache(self, builder, cache_dir, task_with_repo):
+        """Corrupted repo cache JSON falls back gracefully."""
+        (cache_dir / "_repo-justworkshr-myrepo.json").write_text("not valid{{{")
+
+        result = builder._inject_read_cache("base prompt", task_with_repo)
+        assert result == "base prompt"
+
+    def test_seed_skips_empty_repo_cache(self, builder, cache_dir, task_with_repo):
+        """Empty entries dict in repo cache does not seed."""
+        import json
+
+        repo_data = {"github_repo": "justworkshr/myrepo", "entries": {}}
+        (cache_dir / "_repo-justworkshr-myrepo.json").write_text(json.dumps(repo_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_repo)
+        assert result == "base prompt"

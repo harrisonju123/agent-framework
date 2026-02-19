@@ -66,6 +66,12 @@ SUMMARY_CONTEXT_MAX_CHARS = 2000
 SUMMARY_MAX_LENGTH = 500
 _CONVERSATIONAL_PREFIXES = ("i ", "i'", "thank", "sure", "certainly", "of course", "let me")
 BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
+_MAX_REPO_CACHE_ENTRIES = 200
+
+
+def _repo_cache_slug(github_repo: str) -> str:
+    """Convert 'owner/repo' to 'owner-repo' for cache file naming."""
+    return github_repo.replace("/", "-")
 
 # Model pricing (per 1M tokens, as of 2025-01)
 MODEL_PRICING = {
@@ -859,6 +865,11 @@ class Agent:
             # Legacy direct-queue routing only for tasks without a workflow DAG.
             # Workflow-managed tasks route through _enforce_workflow_chain() exclusively.
             has_workflow = bool(task.context.get("workflow"))
+            if not has_workflow and not task.context.get("chain_step"):
+                self.logger.warning(
+                    f"Task {task.id} has no workflow in context — "
+                    f"expected for CLI/web-created tasks"
+                )
             if not has_workflow:
                 self.logger.debug(f"Checking if code review needed for {task.id}")
                 self._review_cycle.queue_code_review_if_needed(task, response)
@@ -883,16 +894,25 @@ class Agent:
                     task.context["verdict"] = self._approval_verdict(task)
 
             # Detect "no changes needed" — architect at plan step determines
-            # the work is already done or not applicable
+            # the work is already done or not applicable.
+            # When triggered, terminate the workflow here — there's nothing
+            # to implement or PR, so skip chain enforcement entirely.
+            skip_chain = False
             if (has_workflow and self.config.base_id == "architect"
                     and task.context.get("workflow_step", task.type) in ("plan", "planning")):
                 content = getattr(response, "content", "") or ""
                 if self._is_no_changes_response(content):
                     task.context["verdict"] = "no_changes"
+                    skip_chain = True
+                    self.logger.info(
+                        f"No-changes verdict at plan step for task {task.id} — "
+                        f"terminating workflow (nothing to implement or PR)"
+                    )
 
             self._git_ops.detect_implementation_branch(task)
 
-            self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
+            if not skip_chain:
+                self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
             # Push + PR lifecycle after chain routing. Downstream agents pick up
             # from queue asynchronously, so push completes before they fetch the branch.
@@ -1855,8 +1875,60 @@ class Agent:
             }
             atomic_write_text(cache_file, json.dumps(cache_data))
             self.logger.debug(f"Read cache: added {added} paths ({len(entries)} total) for {root_task_id}")
+
+            # Merge into repo-scoped cache for cross-attempt persistence
+            github_repo = task.context.get("github_repo")
+            if github_repo:
+                self._update_repo_cache(cache_dir, github_repo, entries)
         except Exception as e:
             self.logger.warning(f"Failed to populate read cache for {task.id}: {e}")
+
+    def _update_repo_cache(self, cache_dir: Path, github_repo: str, entries: dict) -> None:
+        """Merge entries into repo-scoped cache for cross-attempt persistence.
+
+        Accumulates file-read knowledge across independent task attempts on the
+        same repo. New tasks can seed from this when no task-specific cache exists.
+        Non-fatal — exceptions are logged and swallowed.
+        """
+        try:
+            from ..utils.atomic_io import atomic_write_text
+
+            slug = _repo_cache_slug(github_repo)
+            repo_cache_file = cache_dir / f"_repo-{slug}.json"
+
+            existing: dict = {}
+            if repo_cache_file.exists():
+                try:
+                    existing = json.loads(repo_cache_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    existing = {}
+
+            repo_entries = existing.get("entries", {})
+
+            # Merge: newer wins by read_at timestamp
+            for path, entry in entries.items():
+                if path not in repo_entries:
+                    repo_entries[path] = entry
+                else:
+                    existing_at = repo_entries[path].get("read_at", "")
+                    new_at = entry.get("read_at", "")
+                    if new_at > existing_at:
+                        repo_entries[path] = entry
+
+            # Evict oldest entries if over limit
+            if len(repo_entries) > _MAX_REPO_CACHE_ENTRIES:
+                sorted_paths = sorted(
+                    repo_entries.keys(),
+                    key=lambda p: repo_entries[p].get("read_at", ""),
+                )
+                for path in sorted_paths[:len(repo_entries) - _MAX_REPO_CACHE_ENTRIES]:
+                    del repo_entries[path]
+
+            repo_data = {"github_repo": github_repo, "entries": repo_entries}
+            atomic_write_text(repo_cache_file, json.dumps(repo_data))
+            self.logger.debug(f"Repo cache: {len(repo_entries)} entries for {github_repo}")
+        except Exception as e:
+            self.logger.warning(f"Failed to update repo cache for {github_repo}: {e}")
 
     def _save_pre_scan_findings(self, task: Task, response) -> None:
         """Persist QA pre-scan results so downstream agents can load them.

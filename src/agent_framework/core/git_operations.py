@@ -327,42 +327,17 @@ class GitOperationsManager:
             self._active_worktree = None
             return
 
-        # Terminal or standalone — unprotect from eviction immediately,
-        # regardless of whether the directory itself gets removed below
+        # Terminal or standalone — push any unpushed commits, then mark
+        # inactive. Physical deletion is deferred to cleanup_orphaned_worktrees()
+        # which runs at startup and periodically with full safety checks.
+        # This prevents the P0 bug where removing a worktree during task
+        # completion destroyed sibling agents' active working directories.
+        if self.worktree_manager.has_unpushed_commits(self._active_worktree):
+            if self._try_push_worktree_branch(self._active_worktree):
+                self.logger.info("Pushed unpushed commits during cleanup")
+
         self.worktree_manager.mark_worktree_inactive(self._active_worktree)
-
-        worktree_config = self.worktree_manager.config
-        should_cleanup = (
-            (success and worktree_config.cleanup_on_complete) or
-            (not success and worktree_config.cleanup_on_failure)
-        )
-
-        if should_cleanup:
-            # Safety check: don't delete worktrees with unpushed work
-            has_unpushed = self.worktree_manager.has_unpushed_commits(self._active_worktree)
-            has_uncommitted = self.worktree_manager.has_uncommitted_changes(self._active_worktree)
-
-            if has_unpushed:
-                if self._try_push_worktree_branch(self._active_worktree):
-                    has_unpushed = False
-                    self.logger.info("Pushed unpushed commits during cleanup")
-
-            if has_unpushed:
-                self.logger.warning(
-                    f"Skipping worktree cleanup - unpushed commits detected: {self._active_worktree}. "
-                    f"Manual cleanup required after pushing changes."
-                )
-            elif has_uncommitted:
-                self.logger.warning(
-                    f"Skipping worktree cleanup - uncommitted changes detected: {self._active_worktree}. "
-                    f"Manual cleanup required after committing/discarding changes."
-                )
-            else:
-                try:
-                    self.worktree_manager.remove_worktree(self._active_worktree, force=not success)
-                    self.logger.info(f"Cleaned up worktree: {self._active_worktree}")
-                except Exception as e:
-                    self.logger.warning(f"Failed to cleanup worktree: {e}")
+        self.logger.debug(f"Marked worktree inactive (deferred cleanup): {self._active_worktree}")
 
         self._active_worktree = None
 

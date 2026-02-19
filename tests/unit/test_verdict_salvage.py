@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -192,11 +192,6 @@ class TestVerdictSalvageRouting:
     @pytest.mark.asyncio
     async def test_salvageable_routes_to_success_handler(self):
         agent = MagicMock()
-        agent._can_salvage_verdict = Agent._can_salvage_verdict.__get__(agent)
-        agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="QA")
-        agent.config.base_id  # property access works via AgentConfig
-
-        # Make salvage return True
         agent._can_salvage_verdict = MagicMock(return_value=True)
 
         response = _make_response(content=LONG_APPROVE, success=False)

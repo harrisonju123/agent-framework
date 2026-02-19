@@ -266,19 +266,19 @@ class TestCleanupWorktree:
         # No assertions needed - just checking it doesn't crash
 
     def test_cleans_up_on_success_when_configured(self, git_ops_with_worktree, sample_task, tmp_path):
-        """Test that worktree is cleaned up on success when configured."""
+        """Test that worktree is marked inactive (not removed) on success."""
         worktree_path = tmp_path / "worktree"
         git_ops_with_worktree._active_worktree = worktree_path
         git_ops_with_worktree.worktree_manager.has_unpushed_commits.return_value = False
-        git_ops_with_worktree.worktree_manager.has_uncommitted_changes.return_value = False
 
         git_ops_with_worktree.cleanup_worktree(sample_task, success=True)
 
-        git_ops_with_worktree.worktree_manager.remove_worktree.assert_called_once()
+        git_ops_with_worktree.worktree_manager.remove_worktree.assert_not_called()
+        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
         assert git_ops_with_worktree._active_worktree is None
 
-    def test_skips_cleanup_when_unpushed_commits(self, git_ops_with_worktree, sample_task, tmp_path):
-        """Test that cleanup is skipped when there are unpushed commits."""
+    def test_marks_inactive_even_when_unpushed_commits(self, git_ops_with_worktree, sample_task, tmp_path):
+        """Test that worktree is marked inactive even when there are unpushed commits."""
         worktree_path = tmp_path / "worktree"
         git_ops_with_worktree._active_worktree = worktree_path
         git_ops_with_worktree.worktree_manager.has_unpushed_commits.return_value = True
@@ -286,18 +286,19 @@ class TestCleanupWorktree:
         git_ops_with_worktree.cleanup_worktree(sample_task, success=True)
 
         git_ops_with_worktree.worktree_manager.remove_worktree.assert_not_called()
-        assert git_ops_with_worktree._active_worktree is None  # Still cleared
+        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        assert git_ops_with_worktree._active_worktree is None
 
-    def test_skips_cleanup_when_uncommitted_changes(self, git_ops_with_worktree, sample_task, tmp_path):
-        """Test that cleanup is skipped when there are uncommitted changes."""
+    def test_marks_inactive_even_when_uncommitted_changes(self, git_ops_with_worktree, sample_task, tmp_path):
+        """Test that worktree is marked inactive even when there are uncommitted changes."""
         worktree_path = tmp_path / "worktree"
         git_ops_with_worktree._active_worktree = worktree_path
         git_ops_with_worktree.worktree_manager.has_unpushed_commits.return_value = False
-        git_ops_with_worktree.worktree_manager.has_uncommitted_changes.return_value = True
 
         git_ops_with_worktree.cleanup_worktree(sample_task, success=True)
 
         git_ops_with_worktree.worktree_manager.remove_worktree.assert_not_called()
+        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
         assert git_ops_with_worktree._active_worktree is None
 
 
@@ -400,7 +401,6 @@ class TestCleanupWorktreeInactiveMarking:
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
         mock_worktree_manager.has_unpushed_commits.return_value = False
-        mock_worktree_manager.has_uncommitted_changes.return_value = False
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
@@ -453,12 +453,11 @@ class TestCleanupWorktreeChainStepProtection:
     def test_terminal_chain_step_marks_inactive(
         self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
     ):
-        """Terminal chain step: existing behavior preserved (mark_worktree_inactive called)."""
+        """Terminal chain step: mark_worktree_inactive called, no removal."""
         git_ops = self._make_git_ops(mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path)
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
         mock_worktree_manager.has_unpushed_commits.return_value = False
-        mock_worktree_manager.has_uncommitted_changes.return_value = False
         git_ops._is_at_terminal_workflow_step = MagicMock(return_value=True)
 
         sample_task.context["chain_step"] = True
@@ -471,12 +470,11 @@ class TestCleanupWorktreeChainStepProtection:
     def test_non_chain_task_marks_inactive(
         self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
     ):
-        """Standalone task (no chain_step): existing behavior preserved."""
+        """Standalone task (no chain_step): mark_worktree_inactive called, no removal."""
         git_ops = self._make_git_ops(mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path)
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
         mock_worktree_manager.has_unpushed_commits.return_value = False
-        mock_worktree_manager.has_uncommitted_changes.return_value = False
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
@@ -505,10 +503,10 @@ class TestCleanupWorktreePushBeforeRemoval:
     """Tests for push-then-cleanup behavior in cleanup_worktree."""
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
-    def test_pushes_unpushed_commits_then_removes(
+    def test_pushes_unpushed_commits_then_marks_inactive(
         self, mock_run_git, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
     ):
-        """When push succeeds, worktree is removed instead of left behind."""
+        """When push succeeds, worktree is marked inactive (not removed)."""
         git_ops = GitOperationsManager(
             config=mock_config, workspace=tmp_path, queue=mock_queue,
             logger=mock_logger, worktree_manager=mock_worktree_manager,
@@ -516,7 +514,6 @@ class TestCleanupWorktreePushBeforeRemoval:
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
         mock_worktree_manager.has_unpushed_commits.return_value = True
-        mock_worktree_manager.has_uncommitted_changes.return_value = False
 
         # Simulate successful push: rev-parse returns branch, push succeeds
         mock_rev_parse = MagicMock(returncode=0, stdout="agent/engineer/PROJ-123\n")
@@ -525,14 +522,15 @@ class TestCleanupWorktreePushBeforeRemoval:
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        mock_worktree_manager.remove_worktree.assert_called_once()
+        mock_worktree_manager.remove_worktree.assert_not_called()
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
         mock_logger.info.assert_any_call("Pushed unpushed commits during cleanup")
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
-    def test_falls_through_when_push_fails(
+    def test_marks_inactive_even_when_push_fails(
         self, mock_run_git, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
     ):
-        """When push fails, falls back to existing skip-with-warning behavior."""
+        """When push fails, worktree is still marked inactive (never removed)."""
         git_ops = GitOperationsManager(
             config=mock_config, workspace=tmp_path, queue=mock_queue,
             logger=mock_logger, worktree_manager=mock_worktree_manager,
@@ -540,7 +538,6 @@ class TestCleanupWorktreePushBeforeRemoval:
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
         mock_worktree_manager.has_unpushed_commits.return_value = True
-        mock_worktree_manager.has_uncommitted_changes.return_value = False
 
         # Push fails
         mock_rev_parse = MagicMock(returncode=0, stdout="agent/engineer/PROJ-123\n")
@@ -550,6 +547,7 @@ class TestCleanupWorktreePushBeforeRemoval:
         git_ops.cleanup_worktree(sample_task, success=True)
 
         mock_worktree_manager.remove_worktree.assert_not_called()
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_skips_push_for_main_branch(
@@ -563,15 +561,14 @@ class TestCleanupWorktreePushBeforeRemoval:
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
         mock_worktree_manager.has_unpushed_commits.return_value = True
-        mock_worktree_manager.has_uncommitted_changes.return_value = False
 
         mock_rev_parse = MagicMock(returncode=0, stdout="main\n")
         mock_run_git.side_effect = [mock_rev_parse]
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        # Push not attempted, worktree not removed
         mock_worktree_manager.remove_worktree.assert_not_called()
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_push_exception_handled_gracefully(
@@ -585,14 +582,14 @@ class TestCleanupWorktreePushBeforeRemoval:
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
         mock_worktree_manager.has_unpushed_commits.return_value = True
-        mock_worktree_manager.has_uncommitted_changes.return_value = False
 
         mock_run_git.side_effect = Exception("network timeout")
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        # Should not crash, worktree not removed
+        # Should not crash, worktree marked inactive (never removed)
         mock_worktree_manager.remove_worktree.assert_not_called()
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
         assert git_ops._active_worktree is None
 
 
@@ -851,3 +848,50 @@ class TestPreflightWorktreeExistence:
         mock_worktree_manager.remove_worktree.assert_called_once_with(ghost_path, force=True)
         mock_worktree_manager.create_worktree.assert_called_once()
         assert result == tmp_path / "new-worktree"
+
+
+class TestCleanupWorktreeNeverRemoves:
+    """Verify the P0 fix: cleanup_worktree never physically removes worktrees."""
+
+    def test_cleanup_worktree_terminal_marks_inactive_without_remove(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
+    ):
+        """Terminal task with cleanup_on_complete=True calls mark_worktree_inactive but NOT remove_worktree."""
+        mock_worktree_manager.config.cleanup_on_complete = True
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        worktree_path = tmp_path / "worktree"
+        git_ops._active_worktree = worktree_path
+        mock_worktree_manager.has_unpushed_commits.return_value = False
+
+        git_ops.cleanup_worktree(sample_task, success=True)
+
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.remove_worktree.assert_not_called()
+        assert git_ops._active_worktree is None
+
+    @patch("agent_framework.utils.subprocess_utils.run_git_command")
+    def test_cleanup_worktree_pushes_before_marking_inactive(
+        self, mock_run_git, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
+    ):
+        """Unpushed commits are pushed before marking inactive."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        worktree_path = tmp_path / "worktree"
+        git_ops._active_worktree = worktree_path
+        mock_worktree_manager.has_unpushed_commits.return_value = True
+
+        # Simulate successful push
+        mock_rev_parse = MagicMock(returncode=0, stdout="agent/engineer/PROJ-123\n")
+        mock_push = MagicMock(returncode=0)
+        mock_run_git.side_effect = [mock_rev_parse, mock_push]
+
+        git_ops.cleanup_worktree(sample_task, success=True)
+
+        mock_logger.info.assert_any_call("Pushed unpushed commits during cleanup")
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.remove_worktree.assert_not_called()
