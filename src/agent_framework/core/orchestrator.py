@@ -286,6 +286,7 @@ class Orchestrator:
         """Get info about a running dashboard.
 
         Returns dict with 'pid' and 'port' keys, or None if not running.
+        Detects zombie processes (alive but not listening) and cleans them up.
         """
         info = self._load_dashboard_pid()
         if not info:
@@ -296,6 +297,16 @@ class Orchestrator:
             return None
 
         if not self._is_dashboard_process(info["pid"]):
+            self._remove_dashboard_pid()
+            return None
+
+        # Process is alive — verify it's actually serving (not stuck in shutdown)
+        if not self.is_port_in_use(info["port"]):
+            logger.warning(
+                f"Dashboard process {info['pid']} alive but not listening on port {info['port']}. "
+                "Killing stuck process."
+            )
+            kill_process_tree(info["pid"], signal.SIGKILL)
             self._remove_dashboard_pid()
             return None
 

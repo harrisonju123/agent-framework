@@ -783,6 +783,8 @@ def register_routes(app: FastAPI):
 
         except WebSocketDisconnect:
             logger.info("WebSocket client disconnected")
+        except asyncio.CancelledError:
+            logger.info("WebSocket task cancelled (server shutting down)")
         except Exception as e:
             logger.error(f"WebSocket error: {e}")
 
@@ -891,6 +893,8 @@ def register_routes(app: FastAPI):
 
         except WebSocketDisconnect:
             logger.info("Log stream WebSocket client disconnected")
+        except asyncio.CancelledError:
+            logger.info("Log stream task cancelled (server shutting down)")
         except Exception as e:
             logger.error(f"Log stream WebSocket error: {e}")
 

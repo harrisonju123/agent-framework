@@ -17,6 +17,7 @@ const report = ref<AgenticMetricsReport | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const hours = ref(24)
+const activeTab = ref('performance')
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let polling = true
 
@@ -83,7 +84,7 @@ onUnmounted(() => {
     </div>
 
     <template v-else>
-      <Tabs value="performance">
+      <Tabs v-model:value="activeTab">
         <TabList>
           <Tab value="performance">Agent Performance</Tab>
           <Tab value="health">System Health</Tab>
@@ -92,13 +93,13 @@ onUnmounted(() => {
 
         <TabPanels>
           <TabPanel value="performance">
-            <AgentPerformanceTab :report="report" />
+            <AgentPerformanceTab v-if="activeTab === 'performance'" :report="report" />
           </TabPanel>
           <TabPanel value="health">
-            <SystemHealthTab :report="report" />
+            <SystemHealthTab v-if="activeTab === 'health'" :report="report" />
           </TabPanel>
           <TabPanel value="decisions">
-            <DecisionsTab :report="report" />
+            <DecisionsTab v-if="activeTab === 'decisions'" :report="report" />
           </TabPanel>
         </TabPanels>
       </Tabs>
