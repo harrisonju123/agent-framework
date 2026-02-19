@@ -67,6 +67,30 @@ _CONVERSATIONAL_PREFIXES = ("i ", "i'", "thank", "sure", "certainly", "of course
 BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
 _MAX_REPO_CACHE_ENTRIES = 200
 
+# Circuit breaker: commands that indicate productive work (test/build/lint/git)
+# rather than stuck-agent flailing (ls, pwd, echo). When most commands are
+# productive, we use a higher threshold to avoid killing legitimate workflows.
+_PRODUCTIVE_PREFIXES = frozenset({
+    "pytest", "python -m pytest", "python -m unittest",
+    "pip", "pip3", "uv ",
+    "npm", "yarn", "pnpm", "bun ",
+    "make", "cmake",
+    "cargo", "go test", "go build", "go vet",
+    "mvn", "gradle",
+    "docker", "docker-compose",
+    "bandit", "pylint", "mypy", "ruff", "flake8", "black", "isort", "tox",
+    "git commit", "git push", "git add", "git diff", "git log", "git stash",
+    "python", "node ",
+})
+_PRODUCTIVE_THRESHOLD_MULTIPLIER = 3
+_PRODUCTIVE_RATIO_THRESHOLD = 0.7
+
+
+def _is_productive_command(cmd: str) -> bool:
+    """Check if a bash command is a productive tool (test/build/lint/git)."""
+    cmd_stripped = cmd.strip().lower()
+    return any(cmd_stripped.startswith(p) for p in _PRODUCTIVE_PREFIXES)
+
 
 def _repo_cache_slug(github_repo: str) -> str:
     """Convert 'owner/repo' to 'owner-repo' for cache file naming."""
@@ -1326,11 +1350,32 @@ class Agent:
                         diversity = unique / count if count > 0 else 0.0
 
                         if diversity <= _DIVERSITY_THRESHOLD:
-                            self.logger.warning(
-                                f"Circuit breaker: {count} consecutive Bash calls, "
-                                f"low diversity={diversity:.2f} (unique_commands={unique})"
-                            )
-                            _circuit_breaker_event.set()
+                            productive = sum(1 for c in _bash_commands[0] if _is_productive_command(c))
+                            productive_ratio = productive / count
+
+                            if productive_ratio > _PRODUCTIVE_RATIO_THRESHOLD:
+                                # Productive workflow — use higher threshold before tripping
+                                effective = threshold * _PRODUCTIVE_THRESHOLD_MULTIPLIER
+                                if count >= effective:
+                                    self.logger.warning(
+                                        f"Circuit breaker: {count} consecutive Bash calls, "
+                                        f"low diversity={diversity:.2f} (unique_commands={unique}), "
+                                        f"productive_ratio={productive_ratio:.2f} exceeded hard ceiling={effective}"
+                                    )
+                                    _circuit_breaker_event.set()
+                                elif not _soft_threshold_logged[0]:
+                                    self.logger.info(
+                                        f"Circuit breaker deferred: {count} consecutive Bash calls, "
+                                        f"productive_ratio={productive_ratio:.2f} (effective threshold={effective})"
+                                    )
+                                    _soft_threshold_logged[0] = True
+                            else:
+                                self.logger.warning(
+                                    f"Circuit breaker: {count} consecutive Bash calls, "
+                                    f"low diversity={diversity:.2f} (unique_commands={unique}), "
+                                    f"productive_ratio={productive_ratio:.2f}"
+                                )
+                                _circuit_breaker_event.set()
                         elif not _soft_threshold_logged[0]:
                             # Diverse commands — log once and let them continue
                             self.logger.info(
@@ -1451,10 +1496,13 @@ class Agent:
             commands = _bash_commands[0]
             unique = len(set(commands))
             diversity = unique / count if count > 0 else 0.0
+            productive = sum(1 for c in commands if _is_productive_command(c))
+            productive_ratio = productive / count if count > 0 else 0.0
             self.logger.warning(
                 f"Circuit breaker tripped for task {task.id}: "
                 f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls}, "
-                f"diversity={diversity:.2f}, unique_commands={unique})"
+                f"diversity={diversity:.2f}, unique_commands={unique}, "
+                f"productive_ratio={productive_ratio:.2f})"
             )
 
             # Auto-commit WIP before killing — prevents code loss
@@ -1489,12 +1537,16 @@ class Agent:
                 threshold=self._max_consecutive_tool_calls,
                 unique_commands=unique,
                 diversity=round(diversity, 2),
+                productive_ratio=round(productive_ratio, 2),
             )
             self.activity_manager.append_event(ActivityEvent(
                 type="circuit_breaker",
                 agent=self.config.id,
                 task_id=task.id,
-                title=f"Circuit breaker: {count} consecutive Bash calls (diversity={diversity:.2f})",
+                title=(
+                    f"Circuit breaker: {count} consecutive Bash calls "
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
+                ),
                 timestamp=datetime.now(timezone.utc),
             ))
             return LLMResponse(
@@ -1507,7 +1559,8 @@ class Agent:
                 success=False,
                 error=(
                     f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
-                    f"(diversity={diversity:.2f}). Working directory may be deleted or inaccessible."
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
+                    f"Working directory may be deleted or inaccessible."
                 ),
             )
 
