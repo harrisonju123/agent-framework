@@ -37,6 +37,11 @@ _TIPS = {
         "When you already know which lines are relevant from Grep, "
         "use Read with offset/limit to fetch only those lines instead of the whole file."
     ),
+    "chunked-reread": (
+        "Read each file once in full. Calling Read on the same file with "
+        "different offset/limit values wastes tokens — the whole file fits in "
+        "context after one read."
+    ),
 }
 
 # Bash commands that indicate file-op anti-pattern
@@ -81,6 +86,12 @@ class ToolPatternAnalyzer:
                 rec = detector(window, tool_calls[:i])
                 if rec and rec.pattern_id not in seen:
                     seen[rec.pattern_id] = rec
+
+        # Full-history detectors — patterns that span the entire session
+        for detector in (self._detect_chunked_reread,):
+            rec = detector(tool_calls, seen)
+            if rec and rec.pattern_id not in seen:
+                seen[rec.pattern_id] = rec
 
         return list(seen.values())
 
@@ -185,6 +196,24 @@ class ToolPatternAnalyzer:
                         pattern_id="bash-for-search",
                         tip=_TIPS["bash-for-search"],
                     )
+        return None
+
+    def _detect_chunked_reread(
+        self, all_calls: List[Dict], _seen: Dict[str, ToolPatternRecommendation]
+    ) -> Optional[ToolPatternRecommendation]:
+        """Same file Read 3+ times across the session — chunked re-read anti-pattern."""
+        read_counts: Dict[str, int] = {}
+        for call in all_calls:
+            if call.get("tool") == "Read":
+                file_path = (call.get("input") or {}).get("file_path", "")
+                if file_path:
+                    read_counts[file_path] = read_counts.get(file_path, 0) + 1
+        for count in read_counts.values():
+            if count >= 3:
+                return ToolPatternRecommendation(
+                    pattern_id="chunked-reread",
+                    tip=_TIPS["chunked-reread"],
+                )
         return None
 
     def _detect_read_without_limit(

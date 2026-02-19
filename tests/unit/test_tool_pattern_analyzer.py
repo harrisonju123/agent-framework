@@ -182,6 +182,62 @@ class TestReadWithoutLimit:
         assert "read-without-limit" not in ids
 
 
+class TestChunkedReread:
+    def test_detects_three_reads_same_file(self, tmp_path):
+        session = _write_session(tmp_path, [
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 0, "limit": 100}},
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 100, "limit": 100}},
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 200, "limit": 100}},
+        ])
+        results = ToolPatternAnalyzer().analyze_session(session)
+        ids = {r.pattern_id for r in results}
+        assert "chunked-reread" in ids
+
+    def test_no_detection_with_two_reads(self, tmp_path):
+        session = _write_session(tmp_path, [
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 0, "limit": 100}},
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 100, "limit": 100}},
+        ])
+        results = ToolPatternAnalyzer().analyze_session(session)
+        ids = {r.pattern_id for r in results}
+        assert "chunked-reread" not in ids
+
+    def test_no_detection_different_files(self, tmp_path):
+        session = _write_session(tmp_path, [
+            {"tool": "Read", "input": {"file_path": "/a.py"}},
+            {"tool": "Read", "input": {"file_path": "/b.py"}},
+            {"tool": "Read", "input": {"file_path": "/c.py"}},
+        ])
+        results = ToolPatternAnalyzer().analyze_session(session)
+        ids = {r.pattern_id for r in results}
+        assert "chunked-reread" not in ids
+
+    def test_non_adjacent_reads_still_detected(self, tmp_path):
+        """Reads of the same file spread across the session still fire."""
+        session = _write_session(tmp_path, [
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 0, "limit": 50}},
+            {"tool": "Grep", "input": {"pattern": "foo"}},
+            {"tool": "Bash", "input": {"command": "npm test"}},
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 50, "limit": 50}},
+            {"tool": "Glob", "input": {"pattern": "**/*.py"}},
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": 100, "limit": 50}},
+        ])
+        results = ToolPatternAnalyzer().analyze_session(session)
+        ids = {r.pattern_id for r in results}
+        assert "chunked-reread" in ids
+
+    def test_many_reads_fires_once(self, tmp_path):
+        """10 reads of the same file should produce exactly one recommendation."""
+        calls = [
+            {"tool": "Read", "input": {"file_path": "/src/big.py", "offset": i * 50, "limit": 50}}
+            for i in range(10)
+        ]
+        session = _write_session(tmp_path, calls)
+        results = ToolPatternAnalyzer().analyze_session(session)
+        chunked = [r for r in results if r.pattern_id == "chunked-reread"]
+        assert len(chunked) == 1
+
+
 class TestEdgeCases:
     def test_empty_session(self, tmp_path):
         path = tmp_path / "empty.jsonl"

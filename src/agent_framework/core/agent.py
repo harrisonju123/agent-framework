@@ -1383,9 +1383,10 @@ class Agent:
         # Behavioral directive to reduce redundant file reads within a session
         efficiency_parts = [
             "EFFICIENCY: Track which files you have already read in this session. "
-            "Never read the same file twice — use your conversation history to recall "
-            "prior file contents. Use Grep for targeted searches instead of re-reading "
-            "entire files.",
+            "When you read a file, read it ONCE in full — never chunk through the same "
+            "file with repeated Read calls at different offsets. After one full read, "
+            "the contents are in your context; use your conversation history to recall "
+            "them. Use Grep for targeted searches instead of reading files at all.",
         ]
         if self._mcp_enabled:
             efficiency_parts.append(
