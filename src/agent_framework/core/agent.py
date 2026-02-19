@@ -1298,7 +1298,6 @@ class Agent:
         _circuit_breaker_event = asyncio.Event()
 
         _DIVERSITY_THRESHOLD = 0.5
-        _HARD_CAP_MULTIPLIER = 2
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
             try:
@@ -1310,19 +1309,12 @@ class Agent:
                     _bash_commands[0].append(tool_input_summary or "")
                     count = _consecutive_bash[0]
                     threshold = self._max_consecutive_tool_calls
-                    hard_cap = threshold * _HARD_CAP_MULTIPLIER
 
                     if count >= threshold:
                         unique = len(set(_bash_commands[0]))
                         diversity = unique / count if count > 0 else 0.0
 
-                        if count >= hard_cap:
-                            self.logger.warning(
-                                f"Circuit breaker hard cap: {count} consecutive Bash calls "
-                                f"(diversity={diversity:.2f}, unique_commands={unique})"
-                            )
-                            _circuit_breaker_event.set()
-                        elif diversity <= _DIVERSITY_THRESHOLD:
+                        if diversity <= _DIVERSITY_THRESHOLD:
                             self.logger.warning(
                                 f"Circuit breaker: {count} consecutive Bash calls, "
                                 f"low diversity={diversity:.2f} (unique_commands={unique})"
@@ -1332,8 +1324,7 @@ class Agent:
                             # Diverse commands — log once and let them continue
                             self.logger.info(
                                 f"Circuit breaker deferred: {count} consecutive Bash calls "
-                                f"but diversity={diversity:.2f} (unique_commands={unique}), "
-                                f"hard cap at {hard_cap}"
+                                f"but diversity={diversity:.2f} (unique_commands={unique})"
                             )
                             _soft_threshold_logged[0] = True
                 else:

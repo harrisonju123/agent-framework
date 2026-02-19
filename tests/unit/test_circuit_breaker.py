@@ -140,7 +140,7 @@ class TestCircuitBreakerFires:
             pass
 
     @pytest.mark.asyncio
-    async def test_diverse_commands_defer_to_hard_cap(self, agent, task):
+    async def test_diverse_commands_pass_at_threshold(self, agent, task):
         """All-unique commands at threshold → high diversity → no trip."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
@@ -158,20 +158,22 @@ class TestCircuitBreakerFires:
             pass
 
     @pytest.mark.asyncio
-    async def test_hard_cap_trips_despite_diversity(self, agent, task):
-        """Even fully diverse commands trip at hard cap (2x threshold)."""
+    async def test_diverse_commands_never_trip(self, agent, task):
+        """Fully diverse commands never trip, even far beyond threshold."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 10 unique commands at threshold=5 → hard cap = 10
-        for i in range(10):
+        # 50 unique commands at threshold=5 — high diversity should never trip
+        for i in range(50):
             on_tool("Bash", f"unique-command-{i}")
 
-        result = await asyncio.wait_for(result_task, timeout=5.0)
+        await asyncio.sleep(0.05)
+        assert not result_task.done(), "Diverse commands should never trip the circuit breaker"
 
-        assert result.success is False
-        assert result.finish_reason == "circuit_breaker"
-        assert "diversity=1.00" in result.error
-        agent.llm.cancel.assert_called()
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
 
     @pytest.mark.asyncio
     async def test_diversity_at_boundary_trips(self, agent, task):
