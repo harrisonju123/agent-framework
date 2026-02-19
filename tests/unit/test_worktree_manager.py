@@ -458,7 +458,8 @@ class TestPhantomWorktreeCleanup:
             base_repo=str(base_repo),
         )
 
-        with patch.object(manager, '_run_git') as mock_git:
+        with patch.object(manager, '_run_git') as mock_git, \
+             patch.object(manager, '_load_registry'):
             result = manager.cleanup_orphaned_worktrees()
             # Path-gone short-circuit in cleanup_orphaned_worktrees bypasses _remove_worktree_directory
             mock_git.assert_not_called()
@@ -570,7 +571,8 @@ class TestActiveWorktreeProtection:
             active=True,
         )
 
-        with patch.object(manager, '_remove_worktree_directory', return_value=True) as mock_remove:
+        with patch.object(manager, '_remove_worktree_directory', return_value=True) as mock_remove, \
+             patch.object(manager, '_load_registry'):
             result = manager.cleanup_orphaned_worktrees()
 
         # Active worktree should not be removed
@@ -1317,7 +1319,8 @@ class TestCleanupSafetyChecks:
         with patch.object(manager, 'has_uncommitted_changes', return_value=True), \
              patch.object(manager, 'has_unpushed_commits', return_value=False), \
              patch.object(manager, '_remove_worktree_directory') as mock_remove, \
-             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0):
+             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0), \
+             patch.object(manager, '_load_registry'):
             result = manager.cleanup_orphaned_worktrees()
 
         assert "stale-key" in manager._registry
@@ -1423,3 +1426,151 @@ class TestForceRemovalPrunesAfterRmtree:
         assert result is True
         # Verify prune was called after the failed remove attempt
         assert ["worktree", "prune"] in git_calls
+
+
+class TestProtectedAgentIds:
+    """Tests for protected_agent_ids guard across cleanup methods."""
+
+    def test_cleanup_orphaned_reloads_registry(self, tmp_path):
+        """cleanup_orphaned_worktrees calls _load_registry before processing."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        with patch.object(manager, '_load_registry') as mock_load, \
+             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0):
+            manager.cleanup_orphaned_worktrees()
+
+        mock_load.assert_called_once()
+
+    def test_cleanup_orphaned_skips_protected_agent(self, tmp_path):
+        """Worktrees belonging to protected agents are never evicted."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-protected"
+        wt_path.mkdir()
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        manager._registry["eng-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="engineer", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, '_load_registry'), \
+             patch.object(manager, '_remove_worktree_directory') as mock_remove, \
+             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0):
+            result = manager.cleanup_orphaned_worktrees(
+                protected_agent_ids={"engineer"},
+            )
+
+        assert "eng-key" in manager._registry
+        mock_remove.assert_not_called()
+        assert result["registered"] == 0
+
+    def test_cleanup_orphaned_evicts_unprotected_agent(self, tmp_path):
+        """Worktrees belonging to unprotected agents are still evicted normally."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-unprotected"
+        wt_path.mkdir()
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        manager._registry["qa-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="qa", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, '_load_registry'), \
+             patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory', return_value=True), \
+             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0):
+            result = manager.cleanup_orphaned_worktrees(
+                protected_agent_ids={"engineer"},
+            )
+
+        assert "qa-key" not in manager._registry
+        assert result["registered"] == 1
+
+    def test_cleanup_unregistered_skips_protected_agent_prefix(self, tmp_path):
+        """Unregistered worktrees whose dir name starts with a protected agent ID are skipped."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        # Create owner/repo/engineer-ME-123 structure with .git marker
+        wt_dir = config.root / "owner" / "repo" / "engineer-ME-123"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/engineer-ME-123")
+
+        with patch.object(manager, '_remove_worktree_directory') as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees(
+                protected_agent_ids={"engineer"},
+            )
+
+        assert removed == 0
+        mock_remove.assert_not_called()
+
+    def test_cleanup_unregistered_protects_replica_worktrees(self, tmp_path):
+        """Protecting 'engineer' also protects replica 'engineer-2' worktrees (same role)."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        # "engineer-2-ME-1" belongs to replica agent "engineer-2"
+        wt_dir = config.root / "owner" / "repo" / "engineer-2-ME-1"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/engineer-2-ME-1")
+
+        with patch.object(manager, '_remove_worktree_directory') as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees(
+                protected_agent_ids={"engineer"},
+            )
+
+        # Replica worktrees share the base agent ID prefix, so they're protected
+        assert removed == 0
+        mock_remove.assert_not_called()
+
+    def test_cleanup_unregistered_does_not_match_different_agent(self, tmp_path):
+        """Protecting 'qa' does not protect 'architect' worktrees."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_dir = config.root / "owner" / "repo" / "architect-ME-1"
+        wt_dir.mkdir(parents=True)
+        (wt_dir / ".git").write_text("gitdir: /some/base/.git/worktrees/architect-ME-1")
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory', return_value=True) as mock_remove:
+            removed = manager._cleanup_unregistered_worktrees(
+                protected_agent_ids={"qa"},
+            )
+
+        assert removed == 1
+        mock_remove.assert_called_once()
+
+    def test_enforce_capacity_skips_protected_agent(self, tmp_path):
+        """Protected agents' worktrees are not evicted even when over capacity."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_worktrees=1)
+        manager = WorktreeManager(config=config)
+
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(minutes=5)).isoformat()
+
+        # Two worktrees — over the limit of 1
+        manager._registry["eng-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt1"), branch="b1", agent_id="engineer", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+        )
+        manager._registry["qa-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt2"), branch="b2", agent_id="qa", task_id="t2",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, '_load_registry'), \
+             patch.object(manager, '_remove_worktree_directory', return_value=True):
+            manager._enforce_capacity_limit(protected_agent_ids={"engineer"})
+
+        # Engineer's worktree survives, QA's gets evicted
+        assert "eng-key" in manager._registry
+        assert "qa-key" not in manager._registry

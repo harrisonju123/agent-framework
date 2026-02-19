@@ -28,6 +28,23 @@ from .workspace.worktree_manager import WorktreeManager
 from .utils.rich_logging import setup_rich_logging
 
 
+def _get_active_agent_ids(workspace: Path) -> set:
+    """Read activity files and return agent IDs that are actively working.
+
+    Used to protect worktrees from cleanup when their owning agent is still alive.
+    """
+    from .core.activity import ActivityManager, AgentStatus
+    try:
+        mgr = ActivityManager(workspace)
+        return {
+            a.agent_id
+            for a in mgr.get_all_activities()
+            if a.status not in (AgentStatus.IDLE, AgentStatus.DEAD)
+        }
+    except Exception:
+        return set()
+
+
 def setup_logging(agent_id: str, workspace: Path):
     """Setup logging for the agent."""
     # Use rich logging with better formatting
@@ -174,8 +191,11 @@ def main():
                 )
                 logger.info(f"WorktreeManager initialized (root: {wt_config.root})")
 
-                # Run startup cleanup of orphaned worktrees
-                cleanup_result = worktree_manager.cleanup_orphaned_worktrees()
+                # Run startup cleanup of orphaned worktrees, protecting agents that are actively working
+                protected_ids = _get_active_agent_ids(Path(framework_config.workspace))
+                cleanup_result = worktree_manager.cleanup_orphaned_worktrees(
+                    protected_agent_ids=protected_ids,
+                )
                 if cleanup_result["total"]:
                     logger.info(
                         f"Cleaned up {cleanup_result['total']} worktrees on startup "

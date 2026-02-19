@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from ..utils.validators import validate_branch_name, validate_identifier, validate_owner_repo
 from ..utils.subprocess_utils import run_git_command
@@ -508,13 +508,23 @@ class WorktreeManager:
                     return path
         return None
 
-    def cleanup_orphaned_worktrees(self) -> Dict[str, int]:
+    def cleanup_orphaned_worktrees(
+        self,
+        protected_agent_ids: Optional[Set[str]] = None,
+    ) -> Dict[str, int]:
         """
         Remove stale worktrees older than max_age.
+
+        Args:
+            protected_agent_ids: Agent IDs with active work — their worktrees
+                are never evicted regardless of age or staleness.
 
         Returns:
             Dict with counts: {"registered": N, "unregistered": M, "total": N+M}
         """
+        # Reload so we see worktrees registered by other agent processes
+        self._load_registry()
+
         registered_removed = 0
         now = datetime.now(timezone.utc)
         max_age_seconds = self.config.max_age_hours * 3600
@@ -537,11 +547,15 @@ class WorktreeManager:
                     path = Path(info.path)
                     base_repo = Path(info.base_repo) if info.base_repo else None
 
-                    # Worktree path gone — just purge from registry
+                    # Worktree path gone — always purge stale registry entry
                     if not path.exists():
                         keys_to_remove.append(key)
                         registered_removed += 1
                         logger.debug(f"Purged stale worktree from registry: {key}")
+                        continue
+
+                    # Never evict worktrees belonging to agents with active work
+                    if protected_agent_ids and info.agent_id in protected_agent_ids:
                         continue
 
                     # Don't destroy worktrees with uncommitted or unpushed work
@@ -566,7 +580,7 @@ class WorktreeManager:
             self._save_registry()
 
         # Also clean up worktrees not in registry
-        unregistered_removed = self._cleanup_unregistered_worktrees()
+        unregistered_removed = self._cleanup_unregistered_worktrees(protected_agent_ids)
 
         if unregistered_removed:
             logger.info(f"Cleaned up {unregistered_removed} unregistered worktrees")
@@ -577,8 +591,16 @@ class WorktreeManager:
             "total": registered_removed + unregistered_removed,
         }
 
-    def _cleanup_unregistered_worktrees(self) -> int:
-        """Clean up worktrees that exist on disk but not in registry."""
+    def _cleanup_unregistered_worktrees(
+        self,
+        protected_agent_ids: Optional[Set[str]] = None,
+    ) -> int:
+        """Clean up worktrees that exist on disk but not in registry.
+
+        When protected_agent_ids is set, skip any unregistered worktree whose
+        directory name starts with a protected agent ID prefix (conservative —
+        we can't know the agent_id without a registry entry).
+        """
         removed = 0
 
         # Check if root exists and is accessible
@@ -602,6 +624,17 @@ class WorktreeManager:
                                     continue
                                 git_marker = worktree_dir / ".git"
                                 if git_marker.exists() and worktree_dir.resolve() not in registered_paths:
+                                    # Skip if dir name matches a protected agent
+                                    # Worktree dirs are "{agent_id}-{ticket_key}", so match with trailing hyphen
+                                    if protected_agent_ids and any(
+                                        worktree_dir.name.startswith(aid + "-")
+                                        for aid in protected_agent_ids
+                                    ):
+                                        logger.debug(
+                                            f"Skipping unregistered worktree owned by protected agent: {worktree_dir}"
+                                        )
+                                        continue
+
                                     # Don't destroy worktrees with uncommitted or unpushed work
                                     if self.has_uncommitted_changes(worktree_dir) or self.has_unpushed_commits(worktree_dir):
                                         logger.warning(
@@ -624,7 +657,10 @@ class WorktreeManager:
 
         return removed
 
-    def _enforce_capacity_limit(self) -> None:
+    def _enforce_capacity_limit(
+        self,
+        protected_agent_ids: Optional[Set[str]] = None,
+    ) -> None:
         """Remove oldest worktrees if over capacity, skipping active ones."""
         # Reload from disk so we see active flags set by other agent processes
         self._load_registry()
@@ -632,10 +668,12 @@ class WorktreeManager:
         if len(self._registry) < self.config.max_worktrees:
             return
 
-        # Only consider inactive or stale-active worktrees for eviction
+        # Only consider inactive or stale-active worktrees for eviction,
+        # and never evict worktrees belonging to agents with active work
         evictable = [
             (key, info) for key, info in self._registry.items()
-            if not info.active or self._is_stale_active(info)
+            if (not info.active or self._is_stale_active(info))
+            and not (protected_agent_ids and info.agent_id in protected_agent_ids)
         ]
 
         # Sort by last_accessed (oldest first)

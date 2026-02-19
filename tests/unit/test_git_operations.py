@@ -128,18 +128,21 @@ class TestGetWorkingDirectory:
         assert git_ops_with_worktree._active_worktree == Path("/worktree")
         git_ops_with_worktree.worktree_manager.create_worktree.assert_called_once()
 
-    def test_reuses_existing_worktree(self, git_ops_with_worktree, sample_task):
+    def test_reuses_existing_worktree(self, git_ops_with_worktree, sample_task, tmp_path):
         """Test that existing worktree is reused."""
+        existing_wt = tmp_path / "existing-worktree"
+        existing_wt.mkdir()
+
         git_ops_with_worktree.multi_repo_manager = MagicMock()
         git_ops_with_worktree.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
-        git_ops_with_worktree.worktree_manager.find_worktree_by_branch.return_value = Path("/existing/worktree")
+        git_ops_with_worktree.worktree_manager.find_worktree_by_branch.return_value = existing_wt
 
         sample_task.context["worktree_branch"] = "agent/engineer/task-abc123"
 
         result = git_ops_with_worktree.get_working_directory(sample_task)
 
-        assert result == Path("/existing/worktree")
-        assert git_ops_with_worktree._active_worktree == Path("/existing/worktree")
+        assert result == existing_wt
+        assert git_ops_with_worktree._active_worktree == existing_wt
         git_ops_with_worktree.worktree_manager.create_worktree.assert_not_called()
 
     def test_falls_back_to_shared_clone_on_worktree_failure(self, git_ops_with_worktree, sample_task):
@@ -752,7 +755,8 @@ class TestRegistryReloadInGetWorkingDirectory:
         git_ops.multi_repo_manager = MagicMock()
         git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
 
-        worktree_path = Path("/worktrees/owner/repo/engineer-ME-1")
+        worktree_path = tmp_path / "engineer-ME-1"
+        worktree_path.mkdir()
         mock_worktree_manager.find_worktree_by_branch.return_value = worktree_path
 
         from datetime import datetime, timezone
@@ -810,3 +814,40 @@ class TestIsOwnBranch:
             config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
         )
         assert git_ops._is_own_branch("agent/engineering/PROJ-123") is False
+
+
+class TestPreflightWorktreeExistence:
+    """Tests for pre-flight worktree path existence check in get_working_directory."""
+
+    def test_recreates_worktree_when_path_missing(self, mock_config, mock_logger, mock_queue, tmp_path):
+        """When find_worktree_by_branch returns a path that no longer exists, recreate it."""
+        mock_worktree_manager = MagicMock()
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        # find_worktree_by_branch returns a path that doesn't exist on disk
+        ghost_path = tmp_path / "ghost-worktree"
+        mock_worktree_manager.find_worktree_by_branch.return_value = ghost_path
+        mock_worktree_manager.create_worktree.return_value = tmp_path / "new-worktree"
+
+        from datetime import datetime, timezone
+        task = Task(
+            id="task-preflight", title="T", description="D", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={
+                "github_repo": "owner/repo",
+                "worktree_branch": "agent/engineer/ME-1-abc",
+            },
+        )
+
+        result = git_ops.get_working_directory(task)
+
+        # Should have removed the stale entry and created a new worktree
+        mock_worktree_manager.remove_worktree.assert_called_once_with(ghost_path, force=True)
+        mock_worktree_manager.create_worktree.assert_called_once()
+        assert result == tmp_path / "new-worktree"

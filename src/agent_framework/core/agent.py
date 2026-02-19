@@ -1029,11 +1029,26 @@ class Agent:
             return
         self._last_worktree_cleanup = now
         try:
-            result = self.worktree_manager.cleanup_orphaned_worktrees()
+            protected = self._get_protected_agent_ids()
+            result = self.worktree_manager.cleanup_orphaned_worktrees(
+                protected_agent_ids=protected,
+            )
             if result.get("total", 0) > 0:
                 self.logger.info(f"Periodic worktree cleanup: removed {result['total']} stale worktree(s)")
         except Exception as e:
             self.logger.debug(f"Periodic worktree cleanup failed: {e}")
+
+    def _get_protected_agent_ids(self) -> set:
+        """Collect agent IDs that are actively working and must not have their worktrees evicted."""
+        protected = set()
+        try:
+            from .activity import AgentStatus
+            for activity in self.activity_manager.get_all_activities():
+                if activity.status not in (AgentStatus.IDLE, AgentStatus.DEAD):
+                    protected.add(activity.agent_id)
+        except Exception:
+            pass
+        return protected
 
     async def _watch_for_interruption(self) -> None:
         """Poll for pause/stop signals during LLM execution.

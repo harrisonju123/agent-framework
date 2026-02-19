@@ -119,10 +119,15 @@ class GitOperationsManager:
                 # Check registry for existing worktree on this branch (reuse or retry)
                 existing = self.worktree_manager.find_worktree_by_branch(branch_name)
                 if existing:
-                    self._active_worktree = existing
-                    task.context["worktree_branch"] = branch_name
-                    self.logger.info(f"Reusing worktree for branch {branch_name}: {existing}")
-                    return existing
+                    if existing.exists():
+                        self._active_worktree = existing
+                        task.context["worktree_branch"] = branch_name
+                        self.logger.info(f"Reusing worktree for branch {branch_name}: {existing}")
+                        return existing
+                    else:
+                        # Worktree deleted by another process — remove stale entry and recreate
+                        self.worktree_manager.remove_worktree(existing, force=True)
+                        self.logger.warning(f"Worktree path missing, will recreate: {existing}")
 
                 try:
                     worktree_path = self.worktree_manager.create_worktree(

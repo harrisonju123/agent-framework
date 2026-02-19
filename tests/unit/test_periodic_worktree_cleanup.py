@@ -3,7 +3,7 @@
 import time
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from agent_framework.core.agent import Agent, _WORKTREE_CLEANUP_INTERVAL_SECONDS
 
@@ -16,6 +16,7 @@ def agent():
     mock._maybe_run_periodic_worktree_cleanup = (
         Agent._maybe_run_periodic_worktree_cleanup.__get__(mock)
     )
+    mock._get_protected_agent_ids = Agent._get_protected_agent_ids.__get__(mock)
     return mock
 
 
@@ -71,3 +72,32 @@ class TestPeriodicWorktreeCleanup:
         agent._maybe_run_periodic_worktree_cleanup()
 
         agent.logger.info.assert_not_called()
+
+    def test_passes_protected_agent_ids(self, agent):
+        """Cleanup receives protected_agent_ids from activity manager."""
+        from agent_framework.core.activity import AgentActivity, AgentStatus
+        from datetime import datetime, timezone
+
+        agent.worktree_manager = MagicMock()
+        agent.worktree_manager.cleanup_orphaned_worktrees.return_value = {"total": 0}
+        agent._last_worktree_cleanup = 0.0
+
+        # Simulate two active agents
+        activities = [
+            AgentActivity(
+                agent_id="engineer",
+                status=AgentStatus.WORKING,
+                last_updated=datetime.now(timezone.utc),
+            ),
+            AgentActivity(
+                agent_id="qa",
+                status=AgentStatus.IDLE,
+                last_updated=datetime.now(timezone.utc),
+            ),
+        ]
+        agent.activity_manager.get_all_activities.return_value = activities
+
+        agent._maybe_run_periodic_worktree_cleanup()
+
+        call_kwargs = agent.worktree_manager.cleanup_orphaned_worktrees.call_args[1]
+        assert call_kwargs["protected_agent_ids"] == {"engineer"}
