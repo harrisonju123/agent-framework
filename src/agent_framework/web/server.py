@@ -41,6 +41,7 @@ from .models import (
     SetupConfiguration,
     SetupStatusResponse,
     TeamSessionData,
+    AgenticInsightsData,
 )
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,21 @@ def register_routes(app: FastAPI):
     async def get_health():
         """Get system health status."""
         return app.state.data_provider.get_health_status()
+
+    @app.get("/api/analytics/agentic", response_model=AgenticInsightsData)
+    async def get_agentic_metrics():
+        """Get aggregated agentic feature metrics for the observability panel."""
+        from ..analytics.agentic_metrics import AgenticMetricsAggregator
+
+        aggregator = AgenticMetricsAggregator(app.state.workspace)
+        metrics = aggregator.get_all_metrics()
+        return AgenticInsightsData(
+            memory=metrics.memory.__dict__,
+            self_eval=metrics.self_eval.__dict__,
+            replan=metrics.replan.__dict__,
+            specialization_distribution=metrics.specialization_distribution,
+            context_budget=metrics.context_budget.__dict__,
+        )
 
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():

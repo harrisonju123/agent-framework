@@ -159,3 +159,37 @@ export interface LogEntry {
   level: string | null
 }
 
+// Agentic feature observability
+
+export interface MemoryStats {
+  total_entries: number
+  accessed_entries: number
+  hit_rate: number
+}
+
+export interface SelfEvalStats {
+  total_evaluations: number
+  failed_evaluations: number
+  retry_rate: number
+}
+
+export interface ReplanStats {
+  sessions_with_replan: number
+  total_sessions: number
+  trigger_rate: number
+}
+
+export interface ContextBudgetStats {
+  total_tasks_with_tokens: number
+  budget_exceeded_events: number
+  avg_utilization_pct: number | null
+}
+
+export interface AgenticInsights {
+  memory: MemoryStats
+  self_eval: SelfEvalStats
+  replan: ReplanStats
+  specialization_distribution: Record<string, number>
+  context_budget: ContextBudgetStats
+}
+

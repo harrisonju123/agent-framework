@@ -4,6 +4,7 @@ import KpiCards from '../components/KpiCards.vue'
 import AgentCard from '../components/AgentCard.vue'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import FailedTasks from '../components/FailedTasks.vue'
+import AgenticInsightsPanel from '../components/AgenticInsightsPanel.vue'
 
 const {
   agents, queues, events, failedTasks,
@@ -35,6 +36,9 @@ const {
         No agents configured
       </div>
     </div>
+
+    <!-- Agentic Feature Insights -->
+    <AgenticInsightsPanel />
 
     <!-- Activity / Failed panels -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">

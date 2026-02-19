@@ -293,3 +293,44 @@ class SetupStatusResponse(BaseModel):
     repositories_registered: int
     mcp_enabled: bool
     ready_to_start: bool
+
+
+# Agentic observability models
+
+class MemoryStatsData(BaseModel):
+    """Memory recall statistics."""
+    total_entries: int
+    accessed_entries: int
+    hit_rate: float  # fraction of stored memories recalled at least once
+
+
+class SelfEvalStatsData(BaseModel):
+    """Self-evaluation statistics."""
+    total_evaluations: int
+    failed_evaluations: int
+    # Fraction of evals where self-eval caught an issue and triggered a rewrite
+    retry_rate: float
+
+
+class ReplanStatsData(BaseModel):
+    """Replanning statistics."""
+    sessions_with_replan: int
+    total_sessions: int
+    trigger_rate: float
+
+
+class ContextBudgetStatsData(BaseModel):
+    """Context budget utilization statistics."""
+    total_tasks_with_tokens: int
+    budget_exceeded_events: int
+    avg_utilization_pct: Optional[float] = None
+
+
+class AgenticInsightsData(BaseModel):
+    """Aggregated agentic feature metrics for the observability panel."""
+    memory: MemoryStatsData
+    self_eval: SelfEvalStatsData
+    replan: ReplanStatsData
+    # Current specialization profile per active agent ("none" = no profile)
+    specialization_distribution: Dict[str, int]
+    context_budget: ContextBudgetStatsData
