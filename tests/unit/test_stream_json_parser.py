@@ -367,3 +367,77 @@ class TestBufferSplitting:
             while b"\n" in buffer:
                 line_bytes, buffer = buffer.split(b"\n", 1)
                 _process_stream_line(line_bytes.decode(errors='replace'), text_chunks, usage_result)
+
+
+class TestContentPreference:
+    """Verify that multi-turn text_chunks are preferred over single-turn result_text.
+
+    The architect's plan spans multiple assistant turns. result_text only contains
+    the final turn (often a JIRA status note), so using it discards the plan.
+    """
+
+    def test_content_prefers_text_chunks_over_result_text(self):
+        """When both text_chunks and result_text exist, text_chunks wins."""
+        text_chunks = [
+            "## Implementation Plan\n",
+            "1. Add endpoint in routes.py\n",
+            "2. Add model in models.py\n",
+        ]
+        usage_result = {"result_text": "Updated JIRA-123 status to In Progress"}
+
+        content = "".join(text_chunks) or usage_result.get("result_text", "")
+
+        assert "Implementation Plan" in content
+        assert "JIRA-123" not in content
+
+    def test_content_falls_back_to_result_text_when_no_chunks(self):
+        """Empty text_chunks falls back to result_text."""
+        text_chunks = []
+        usage_result = {"result_text": "Task completed successfully"}
+
+        content = "".join(text_chunks) or usage_result.get("result_text", "")
+
+        assert content == "Task completed successfully"
+
+    def test_multi_turn_plan_survives_to_content(self):
+        """End-to-end: multiple assistant events + result event → plan in content."""
+        text_chunks = []
+        usage_result = {}
+
+        events = [
+            {
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "I'll analyze the codebase first.\n"},
+                ]},
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "## Plan\n- Step 1: Create handler\n- Step 2: Add tests\n"},
+                ]},
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "name": "jira_update_status"},
+                ]},
+            },
+            {
+                "type": "result",
+                "usage": {"input_tokens": 5000, "output_tokens": 1200},
+                "total_cost_usd": 0.05,
+                "result": "Updated JIRA ticket status.",
+            },
+        ]
+
+        for event in events:
+            _process_stream_line(json.dumps(event), text_chunks, usage_result)
+
+        content = "".join(text_chunks) or usage_result.get("result_text", "")
+
+        assert "## Plan" in content
+        assert "Step 1: Create handler" in content
+        assert "Step 2: Add tests" in content
+        # result_text exists but is not used since text_chunks is non-empty
+        assert usage_result["result_text"] == "Updated JIRA ticket status."

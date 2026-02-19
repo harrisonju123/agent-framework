@@ -495,8 +495,8 @@ class ClaudeCLIBackend(LLMBackend):
                 await process.wait()
 
             latency_ms = (time.time() - start_time) * 1000
-            # Prefer authoritative result text from result event, fall back to accumulated chunks
-            content = usage_result.get("result_text") or "".join(text_chunks)
+            # Full multi-turn transcript preferred — result_text only contains the last turn
+            content = "".join(text_chunks) or usage_result.get("result_text", "")
             stderr_text = "".join(stderr_chunks)
 
             # Extract usage data (available if result event was received)
