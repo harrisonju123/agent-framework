@@ -137,8 +137,10 @@ Instructions for Architect Agent:
 1. Clone/update repository (use MultiRepoManager)
 2. Search for keywords and concepts from the goal — grep for relevant function names, class names, and config keys
 3. Stop exploring once you have enough context to produce a concrete plan — do not map the entire codebase
-4. Produce a PlanDocument with: objectives, approach (step-by-step), files_to_modify, risks, success_criteria
-5. Store plan in task.plan — the framework routes to Engineer automatically
+4. Output your plan as a ```json code block with this schema:
+   {{"objectives": ["..."], "approach": ["step 1", "step 2"], "files_to_modify": ["path/to/file.py"], "risks": ["..."], "success_criteria": ["..."]}}
+   Required fields: objectives, approach, success_criteria. Optional: files_to_modify, risks, dependencies.
+5. You may include analysis prose before the JSON block — the framework extracts the plan automatically
 {jira_note}
 
 If you determine that no code changes are needed (feature already fully exists, already shipped, etc.), \

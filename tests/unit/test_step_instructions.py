@@ -267,3 +267,40 @@ class TestInstructionsRoundTrip:
 
         assert step.instructions == "Only create a PR. Do NOT plan."
         assert step.agent == "architect"
+
+
+# -- Plan step instructions from YAML --
+
+class TestPlanStepHasInstructions:
+    """Verify plan step defines JSON output instructions in workflow definitions."""
+
+    def test_default_workflow_plan_step_has_instructions(self):
+        """Plan step in default workflow defines JSON output instructions."""
+        defn = WorkflowDefinition(
+            description="test",
+            start_step="plan",
+            steps={
+                "plan": WorkflowStepDefinition(
+                    agent="architect",
+                    instructions="Output your plan as a ```json code block.",
+                ),
+                "implement": WorkflowStepDefinition(agent="engineer"),
+            },
+        )
+        dag = defn.to_dag("test")
+        assert dag.steps["plan"].instructions is not None
+        assert "json" in dag.steps["plan"].instructions.lower()
+
+    def test_plan_step_instructions_thread_to_chain_task(self):
+        """Plan step instructions survive through _build_chain_task."""
+        executor = WorkflowExecutor(MagicMock(), MagicMock())
+        task = _make_task()
+        target = WorkflowStep(
+            id="plan",
+            agent="architect",
+            instructions="Output your plan as a ```json code block.",
+        )
+
+        chain = executor._build_chain_task(task, target, "engineer")
+
+        assert "json" in chain.context["_step_instructions"].lower()

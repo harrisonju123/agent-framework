@@ -282,6 +282,7 @@ class WorkflowExecutor:
         # Cap review→engineer fix cycles to prevent infinite bounce loops.
         # code_review, qa_review, and preview_review share a single counter.
         review_cycles = task.context.get("_dag_review_cycles", 0)
+        cap_redirect = False
         is_review_to_engineer = (
             target_step.agent == "engineer"
             and task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
@@ -305,10 +306,13 @@ class WorkflowExecutor:
                 if pr_step and pr_step != target_step:
                     target_step = pr_step
                     next_agent = pr_step.agent
+                    cap_redirect = True
                 else:
                     return
 
-        if not self._has_diff_for_pr(task, target_step):
+        # Cap redirect bypasses the diff check — an infinite review loop is
+        # worse than a no-diff PR attempt.
+        if not cap_redirect and not self._has_diff_for_pr(task, target_step):
             return
 
         chain_task = self._build_chain_task(
@@ -425,6 +429,7 @@ class WorkflowExecutor:
             "_chain_depth": chain_depth,
             "_root_task_id": root_task_id,
             "_global_cycle_count": task.context.get("_global_cycle_count", 0) + 1,
+            "_dag_review_cycles": task.context.get("_dag_review_cycles", 0),
         }
         # Clear stale verdict so the next agent's output is evaluated fresh
         context.pop("verdict", None)

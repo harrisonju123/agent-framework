@@ -1793,7 +1793,7 @@ class Agent:
     # -- Upstream Context Handoff --
 
     UPSTREAM_CONTEXT_MAX_CHARS = 15000
-    UPSTREAM_INLINE_MAX_CHARS = 12000
+    UPSTREAM_INLINE_MAX_CHARS = 15000
 
     def _save_upstream_context(self, task: Task, response) -> None:
         """Save agent's response to disk so downstream agents can read it.

@@ -862,16 +862,17 @@ class TestPlanningInstructions:
         assert "do not map the entire codebase" in result
 
     def test_contains_plan_document_requirement(self):
-        """Instructions require producing a PlanDocument with specific fields."""
+        """Instructions require producing a JSON plan with specific fields."""
         from agent_framework.core.task_builder import _build_planning_instructions
 
         result = _build_planning_instructions("Add auth", "default", "PROJ")
 
-        assert "PlanDocument" in result
+        assert "```json" in result
         assert "objectives" in result
         assert "files_to_modify" in result
         assert "risks" in result
         assert "success_criteria" in result
+        assert "Store plan in task.plan" not in result
 
     def test_contains_stop_condition(self):
         """Instructions include explicit termination condition for exploration."""

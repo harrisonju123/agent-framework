@@ -1471,7 +1471,7 @@ class TestCodeReviewCycleCap:
 
         queue.push.assert_called_once()
         chain_task = queue.push.call_args[0][0]
-        assert "_dag_review_cycles" not in chain_task.context
+        assert chain_task.context["_dag_review_cycles"] == 0
 
 
 # -- Fix 4: PR creation skipped for planning-only tasks --
@@ -2196,8 +2196,8 @@ class TestSameAgentUpstreamClearing:
 class TestUpstreamInlineLimit:
     """Verify UPSTREAM_INLINE_MAX_CHARS is used for inline summary truncation."""
 
-    def test_upstream_inline_uses_12kb_limit(self, tmp_path):
-        """_save_upstream_context uses UPSTREAM_INLINE_MAX_CHARS (12KB) for inline summary."""
+    def test_upstream_inline_uses_15kb_limit(self, tmp_path):
+        """_save_upstream_context uses UPSTREAM_INLINE_MAX_CHARS (15KB) for inline summary."""
         agent = MagicMock()
         agent.config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="p",
@@ -2216,8 +2216,8 @@ class TestUpstreamInlineLimit:
 
         assert len(task.context["upstream_summary"]) == 10000
 
-    def test_upstream_inline_truncates_at_12kb(self, tmp_path):
-        """Content longer than 12KB is truncated at UPSTREAM_INLINE_MAX_CHARS."""
+    def test_upstream_inline_truncates_at_15kb(self, tmp_path):
+        """Content longer than 15KB is truncated at UPSTREAM_INLINE_MAX_CHARS."""
         agent = MagicMock()
         agent.config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="p",
@@ -2228,12 +2228,12 @@ class TestUpstreamInlineLimit:
         agent.logger = MagicMock()
 
         task = _make_task()
-        content = "y" * 15000
+        content = "y" * 20000
         response = _make_response(content)
 
         Agent._save_upstream_context(agent, task, response)
 
-        assert len(task.context["upstream_summary"]) == 12000
+        assert len(task.context["upstream_summary"]) == 15000
 
 
 class TestPlanPropagation:
@@ -2506,3 +2506,160 @@ class TestNoDiffGuard:
 
         with patch("agent_framework.utils.subprocess_utils.run_git_command", side_effect=Exception("git error")):
             assert executor._has_diff_for_pr(task, step) is False
+
+
+# -- Fix: Review cycle counter propagation across all chain hops --
+
+class TestReviewCycleCounterPropagation:
+    """Verify _dag_review_cycles survives every chain hop, not just review→engineer."""
+
+    def test_counter_survives_implement_to_code_review_hop(self, queue, tmp_path):
+        """Counter set on implement task propagates to code_review chain task."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="implement",
+            _dag_review_cycles=1,
+            _chain_depth=3,
+            _root_task_id="root-1",
+            _global_cycle_count=3,
+        )
+
+        code_review_step = WorkflowStep(id="code_review", agent="architect")
+        workflow = MagicMock()
+        workflow.steps = {"code_review": code_review_step}
+
+        executor._route_to_step(task, code_review_step, workflow, "engineer", None)
+
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.context["_dag_review_cycles"] == 1
+
+    def test_full_cycle_cap_fires_on_second_review(self, queue, tmp_path):
+        """Simulates d1(plan)→d2(implement)→d3(code_review)→d4(implement)→d5(code_review).
+
+        Counter starts at 0, increments to 1 on d3→d4, then d4→d5 is a
+        non-review hop so counter stays at 1. On d5→d6 (code_review→implement),
+        counter increments to 2 >= MAX(2), redirects to create_pr.
+        """
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        code_review_step = WorkflowStep(id="code_review", agent="architect")
+        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        workflow = MagicMock()
+        workflow.steps = {
+            "implement": engineer_step,
+            "code_review": code_review_step,
+            "create_pr": pr_step,
+        }
+
+        # Hop 1: code_review→implement (first fix cycle, counter 0→1)
+        task1 = _make_task(
+            workflow="default",
+            workflow_step="code_review",
+            _dag_review_cycles=0,
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+        executor._route_to_step(task1, engineer_step, workflow, "architect", None)
+        chain1 = queue.push.call_args[0][0]
+        assert chain1.context["_dag_review_cycles"] == 1
+        assert queue.push.call_args[0][1] == "engineer"
+        queue.push.reset_mock()
+
+        # Hop 2: implement→code_review (non-review hop, counter stays 1)
+        task2 = _make_task(
+            workflow="default",
+            workflow_step="implement",
+            _dag_review_cycles=1,
+            _chain_depth=3,
+            _root_task_id="root-1",
+            _global_cycle_count=3,
+        )
+        executor._route_to_step(task2, code_review_step, workflow, "engineer", None)
+        chain2 = queue.push.call_args[0][0]
+        assert chain2.context["_dag_review_cycles"] == 1
+        queue.push.reset_mock()
+
+        # Hop 3: code_review→implement (second fix cycle, counter 1→2 >= MAX)
+        task3 = _make_task(
+            workflow="default",
+            workflow_step="code_review",
+            _dag_review_cycles=1,
+            _chain_depth=4,
+            _root_task_id="root-1",
+            _global_cycle_count=4,
+            implementation_branch="feature/xyz",
+        )
+        executor._route_to_step(task3, engineer_step, workflow, "architect", None)
+        chain3 = queue.push.call_args[0][0]
+        target = queue.push.call_args[0][1]
+        # Cap fired — redirected to create_pr (architect)
+        assert target == "architect"
+        assert chain3.context["workflow_step"] == "create_pr"
+
+    def test_counter_starts_at_zero_on_fresh_chain(self, queue, tmp_path):
+        """First task in a chain without prior counter gets 0."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            _chain_depth=0,
+            _root_task_id="root-1",
+            _global_cycle_count=0,
+        )
+        # No _dag_review_cycles in context at all
+        assert "_dag_review_cycles" not in task.context
+
+        implement_step = WorkflowStep(id="implement", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"implement": implement_step}
+
+        executor._route_to_step(task, implement_step, workflow, "architect", None)
+
+        chain_task = queue.push.call_args[0][0]
+        assert chain_task.context["_dag_review_cycles"] == 0
+
+    def test_cap_redirect_bypasses_diff_check(self, queue, tmp_path):
+        """Cap redirect to create_pr works even without implementation_branch."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        # No implementation_branch — would normally fail _has_diff_for_pr
+        task = _make_task(
+            workflow="default",
+            workflow_step="code_review",
+            _dag_review_cycles=1,
+            _chain_depth=4,
+            _root_task_id="root-1",
+            _global_cycle_count=4,
+        )
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        workflow = MagicMock()
+        workflow.steps = {"implement": engineer_step, "create_pr": pr_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "architect", None)
+
+        # Without cap_redirect bypass, _has_diff_for_pr would block this
+        queue.push.assert_called_once()
+        chain_task = queue.push.call_args[0][0]
+        target = queue.push.call_args[0][1]
+        assert target == "architect"
+        assert chain_task.context["workflow_step"] == "create_pr"
