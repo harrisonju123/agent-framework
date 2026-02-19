@@ -1,12 +1,16 @@
 """Tests for dynamic team composition logic."""
 
 import logging
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
 from typing import Optional
 
+from agent_framework.core.agent import Agent
 from agent_framework.core.config import AgentDefinition, TeammateDefinition
+from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.core.team_composer import (
     compose_default_team,
     compose_team,
@@ -317,3 +321,116 @@ class TestTeamMerge:
             agent_def, "nonexistent", agents, caller_agent_id="engineer",
         )
         assert result is None
+
+
+# -- Solo workflow steps (Layer 2 suppression in agent.py) --
+
+def _make_task(context: Optional[dict] = None) -> Task:
+    return Task(
+        id="test-1",
+        type=TaskType.IMPLEMENTATION,
+        status=TaskStatus.IN_PROGRESS,
+        priority=3,
+        created_by="test",
+        assigned_to="architect",
+        created_at=datetime.now(timezone.utc),
+        title="Test task",
+        description="Test",
+        context=context or {},
+    )
+
+
+def _make_solo_agent(agents_config: list) -> MagicMock:
+    """Build a minimal mock Agent with the real _compose_team_for_task bound."""
+    agent = MagicMock()
+    agent._compose_team_for_task = Agent._compose_team_for_task.__get__(agent)
+    agent._SOLO_WORKFLOW_STEPS = Agent._SOLO_WORKFLOW_STEPS
+    agent._team_mode_enabled = True
+    agent._team_mode_default_model = "sonnet"
+    agent._agents_config = agents_config
+    agent._default_team_cache = None
+    agent._workflow_team_cache = {}
+    agent.config = MagicMock()
+    agent.config.id = "architect"
+    agent.config.base_id = "architect"
+    agent._agent_definition = _make_agent("architect")
+    agent._agent_definition.teammates = {
+        "principal-engineer": TeammateDefinition(
+            description="Principal engineer", prompt="Advise on architecture.",
+        ),
+    }
+    agent._current_specialization = None
+    return agent
+
+
+class TestSoloSteps:
+    """Layer 2 (workflow teammates) should be suppressed for solo workflow steps."""
+
+    @pytest.fixture
+    def agents_config(self, agents):
+        return agents
+
+    def _get_layer2_ids(self) -> set:
+        """IDs that come from Layer 2 (WORKFLOW_TEAMMATES for 'default')."""
+        return set(WORKFLOW_TEAMMATES["default"])
+
+    def _run(self, agents_config, context):
+        agent = _make_solo_agent(agents_config)
+        task = _make_task(context)
+        result = agent._compose_team_for_task(task)
+        return result
+
+    def test_initial_plan_task_layer1_only(self, agents_config):
+        """First architect task has workflow but no workflow_step → solo."""
+        result = self._run(agents_config, {"workflow": "default"})
+        assert result is not None
+        assert "principal-engineer" in result
+        for l2_id in self._get_layer2_ids():
+            assert l2_id not in result, f"Layer 2 agent '{l2_id}' should be excluded"
+
+    def test_chain_plan_step_layer1_only(self, agents_config):
+        result = self._run(agents_config, {"workflow": "default", "workflow_step": "plan"})
+        assert result is not None
+        assert "principal-engineer" in result
+        for l2_id in self._get_layer2_ids():
+            assert l2_id not in result
+
+    def test_code_review_step_layer1_only(self, agents_config):
+        result = self._run(agents_config, {"workflow": "default", "workflow_step": "code_review"})
+        assert result is not None
+        assert "principal-engineer" in result
+        for l2_id in self._get_layer2_ids():
+            assert l2_id not in result
+
+    def test_preview_review_step_layer1_only(self, agents_config):
+        result = self._run(agents_config, {"workflow": "default", "workflow_step": "preview_review"})
+        assert result is not None
+        assert "principal-engineer" in result
+        for l2_id in self._get_layer2_ids():
+            assert l2_id not in result
+
+    def test_create_pr_step_layer1_only(self, agents_config):
+        result = self._run(agents_config, {"workflow": "default", "workflow_step": "create_pr"})
+        assert result is not None
+        assert "principal-engineer" in result
+        for l2_id in self._get_layer2_ids():
+            assert l2_id not in result
+
+    def test_implement_step_includes_layer2(self, agents_config):
+        result = self._run(agents_config, {"workflow": "default", "workflow_step": "implement"})
+        assert result is not None
+        assert "principal-engineer" in result
+        # Layer 2 agents present (minus caller=architect)
+        assert "engineer" in result or "qa" in result
+
+    def test_qa_review_step_includes_layer2(self, agents_config):
+        result = self._run(agents_config, {"workflow": "default", "workflow_step": "qa_review"})
+        assert result is not None
+        assert "engineer" in result or "qa" in result
+
+    def test_legacy_non_workflow_task_includes_layer2(self, agents_config):
+        """No workflow key at all → legacy task, Layer 2 should be included."""
+        result = self._run(agents_config, {})
+        assert result is not None
+        assert "principal-engineer" in result
+        assert "engineer" in result or "qa" in result

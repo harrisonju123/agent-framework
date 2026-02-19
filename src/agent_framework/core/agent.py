@@ -125,6 +125,10 @@ class Agent:
     at lines 254-407.
     """
 
+    # Steps where only Layer 1 (configured) teammates are needed —
+    # workflow-level teammates (engineer/qa) add redundant exploration
+    _SOLO_WORKFLOW_STEPS = frozenset({"plan", "code_review", "preview_review", "create_pr"})
+
     def _init_core_dependencies(
         self,
         config,
@@ -1129,21 +1133,30 @@ class Agent:
                     team_agents.update(self._default_team_cache)
 
         # Layer 2: workflow-required agents (cached per workflow type)
-        workflow = task.context.get("workflow", "default")
-        if workflow not in self._workflow_team_cache:
-            self._workflow_team_cache[workflow] = compose_team(
-                task.context, workflow, self._agents_config,
-                default_model=self._team_mode_default_model,
-                caller_agent_id=self.config.id,
-            )
-        workflow_teammates = self._workflow_team_cache[workflow]
-        if workflow_teammates:
-            collisions = sorted(set(team_agents) & set(workflow_teammates))
-            if collisions:
-                self.logger.warning(
-                    f"Teammate ID collision: {collisions} - workflow agents take precedence"
+        # Solo steps (plan, code_review, etc.) skip Layer 2 — the configured
+        # teammates from Layer 1 are sufficient and workflow agents just
+        # duplicate the lead's exploration.
+        workflow_step = task.context.get("workflow_step")
+        is_solo_step = (
+            workflow_step in self._SOLO_WORKFLOW_STEPS
+            or (task.context.get("workflow") and workflow_step is None)
+        )
+        if not is_solo_step:
+            workflow = task.context.get("workflow", "default")
+            if workflow not in self._workflow_team_cache:
+                self._workflow_team_cache[workflow] = compose_team(
+                    task.context, workflow, self._agents_config,
+                    default_model=self._team_mode_default_model,
+                    caller_agent_id=self.config.id,
                 )
-            team_agents.update(workflow_teammates)
+            workflow_teammates = self._workflow_team_cache[workflow]
+            if workflow_teammates:
+                collisions = sorted(set(team_agents) & set(workflow_teammates))
+                if collisions:
+                    self.logger.warning(
+                        f"Teammate ID collision: {collisions} - workflow agents take precedence"
+                    )
+                team_agents.update(workflow_teammates)
 
         team_agents = team_agents or None
         if team_agents:
