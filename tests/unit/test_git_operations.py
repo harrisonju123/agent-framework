@@ -499,6 +499,57 @@ class TestCleanupWorktreeChainStepProtection:
         mock_worktree_manager.remove_worktree.assert_not_called()
         mock_worktree_manager.mark_worktree_inactive.assert_not_called()
 
+    def test_root_task_with_workflow_keeps_worktree_active(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
+    ):
+        """Root plan task has workflow= but no chain_step= — still intermediate."""
+        git_ops = self._make_git_ops(mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path)
+        worktree_path = tmp_path / "worktree"
+        git_ops._active_worktree = worktree_path
+        git_ops._is_at_terminal_workflow_step = MagicMock(return_value=False)
+
+        sample_task.context["workflow"] = "default"
+
+        git_ops.cleanup_worktree(sample_task, success=True)
+
+        mock_worktree_manager.touch_worktree.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_not_called()
+
+    def test_root_task_with_workflow_at_terminal_step_marks_inactive(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
+    ):
+        """Root task at the last workflow step should be terminal (mark inactive)."""
+        git_ops = self._make_git_ops(mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path)
+        worktree_path = tmp_path / "worktree"
+        git_ops._active_worktree = worktree_path
+        mock_worktree_manager.has_unpushed_commits.return_value = False
+        git_ops._is_at_terminal_workflow_step = MagicMock(return_value=True)
+
+        sample_task.context["workflow"] = "default"
+
+        git_ops.cleanup_worktree(sample_task, success=True)
+
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.touch_worktree.assert_not_called()
+
+    def test_subtask_with_workflow_marks_inactive(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
+    ):
+        """Subtask (parent_task_id set) goes terminal even with workflow context."""
+        git_ops = self._make_git_ops(mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path)
+        worktree_path = tmp_path / "worktree"
+        git_ops._active_worktree = worktree_path
+        mock_worktree_manager.has_unpushed_commits.return_value = False
+        git_ops._is_at_terminal_workflow_step = MagicMock(return_value=False)
+
+        sample_task.context["workflow"] = "default"
+        sample_task.parent_task_id = "parent-123"
+
+        git_ops.cleanup_worktree(sample_task, success=True)
+
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.touch_worktree.assert_not_called()
+
 
 class TestCleanupWorktreePushBeforeRemoval:
     """Tests for push-then-cleanup behavior in cleanup_worktree."""

@@ -9,7 +9,7 @@ import pytest
 
 from agent_framework.core.workflow_router import WorkflowRouter
 from agent_framework.core.config import WorkflowDefinition
-from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
+from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW, REVIEW_WORKFLOW
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
@@ -87,7 +87,12 @@ def router(config, queue, tmp_path):
     """Create WorkflowRouter instance for testing."""
     logger = MagicMock()
     session_logger = MagicMock()
-    workflows_config = {"default": DEFAULT_WORKFLOW, "preview": PREVIEW_WORKFLOW, "analysis": ANALYSIS_WORKFLOW}
+    workflows_config = {
+        "default": DEFAULT_WORKFLOW,
+        "preview": PREVIEW_WORKFLOW,
+        "review": REVIEW_WORKFLOW,
+        "analysis": ANALYSIS_WORKFLOW,
+    }
     agents_config = [
         SimpleNamespace(id="architect"),
         SimpleNamespace(id="engineer"),
@@ -535,3 +540,87 @@ class TestReviewFixGuard:
         router.enforce_chain(task, response)
 
         queue.push.assert_not_called()
+
+
+# -- Non-terminal fallthrough guard --
+
+class TestEnforceChainNonTerminalGuard:
+    """Verify that `not routed` at a non-terminal step halts rather than creating a PR."""
+
+    def test_does_not_queue_pr_when_stuck_mid_chain(self, router, queue):
+        """code_review with no verdict → no condition matches → PR NOT queued."""
+        router.config.base_id = "architect"
+        task = _make_task(
+            workflow="review",
+            workflow_step="code_review",
+            chain_step=True,
+            implementation_branch="feature/test",
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+        task.type = TaskType.REVIEW
+        response = _make_response()
+
+        router.enforce_chain(task, response)
+
+        # No PR task should be queued — code_review has outgoing edges
+        pr_pushes = [
+            call for call in queue.push.call_args_list
+            if call[0][0].type == TaskType.PR_REQUEST
+        ]
+        assert len(pr_pushes) == 0, "PR was queued despite being stuck at non-terminal step"
+
+        # Warning should be logged
+        warning_calls = [
+            call for call in router.logger.warning.call_args_list
+            if "Workflow halted" in str(call)
+        ]
+        assert len(warning_calls) == 1
+
+    def test_queues_pr_at_true_terminal_step(self, router, queue):
+        """Terminal step (create_pr) with no routing → PR IS queued."""
+        router.config.base_id = "architect"
+        router._workflows_config["review"] = REVIEW_WORKFLOW
+        task = _make_task(
+            workflow="review",
+            workflow_step="create_pr",
+            implementation_branch="feature/test",
+        )
+        response = _make_response()
+
+        router.enforce_chain(task, response)
+
+        # create_pr is terminal (no outgoing edges) → PR creation should proceed
+        assert not any(
+            "Workflow halted" in str(call) for call in router.logger.warning.call_args_list
+        ), "Unexpected halt warning at terminal step"
+
+    def test_halts_qa_review_with_no_verdict(self, router, queue):
+        """qa_review with no verdict → chain halts, PR NOT queued."""
+        router.config.base_id = "qa"
+        task = _make_task(
+            workflow="review",
+            workflow_step="qa_review",
+            chain_step=True,
+            implementation_branch="feature/test",
+            _chain_depth=3,
+            _root_task_id="root-2",
+            _global_cycle_count=3,
+        )
+        task.type = TaskType.REVIEW
+        response = _make_response()
+
+        router.enforce_chain(task, response)
+
+        pr_pushes = [
+            call for call in queue.push.call_args_list
+            if call[0][0].type == TaskType.PR_REQUEST
+        ]
+        assert len(pr_pushes) == 0, "PR was queued despite being stuck at qa_review"
+
+        warning_calls = [
+            call for call in router.logger.warning.call_args_list
+            if "Workflow halted" in str(call)
+        ]
+        assert len(warning_calls) == 1

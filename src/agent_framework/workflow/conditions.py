@@ -197,6 +197,32 @@ class FilesMatchCondition(ConditionEvaluator):
         return False
 
 
+class AllFilesMatchCondition(ConditionEvaluator):
+    """True only when ALL changed files match a glob pattern.
+
+    Returns False when changed_files is empty/missing — fail safe, keep QA.
+    """
+
+    def evaluate(self, condition, task, response, routing_signal=None, context=None) -> bool:
+        from pathlib import PurePath
+
+        pattern = condition.params.get("pattern", "")
+        if not pattern:
+            logger.warning("all_files_match condition missing 'pattern' parameter")
+            return False
+
+        changed_files = []
+        if context and "changed_files" in context:
+            changed_files = context["changed_files"]
+        elif task.context and "changed_files" in task.context:
+            changed_files = task.context["changed_files"]
+
+        if not changed_files:
+            return False
+
+        return all(PurePath(f).match(pattern) for f in changed_files)
+
+
 class PRSizeUnderCondition(ConditionEvaluator):
     """True if PR size (number of changed files) is under threshold."""
 
@@ -274,6 +300,7 @@ def _default_evaluators() -> Dict[EdgeConditionType, ConditionEvaluator]:
         EdgeConditionType.TEST_PASSED: TestPassedCondition(),
         EdgeConditionType.TEST_FAILED: TestFailedCondition(),
         EdgeConditionType.FILES_MATCH: FilesMatchCondition(),
+        EdgeConditionType.ALL_FILES_MATCH: AllFilesMatchCondition(),
         EdgeConditionType.PR_SIZE_UNDER: PRSizeUnderCondition(),
         EdgeConditionType.SIGNAL_TARGET: SignalTargetCondition(),
         EdgeConditionType.NO_CHANGES: NoChangesCondition(),

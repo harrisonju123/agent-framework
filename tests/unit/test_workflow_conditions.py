@@ -18,6 +18,7 @@ from agent_framework.workflow.conditions import (
     TestPassedCondition,
     TestFailedCondition,
     FilesMatchCondition,
+    AllFilesMatchCondition,
     PRSizeUnderCondition,
     SignalTargetCondition,
     NoChangesCondition,
@@ -574,3 +575,102 @@ class TestNoChangesCondition:
         response = _make_response()
 
         assert ConditionRegistry.evaluate(condition, task, response) is True
+
+
+class TestAllFilesMatchCondition:
+    """Tests for ALL_FILES_MATCH — true only when every file matches."""
+
+    def test_all_md_files(self):
+        condition = EdgeCondition(
+            EdgeConditionType.ALL_FILES_MATCH, params={"pattern": "*.md"}
+        )
+        task = _make_task()
+        response = _make_response()
+        context = {"changed_files": ["README.md", "docs/guide.md"]}
+
+        evaluator = AllFilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is True
+
+    def test_mixed_files(self):
+        condition = EdgeCondition(
+            EdgeConditionType.ALL_FILES_MATCH, params={"pattern": "*.md"}
+        )
+        task = _make_task()
+        response = _make_response()
+        context = {"changed_files": ["README.md", "src/main.py"]}
+
+        evaluator = AllFilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is False
+
+    def test_no_changed_files_returns_false(self):
+        """Fail safe: no files → False (keep QA)."""
+        condition = EdgeCondition(
+            EdgeConditionType.ALL_FILES_MATCH, params={"pattern": "*.md"}
+        )
+        task = _make_task()
+        response = _make_response()
+
+        evaluator = AllFilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response) is False
+
+    def test_empty_changed_files_returns_false(self):
+        condition = EdgeCondition(
+            EdgeConditionType.ALL_FILES_MATCH, params={"pattern": "*.md"}
+        )
+        task = _make_task()
+        response = _make_response()
+        context = {"changed_files": []}
+
+        evaluator = AllFilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is False
+
+    def test_task_context_fallback(self):
+        """Falls back to task.context when evaluation context missing."""
+        condition = EdgeCondition(
+            EdgeConditionType.ALL_FILES_MATCH, params={"pattern": "*.md"}
+        )
+        task = _make_task(changed_files=["docs/README.md", "CHANGELOG.md"])
+        response = _make_response()
+
+        evaluator = AllFilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response) is True
+
+    def test_nested_path(self):
+        condition = EdgeCondition(
+            EdgeConditionType.ALL_FILES_MATCH, params={"pattern": "*.md"}
+        )
+        task = _make_task()
+        response = _make_response()
+        context = {"changed_files": ["docs/guides/getting-started.md"]}
+
+        evaluator = AllFilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is True
+
+    def test_constructor_requires_pattern(self):
+        """__post_init__ validation rejects missing pattern."""
+        with pytest.raises(ValueError, match="pattern"):
+            EdgeCondition(EdgeConditionType.ALL_FILES_MATCH, params={})
+
+    def test_missing_pattern_returns_false(self):
+        """Evaluator defensively returns False even if validation is bypassed."""
+        # Bypass __post_init__ to test the evaluator's own guard
+        condition = EdgeCondition.__new__(EdgeCondition)
+        condition.type = EdgeConditionType.ALL_FILES_MATCH
+        condition.params = {}
+
+        task = _make_task()
+        response = _make_response()
+        context = {"changed_files": ["README.md"]}
+
+        evaluator = AllFilesMatchCondition()
+        assert evaluator.evaluate(condition, task, response, context=context) is False
+
+    def test_registry_integration(self):
+        condition = EdgeCondition(
+            EdgeConditionType.ALL_FILES_MATCH, params={"pattern": "*.md"}
+        )
+        task = _make_task()
+        response = _make_response()
+        context = {"changed_files": ["README.md"]}
+
+        assert ConditionRegistry.evaluate(condition, task, response, context=context) is True

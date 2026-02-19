@@ -13,6 +13,7 @@ from agent_framework.workspace.worktree_manager import (
     WorktreeConfig,
     WorktreeInfo,
     STALE_ACTIVE_THRESHOLD_SECONDS,
+    MIN_WORKTREE_AGE_SECONDS,
 )
 
 
@@ -509,9 +510,9 @@ class TestActiveWorktreeProtection:
         manager = WorktreeManager(config=config)
 
         now = datetime.now(timezone.utc)
-        # 30 min old — older than the inactive entry, but well within the 2h stale threshold
-        old_ts = (now - timedelta(minutes=30)).isoformat()
-        recent_ts = (now - timedelta(minutes=5)).isoformat()
+        # Past min-age (1h) but under stale threshold (2h) so active flag is respected
+        old_ts = (now - timedelta(hours=1, minutes=30)).isoformat()
+        recent_ts = (now - timedelta(hours=1, minutes=5)).isoformat()
 
         # Oldest entry — but active
         manager._registry["active-old"] = WorktreeInfo(
@@ -593,7 +594,8 @@ class TestActiveWorktreeProtection:
             base_repo="/base", active=True,
         )
 
-        with patch.object(manager, '_save_registry') as mock_save:
+        with patch.object(manager, '_save_registry') as mock_save, \
+             patch.object(manager, '_load_registry'):
             manager.mark_worktree_inactive(wt_path)
 
         assert manager._registry["key1"].active is False
@@ -604,7 +606,8 @@ class TestActiveWorktreeProtection:
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
-        with patch.object(manager, '_save_registry') as mock_save:
+        with patch.object(manager, '_save_registry') as mock_save, \
+             patch.object(manager, '_load_registry'):
             manager.mark_worktree_inactive(tmp_path / "does-not-exist")
 
         mock_save.assert_not_called()
@@ -1386,7 +1389,8 @@ class TestTouchWorktree:
             base_repo="/base", active=True,
         )
 
-        with patch.object(manager, '_save_registry') as mock_save:
+        with patch.object(manager, '_save_registry') as mock_save, \
+             patch.object(manager, '_load_registry'):
             manager.touch_worktree(wt_path)
 
         assert manager._registry["key1"].last_accessed != old_ts
@@ -1398,7 +1402,8 @@ class TestTouchWorktree:
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
-        with patch.object(manager, '_save_registry') as mock_save:
+        with patch.object(manager, '_save_registry') as mock_save, \
+             patch.object(manager, '_load_registry'):
             manager.touch_worktree(tmp_path / "nonexistent")
 
         mock_save.assert_not_called()
@@ -1602,7 +1607,7 @@ class TestProtectedAgentIds:
         manager = WorktreeManager(config=config)
 
         now = datetime.now(timezone.utc)
-        old_ts = (now - timedelta(minutes=5)).isoformat()
+        old_ts = (now - timedelta(hours=2)).isoformat()
 
         # Two worktrees — over the limit of 1
         manager._registry["eng-key"] = WorktreeInfo(
@@ -1939,7 +1944,8 @@ class TestEnforceCapacityDerivesProtected:
         manager = WorktreeManager(config=config)
 
         now = datetime.now(timezone.utc)
-        old_ts = (now - timedelta(minutes=10)).isoformat()
+        # Past min-age (1h) but under stale threshold (2h)
+        old_ts = (now - timedelta(hours=1, minutes=30)).isoformat()
 
         # 3 worktrees (over limit of 2): 2 active, 1 inactive
         manager._registry["eng-key"] = WorktreeInfo(
@@ -2067,3 +2073,165 @@ class TestRemoveDirectoryRecreatesParent:
 
         assert result is True
         assert parent_dir.exists()
+
+
+class TestWorktreeAgeSeconds:
+    """Tests for _worktree_age_seconds() helper."""
+
+    def test_returns_positive_age_for_old_worktree(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        info = WorktreeInfo(
+            path=str(tmp_path / "wt"), branch="b1", agent_id="a1", task_id="t1",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+        )
+        age = manager._worktree_age_seconds(info)
+        assert 7100 < age < 7300  # ~2 hours in seconds
+
+    def test_returns_zero_on_parse_error(self, tmp_path):
+        """Parse error → 0 (conservative, don't evict)."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        info = WorktreeInfo(
+            path=str(tmp_path / "wt"), branch="b1", agent_id="a1", task_id="t1",
+            created_at="not-a-date", last_accessed="not-a-date", base_repo=str(tmp_path),
+        )
+        assert manager._worktree_age_seconds(info) == 0
+
+    def test_handles_naive_datetime(self, tmp_path):
+        """Naive datetime string is treated as UTC."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        # Naive ISO string (no timezone suffix)
+        naive_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S")
+        info = WorktreeInfo(
+            path=str(tmp_path / "wt"), branch="b1", agent_id="a1", task_id="t1",
+            created_at=naive_ts, last_accessed=naive_ts, base_repo=str(tmp_path),
+        )
+        age = manager._worktree_age_seconds(info)
+        assert 3500 < age < 3700
+
+
+class TestMinAgeProtection:
+    """Tests that worktrees younger than MIN_WORKTREE_AGE_SECONDS survive cleanup."""
+
+    def test_young_worktree_survives_orphan_cleanup(self, tmp_path):
+        """Registered worktree < 1h old is never deleted, even if inactive and past max_age."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-young"
+        wt_path.mkdir(parents=True)
+
+        # 10 minutes old — under the 1h minimum
+        recent_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        manager._registry["young-key"] = WorktreeInfo(
+            path=str(wt_path), branch="feature/young", agent_id="engineer",
+            task_id="task-young", created_at=recent_ts, last_accessed=recent_ts,
+            base_repo=str(tmp_path), active=False,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory') as mock_remove, \
+             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0), \
+             patch.object(manager, '_load_registry'):
+            result = manager.cleanup_orphaned_worktrees()
+
+        mock_remove.assert_not_called()
+        assert "young-key" in manager._registry
+        assert result["registered"] == 0
+
+    def test_old_worktree_still_cleaned_up(self, tmp_path):
+        """Registered worktree > 1h old is still cleaned up normally."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_age_hours=0)
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-old"
+        wt_path.mkdir(parents=True)
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        manager._registry["old-key"] = WorktreeInfo(
+            path=str(wt_path), branch="feature/old", agent_id="engineer",
+            task_id="task-old", created_at=old_ts, last_accessed=old_ts,
+            base_repo=str(tmp_path), active=False,
+        )
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch.object(manager, '_remove_worktree_directory', return_value=True), \
+             patch.object(manager, '_cleanup_unregistered_worktrees', return_value=0), \
+             patch.object(manager, '_load_registry'):
+            result = manager.cleanup_orphaned_worktrees()
+
+        assert "old-key" not in manager._registry
+        assert result["registered"] == 1
+
+    def test_young_worktree_survives_capacity_eviction(self, tmp_path):
+        """Inactive worktree < 1h old is not evicted even when over capacity."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees", max_worktrees=1)
+        manager = WorktreeManager(config=config)
+
+        now = datetime.now(timezone.utc)
+        recent_ts = (now - timedelta(minutes=10)).isoformat()
+        old_ts = (now - timedelta(hours=2)).isoformat()
+
+        # 2 worktrees (over limit of 1): both inactive, one young, one old
+        manager._registry["young-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt-young"), branch="b1", agent_id="eng", task_id="t1",
+            created_at=recent_ts, last_accessed=recent_ts, base_repo=str(tmp_path),
+            active=False,
+        )
+        manager._registry["old-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt-old"), branch="b2", agent_id="qa", task_id="t2",
+            created_at=old_ts, last_accessed=old_ts, base_repo=str(tmp_path),
+            active=False,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory', return_value=True), \
+             patch.object(manager, '_load_registry'):
+            manager._enforce_capacity_limit()
+
+        # Young one survives, old one evicted
+        assert "young-key" in manager._registry
+        assert "old-key" not in manager._registry
+
+
+class TestReloadBeforeModify:
+    """Tests that mark_worktree_inactive and touch_worktree reload the registry first."""
+
+    def test_mark_inactive_reloads_registry(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt"
+        ts = datetime.now(timezone.utc).isoformat()
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="a1", task_id="t1",
+            created_at=ts, last_accessed=ts, base_repo=str(tmp_path), active=True,
+        )
+
+        with patch.object(manager, '_load_registry') as mock_load, \
+             patch.object(manager, '_save_registry'):
+            manager.mark_worktree_inactive(wt_path)
+
+        mock_load.assert_called_once()
+
+    def test_touch_worktree_reloads_registry(self, tmp_path):
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt"
+        ts = datetime.now(timezone.utc).isoformat()
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="a1", task_id="t1",
+            created_at=ts, last_accessed=ts, base_repo=str(tmp_path), active=True,
+        )
+
+        with patch.object(manager, '_load_registry') as mock_load, \
+             patch.object(manager, '_save_registry'):
+            manager.touch_worktree(wt_path)
+
+        mock_load.assert_called_once()

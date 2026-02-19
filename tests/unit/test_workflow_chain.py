@@ -1818,11 +1818,12 @@ class TestVerdictStorageAndClearing:
 
         assert task.context.get("verdict") == "preview_approved"
 
-    def test_preview_review_implicit_approval_stores_preview_approved(self, agent, queue):
-        """Architect at preview_review with no explicit keywords → implicit 'preview_approved'.
+    def test_preview_review_ambiguous_does_not_set_verdict(self, agent, queue):
+        """Architect at preview_review with ambiguous output → no verdict stored.
 
-        The else branch must emit 'preview_approved' not 'approved' so the workflow
-        doesn't stall when the architect writes a nuanced response without the verdict keyword.
+        Review steps with ambiguous output should halt the chain rather than
+        default to approval. The preview_review "always" fallback edge will
+        still route to implement via the DAG, but no verdict is recorded.
         """
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         task = _make_task(workflow="preview", workflow_step="preview_review")
@@ -1831,7 +1832,7 @@ class TestVerdictStorageAndClearing:
         agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
-        assert task.context.get("verdict") == "preview_approved"
+        assert "verdict" not in task.context
 
     def test_code_review_approval_still_stores_approved(self, agent, queue):
         """Architect at code_review (not preview_review) still gets verdict='approved'.
@@ -1841,6 +1842,39 @@ class TestVerdictStorageAndClearing:
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         task = _make_task(workflow="default", workflow_step="code_review")
         response = _make_response("VERDICT: APPROVE")
+
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
+
+        assert task.context.get("verdict") == "approved"
+
+    def test_ambiguous_at_code_review_does_not_set_verdict(self, agent, queue):
+        """Ambiguous output at code_review → no verdict, chain will halt."""
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        task = _make_task(workflow="default", workflow_step="code_review")
+        response = _make_response("I reviewed the changes. Some observations noted.")
+
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
+
+        assert "verdict" not in task.context
+
+    def test_ambiguous_at_qa_review_does_not_set_verdict(self, agent, queue):
+        """Ambiguous output at qa_review → no verdict, chain will halt."""
+        agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        task = _make_task(workflow="default", workflow_step="qa_review")
+        response = _make_response("Ran the test suite. Results are inconclusive.")
+
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
+
+        assert "verdict" not in task.context
+
+    def test_ambiguous_at_plan_step_still_sets_approved(self, agent, queue):
+        """Ambiguous output at plan step → verdict='approved' (no regression)."""
+        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        task = _make_task(workflow="default", workflow_step="plan")
+        response = _make_response("Here is the implementation plan for the feature.")
 
         agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)

@@ -19,6 +19,7 @@ class EdgeConditionType(str, Enum):
     SIGNAL_TARGET = "signal_target"  # Use routing signal if present
     NO_CHANGES = "no_changes"  # Task completed with no code changes needed
     PREVIEW_APPROVED = "preview_approved"  # Architect approved an execution preview for implementation
+    ALL_FILES_MATCH = "all_files_match"  # Every changed file matches pattern (e.g. docs-only)
 
 
 @dataclass
@@ -35,6 +36,8 @@ class EdgeCondition:
             raise ValueError("pr_size_under condition requires 'max_files' parameter")
         if self.type == EdgeConditionType.SIGNAL_TARGET and "target" not in self.params:
             raise ValueError("signal_target condition requires 'target' parameter")
+        if self.type == EdgeConditionType.ALL_FILES_MATCH and "pattern" not in self.params:
+            raise ValueError("all_files_match condition requires 'pattern' parameter")
 
 
 @dataclass

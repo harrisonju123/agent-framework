@@ -340,11 +340,16 @@ class GitOperationsManager:
         if not self._active_worktree or not self.worktree_manager:
             return
 
-        # Intermediate chain steps keep worktree active/protected so it survives
-        # eviction during the gap before the next step for this agent
+        # Intermediate steps keep worktree active/protected so it survives
+        # eviction during the gap before the next step picks it up.
+        # Root plan tasks have workflow= but no chain_step= — they still
+        # need the worktree for downstream implement/review/qa steps.
+        has_downstream_steps = not self._is_at_terminal_workflow_step(task)
+        is_subtask = task.parent_task_id is not None
         is_intermediate = (
-            task.context.get("chain_step")
-            and not self._is_at_terminal_workflow_step(task)
+            has_downstream_steps
+            and not is_subtask
+            and (task.context.get("chain_step") or task.context.get("workflow"))
         )
         if is_intermediate:
             self.worktree_manager.touch_worktree(self._active_worktree)

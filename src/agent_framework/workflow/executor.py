@@ -341,10 +341,12 @@ class WorkflowExecutor:
             self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
             return
 
-        # Side-channel: queue QA pre-scan in parallel with code review
+        # Side-channel: queue QA pre-scan in parallel with code review.
+        # Skip for docs-only changes — the workflow edge will route straight to create_pr.
         if (task.context.get("workflow_step") == "implement"
                 and target_step.id == "code_review"):
-            self._queue_qa_pre_scan(task)
+            if not self._is_docs_only_change(task):
+                self._queue_qa_pre_scan(task)
 
     def _is_chain_task_already_queued(
         self, next_agent: str, source_task_id: str, *,
@@ -558,6 +560,17 @@ class WorkflowExecutor:
                 return False
 
         return True
+
+    def _is_docs_only_change(self, task: "Task") -> bool:
+        """True when every changed file is markdown. No git subprocess — uses task context only.
+
+        Keep pattern in sync with the all_files_match edge in agent-framework.yaml.
+        """
+        from pathlib import PurePath
+        changed_files = task.context.get("changed_files") if task.context else None
+        if not changed_files:
+            return False
+        return all(PurePath(f).match("*.md") for f in changed_files)
 
     def _queue_qa_pre_scan(self, task: "Task") -> None:
         """Queue a lightweight QA pre-scan in parallel with code review.

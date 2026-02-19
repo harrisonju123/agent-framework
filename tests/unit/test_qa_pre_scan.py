@@ -549,3 +549,71 @@ class TestRouteToStepTrigger:
         executor._route_to_step(task, target_step, workflow, "architect", None)
 
         executor._queue_qa_pre_scan.assert_not_called()
+
+
+# -- TestIsDocsOnlyChange --
+
+class TestIsDocsOnlyChange:
+    """Tests for _is_docs_only_change() in WorkflowExecutor."""
+
+    def test_all_md_returns_true(self, executor):
+        task = _make_task(changed_files=["README.md", "docs/guide.md"])
+        assert executor._is_docs_only_change(task) is True
+
+    def test_mixed_returns_false(self, executor):
+        task = _make_task(changed_files=["README.md", "src/main.py"])
+        assert executor._is_docs_only_change(task) is False
+
+    def test_missing_key_returns_false(self, executor):
+        task = _make_task()
+        assert executor._is_docs_only_change(task) is False
+
+    def test_empty_list_returns_false(self, executor):
+        task = _make_task(changed_files=[])
+        assert executor._is_docs_only_change(task) is False
+
+
+class TestPreScanDocsOnlySkip:
+    """Integration: pre-scan skipped for docs-only, fires for mixed."""
+
+    def test_prescan_skipped_for_docs_only(self, executor, queue, tmp_path):
+        """Pre-scan NOT queued when all changed files are markdown."""
+        from agent_framework.workflow.dag import WorkflowStep, WorkflowDAG
+
+        task = _make_task(
+            workflow_step="implement",
+            implementation_branch="feature/docs",
+            _root_task_id="root-docs",
+            _chain_depth=1,
+            changed_files=["README.md", "docs/guide.md"],
+        )
+
+        target_step = WorkflowStep(id="code_review", agent="architect")
+        workflow = MagicMock(spec=WorkflowDAG)
+        workflow.steps = {"code_review": target_step}
+
+        executor._queue_qa_pre_scan = MagicMock()
+        executor._route_to_step(task, target_step, workflow, "engineer", None)
+
+        executor._queue_qa_pre_scan.assert_not_called()
+
+    def test_prescan_fires_for_mixed_changes(self, executor, queue, tmp_path):
+        """Pre-scan queued when changed files include non-markdown."""
+        from agent_framework.workflow.dag import WorkflowStep, WorkflowDAG
+
+        task = _make_task(
+            workflow_step="implement",
+            implementation_branch="feature/code",
+            _root_task_id="root-code",
+            _chain_depth=1,
+            changed_files=["README.md", "src/main.py"],
+        )
+
+        target_step = WorkflowStep(id="code_review", agent="architect")
+        workflow = MagicMock(spec=WorkflowDAG)
+        workflow.steps = {"code_review": target_step}
+
+        executor._queue_qa_pre_scan = MagicMock()
+        executor._route_to_step(task, target_step, workflow, "engineer", None)
+
+        executor._queue_qa_pre_scan.assert_called_once_with(task)

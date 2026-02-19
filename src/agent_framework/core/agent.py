@@ -944,7 +944,17 @@ class Agent:
         elif outcome.needs_fix:
             task.context["verdict"] = "needs_fix"
         else:
-            task.context["verdict"] = self._approval_verdict(task)
+            # At review steps, ambiguous outcome should halt the chain
+            # rather than default to "approved" and skip review.
+            _REVIEW_STEP_IDS = PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
+            workflow_step = task.context.get("workflow_step")
+            if workflow_step in _REVIEW_STEP_IDS:
+                self.logger.warning(
+                    f"Ambiguous review outcome at step {workflow_step!r} for "
+                    f"task {task.id} — not setting verdict (chain will halt)"
+                )
+            else:
+                task.context["verdict"] = self._approval_verdict(task)
 
         if (self.config.base_id == "architect"
                 and task.context.get("workflow_step", task.type) in ("plan", "planning")):
@@ -1092,9 +1102,12 @@ class Agent:
 
         # Skip periodic cleanup for intermediate chain steps — only the
         # terminal step (or standalone tasks) should risk evicting worktrees
+        has_downstream_steps = not self._git_ops._is_at_terminal_workflow_step(task)
+        is_subtask = task.parent_task_id is not None
         is_intermediate_chain = (
-            task.context.get("chain_step")
-            and not self._git_ops._is_at_terminal_workflow_step(task)
+            has_downstream_steps
+            and not is_subtask
+            and (task.context.get("chain_step") or task.context.get("workflow"))
         )
         if not is_intermediate_chain:
             self._maybe_run_periodic_worktree_cleanup()

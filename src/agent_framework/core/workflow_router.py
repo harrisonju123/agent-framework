@@ -251,9 +251,16 @@ class WorkflowRouter:
                 context=self.build_workflow_context(task),
             )
 
-            # Terminal step with no routing — check if pr_creator should take over.
             if not routed:
-                self.queue_pr_creation_if_needed(task, workflow_def)
+                if self.is_at_terminal_workflow_step(task):
+                    self.queue_pr_creation_if_needed(task, workflow_def)
+                else:
+                    self.logger.warning(
+                        f"Workflow halted for task {task.id}: no edge matched at "
+                        f"step {task.context.get('workflow_step', 'unknown')} "
+                        f"(verdict={task.context.get('verdict')!r}). "
+                        f"Not at terminal step, skipping PR creation."
+                    )
 
             # Log routing decision
             if routing_signal:

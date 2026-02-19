@@ -33,6 +33,10 @@ DEFAULT_MAX_AGE_HOURS = 24
 # Active worktrees older than this are considered stale (crashed agent) and eligible for eviction
 STALE_ACTIVE_THRESHOLD_SECONDS = 2 * 3600
 
+# Minimum age before any cleanup path can delete a worktree — belt-and-suspenders
+# guard against race conditions where a worktree is incorrectly marked inactive
+MIN_WORKTREE_AGE_SECONDS = 3600
+
 
 @dataclass
 class WorktreeInfo:
@@ -624,12 +628,13 @@ class WorktreeManager:
         keys_to_remove = []
         for key, info in self._registry.items():
             try:
-                # Handle both timezone-aware and naive datetimes
-                last_accessed = datetime.fromisoformat(info.last_accessed)
-                if last_accessed.tzinfo is None:
-                    # Assume UTC for naive datetimes
-                    last_accessed = last_accessed.replace(tzinfo=timezone.utc)
-                age_seconds = (now - last_accessed).total_seconds()
+                age_seconds = self._worktree_age_seconds(info)
+
+                # Never delete worktrees younger than MIN_WORKTREE_AGE_SECONDS
+                # regardless of active/inactive state — guards against race
+                # conditions where a worktree is incorrectly marked inactive
+                if age_seconds < MIN_WORKTREE_AGE_SECONDS:
+                    continue
 
                 if age_seconds > max_age_seconds:
                     # Don't evict worktrees actively in use (unless stale)
@@ -781,10 +786,12 @@ class WorktreeManager:
 
         # Only consider inactive or stale-active worktrees for eviction,
         # and never evict worktrees belonging to agents with active work
+        # or younger than MIN_WORKTREE_AGE_SECONDS
         evictable = [
             (key, info) for key, info in self._registry.items()
             if (not info.active or self._is_stale_active(info))
             and not (protected_agent_ids and info.agent_id in protected_agent_ids)
+            and self._worktree_age_seconds(info) > MIN_WORKTREE_AGE_SECONDS
         ]
 
         # Sort by last_accessed (oldest first)
@@ -810,6 +817,8 @@ class WorktreeManager:
         Called when the agent finishes (success or failure) so the worktree
         becomes eligible for eviction again.
         """
+        # Reload so we don't overwrite another process's active=True with stale data
+        self._load_registry()
         path = Path(path).resolve()
         for key, info in self._registry.items():
             if Path(info.path).resolve() == path:
@@ -824,12 +833,23 @@ class WorktreeManager:
         Used by intermediate chain steps to prevent stale-active eviction
         during the gap before the next step reuses this worktree.
         """
+        self._load_registry()
         path = Path(path).resolve()
         for key, info in self._registry.items():
             if Path(info.path).resolve() == path:
                 info.last_accessed = datetime.now(timezone.utc).isoformat()
                 self._save_registry()
                 return
+
+    def _worktree_age_seconds(self, info: WorktreeInfo) -> float:
+        """Seconds since last access. Returns 0 on parse error (conservative — don't evict)."""
+        try:
+            last_accessed = datetime.fromisoformat(info.last_accessed)
+            if last_accessed.tzinfo is None:
+                last_accessed = last_accessed.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - last_accessed).total_seconds()
+        except (ValueError, OSError):
+            return 0
 
     def _is_stale_active(self, info: WorktreeInfo) -> bool:
         """Check if an active worktree is stale (likely from a crashed agent).
@@ -839,14 +859,7 @@ class WorktreeManager:
         """
         if not info.active:
             return False
-        try:
-            last_accessed = datetime.fromisoformat(info.last_accessed)
-            if last_accessed.tzinfo is None:
-                last_accessed = last_accessed.replace(tzinfo=timezone.utc)
-            age = (datetime.now(timezone.utc) - last_accessed).total_seconds()
-            return age > STALE_ACTIVE_THRESHOLD_SECONDS
-        except (ValueError, OSError):
-            return False
+        return self._worktree_age_seconds(info) > STALE_ACTIVE_THRESHOLD_SECONDS
 
     def _update_last_accessed(self, key: str) -> None:
         """Update last_accessed timestamp for a worktree.
