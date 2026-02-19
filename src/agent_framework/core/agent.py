@@ -114,16 +114,7 @@ class AgentConfig:
 
 _JSON_FENCE_PATTERN = re.compile(r'```json\s*\n(.*?)\n?\s*```', re.DOTALL)
 
-_NO_CHANGES_MAX_LENGTH = 2000  # Genuine "nothing to do" responses are short
-
-_NO_CHANGES_PATTERNS = [
-    re.compile(r'\balready\s+(\w+\s+)?(exists?|merged|implemented|shipped|completed|done)\b', re.IGNORECASE),
-    re.compile(r'\bno\s+(code\s+)?changes?\s+(needed|required|necessary)\b', re.IGNORECASE),
-    re.compile(r'\bnothing\s+to\s+(implement|do|change)\b', re.IGNORECASE),
-    re.compile(r'\bfeature\s+(is\s+)?(already\s+)?(in\s+)?production\b', re.IGNORECASE),
-    re.compile(r'\bno\s+(\w+\s+)?work\s+(needed|required|necessary)\b', re.IGNORECASE),
-    re.compile(r'\balready\s+(\w+\s+)?(handled|addressed|resolved)\b', re.IGNORECASE),
-]
+_NO_CHANGES_MARKER = "[NO_CHANGES_NEEDED]"
 
 
 class Agent:
@@ -909,13 +900,16 @@ class Agent:
 
     @staticmethod
     def _is_no_changes_response(content: str) -> bool:
-        """Detect if response indicates no code changes are needed."""
-        # A substantive plan (2000+ chars) may incidentally mention
-        # "already exists" while describing current state. Only short
-        # responses are genuine "nothing to do" dismissals.
-        if len(content) > _NO_CHANGES_MAX_LENGTH:
+        """Detect if response indicates no code changes are needed.
+
+        Requires the LLM to emit an explicit marker rather than relying
+        on regex over free-text, which is prone to false positives when
+        the planner describes existing state.
+        """
+        if not content:
             return False
-        return any(p.search(content) for p in _NO_CHANGES_PATTERNS)
+        # Marker must appear in the first 200 chars (before any plan body)
+        return _NO_CHANGES_MARKER in content[:200]
 
     def _resolve_budget_ceiling(self, task: Task) -> Optional[float]:
         """Resolve USD budget ceiling from task effort or plan heuristic.

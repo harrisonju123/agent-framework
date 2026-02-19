@@ -1778,11 +1778,11 @@ class TestNoChangesVerdict:
     """Verify no_changes verdict is set at plan step when work is already done."""
 
     def test_no_changes_verdict_set_at_plan_step(self, agent, queue):
-        """Architect at plan step with 'already exists' response → verdict='no_changes'."""
+        """Architect at plan step with [NO_CHANGES_NEEDED] marker → verdict='no_changes'."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="plan")
-        response = _make_response("The feature already exists in production. No changes needed.")
+        response = _make_response("[NO_CHANGES_NEEDED]\nThe feature already exists in production.")
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         agent._extract_and_store_memories = MagicMock()
@@ -1810,7 +1810,7 @@ class TestNoChangesVerdict:
             description="Evaluate whether feature X needs work.",
             context={"workflow": "default"},
         )
-        response = _make_response("The feature already exists in production. No changes needed.")
+        response = _make_response("[NO_CHANGES_NEEDED]\nThe feature already exists in production.")
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         agent._extract_and_store_memories = MagicMock()
@@ -1822,11 +1822,11 @@ class TestNoChangesVerdict:
         assert task.context.get("verdict") == "no_changes"
 
     def test_no_changes_verdict_not_set_at_code_review(self, agent, queue):
-        """Architect at code_review step → no 'no_changes' verdict even with matching text."""
+        """Architect at code_review step → no 'no_changes' verdict even with marker."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="code_review")
-        response = _make_response("Nothing to change, already implemented. Approved.")
+        response = _make_response("[NO_CHANGES_NEEDED]\nNothing to change, already implemented.")
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         agent._extract_and_store_memories = MagicMock()
@@ -1841,7 +1841,7 @@ class TestNoChangesVerdict:
     def test_no_changes_verdict_not_set_for_engineer(self, agent, queue):
         """Engineer at plan step (edge case) → no no_changes verdict."""
         task = _make_task(workflow="default", workflow_step="plan")
-        response = _make_response("Feature already exists. Nothing to implement.")
+        response = _make_response("[NO_CHANGES_NEEDED]\nFeature already exists.")
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         agent._extract_and_store_memories = MagicMock()
@@ -1857,7 +1857,7 @@ class TestNoChangesVerdict:
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="plan")
-        response = _make_response("No engineering work needed — the feature already exists.")
+        response = _make_response("[NO_CHANGES_NEEDED]\nNo engineering work needed.")
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         agent._enforce_workflow_chain = MagicMock()
@@ -1870,67 +1870,57 @@ class TestNoChangesVerdict:
         assert task.context.get("verdict") == "no_changes"
         agent._enforce_workflow_chain.assert_called_once()
 
-    def test_no_changes_pattern_variants(self):
-        """Various 'no changes' phrases are detected by _is_no_changes_response."""
-        phrases = [
-            "The feature already exists in the codebase.",
-            "This has already been merged into main.",
-            "Already implemented in PR #42.",
-            "No code changes needed for this task.",
-            "No changes required — the config is correct.",
-            "There is nothing to implement here.",
-            "Nothing to do — the endpoint already handles this case.",
-            "The feature is already in production.",
-            "Already done in a previous sprint.",
-            "Already shipped as part of the v2 release.",
-            "Already completed by another engineer.",
-            "No engineering work needed.",
-            "No work required for this ticket.",
-            "Already handled by a previous PR.",
-            "Already resolved in main.",
+    def test_no_changes_marker_detected(self):
+        """Responses starting with [NO_CHANGES_NEEDED] marker are detected."""
+        positives = [
+            "[NO_CHANGES_NEEDED]\nThe feature already exists in the codebase.",
+            "[NO_CHANGES_NEEDED]\nAlready shipped as part of the v2 release.",
+            "[NO_CHANGES_NEEDED] No engineering work needed.",
+            "[NO_CHANGES_NEEDED]",
         ]
 
-        for phrase in phrases:
+        for phrase in positives:
             assert Agent._is_no_changes_response(phrase), \
-                f"Failed to detect no-changes in: {phrase}"
+                f"Failed to detect no-changes marker in: {phrase}"
 
-    def test_long_plan_with_already_exists_not_detected_as_no_changes(self):
-        """Long plan that incidentally mentions 'already exist' is NOT no_changes."""
+    def test_no_changes_without_marker_not_detected(self):
+        """Responses WITHOUT the marker are NOT detected, even with 'already exists' text."""
+        negatives = [
+            "The feature already exists in the codebase.",
+            "This has already been merged into main.",
+            "No code changes needed for this task.",
+            "Nothing to implement here.",
+            "Already done in a previous sprint.",
+            "No work required for this ticket.",
+        ]
+
+        for phrase in negatives:
+            assert not Agent._is_no_changes_response(phrase), \
+                f"False positive no-changes (no marker) on: {phrase}"
+
+    def test_no_changes_marker_buried_in_plan_not_detected(self):
+        """Marker buried past 200 chars in a plan body is NOT detected."""
+        plan_text = "## Plan\n" + "x" * 200 + "\n[NO_CHANGES_NEEDED]\nThis is buried."
+        assert not Agent._is_no_changes_response(plan_text), \
+            "Marker after 200 chars should not trigger no_changes"
+
+    def test_p0_scenario_already_exist_no_false_positive(self):
+        """Exact P0 scenario: planner mentions 'already exist' while describing current state."""
         plan_text = (
             "## Plan: Enhance Observability Dashboard\n\n"
-            "### Objectives\n"
-            "1. Add real-time metrics panel\n"
-            "2. Improve data refresh intervals\n\n"
             "### Data Sources (all already exist)\n"
             "- Session logs in /var/log/agent/\n"
-            "- Memory files in .agent-workspaces/\n"
             "- Profile registry already exists in config/\n\n"
             "### Files to Modify\n"
             "1. server.py - add metrics endpoint\n"
-            "2. models.py - add MetricsSnapshot model\n"
-            "3. DashboardPage.vue - new metrics panel component\n"
-            "4. activity.py - aggregate session data\n"
-            "5. styles.css - dashboard layout updates\n\n"
-            "### Approach\n"
-        ) + "Detailed implementation steps...\n" * 100
-        assert len(plan_text) > 2000, "Test precondition: plan must exceed length threshold"
+        )
         assert not Agent._is_no_changes_response(plan_text), \
-            "Long plan with incidental 'already exist' should not trigger no_changes"
+            "Plan with incidental 'already exist' must NOT trigger no_changes"
 
-    def test_no_changes_boundary_at_threshold(self):
-        """Response exactly at the length threshold still gets checked."""
-        from agent_framework.core.agent import _NO_CHANGES_MAX_LENGTH
-        # Pad a matching phrase to exactly the threshold length
-        base = "No code changes needed."
-        padded = base + " " * (_NO_CHANGES_MAX_LENGTH - len(base))
-        assert len(padded) == _NO_CHANGES_MAX_LENGTH
-        assert Agent._is_no_changes_response(padded), \
-            "Response at exactly the threshold should still be checked"
-
-        # One char over the threshold bypasses regex
-        over = padded + "x"
-        assert not Agent._is_no_changes_response(over), \
-            "Response exceeding the threshold should bypass regex"
+    def test_empty_and_none_content(self):
+        """Empty string and edge cases return False."""
+        assert not Agent._is_no_changes_response("")
+        assert not Agent._is_no_changes_response("   ")
 
     def test_normal_plan_not_detected_as_no_changes(self):
         """Normal planning output should NOT trigger no_changes."""
@@ -1999,7 +1989,7 @@ class TestNoChangesRouting:
             _global_cycle_count=0,
         )
 
-        response = _make_response("Feature already exists. Nothing to implement.")
+        response = _make_response("[NO_CHANGES_NEEDED]\nFeature already exists.")
 
         from agent_framework.workflow.conditions import ConditionRegistry
         # Evaluate edges in priority order — no_changes should match

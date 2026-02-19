@@ -139,7 +139,11 @@ Instructions for Architect Agent:
 3. Stop exploring once you have enough context to produce a concrete plan — do not map the entire codebase
 4. Produce a PlanDocument with: objectives, approach (step-by-step), files_to_modify, risks, success_criteria
 5. Store plan in task.plan — the framework routes to Engineer automatically
-{jira_note}"""
+{jira_note}
+
+If you determine that no code changes are needed (feature already fully exists, already shipped, etc.), \
+respond with [NO_CHANGES_NEEDED] as the very first line, followed by a brief explanation. \
+Otherwise, produce the plan as described above."""
 
 
 def _build_analysis_description(
