@@ -293,3 +293,60 @@ class SetupStatusResponse(BaseModel):
     repositories_registered: int
     mcp_enabled: bool
     ready_to_start: bool
+
+
+# Agentic metrics response models (mirrors analytics.agentic_metrics)
+
+class MemoryMetricsResponse(BaseModel):
+    total_recalls: int
+    tasks_with_recall: int
+    avg_chars_injected: float
+    recall_rate: float
+
+
+class SelfEvalMetricsResponse(BaseModel):
+    total_evals: int
+    pass_count: int
+    fail_count: int
+    auto_pass_count: int
+    catch_rate: float
+
+
+class ReplanMetricsResponse(BaseModel):
+    total_replans: int
+    tasks_with_replan: int
+    tasks_completed_after_replan: int
+    trigger_rate: float
+    success_rate_after_replan: float
+
+
+class SpecializationMetricsResponse(BaseModel):
+    distribution: Dict[str, int]
+    total_active_agents: int
+
+
+class DebateMetricsResponse(BaseModel):
+    available: bool
+    note: str
+
+
+class ContextBudgetMetricsResponse(BaseModel):
+    sample_count: int
+    avg_prompt_length: int
+    max_prompt_length: int
+    min_prompt_length: int
+    p50_prompt_length: int
+    p90_prompt_length: int
+
+
+class AgenticMetricsResponse(BaseModel):
+    """API response for /api/agentic-metrics."""
+    generated_at: datetime
+    time_range_hours: int
+    total_observed_tasks: int
+    memory: MemoryMetricsResponse
+    self_eval: SelfEvalMetricsResponse
+    replan: ReplanMetricsResponse
+    specialization: SpecializationMetricsResponse
+    debate: DebateMetricsResponse
+    context_budget: ContextBudgetMetricsResponse
