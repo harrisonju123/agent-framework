@@ -977,6 +977,22 @@ class Agent:
 
         return joined
 
+    def _can_salvage_verdict(self, task: Task, response) -> bool:
+        """Check if a failed response contains a valid review verdict worth salvaging.
+
+        Claude CLI occasionally exits 1 after producing complete output
+        (e.g., cleanup failure after verdict). Salvage rather than retry.
+        """
+        if self.config.base_id not in ("qa", "architect"):
+            return False
+
+        content = getattr(response, "content", "") or ""
+        if len(content) < 200:
+            return False
+
+        outcome = self._review_cycle.parse_review_outcome(content)
+        return outcome.approved or outcome.needs_fix
+
     async def _handle_failed_response(self, task: Task, response) -> None:
         """Handle failed LLM response."""
         from datetime import datetime
@@ -1512,6 +1528,21 @@ class Agent:
             # Handle response
             if response.success:
                 # Populate shared read cache for downstream chain steps
+                self._populate_read_cache(task)
+                await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
+            elif self._can_salvage_verdict(task, response):
+                self.logger.warning(
+                    f"Salvaging task {task.id}: non-zero exit code but output "
+                    f"contains valid review verdict"
+                )
+                self._session_logger.log(
+                    "verdict_salvaged",
+                    task_id=task.id,
+                    original_error=response.error,
+                    content_length=len(response.content or ""),
+                )
+                response.success = True
+                response.finish_reason = "stop"
                 self._populate_read_cache(task)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
