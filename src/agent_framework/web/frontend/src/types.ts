@@ -183,6 +183,13 @@ export interface ContextBudgetMetrics {
   avg_output_token_ratio_pct: number
 }
 
+export interface DebateMetrics {
+  total_debates: number
+  avg_confidence: number
+  debate_usage_rate: number
+  data_available: boolean
+}
+
 export interface AgenticMetrics {
   generated_at: string
   time_range_hours: number
@@ -191,6 +198,7 @@ export interface AgenticMetrics {
   replan: ReplanMetrics
   specialization: SpecializationMetrics
   context_budget: ContextBudgetMetrics
+  debate: DebateMetrics
 }
 
 // Log streaming types

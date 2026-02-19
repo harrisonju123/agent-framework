@@ -214,7 +214,8 @@ def register_routes(app: FastAPI):
         body = {}
         try:
             body = await request.json()
-        except Exception:
+        except (ValueError, UnicodeDecodeError):
+            # Body is optional for cancel — skip it if it can't be parsed
             pass
 
         reason = body.get("reason") if body else None
@@ -655,7 +656,7 @@ def register_routes(app: FastAPI):
 
             return OperationResponse(
                 success=True,
-                task_id=task_id,
+                task_id=task.id,
                 message=f"Analysis queued for {request.repository}"
             )
 

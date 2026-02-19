@@ -336,6 +336,14 @@ class ContextBudgetMetricsData(BaseModel):
     avg_output_token_ratio_pct: float
 
 
+class DebateMetricsData(BaseModel):
+    """Debate system usage and confidence metrics."""
+    total_debates: int
+    avg_confidence: float
+    debate_usage_rate: float
+    data_available: bool
+
+
 class AgenticMetricsResponse(BaseModel):
     """Complete agentic observability report returned by the API."""
     generated_at: datetime
@@ -345,3 +353,4 @@ class AgenticMetricsResponse(BaseModel):
     replan: ReplanMetricsData
     specialization: SpecializationMetricsData
     context_budget: ContextBudgetMetricsData
+    debate: DebateMetricsData

@@ -242,6 +242,43 @@ class TestContextBudgetMetrics:
         assert report.context_budget.avg_output_token_ratio_pct == pytest.approx(33.3, abs=0.1)
 
 
+class TestDebateMetrics:
+    def test_empty_workspace_returns_placeholder(self, metrics):
+        report = metrics.get_report()
+        assert report.debate.total_debates == 0
+        assert report.debate.avg_confidence == 0.0
+        assert report.debate.debate_usage_rate == 0.0
+        assert report.debate.data_available is False
+
+    def test_debate_complete_events_aggregated(self, workspace, metrics):
+        _write_session(workspace, "t1", [
+            {"event": "debate_complete", "confidence": 0.9},
+        ])
+        _write_session(workspace, "t2", [
+            {"event": "debate_complete", "confidence": 0.7},
+        ])
+        _write_stream(workspace, [
+            {"type": "complete", "task_id": "t1"},
+            {"type": "complete", "task_id": "t2"},
+            {"type": "complete", "task_id": "t3"},  # no debate
+        ])
+        report = metrics.get_report()
+        assert report.debate.total_debates == 2
+        assert report.debate.avg_confidence == pytest.approx(0.8, abs=0.01)
+        # 2 tasks with debate / 3 terminal = 66.7%
+        assert report.debate.debate_usage_rate == pytest.approx(66.7, abs=0.1)
+        assert report.debate.data_available is True
+
+    def test_non_debate_events_ignored(self, workspace, metrics):
+        _write_session(workspace, "t1", [
+            {"event": "self_eval", "verdict": "PASS"},
+            {"event": "llm_complete", "tokens_in": 100, "tokens_out": 50},
+        ])
+        report = metrics.get_report()
+        assert report.debate.total_debates == 0
+        assert report.debate.data_available is False
+
+
 class TestCaching:
     def test_second_call_returns_cached_report(self, metrics, workspace):
         # Call twice — second should return cached (same generated_at timestamp)
@@ -260,3 +297,22 @@ class TestCaching:
         # A new report was computed — timestamps may differ if any time passes
         # The key thing is the cache was invalidated (no exception thrown)
         assert r2 is not None
+
+    def test_cache_invalidates_on_hours_change(self, metrics, workspace):
+        """Switching the time window must not serve the old window's cached data."""
+        r24 = metrics.get_report(hours=24)
+        assert r24.time_range_hours == 24
+
+        # Same monotonic time — would hit cache without the hours check
+        r1 = metrics.get_report(hours=1)
+        assert r1.time_range_hours == 1
+
+        # Back to 24h — must re-compute, not return the 1h report
+        r24_again = metrics.get_report(hours=24)
+        assert r24_again.time_range_hours == 24
+
+    def test_same_hours_uses_cache(self, metrics, workspace):
+        r1 = metrics.get_report(hours=6)
+        r2 = metrics.get_report(hours=6)
+        # Same window repeated immediately — should hit cache (same object)
+        assert r1.generated_at == r2.generated_at

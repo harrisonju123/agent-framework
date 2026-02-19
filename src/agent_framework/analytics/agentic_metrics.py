@@ -66,6 +66,19 @@ class ContextBudgetMetrics(BaseModel):
     avg_output_token_ratio_pct: float  # avg (output / (in + out)) across LLM calls
 
 
+class DebateMetrics(BaseModel):
+    """Debate system usage and confidence metrics.
+
+    The debate system runs in the TypeScript MCP layer (mcp-servers/task-queue/src/debate.ts).
+    Until those debate outcomes are written to Python-readable session logs, this model
+    returns zero/empty values so the dashboard panel exists and is ready to populate.
+    """
+    total_debates: int         # number of debate rounds observed
+    avg_confidence: float      # average confidence score across all debates
+    debate_usage_rate: float   # % of terminal tasks that involved a debate
+    data_available: bool       # False until debate logging lands in session logs
+
+
 class AgenticMetricsReport(BaseModel):
     """Complete agentic observability report for the dashboard."""
     generated_at: datetime
@@ -75,6 +88,7 @@ class AgenticMetricsReport(BaseModel):
     replan: ReplanMetrics
     specialization: SpecializationMetrics
     context_budget: ContextBudgetMetrics
+    debate: DebateMetrics
 
 
 class AgenticMetrics:
@@ -102,16 +116,26 @@ class AgenticMetrics:
         # runs in a single-process async server, so this is fine.
         self._cache: Optional[AgenticMetricsReport] = None
         self._cache_at: float = 0.0
+        self._cache_hours: int = -1  # track which time window is cached
 
     def get_report(self, hours: int = 24) -> AgenticMetricsReport:
-        """Return the aggregated report, rebuilding at most once per 30 seconds."""
+        """Return the aggregated report, rebuilding at most once per 30 seconds.
+
+        The cache is keyed on `hours` so switching time windows always returns
+        fresh data rather than serving the previous window's report.
+        """
         now = time.monotonic()
-        if self._cache is not None and (now - self._cache_at) < _CACHE_TTL_SECONDS:
+        if (
+            self._cache is not None
+            and (now - self._cache_at) < _CACHE_TTL_SECONDS
+            and hours == self._cache_hours
+        ):
             return self._cache
 
         report = self._build_report(hours)
         self._cache = report
         self._cache_at = now
+        self._cache_hours = hours
         return report
 
     # ------------------------------------------------------------------ #
@@ -133,6 +157,7 @@ class AgenticMetrics:
             context_budget=self._compute_context_budget_metrics(
                 stream_events, session_events
             ),
+            debate=self._compute_debate_metrics(session_events, stream_events),
         )
 
     # ------------------------------------------------------------------ #
@@ -370,4 +395,55 @@ class AgenticMetrics:
             critical_budget_events=critical_events,
             total_token_budget_warnings=critical_events + budget_exceeded,
             avg_output_token_ratio_pct=avg_util,
+        )
+
+    def _compute_debate_metrics(
+        self,
+        session_events: List[Dict[str, Any]],
+        stream_events: List[Dict[str, Any]],
+    ) -> DebateMetrics:
+        """Aggregate debate system usage from session and stream events.
+
+        The debate system currently runs in the TypeScript MCP layer and does not
+        yet emit debate outcome events to Python-readable session logs. This method
+        reads `debate_complete` events if they exist, and returns a placeholder
+        with data_available=False when none are found — keeping the dashboard panel
+        wired up and ready to populate when debate logging is added.
+        """
+        confidences: List[float] = []
+        tasks_with_debate: set = set()
+
+        for event in session_events:
+            if event.get("event") == "debate_complete":
+                confidence = event.get("confidence")
+                if isinstance(confidence, (int, float)):
+                    confidences.append(float(confidence))
+                task_id = event.get("task_id", "")
+                if task_id:
+                    tasks_with_debate.add(task_id)
+
+        # Compute debate usage rate against terminal tasks from activity stream
+        completed_tasks: set = {
+            e["task_id"]
+            for e in stream_events
+            if e.get("type") == "complete" and e.get("task_id")
+        }
+        failed_tasks: set = {
+            e["task_id"]
+            for e in stream_events
+            if e.get("type") == "fail" and e.get("task_id")
+        }
+        all_terminal = len(completed_tasks | failed_tasks)
+        usage_rate = (
+            (len(tasks_with_debate) / all_terminal * 100) if all_terminal > 0 else 0.0
+        )
+        avg_confidence = (
+            round(sum(confidences) / len(confidences), 2) if confidences else 0.0
+        )
+
+        return DebateMetrics(
+            total_debates=len(confidences),
+            avg_confidence=avg_confidence,
+            debate_usage_rate=round(usage_rate, 1),
+            data_available=len(confidences) > 0,
         )

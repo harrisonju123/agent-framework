@@ -49,6 +49,7 @@ class DashboardDataProvider:
         self._cache_ttl_seconds = 5  # Refresh config/teams every 5 seconds
         self._teams_cache: Optional[List[TeamSessionData]] = None
         self._teams_cache_time: Optional[datetime] = None
+        self._agentic_metrics = None  # lazy-initialized on first request
 
     def _get_agents_config(self) -> List[AgentDefinition]:
         """Get agents config with caching."""
@@ -726,9 +727,10 @@ class DashboardDataProvider:
             ReplanMetricsData,
             SpecializationMetricsData,
             ContextBudgetMetricsData,
+            DebateMetricsData,
         )
 
-        if not hasattr(self, "_agentic_metrics"):
+        if self._agentic_metrics is None:
             self._agentic_metrics = AgenticMetrics(self.workspace)
 
         report = self._agentic_metrics.get_report(hours=hours)
@@ -745,6 +747,7 @@ class DashboardDataProvider:
             context_budget=ContextBudgetMetricsData(
                 **report.context_budget.model_dump()
             ),
+            debate=DebateMetricsData(**report.debate.model_dump()),
         )
 
     def get_active_claude_cli_tasks(self) -> Dict[str, str]:
