@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal, Optional, List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from ..utils.stream_parser import parse_jsonl_to_models
 
@@ -103,6 +103,15 @@ class ActivityEvent(BaseModel):
     task_id: str
     title: str
     timestamp: datetime
+
+    @field_validator("title")
+    @classmethod
+    def truncate_title(cls, v: str) -> str:
+        """Keep stream events compact — full goal lives in task.context["user_goal"]."""
+        max_len = 80
+        if len(v) > max_len:
+            return v[:max_len] + "..."
+        return v
     duration_ms: Optional[int] = None
     retry_count: Optional[int] = None
     phase: Optional[TaskPhase] = None

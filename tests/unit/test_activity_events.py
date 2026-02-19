@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent_framework.core.activity import ActivityEvent, ActivityManager
 from agent_framework.core.agent import Agent
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
@@ -78,3 +79,44 @@ class TestInitializeTaskExecutionRetryEvent:
         event = agent._emitted[0]
         assert event.type == "retry"
         assert event.retry_count == 3
+
+
+class TestActivityEventTitleTruncation:
+    """ActivityEvent.title is capped at 80 chars to keep the stream file compact."""
+
+    def _make_event(self, title: str) -> ActivityEvent:
+        return ActivityEvent(
+            type="start",
+            agent="engineer-1",
+            task_id="task-001",
+            title=title,
+            timestamp=datetime.now(timezone.utc),
+        )
+
+    def test_long_title_truncated(self):
+        long_title = "A" * 120
+        event = self._make_event(long_title)
+        assert len(event.title) == 83  # 80 + "..."
+        assert event.title.endswith("...")
+
+    def test_short_title_unchanged(self):
+        short_title = "Fix login bug"
+        event = self._make_event(short_title)
+        assert event.title == short_title
+
+    def test_exact_boundary_unchanged(self):
+        exact = "B" * 80
+        event = self._make_event(exact)
+        assert event.title == exact
+
+    def test_round_trip_through_stream(self, tmp_path):
+        """Write event with long title to stream, read back, title is truncated."""
+        manager = ActivityManager(tmp_path)
+        long_title = "Plan and delegate: " + "x" * 200
+        event = self._make_event(long_title)
+        manager.append_event(event)
+
+        events = manager.get_recent_events(limit=1)
+        assert len(events) == 1
+        assert len(events[0].title) == 83
+        assert events[0].title.endswith("...")
