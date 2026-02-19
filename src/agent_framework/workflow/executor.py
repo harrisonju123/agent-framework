@@ -433,6 +433,13 @@ class WorkflowExecutor:
         }
         # Clear stale verdict so the next agent's output is evaluated fresh
         context.pop("verdict", None)
+        # Route PR creation to shared clone, not the chain worktree — avoids
+        # marking the worktree inactive and triggering cleanup races.
+        # Pop inherited flag for non-PR steps so it never leaks downstream.
+        if target_step.task_type_override == "pr_request":
+            context["pr_creation_step"] = True
+        else:
+            context.pop("pr_creation_step", None)
         # Thread step-specific instructions into the chain task for prompt injection
         if target_step.instructions is not None:
             context["_step_instructions"] = target_step.instructions

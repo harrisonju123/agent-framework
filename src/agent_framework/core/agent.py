@@ -1078,8 +1078,26 @@ class Agent:
         await self._handle_failure(task)
 
     def _cleanup_task_execution(self, task: Task, lock) -> None:
-        """Cleanup after task execution."""
+        """Cleanup after task execution.
+
+        IDLE is set AFTER worktree cleanup so the agent stays in the
+        protected set during periodic cleanup (prevents race where our
+        worktree gets evicted mid-cleanup).
+        """
         from datetime import datetime
+
+        task_succeeded = task.status == TaskStatus.COMPLETED
+        self._git_ops.sync_worktree_queued_tasks()
+        self._git_ops.cleanup_worktree(task, success=task_succeeded)
+
+        # Skip periodic cleanup for intermediate chain steps — only the
+        # terminal step (or standalone tasks) should risk evicting worktrees
+        is_intermediate_chain = (
+            task.context.get("chain_step")
+            and not self._git_ops._is_at_terminal_workflow_step(task)
+        )
+        if not is_intermediate_chain:
+            self._maybe_run_periodic_worktree_cleanup()
 
         self.activity_manager.update_activity(AgentActivity(
             agent_id=self.config.id,
@@ -1087,14 +1105,19 @@ class Agent:
             last_updated=datetime.now(timezone.utc)
         ))
 
-        task_succeeded = task.status == TaskStatus.COMPLETED
-        self._git_ops.sync_worktree_queued_tasks()
-        self._git_ops.cleanup_worktree(task, success=task_succeeded)
-        self._maybe_run_periodic_worktree_cleanup()
-
         if lock:
             self.queue.release_lock(lock)
         self._current_task_id = None
+
+    def _get_validated_working_directory(self, task: Task) -> Path:
+        """Get working directory with one retry if the path vanishes between creation and use."""
+        working_dir = self._git_ops.get_working_directory(task)
+        if not working_dir.exists():
+            self.logger.warning(f"Working directory vanished, retrying: {working_dir}")
+            working_dir = self._git_ops.get_working_directory(task)
+            if not working_dir.exists():
+                raise RuntimeError(f"Working directory does not exist after retry: {working_dir}")
+        return working_dir
 
     def _maybe_run_periodic_worktree_cleanup(self) -> None:
         """Run orphaned worktree cleanup at most every 2 hours.
@@ -1618,7 +1641,7 @@ class Agent:
             self._initialize_task_execution(task, task_start_time)
 
             # Get working directory for task (worktree, target repo, or framework workspace)
-            working_dir = self._git_ops.get_working_directory(task)
+            working_dir = self._get_validated_working_directory(task)
             self.logger.info(f"Working directory: {working_dir}")
 
             # Index codebase for structural context (cached by commit SHA)
@@ -1720,6 +1743,15 @@ class Agent:
                 # Cleanup failed mid-way. The worktree and activity state may be inconsistent,
                 # but release the lock so the task doesn't stay locked forever.
                 self.logger.error(f"Cleanup failed for task {task.id}, releasing lock directly: {e}")
+                # IDLE may not have been set if cleanup raised before reaching it
+                try:
+                    self.activity_manager.update_activity(AgentActivity(
+                        agent_id=self.config.id,
+                        status=AgentStatus.IDLE,
+                        last_updated=datetime.now(timezone.utc),
+                    ))
+                except Exception:
+                    pass
                 if lock:
                     try:
                         self.queue.release_lock(lock)

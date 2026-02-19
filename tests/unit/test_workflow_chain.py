@@ -2663,3 +2663,222 @@ class TestReviewCycleCounterPropagation:
         target = queue.push.call_args[0][1]
         assert target == "architect"
         assert chain_task.context["workflow_step"] == "create_pr"
+
+
+# -- Worktree race condition fixes --
+
+class TestPRCreationStepInChainBuilder:
+    """Fix 1: _build_chain_task sets pr_creation_step for PR chain tasks."""
+
+    def test_pr_request_step_sets_pr_creation_step(self, queue):
+        """Chain task targeting a pr_request step gets pr_creation_step=True."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="qa_review",
+            _chain_depth=3,
+            _root_task_id="root-1",
+            _global_cycle_count=3,
+        )
+
+        pr_step = WorkflowStep(
+            id="create_pr", agent="architect", task_type_override="pr_request",
+        )
+        chain_task = executor._build_chain_task(task, pr_step, "qa")
+
+        assert chain_task.context["pr_creation_step"] is True
+
+    def test_non_pr_step_does_not_set_pr_creation_step(self, queue):
+        """Chain task targeting a normal step does NOT get pr_creation_step."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            _chain_depth=0,
+            _root_task_id="root-1",
+            _global_cycle_count=0,
+        )
+
+        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        chain_task = executor._build_chain_task(task, engineer_step, "architect")
+
+        assert "pr_creation_step" not in chain_task.context
+
+    def test_pr_creation_step_stripped_from_non_pr_steps(self, queue):
+        """pr_creation_step inherited from source context is popped for non-PR steps."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            pr_creation_step=True,
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+
+        qa_step = WorkflowStep(id="qa_review", agent="qa")
+        chain_task = executor._build_chain_task(task, qa_step, "engineer")
+
+        assert "pr_creation_step" not in chain_task.context
+
+
+class TestCleanupTaskExecutionOrdering:
+    """Fix 2 & 3: IDLE set after cleanup, periodic cleanup skipped for intermediate steps."""
+
+    @pytest.fixture
+    def cleanup_agent(self, queue, tmp_path):
+        """Minimal agent with enough wiring for _cleanup_task_execution."""
+        from agent_framework.core.activity import AgentStatus, AgentActivity, ActivityManager
+
+        config = AgentConfig(id="engineer", name="Engineer", queue="engineer", prompt="p")
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.queue = queue
+        a.workspace = tmp_path
+        a.logger = MagicMock()
+        a._current_task_id = "task-1"
+        a.worktree_manager = MagicMock()
+        a._last_worktree_cleanup = 0
+
+        # Track the order of calls to verify IDLE happens after cleanup
+        call_order = []
+
+        # Activity manager mock that records when IDLE is set
+        activity_mgr = MagicMock(spec=ActivityManager)
+        def record_update(activity):
+            if activity.status == AgentStatus.IDLE:
+                call_order.append("idle")
+        activity_mgr.update_activity.side_effect = record_update
+        a.activity_manager = activity_mgr
+
+        # Git ops mock that records cleanup calls
+        a._git_ops = MagicMock()
+        def record_cleanup(*args, **kwargs):
+            call_order.append("cleanup_worktree")
+        a._git_ops.cleanup_worktree.side_effect = record_cleanup
+
+        a._workflows_config = {"default": DEFAULT_WORKFLOW}
+
+        # Store call_order on agent for assertions
+        a._test_call_order = call_order
+        return a
+
+    def test_idle_set_after_worktree_cleanup(self, cleanup_agent, queue):
+        """Agent stays WORKING during cleanup — IDLE is set after cleanup_worktree."""
+        task = _make_task(workflow="default")
+        task.status = TaskStatus.COMPLETED
+
+        cleanup_agent._cleanup_task_execution(task, lock=None)
+
+        order = cleanup_agent._test_call_order
+        assert "cleanup_worktree" in order
+        assert "idle" in order
+        assert order.index("cleanup_worktree") < order.index("idle")
+
+    def test_periodic_cleanup_skipped_for_intermediate_chain_step(self, cleanup_agent):
+        """Intermediate chain steps skip periodic worktree cleanup entirely."""
+        task = _make_task(
+            workflow="default",
+            chain_step=True,
+            workflow_step="implement",
+        )
+        task.status = TaskStatus.COMPLETED
+
+        # _is_at_terminal_workflow_step returns False for intermediate steps
+        cleanup_agent._git_ops._is_at_terminal_workflow_step.return_value = False
+
+        cleanup_agent._maybe_run_periodic_worktree_cleanup = MagicMock()
+        cleanup_agent._cleanup_task_execution(task, lock=None)
+
+        cleanup_agent._maybe_run_periodic_worktree_cleanup.assert_not_called()
+
+    def test_periodic_cleanup_runs_for_terminal_chain_step(self, cleanup_agent):
+        """Terminal chain steps do run periodic worktree cleanup."""
+        task = _make_task(
+            workflow="default",
+            chain_step=True,
+            workflow_step="qa_review",
+        )
+        task.status = TaskStatus.COMPLETED
+
+        cleanup_agent._git_ops._is_at_terminal_workflow_step.return_value = True
+
+        cleanup_agent._maybe_run_periodic_worktree_cleanup = MagicMock()
+        cleanup_agent._cleanup_task_execution(task, lock=None)
+
+        cleanup_agent._maybe_run_periodic_worktree_cleanup.assert_called_once()
+
+    def test_periodic_cleanup_runs_for_standalone_tasks(self, cleanup_agent):
+        """Non-chain tasks always run periodic cleanup."""
+        task = _make_task(workflow="default")
+        task.status = TaskStatus.COMPLETED
+
+        cleanup_agent._maybe_run_periodic_worktree_cleanup = MagicMock()
+        cleanup_agent._cleanup_task_execution(task, lock=None)
+
+        cleanup_agent._maybe_run_periodic_worktree_cleanup.assert_called_once()
+
+
+class TestWorkingDirectoryValidation:
+    """Fix 4: _get_validated_working_directory retries when path vanishes."""
+
+    @pytest.fixture
+    def validated_agent(self, queue, tmp_path):
+        """Minimal agent for testing _get_validated_working_directory."""
+        config = AgentConfig(id="engineer", name="Engineer", queue="engineer", prompt="p")
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.logger = MagicMock()
+        a._git_ops = MagicMock()
+        a._get_validated_working_directory = Agent._get_validated_working_directory.__get__(a)
+        return a
+
+    def test_returns_existing_directory(self, validated_agent, tmp_path):
+        """Happy path — directory exists on first call."""
+        real_dir = tmp_path / "work"
+        real_dir.mkdir()
+        validated_agent._git_ops.get_working_directory.return_value = real_dir
+
+        task = _make_task(workflow="default")
+        result = validated_agent._get_validated_working_directory(task)
+
+        assert result == real_dir
+        assert validated_agent._git_ops.get_working_directory.call_count == 1
+
+    def test_retries_when_working_dir_vanishes(self, validated_agent, tmp_path):
+        """When working dir doesn't exist on first call, retries once."""
+        vanished_dir = tmp_path / "vanished"
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+
+        validated_agent._git_ops.get_working_directory.side_effect = [vanished_dir, real_dir]
+
+        task = _make_task(workflow="default")
+        result = validated_agent._get_validated_working_directory(task)
+
+        assert result == real_dir
+        assert validated_agent._git_ops.get_working_directory.call_count == 2
+        validated_agent.logger.warning.assert_called_once_with(
+            f"Working directory vanished, retrying: {vanished_dir}"
+        )
+
+    def test_raises_when_working_dir_vanishes_permanently(self, validated_agent, tmp_path):
+        """When working dir doesn't exist after retry, raises RuntimeError."""
+        vanished_dir = tmp_path / "vanished"
+        validated_agent._git_ops.get_working_directory.return_value = vanished_dir
+
+        task = _make_task(workflow="default")
+        with pytest.raises(RuntimeError, match="does not exist after retry"):
+            validated_agent._get_validated_working_directory(task)
+
+        assert validated_agent._git_ops.get_working_directory.call_count == 2
