@@ -41,6 +41,7 @@ from .models import (
     SetupConfiguration,
     SetupStatusResponse,
     TeamSessionData,
+    AgenticMetricsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -307,6 +308,20 @@ def register_routes(app: FastAPI):
     async def get_health():
         """Get system health status."""
         return app.state.data_provider.get_health_status()
+
+    @app.get("/api/agentic-metrics", response_model=AgenticMetricsResponse)
+    async def get_agentic_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """
+        Aggregate agentic feature metrics from session logs.
+
+        Scans per-task JSONL session logs for memory recall, self-evaluation,
+        replanning, and context budget events. Results are computed on demand
+        and suitable for polling at ~30s intervals.
+        """
+        from ..analytics.agentic_metrics import AgenticMetrics
+        collector = AgenticMetrics(app.state.workspace)
+        report = collector.generate_report(hours=hours)
+        return AgenticMetricsResponse(**report.model_dump())
 
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():
