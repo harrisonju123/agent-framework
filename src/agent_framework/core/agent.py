@@ -1018,7 +1018,7 @@ class Agent:
         outcome = self._review_cycle.parse_review_outcome(content)
         return outcome.approved or outcome.needs_fix
 
-    async def _handle_failed_response(self, task: Task, response) -> None:
+    async def _handle_failed_response(self, task: Task, response, *, working_dir: Optional[Path] = None) -> None:
         """Handle failed LLM response."""
         from datetime import datetime
 
@@ -1029,6 +1029,16 @@ class Agent:
             summary = self._extract_partial_progress(response.content)
             if summary:
                 task.context["_previous_attempt_summary"] = summary
+
+        # Capture git state from worktree so retry knows what code was written
+        if working_dir and working_dir.exists():
+            try:
+                git_evidence = self._error_recovery.gather_git_evidence(working_dir)
+                if git_evidence:
+                    task.context["_previous_attempt_git_diff"] = git_evidence
+                    self.logger.debug(f"Captured {len(git_evidence)} chars of git evidence for retry")
+            except Exception as e:
+                self.logger.debug(f"Git evidence capture failed (non-fatal): {e}")
 
         # Log detailed error information for debugging
         self.logger.error(
@@ -1400,6 +1410,20 @@ class Agent:
             await self._auto_commit_wip(task, working_dir, count)
 
             self.llm.cancel()
+
+            # Harvest partial output before cancelling the task — mirrors interruption path
+            try:
+                partial = self.llm.get_partial_output()
+                if partial:
+                    summary = self._extract_partial_progress(partial)
+                    if summary:
+                        task.context["_previous_attempt_summary"] = summary
+                        self.logger.debug(
+                            f"Preserved {len(summary)} chars of partial progress from circuit breaker"
+                        )
+            except Exception as e:
+                self.logger.debug(f"Partial output harvest failed (non-fatal): {e}")
+
             llm_task.cancel()
             watcher_task.cancel()
             for t in [llm_task, watcher_task]:
@@ -1638,7 +1662,7 @@ class Agent:
                 self._populate_read_cache(task)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
-                await self._handle_failed_response(task, response)
+                await self._handle_failed_response(task, response, working_dir=working_dir)
 
         except Exception as e:
             task.last_error = str(e)
@@ -1665,6 +1689,14 @@ class Agent:
                     f"Post-completion error for task {task.id} (already completed): {e}"
                 )
             else:
+                # Capture git state before retry so next attempt knows what was written
+                if working_dir and working_dir.exists():
+                    try:
+                        git_evidence = self._error_recovery.gather_git_evidence(working_dir)
+                        if git_evidence:
+                            task.context["_previous_attempt_git_diff"] = git_evidence
+                    except Exception:
+                        pass
                 await self._handle_failure(task)
 
         finally:

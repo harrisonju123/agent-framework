@@ -83,6 +83,40 @@ def _llm_response(content: str, success: bool = True):
     )
 
 
+class TestGatherGitEvidence:
+    """Test public gather_git_evidence method."""
+
+    @patch("agent_framework.core.error_recovery.run_git_command")
+    def test_returns_formatted_evidence(self, mock_git):
+        """Formats diff stat + diff into markdown sections."""
+        mock_git.side_effect = [
+            MagicMock(stdout=" src/auth.py | 10 ++++\n 1 file changed"),
+            MagicMock(stdout="+def authenticate(token):\n+    return True"),
+        ]
+        manager = _make_manager()
+        result = manager.gather_git_evidence(Path("/tmp/repo"))
+
+        assert "Git Diff" in result
+        assert "src/auth.py" in result
+        assert "+def authenticate" in result
+
+    @patch("agent_framework.core.error_recovery.run_git_command")
+    def test_returns_empty_on_clean_worktree(self, mock_git):
+        """No changes → empty string."""
+        mock_git.return_value = MagicMock(stdout="")
+        manager = _make_manager()
+        result = manager.gather_git_evidence(Path("/tmp/repo"))
+        assert result == ""
+
+    @patch("agent_framework.core.error_recovery.run_git_command")
+    def test_returns_empty_on_error(self, mock_git):
+        """Git errors → empty string (non-fatal)."""
+        mock_git.side_effect = RuntimeError("not a git repo")
+        manager = _make_manager()
+        result = manager.gather_git_evidence(Path("/tmp/bad"))
+        assert result == ""
+
+
 class TestHandleFailure:
     @pytest.mark.asyncio
     async def test_resets_task_when_retries_remaining(self):

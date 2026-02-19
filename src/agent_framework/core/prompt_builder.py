@@ -1258,15 +1258,32 @@ If a tool call fails:
             sections.append(prev_summary)
             sections.append("")
 
-        if task.last_error and task.last_error.startswith("Interrupted"):
-            sections.append(
-                "Do NOT restart from scratch. The previous attempt was interrupted "
-                "before completion. Continue from the progress above."
-            )
+        # Git diff from the previous attempt's worktree
+        prev_git_diff = task.context.get("_previous_attempt_git_diff")
+        if prev_git_diff:
+            sections.append("### Code Changes From Previous Attempt")
+            sections.append(prev_git_diff)
+            sections.append("")
+
+        has_progress = bool(prev_summary) or bool(prev_git_diff)
+
+        if has_progress:
+            if task.last_error and task.last_error.startswith("Interrupted"):
+                sections.append(
+                    "Do NOT restart from scratch. The previous attempt was interrupted "
+                    "before completion. Continue from the progress above."
+                )
+            else:
+                sections.append(
+                    "Do NOT restart from scratch. Continue from the progress above, "
+                    "fixing the error that caused the previous attempt to fail."
+                )
         else:
             sections.append(
-                "Do NOT restart from scratch. Continue from the progress above, "
-                "fixing the error that caused the previous attempt to fail."
+                "Do NOT restart from scratch. The previous attempt wrote code but the "
+                "progress could not be captured in this prompt. Run `git log --oneline -10` "
+                "and `git diff HEAD~1` in your working directory to see what was already done, "
+                "then continue from there."
             )
 
         # Disambiguate upstream context if present

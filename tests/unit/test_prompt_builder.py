@@ -430,16 +430,73 @@ class TestPromptInjections:
         assert "interrupted before completion" in result
         assert "fixing the error" not in result
 
-    def test_inject_retry_context_error_wording_unchanged(self, prompt_builder, sample_task):
-        """Non-interruption errors still get the 'fix the error' wording."""
+    def test_inject_retry_context_error_wording_with_progress(self, prompt_builder, sample_task):
+        """Non-interruption errors with progress get the 'fix the error' wording."""
         sample_task.retry_count = 1
         sample_task.last_error = "Connection refused at line 42"
+        sample_task.context["_previous_attempt_summary"] = "Started writing module"
 
         prompt = "Base prompt"
         result = prompt_builder._inject_retry_context(prompt, sample_task)
 
         assert "fixing the error" in result
         assert "interrupted before completion" not in result
+
+    def test_inject_retry_context_includes_git_diff(self, prompt_builder, sample_task):
+        """Git diff from previous attempt is injected into retry context."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Circuit breaker tripped"
+        sample_task.context["_previous_attempt_git_diff"] = (
+            "## Git Diff (actual code changes)\n"
+            "### Summary\n```\n src/auth.py | 42 ++++\n```\n"
+            "### Diff\n```\n+def authenticate(token):\n```"
+        )
+
+        result = prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        assert "Code Changes From Previous Attempt" in result
+        assert "src/auth.py" in result
+        assert "Do NOT restart from scratch" in result
+        # With git diff present, should NOT show the "run git log" fallback
+        assert "git log --oneline" not in result
+
+    def test_inject_retry_context_git_diff_only(self, prompt_builder, sample_task):
+        """Git diff alone (no partial output) still counts as 'has progress'."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Circuit breaker tripped"
+        sample_task.context["_previous_attempt_git_diff"] = "## Git Diff\n```\n+code\n```"
+
+        result = prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        assert "Continue from the progress above" in result
+        assert "git log --oneline" not in result
+
+    def test_inject_retry_context_no_progress_fallback(self, prompt_builder, sample_task):
+        """No partial output and no git diff triggers the 'run git log' fallback."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Circuit breaker tripped"
+        # Neither _previous_attempt_summary nor _previous_attempt_git_diff set
+
+        result = prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        assert "git log --oneline -10" in result
+        assert "git diff HEAD~1" in result
+        assert "progress could not be captured" in result
+
+    def test_inject_retry_context_both_sources(self, prompt_builder, sample_task):
+        """Both partial output and git diff are included together."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Some error"
+        sample_task.context["_previous_attempt_summary"] = "Started writing auth module"
+        sample_task.context["_previous_attempt_git_diff"] = "## Git Diff\n```\n+def auth():\n```"
+
+        result = prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        assert "Progress From Previous Attempt" in result
+        assert "Started writing auth module" in result
+        assert "Code Changes From Previous Attempt" in result
+        assert "+def auth():" in result
+        assert "Continue from the progress above" in result
 
 
 class TestStructuredFindings:

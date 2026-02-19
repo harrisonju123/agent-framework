@@ -223,7 +223,7 @@ class ErrorRecoveryManager:
                 continue
         return "", ""
 
-    def _gather_git_evidence(self, working_dir: Path) -> str:
+    def gather_git_evidence(self, working_dir: Path) -> str:
         """Collect git diff evidence for self-evaluation.
 
         Returns a formatted string with diff stat and full diff (truncated),
@@ -272,7 +272,7 @@ class ErrorRecoveryManager:
         response_preview = response.content[:4000] if response.content else ""
 
         # Gather objective evidence
-        git_evidence = self._gather_git_evidence(working_dir) if working_dir else ""
+        git_evidence = self.gather_git_evidence(working_dir) if working_dir else ""
         if test_passed is True:
             test_section = "## Test Results\nPASSED"
         elif test_passed is False:

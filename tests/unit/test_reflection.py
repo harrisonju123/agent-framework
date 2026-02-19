@@ -54,7 +54,7 @@ def _make_agent(**overrides):
     # So we bind the ErrorRecoveryManager.self_evaluate method instead
     error_recovery = MagicMock()
     error_recovery.self_evaluate = ErrorRecoveryManager.self_evaluate.__get__(error_recovery)
-    error_recovery._gather_git_evidence = ErrorRecoveryManager._gather_git_evidence.__get__(error_recovery)
+    error_recovery.gather_git_evidence = ErrorRecoveryManager.gather_git_evidence.__get__(error_recovery)
     error_recovery._try_diff_strategies = ErrorRecoveryManager._try_diff_strategies.__get__(error_recovery)
     error_recovery._self_eval_max_retries = overrides.get("max_retries", 2)
     error_recovery._self_eval_model = overrides.get("model", "haiku")
@@ -216,9 +216,9 @@ class TestGatherGitEvidence:
         ]
 
         er = MagicMock()
-        er._gather_git_evidence = ErrorRecoveryManager._gather_git_evidence.__get__(er)
+        er.gather_git_evidence = ErrorRecoveryManager.gather_git_evidence.__get__(er)
         er._try_diff_strategies = ErrorRecoveryManager._try_diff_strategies.__get__(er)
-        result = er._gather_git_evidence(Path("/tmp/repo"))
+        result = er.gather_git_evidence(Path("/tmp/repo"))
 
         assert "Git Diff" in result
         assert "file.py" in result
@@ -233,9 +233,9 @@ class TestGatherGitEvidence:
         mock_git.side_effect = RuntimeError("not a git repo")
 
         er = MagicMock()
-        er._gather_git_evidence = ErrorRecoveryManager._gather_git_evidence.__get__(er)
+        er.gather_git_evidence = ErrorRecoveryManager.gather_git_evidence.__get__(er)
         er._try_diff_strategies = ErrorRecoveryManager._try_diff_strategies.__get__(er)
-        result = er._gather_git_evidence(Path("/tmp/bad"))
+        result = er.gather_git_evidence(Path("/tmp/bad"))
 
         assert result == ""
 

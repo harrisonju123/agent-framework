@@ -362,3 +362,62 @@ class TestCircuitBreakerConfig:
         from agent_framework.core.config import SafeguardsConfig
         cfg = SafeguardsConfig(max_consecutive_tool_calls=25)
         assert cfg.max_consecutive_tool_calls == 25
+
+
+class TestCircuitBreakerPartialOutput:
+    """Circuit breaker harvests partial LLM output before killing the session."""
+
+    @pytest.mark.asyncio
+    async def test_captures_partial_output_on_trip(self, agent, task):
+        """Partial progress is stored in task context when circuit breaker fires."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        # Override get_partial_output to return meaningful content
+        agent.llm.get_partial_output.return_value = (
+            "I analyzed the auth module and found:\n"
+            "[Tool Call: Read src/auth.py]\n"
+            "The existing implementation uses session-based auth.\n"
+            "I'll refactor to JWT-based tokens."
+        )
+        agent._extract_partial_progress = Agent._extract_partial_progress
+
+        for _ in range(5):
+            on_tool("Bash", "git status")
+
+        await asyncio.wait_for(result_task, timeout=5.0)
+
+        assert "_previous_attempt_summary" in task.context
+        summary = task.context["_previous_attempt_summary"]
+        # Tool call noise should be filtered out
+        assert "[Tool Call:" not in summary
+        assert "auth" in summary.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_partial_output_leaves_context_empty(self, agent, task):
+        """Empty partial output does not populate _previous_attempt_summary."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        agent.llm.get_partial_output.return_value = ""
+
+        for _ in range(5):
+            on_tool("Bash", "git status")
+
+        await asyncio.wait_for(result_task, timeout=5.0)
+
+        assert "_previous_attempt_summary" not in task.context
+
+    @pytest.mark.asyncio
+    async def test_partial_output_exception_non_fatal(self, agent, task):
+        """get_partial_output raising does not prevent circuit breaker response."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        agent.llm.get_partial_output.side_effect = RuntimeError("buffer gone")
+
+        for _ in range(5):
+            on_tool("Bash", "git status")
+
+        result = await asyncio.wait_for(result_task, timeout=5.0)
+
+        # Should still return the circuit breaker response
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"
