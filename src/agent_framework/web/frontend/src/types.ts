@@ -166,6 +166,9 @@ export interface MemoryMetrics {
   tasks_with_recall: number
   avg_chars_injected: number
   recall_rate: number
+  completion_rate_with_recall: number
+  completion_rate_without_recall: number
+  recall_usefulness_delta: number
 }
 
 export interface SelfEvalMetrics {
@@ -191,7 +194,11 @@ export interface SpecializationMetrics {
 
 export interface DebateMetrics {
   available: boolean
-  note: string
+  total_debates: number
+  successful_debates: number
+  confidence_distribution: Record<string, number>
+  success_rate: number
+  avg_trade_offs_count: number
 }
 
 export interface ContextBudgetMetrics {
@@ -201,6 +208,15 @@ export interface ContextBudgetMetrics {
   min_prompt_length: number
   p50_prompt_length: number
   p90_prompt_length: number
+}
+
+export interface TrendBucket {
+  timestamp: string
+  memory_recall_rate: number
+  self_eval_catch_rate: number
+  replan_trigger_rate: number
+  avg_prompt_length: number
+  task_count: number
 }
 
 export interface AgenticMetricsReport {
@@ -213,5 +229,6 @@ export interface AgenticMetricsReport {
   specialization: SpecializationMetrics
   debate: DebateMetrics
   context_budget: ContextBudgetMetrics
+  trends: TrendBucket[]
 }
 

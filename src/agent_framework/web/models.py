@@ -302,6 +302,9 @@ class MemoryMetricsResponse(BaseModel):
     tasks_with_recall: int
     avg_chars_injected: float
     recall_rate: float
+    completion_rate_with_recall: float = 0.0
+    completion_rate_without_recall: float = 0.0
+    recall_usefulness_delta: float = 0.0
 
 
 class SelfEvalMetricsResponse(BaseModel):
@@ -327,7 +330,11 @@ class SpecializationMetricsResponse(BaseModel):
 
 class DebateMetricsResponse(BaseModel):
     available: bool
-    note: str
+    total_debates: int = 0
+    successful_debates: int = 0
+    confidence_distribution: Dict[str, int] = {}
+    success_rate: float = 0.0
+    avg_trade_offs_count: float = 0.0
 
 
 class ContextBudgetMetricsResponse(BaseModel):
@@ -337,6 +344,15 @@ class ContextBudgetMetricsResponse(BaseModel):
     min_prompt_length: int
     p50_prompt_length: int
     p90_prompt_length: int
+
+
+class TrendBucketResponse(BaseModel):
+    timestamp: datetime
+    memory_recall_rate: float
+    self_eval_catch_rate: float
+    replan_trigger_rate: float
+    avg_prompt_length: int
+    task_count: int
 
 
 class AgenticMetricsResponse(BaseModel):
@@ -350,3 +366,4 @@ class AgenticMetricsResponse(BaseModel):
     specialization: SpecializationMetricsResponse
     debate: DebateMetricsResponse
     context_budget: ContextBudgetMetricsResponse
+    trends: List[TrendBucketResponse] = []

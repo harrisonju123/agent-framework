@@ -1,6 +1,7 @@
 """Tests for the AgenticMetrics session-log aggregator."""
 
 import json
+import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ def workspace(tmp_path: Path) -> Path:
     """Workspace with the standard directory layout."""
     (tmp_path / "logs" / "sessions").mkdir(parents=True)
     (tmp_path / ".agent-communication" / "activity").mkdir(parents=True)
+    (tmp_path / ".agent-communication" / "debates").mkdir(parents=True)
     return tmp_path
 
 
@@ -32,6 +34,29 @@ def _now_iso() -> str:
 
 def _old_iso(hours: int = 48) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
+def _write_debate(
+    workspace: Path,
+    debate_id: str,
+    success: bool = True,
+    confidence: str = "high",
+    trade_offs: list[str] | None = None,
+) -> Path:
+    """Write a debate JSON file and return its path."""
+    path = workspace / ".agent-communication" / "debates" / f"{debate_id}.json"
+    data = {
+        "topic": f"Test debate {debate_id}",
+        "success": success,
+        "synthesis": {
+            "recommendation": "Use approach A",
+            "confidence": confidence,
+            "trade_offs": trade_offs or [],
+            "reasoning": "Test reasoning",
+        },
+    }
+    path.write_text(json.dumps(data))
+    return path
 
 
 class TestMemoryMetrics:
@@ -185,6 +210,126 @@ class TestSpecializationDistribution:
         assert report.specialization.distribution == {}
 
 
+class TestDebateMetrics:
+    def test_no_debates_dir_returns_unavailable(self, tmp_path):
+        """Missing debates directory → available=False."""
+        (tmp_path / "logs" / "sessions").mkdir(parents=True)
+        (tmp_path / ".agent-communication" / "activity").mkdir(parents=True)
+        # No debates dir created
+        report = AgenticMetrics(tmp_path).generate_report(hours=24)
+        assert not report.debate.available
+
+    def test_empty_debates_dir(self, workspace):
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.debate.available
+        assert report.debate.total_debates == 0
+        assert report.debate.success_rate == 0.0
+
+    def test_counts_and_confidence(self, workspace):
+        _write_debate(workspace, "d1", success=True, confidence="high", trade_offs=["perf", "complexity"])
+        _write_debate(workspace, "d2", success=True, confidence="medium", trade_offs=["readability"])
+        _write_debate(workspace, "d3", success=False, confidence="low", trade_offs=[])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        d = report.debate
+        assert d.total_debates == 3
+        assert d.successful_debates == 2
+        assert d.confidence_distribution == {"high": 1, "medium": 1, "low": 1}
+        assert d.success_rate == pytest.approx(0.667, abs=0.001)
+        assert d.avg_trade_offs_count == 1.0
+
+    def test_old_debates_excluded_by_mtime(self, workspace):
+        path = _write_debate(workspace, "old", success=True, confidence="high", trade_offs=["x"])
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=72)).timestamp()
+        os.utime(path, (old_time, old_time))
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.debate.total_debates == 0
+
+
+class TestMemoryUsefulness:
+    def test_positive_delta(self, workspace):
+        """Tasks with recall complete more often than tasks without."""
+        # 2 tasks with recall: both complete
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "memory_recall", "task_id": "t1", "chars_injected": 100},
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t1"},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "memory_recall", "task_id": "t2", "chars_injected": 200},
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t2"},
+        ])
+        # 2 tasks without recall: 1 completes, 1 fails
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t3"},
+        ])
+        _write_session(workspace, "t4", [
+            {"ts": _now_iso(), "event": "task_failed", "task_id": "t4"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.memory.completion_rate_with_recall == 1.0
+        assert report.memory.completion_rate_without_recall == 0.5
+        assert report.memory.recall_usefulness_delta == 0.5
+
+    def test_zero_delta_both_complete(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "memory_recall", "task_id": "t1", "chars_injected": 100},
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t1"},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t2"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.memory.recall_usefulness_delta == 0.0
+
+    def test_no_data_returns_zeros(self, workspace):
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.memory.completion_rate_with_recall == 0.0
+        assert report.memory.completion_rate_without_recall == 0.0
+        assert report.memory.recall_usefulness_delta == 0.0
+
+
+class TestTrends:
+    def test_empty_returns_empty_list(self, workspace):
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.trends == []
+
+    def test_events_bucketed_by_hour(self, workspace):
+        now = datetime.now(timezone.utc)
+        hour_ago = now - timedelta(hours=1)
+
+        _write_session(workspace, "t1", [
+            {"ts": now.isoformat(), "event": "memory_recall", "task_id": "t1", "chars_injected": 100},
+            {"ts": now.isoformat(), "event": "prompt_built", "task_id": "t1", "prompt_length": 5000},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": hour_ago.isoformat(), "event": "self_eval", "task_id": "t2", "verdict": "FAIL"},
+            {"ts": hour_ago.isoformat(), "event": "self_eval", "task_id": "t2", "verdict": "PASS"},
+            {"ts": hour_ago.isoformat(), "event": "prompt_built", "task_id": "t2", "prompt_length": 3000},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert len(report.trends) == 2
+        # Sorted by timestamp — older bucket first
+        assert report.trends[0].timestamp < report.trends[1].timestamp
+        # Older bucket: 1 task, self-eval catch rate = 1 fail / 2 real = 0.5
+        assert report.trends[0].self_eval_catch_rate == 0.5
+        assert report.trends[0].avg_prompt_length == 3000
+        # Newer bucket: 1 task with memory recall
+        assert report.trends[1].memory_recall_rate == 1.0
+        assert report.trends[1].avg_prompt_length == 5000
+
+    def test_rates_computed_per_bucket(self, workspace):
+        now = datetime.now(timezone.utc)
+        _write_session(workspace, "t1", [
+            {"ts": now.isoformat(), "event": "replan", "task_id": "t1"},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": now.isoformat(), "event": "task_start", "task_id": "t2"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert len(report.trends) == 1
+        assert report.trends[0].task_count == 2
+        assert report.trends[0].replan_trigger_rate == 0.5
+
+
 class TestReportShape:
     def test_report_is_well_formed(self, workspace):
         """Smoke test: report always returns a valid AgenticMetricsReport."""
@@ -192,5 +337,7 @@ class TestReportShape:
         assert isinstance(report, AgenticMetricsReport)
         assert report.time_range_hours == 24
         assert report.total_observed_tasks == 0
-        # debate is always stubbed
-        assert not report.debate.available
+        # Debates dir exists in fixture, so available=True with 0 debates
+        assert report.debate.available
+        assert report.debate.total_debates == 0
+        assert report.trends == []

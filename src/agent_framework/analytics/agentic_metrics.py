@@ -2,11 +2,13 @@
 Agentic feature metrics collected from per-task session JSONL logs.
 
 Surfaces observable signals from the framework's agentic subsystems:
-- Memory recall frequency
+- Memory recall frequency and usefulness proxy
 - Self-evaluation catch rate (how often self-eval caught issues before QA)
 - Replanning trigger and success rate
 - Specialization profile distribution (from current agent activity)
 - Context budget utilization (prompt length distribution)
+- Debate outcomes and confidence distribution
+- Hourly trend buckets for time-series charts
 """
 
 import json
@@ -32,6 +34,10 @@ class MemoryMetrics(BaseModel):
     avg_chars_injected: float
     # Fraction of tasks that had at least one memory injection
     recall_rate: float
+    # Usefulness proxy: completion rate comparison for tasks with/without recall
+    completion_rate_with_recall: float = 0.0
+    completion_rate_without_recall: float = 0.0
+    recall_usefulness_delta: float = 0.0
 
 
 class SelfEvalMetrics(BaseModel):
@@ -62,9 +68,13 @@ class SpecializationMetrics(BaseModel):
 
 
 class DebateMetrics(BaseModel):
-    """Debate subsystem metrics (not yet implemented in core)."""
-    available: bool = False
-    note: str = "Debate system not yet implemented"
+    """Debate subsystem metrics from .agent-communication/debates/ JSON files."""
+    available: bool = True
+    total_debates: int = 0
+    successful_debates: int = 0
+    confidence_distribution: Dict[str, int] = {}
+    success_rate: float = 0.0
+    avg_trade_offs_count: float = 0.0
 
 
 class ContextBudgetMetrics(BaseModel):
@@ -75,6 +85,16 @@ class ContextBudgetMetrics(BaseModel):
     min_prompt_length: int
     p50_prompt_length: int
     p90_prompt_length: int
+
+
+class TrendBucket(BaseModel):
+    """Hourly time-series bucket for trend charts."""
+    timestamp: datetime
+    memory_recall_rate: float
+    self_eval_catch_rate: float
+    replan_trigger_rate: float
+    avg_prompt_length: int
+    task_count: int
 
 
 class AgenticMetricsReport(BaseModel):
@@ -88,6 +108,7 @@ class AgenticMetricsReport(BaseModel):
     specialization: SpecializationMetrics
     debate: DebateMetrics
     context_budget: ContextBudgetMetrics
+    trends: List[TrendBucket] = []
 
 
 # --- Collector ---
@@ -106,15 +127,15 @@ class AgenticMetrics:
         self.workspace = Path(workspace)
         self.sessions_dir = self.workspace / "logs" / "sessions"
         self.activity_dir = self.workspace / ".agent-communication" / "activity"
+        self.debates_dir = self.workspace / ".agent-communication" / "debates"
 
     def generate_report(self, hours: int = 24) -> AgenticMetricsReport:
         """
         Generate an agentic metrics report for the given lookback window.
 
         Scans session JSONL files modified within the last `hours` hours and
-        aggregates the four observable agentic signals. Specialization is read
-        from the live agent activity files rather than session logs (not yet
-        logged there).
+        aggregates all agentic signals. Specialization is read from live agent
+        activity files; debates from .agent-communication/debates/ JSON.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         events_by_task = self._load_session_events(cutoff)
@@ -124,6 +145,8 @@ class AgenticMetrics:
         replan = self._aggregate_replan(events_by_task)
         specialization = self._read_specialization_distribution()
         context_budget = self._aggregate_context_budget(events_by_task)
+        debate = self._aggregate_debates(cutoff)
+        trends = self._aggregate_trends(events_by_task)
 
         return AgenticMetricsReport(
             generated_at=datetime.now(timezone.utc),
@@ -133,8 +156,9 @@ class AgenticMetrics:
             self_eval=self_eval,
             replan=replan,
             specialization=specialization,
-            debate=DebateMetrics(),
+            debate=debate,
             context_budget=context_budget,
+            trends=trends,
         )
 
     # --- private helpers ---
@@ -192,20 +216,36 @@ class AgenticMetrics:
         total_recalls = 0
         tasks_with_recall = 0
         total_chars = 0
+        completed_with_recall = 0
+        completed_without_recall = 0
+        tasks_without_recall = 0
 
         for events in events_by_task.values():
             recalls = [e for e in events if e.get("event") == "memory_recall"]
+            completed = any(e.get("event") == "task_complete" for e in events)
             if recalls:
                 tasks_with_recall += 1
                 total_recalls += len(recalls)
                 total_chars += sum(e.get("chars_injected", 0) for e in recalls)
+                if completed:
+                    completed_with_recall += 1
+            else:
+                tasks_without_recall += 1
+                if completed:
+                    completed_without_recall += 1
 
         total_tasks = len(events_by_task)
+        rate_with = round(completed_with_recall / tasks_with_recall, 3) if tasks_with_recall > 0 else 0.0
+        rate_without = round(completed_without_recall / tasks_without_recall, 3) if tasks_without_recall > 0 else 0.0
+
         return MemoryMetrics(
             total_recalls=total_recalls,
             tasks_with_recall=tasks_with_recall,
             avg_chars_injected=round(total_chars / total_recalls, 1) if total_recalls > 0 else 0.0,
             recall_rate=round(tasks_with_recall / total_tasks, 3) if total_tasks > 0 else 0.0,
+            completion_rate_with_recall=rate_with,
+            completion_rate_without_recall=rate_without,
+            recall_usefulness_delta=round(rate_with - rate_without, 3),
         )
 
     def _aggregate_self_eval(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> SelfEvalMetrics:
@@ -302,6 +342,116 @@ class AgenticMetrics:
             distribution=dict(distribution),
             total_active_agents=total_agents,
         )
+
+    def _aggregate_debates(self, cutoff: datetime) -> DebateMetrics:
+        """Aggregate debate metrics from .agent-communication/debates/ JSON files."""
+        if not self.debates_dir.exists():
+            return DebateMetrics(available=False)
+
+        total = 0
+        successful = 0
+        confidence_dist: Dict[str, int] = defaultdict(int)
+        total_trade_offs = 0
+        cutoff_ts = cutoff.timestamp()
+
+        for path in self.debates_dir.glob("*.json"):
+            try:
+                if path.stat().st_mtime < cutoff_ts:
+                    continue
+            except OSError:
+                continue
+
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+
+            total += 1
+            if data.get("success"):
+                successful += 1
+
+            synthesis = data.get("synthesis")
+            if isinstance(synthesis, dict):
+                conf = synthesis.get("confidence", "").lower()
+                if conf in ("high", "medium", "low"):
+                    confidence_dist[conf] += 1
+                trade_offs = synthesis.get("trade_offs")
+                if isinstance(trade_offs, list):
+                    total_trade_offs += len(trade_offs)
+
+        return DebateMetrics(
+            available=True,
+            total_debates=total,
+            successful_debates=successful,
+            confidence_distribution=dict(confidence_dist),
+            success_rate=round(successful / total, 3) if total > 0 else 0.0,
+            avg_trade_offs_count=round(total_trade_offs / total, 1) if total > 0 else 0.0,
+        )
+
+    def _aggregate_trends(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> List[TrendBucket]:
+        """Build hourly time-series buckets for trend charts."""
+        # Flatten all events with parsed timestamps into hourly buckets
+        buckets: Dict[datetime, List[Dict[str, Any]]] = defaultdict(list)
+
+        for events in events_by_task.values():
+            for event in events:
+                raw_ts = event.get("ts")
+                if not raw_ts:
+                    continue
+                try:
+                    event_ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                    # Floor to hour
+                    bucket_ts = event_ts.replace(minute=0, second=0, microsecond=0)
+                    buckets[bucket_ts].append(event)
+                except (ValueError, TypeError):
+                    continue
+
+        if not buckets:
+            return []
+
+        result: List[TrendBucket] = []
+        for bucket_ts in sorted(buckets.keys()):
+            events = buckets[bucket_ts]
+
+            # Group by task_id to compute per-task rates
+            task_events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for e in events:
+                tid = e.get("task_id", "unknown")
+                task_events[tid].append(e)
+
+            task_count = len(task_events)
+            tasks_with_recall = sum(
+                1 for evts in task_events.values()
+                if any(e.get("event") == "memory_recall" for e in evts)
+            )
+
+            # Self-eval catch rate for this bucket
+            se_pass = sum(1 for e in events if e.get("event") == "self_eval" and (e.get("verdict") or "").upper() == "PASS")
+            se_fail = sum(1 for e in events if e.get("event") == "self_eval" and (e.get("verdict") or "").upper() == "FAIL")
+            se_real = se_pass + se_fail
+            catch_rate = round(se_fail / se_real, 3) if se_real > 0 else 0.0
+
+            tasks_with_replan = sum(
+                1 for evts in task_events.values()
+                if any(e.get("event") == "replan" for e in evts)
+            )
+
+            prompt_lengths = [
+                e.get("prompt_length") for e in events
+                if e.get("event") == "prompt_built" and isinstance(e.get("prompt_length"), int)
+            ]
+            avg_prompt = int(sum(prompt_lengths) / len(prompt_lengths)) if prompt_lengths else 0
+
+            result.append(TrendBucket(
+                timestamp=bucket_ts,
+                memory_recall_rate=round(tasks_with_recall / task_count, 3) if task_count > 0 else 0.0,
+                self_eval_catch_rate=catch_rate,
+                replan_trigger_rate=round(tasks_with_replan / task_count, 3) if task_count > 0 else 0.0,
+                avg_prompt_length=avg_prompt,
+                task_count=task_count,
+            ))
+
+        return result
 
     def _aggregate_context_budget(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> ContextBudgetMetrics:
         """
