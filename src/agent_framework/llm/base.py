@@ -23,6 +23,7 @@ class LLMRequest:
     specialization_profile: Optional[str] = None  # Specialization ID (backend, frontend, infrastructure)
     file_count: int = 0  # Number of files involved (for complexity-based routing)
     allowed_tools: Optional[List[str]] = None  # Restrict to these tools via --allowedTools (None = all tools allowed)
+    append_system_prompt: Optional[str] = None  # Appended to Claude CLI's system prompt via --append-system-prompt
 
 
 @dataclass

@@ -176,6 +176,9 @@ class PromptBuilder:
         # Inject structural codebase overview and relevant symbols
         prompt = self._inject_codebase_index(prompt, task)
 
+        # Inject read cache from previous chain steps
+        prompt = self._inject_read_cache(prompt, task)
+
         # Inject self-eval critique if retrying after failed self-evaluation
         prompt = self._inject_self_eval_context(prompt, task)
 
@@ -1046,6 +1049,86 @@ If a tool call fails:
             for file_path in findings.keys():
                 parts.append(file_path)
         return " ".join(parts)
+
+    # Budget for read cache section — keeps prompt size under control
+    _READ_CACHE_MAX_CHARS = 3000
+
+    def _inject_read_cache(self, prompt: str, task: Task) -> str:
+        """Inject read cache manifest from previous chain steps.
+
+        Tells the LLM which files were already analyzed so it can skip
+        redundant reads and use get_cached_reads() for details.
+        """
+        cache_dir = self.ctx.workspace / ".agent-communication" / "read-cache"
+        root_task_id = task.root_id
+        cache_file = cache_dir / f"{root_task_id}.json"
+
+        if not cache_file.exists():
+            return prompt
+
+        try:
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return prompt
+        except (json.JSONDecodeError, OSError) as e:
+            self.logger.debug(f"Failed to load read cache: {e}")
+            return prompt
+
+        entries = data.get("entries", {})
+        if not entries:
+            return prompt
+
+        # Check if any entries have LLM-written summaries
+        has_summaries = any(e.get("summary") for e in entries.values())
+
+        if has_summaries:
+            lines = ["## FILES ANALYZED BY PREVIOUS AGENTS — check these before reading\n"]
+            lines.append("| File | Summary | Read By |")
+            lines.append("|------|---------|---------|")
+            for file_path, entry in entries.items():
+                summary = entry.get("summary", "").replace("|", "/")
+                read_by = entry.get("read_by", "unknown")
+                step = entry.get("workflow_step", "")
+                agent_label = f"{read_by} ({step})" if step else read_by
+                # Truncate long summaries per-row
+                if len(summary) > 120:
+                    summary = summary[:117] + "..."
+                lines.append(f"| {file_path} | {summary} | {agent_label} |")
+            lines.append("")
+            footer = "Do NOT re-read these files unless you need to verify specific line-level details."
+            if self.ctx.mcp_enabled:
+                footer = "Use get_cached_reads() for full details. " + footer
+            lines.append(footer + "\n")
+        else:
+            # Framework-populated paths only — no summaries
+            paths = list(entries.keys())
+            paths_str = ", ".join(paths[:30])
+            if len(paths) > 30:
+                paths_str += f", ... ({len(paths) - 30} more)"
+            header = "## FILES READ BY PREVIOUS AGENTS"
+            if self.ctx.mcp_enabled:
+                header += " (call get_cached_reads() for details)"
+            lines = [
+                header + "\n",
+                paths_str,
+                "",
+            ]
+
+        section = "\n".join(lines)
+
+        # Respect budget
+        if len(section) > self._READ_CACHE_MAX_CHARS:
+            section = section[:self._READ_CACHE_MAX_CHARS] + "\n[truncated]\n"
+
+        if self.ctx.session_logger:
+            self.ctx.session_logger.log(
+                "read_cache_injected",
+                entry_count=len(entries),
+                chars=len(section),
+                has_summaries=has_summaries,
+            )
+
+        return prompt + "\n\n" + section
 
     def _inject_self_eval_context(self, prompt: str, task: Task) -> str:
         """Append self-evaluation critique from a previous attempt.

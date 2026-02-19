@@ -1108,6 +1108,7 @@ class TestDAGReviewCycleCap:
             _chain_depth=4,
             _root_task_id="root-1",
             _global_cycle_count=4,
+            implementation_branch="feature/xyz",
         )
 
         engineer_step = WorkflowStep(id="engineer", agent="engineer")
@@ -1348,6 +1349,7 @@ class TestCodeReviewCycleCap:
             _chain_depth=4,
             _root_task_id="root-1",
             _global_cycle_count=4,
+            implementation_branch="feature/xyz",
         )
 
         engineer_step = WorkflowStep(id="implement", agent="engineer")
@@ -1404,6 +1406,7 @@ class TestCodeReviewCycleCap:
             _chain_depth=5,
             _root_task_id="root-1",
             _global_cycle_count=5,
+            implementation_branch="feature/xyz",
         )
 
         engineer_step = WorkflowStep(id="implement", agent="engineer")
@@ -2505,3 +2508,68 @@ class TestPhantomParentTaskIdGuard:
 
         queue.find_task.assert_not_called()
         agent._enforce_workflow_chain.assert_called_once()
+
+
+class TestNoDiffGuard:
+    """Tests for _has_diff_for_pr — prevents dispatching create_pr with zero changes."""
+
+    def test_no_impl_branch_skips_create_pr(self, queue):
+        """Layer 1: no implementation_branch and no pr_number → skip."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+        task = _make_task(workflow="default")
+        step = WorkflowStep(id="create_pr", agent="architect")
+
+        assert executor._has_diff_for_pr(task, step) is False
+
+    def test_impl_branch_set_proceeds(self, queue):
+        """Layer 1 passes when implementation_branch is present (no workspace → skip Layer 2)."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+        task = _make_task(workflow="default", implementation_branch="feature/xyz")
+        step = WorkflowStep(id="create_pr", agent="architect")
+
+        assert executor._has_diff_for_pr(task, step) is True
+
+    def test_non_create_pr_always_proceeds(self, queue):
+        """Guard only fires for create_pr — other steps pass through."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+        task = _make_task(workflow="default")
+        step = WorkflowStep(id="implement", agent="engineer")
+
+        assert executor._has_diff_for_pr(task, step) is True
+
+    def test_git_log_empty_skips_create_pr(self, queue, tmp_path):
+        """Layer 2: branch exists but has no commits vs main → skip."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+        from unittest.mock import patch
+        import subprocess
+
+        executor = WorkflowExecutor(queue, queue.queue_dir, workspace=tmp_path)
+        task = _make_task(workflow="default", implementation_branch="feature/empty")
+        step = WorkflowStep(id="create_pr", agent="architect")
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        with patch("agent_framework.utils.subprocess_utils.run_git_command", return_value=mock_result):
+            assert executor._has_diff_for_pr(task, step) is False
+
+    def test_git_failure_proceeds(self, queue, tmp_path):
+        """Layer 2: git command fails → fall through to True (graceful degradation)."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+        from unittest.mock import patch
+
+        executor = WorkflowExecutor(queue, queue.queue_dir, workspace=tmp_path)
+        task = _make_task(workflow="default", implementation_branch="feature/broken")
+        step = WorkflowStep(id="create_pr", agent="architect")
+
+        with patch("agent_framework.utils.subprocess_utils.run_git_command", side_effect=Exception("git error")):
+            assert executor._has_diff_for_pr(task, step) is True

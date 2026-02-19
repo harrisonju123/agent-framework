@@ -114,6 +114,41 @@ class SessionLogger:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(self._path, "a")
 
+    def extract_file_reads(self) -> list[str]:
+        """Extract unique file paths from Read tool calls in session log.
+
+        Parses the JSONL, deduplicates, and returns paths in first-seen order.
+        Returns empty list when logging is disabled or file doesn't exist.
+        """
+        if not self._enabled or not self._path.exists():
+            return []
+
+        seen: dict[str, None] = {}  # ordered set via dict keys
+        try:
+            # Close file handle to flush pending writes before reading
+            if self._file:
+                self._file.flush()
+
+            with open(self._path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if event.get("event") != "tool_call" or event.get("tool") != "Read":
+                        continue
+                    tool_input = event.get("input", {})
+                    file_path = tool_input.get("file_path")
+                    if file_path and file_path not in seen:
+                        seen[file_path] = None
+        except Exception as e:
+            logger.debug(f"Failed to extract file reads from session log: {e}")
+
+        return list(seen.keys())
+
     @staticmethod
     def cleanup_old_sessions(logs_dir: Path, retention_days: int) -> int:
         """Delete session logs older than retention_days. Returns count removed."""

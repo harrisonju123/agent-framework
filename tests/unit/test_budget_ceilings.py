@@ -498,6 +498,7 @@ class TestBudgetFastForward:
             "_cumulative_cost": 6.0,
             "workflow": "default",
             "workflow_step": "qa_review",
+            "implementation_branch": "feature/xyz",
         })
 
         # Patch _build_chain_task and _is_chain_task_already_queued

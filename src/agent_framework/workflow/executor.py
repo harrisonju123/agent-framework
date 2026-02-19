@@ -63,10 +63,11 @@ _PR_URL_PATTERN = re.compile(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)')
 class WorkflowExecutor:
     """Executes workflow DAGs and routes tasks between agents."""
 
-    def __init__(self, queue: "FileQueue", queue_dir: Path, agent_logger=None):
+    def __init__(self, queue: "FileQueue", queue_dir: Path, agent_logger=None, workspace=None):
         self.queue = queue
         self.queue_dir = queue_dir
         self.logger = agent_logger or logger
+        self.workspace = workspace
 
     def execute_step(
         self,
@@ -311,6 +312,9 @@ class WorkflowExecutor:
                 else:
                     return
 
+        if not self._has_diff_for_pr(task, target_step):
+            return
+
         chain_task = self._build_chain_task(
             task, target_step, current_agent_id, is_review_to_engineer=is_review_to_engineer,
         )
@@ -502,6 +506,47 @@ class WorkflowExecutor:
             )
             return "warn"
         return "ok"
+
+    def _has_diff_for_pr(self, task: "Task", target_step: WorkflowStep) -> bool:
+        """Check whether there are actual code changes before routing to create_pr.
+
+        Returns True (proceed) unless we can definitively prove there's nothing to PR.
+        Only gates the create_pr step — all other steps pass through unconditionally.
+        """
+        if target_step.id != "create_pr":
+            return True
+
+        impl_branch = task.context.get("implementation_branch") if task.context else None
+        pr_number = task.context.get("pr_number") if task.context else None
+
+        # Layer 1: no branch and no existing PR → nothing to PR
+        if not impl_branch and not pr_number:
+            self.logger.info(
+                f"No-diff guard: skipping create_pr for task {task.id} — "
+                f"no implementation_branch or pr_number in context"
+            )
+            return False
+
+        # Layer 2: branch exists, verify it has commits vs main
+        if impl_branch and self.workspace:
+            from ..utils.subprocess_utils import run_git_command
+            try:
+                result = run_git_command(
+                    ["log", "--oneline", f"origin/main..origin/{impl_branch}"],
+                    cwd=self.workspace,
+                    check=False,
+                    timeout=10,
+                )
+                if result.returncode == 0 and not result.stdout.strip():
+                    self.logger.info(
+                        f"No-diff guard: skipping create_pr for task {task.id} — "
+                        f"branch {impl_branch} has no commits vs main"
+                    )
+                    return False
+            except Exception as e:
+                self.logger.debug(f"No-diff guard: git check failed ({e}), proceeding")
+
+        return True
 
     def _queue_qa_pre_scan(self, task: "Task") -> None:
         """Queue a lightweight QA pre-scan in parallel with code review.

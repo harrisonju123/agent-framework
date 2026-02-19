@@ -1008,3 +1008,160 @@ class TestCodeReviewConstraints:
         assert "Do NOT use Write" in prompt
         # Must not inject the architect-facing review guidance
         assert "PREVIEW REVIEW CONSTRAINTS" not in prompt
+
+
+class TestReadCacheInjection:
+    """Tests for _inject_read_cache() method."""
+
+    @pytest.fixture
+    def cache_dir(self, tmp_path):
+        d = tmp_path / ".agent-communication" / "read-cache"
+        d.mkdir(parents=True)
+        return d
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    @pytest.fixture
+    def task_with_root(self):
+        return Task(
+            id="chain-root123-step1-d0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Implement feature",
+            description="Implement the feature",
+            context={"_root_task_id": "root123"},
+        )
+
+    def test_inject_with_summaries(self, builder, cache_dir, task_with_root):
+        """Read cache with LLM summaries renders a markdown table."""
+        import json
+        cache_data = {
+            "root_task_id": "root123",
+            "entries": {
+                "src/server.py": {
+                    "summary": "Express server with /api/dashboard routes",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:00:00Z",
+                    "workflow_step": "plan",
+                },
+                "src/models.py": {
+                    "summary": "SQLAlchemy models: User, Session, Metrics",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:01:00Z",
+                    "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "root123.json").write_text(json.dumps(cache_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_root)
+        assert "FILES ANALYZED BY PREVIOUS AGENTS" in result
+        assert "src/server.py" in result
+        assert "Express server" in result
+        assert "architect (plan)" in result
+        assert "base prompt" in result
+
+    def test_inject_paths_only(self, builder, cache_dir, task_with_root):
+        """Read cache without summaries renders a compact path list."""
+        import json
+        cache_data = {
+            "root_task_id": "root123",
+            "entries": {
+                "src/server.py": {
+                    "summary": "",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:00:00Z",
+                    "workflow_step": "plan",
+                },
+                "src/models.py": {
+                    "summary": "",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:01:00Z",
+                    "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "root123.json").write_text(json.dumps(cache_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_root)
+        assert "FILES READ BY PREVIOUS AGENTS" in result
+        assert "src/server.py" in result
+        # MCP is disabled in this builder, so get_cached_reads() hint is omitted
+        assert "get_cached_reads()" not in result
+
+    def test_inject_paths_only_with_mcp(self, agent_config, tmp_path, task_with_root):
+        """With MCP enabled, paths-only format includes get_cached_reads() hint."""
+        import json
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=True,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        cache_dir = tmp_path / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        cache_data = {
+            "root_task_id": "root123",
+            "entries": {
+                "src/server.py": {"summary": "", "read_by": "architect",
+                                   "read_at": "2026-02-18T10:00:00Z", "workflow_step": "plan"},
+            },
+        }
+        (cache_dir / "root123.json").write_text(json.dumps(cache_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_root)
+        assert "get_cached_reads()" in result
+
+    def test_inject_empty_when_no_cache(self, builder, task_with_root):
+        """No cache file → original prompt unchanged."""
+        result = builder._inject_read_cache("base prompt", task_with_root)
+        assert result == "base prompt"
+
+    def test_inject_empty_entries(self, builder, cache_dir, task_with_root):
+        """Empty entries dict → original prompt unchanged."""
+        import json
+        cache_data = {"root_task_id": "root123", "entries": {}}
+        (cache_dir / "root123.json").write_text(json.dumps(cache_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_root)
+        assert result == "base prompt"
+
+    def test_inject_respects_budget(self, builder, cache_dir, task_with_root):
+        """Section is truncated when it exceeds _READ_CACHE_MAX_CHARS."""
+        import json
+        # Create many entries to exceed 3000 char budget
+        entries = {}
+        for i in range(200):
+            entries[f"src/very/long/path/to/file_{i:04d}.py"] = {
+                "summary": f"This file contains component {i} with detailed analysis and findings " * 3,
+                "read_by": "architect",
+                "read_at": "2026-02-18T10:00:00Z",
+                "workflow_step": "plan",
+            }
+        cache_data = {"root_task_id": "root123", "entries": entries}
+        (cache_dir / "root123.json").write_text(json.dumps(cache_data))
+
+        result = builder._inject_read_cache("base prompt", task_with_root)
+        # Section should be within budget (base prompt + budget + overhead)
+        section = result[len("base prompt"):]
+        assert len(section) <= builder._READ_CACHE_MAX_CHARS + 50  # small margin for truncation marker
+
+    def test_inject_corrupted_cache_file(self, builder, cache_dir, task_with_root):
+        """Corrupted JSON → falls back gracefully."""
+        (cache_dir / "root123.json").write_text("not valid json{{{")
+
+        result = builder._inject_read_cache("base prompt", task_with_root)
+        assert result == "base prompt"

@@ -180,7 +180,9 @@ class Agent:
             use_json=False,
         )
         from ..workflow.executor import WorkflowExecutor
-        self._workflow_executor = WorkflowExecutor(self.queue, self.queue.queue_dir, agent_logger=self.logger)
+        self._workflow_executor = WorkflowExecutor(
+            self.queue, self.queue.queue_dir, agent_logger=self.logger, workspace=workspace,
+        )
 
     def _init_optimization_and_safeguards(self, optimization_config):
         """Initialize optimization config and safeguards (retry/escalation)."""
@@ -1209,6 +1211,20 @@ class Agent:
                 "Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch",
             ]
 
+        # Behavioral directive to reduce redundant file reads within a session
+        efficiency_parts = [
+            "EFFICIENCY: Track which files you have already read in this session. "
+            "Never read the same file twice — use your conversation history to recall "
+            "prior file contents. Use Grep for targeted searches instead of re-reading "
+            "entire files.",
+        ]
+        if self._mcp_enabled:
+            efficiency_parts.append(
+                "Before reading any file, call get_cached_reads() to check "
+                "if a previous agent already analyzed it."
+            )
+        efficiency_directive = " ".join(efficiency_parts)
+
         # Race LLM execution against pause/stop signal watcher
         llm_coro = self.llm.complete(
             LLMRequest(
@@ -1221,6 +1237,7 @@ class Agent:
                 specialization_profile=self._current_specialization.id if self._current_specialization else None,
                 file_count=self._current_file_count,
                 allowed_tools=preview_allowed_tools,
+                append_system_prompt=efficiency_directive,
             ),
             task_id=task.id,
             on_tool_activity=_on_tool_activity,
@@ -1390,6 +1407,8 @@ class Agent:
 
             # Handle response
             if response.success:
+                # Populate shared read cache for downstream chain steps
+                self._populate_read_cache(task)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
                 await self._handle_failed_response(task, response)
@@ -1647,6 +1666,61 @@ class Agent:
             self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
+
+    def _populate_read_cache(self, task: Task) -> None:
+        """Populate shared read cache with files read during this session.
+
+        Appends to .agent-communication/read-cache/{root_task_id}.json so
+        downstream chain steps can skip re-reading the same files.
+        Non-fatal — workflow continues even if this fails.
+        """
+        try:
+            from ..utils.atomic_io import atomic_write_text
+
+            file_reads = self._session_logger.extract_file_reads()
+            if not file_reads:
+                return
+
+            root_task_id = task.root_id
+            cache_dir = self.workspace / ".agent-communication" / "read-cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"{root_task_id}.json"
+
+            # Load existing cache (may have entries from MCP tool calls with summaries)
+            existing: dict = {}
+            if cache_file.exists():
+                try:
+                    existing = json.loads(cache_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    existing = {}
+
+            entries = existing.get("entries", {})
+            step = task.context.get("workflow_step", "unknown")
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Only populate paths not already cached (preserve LLM-written summaries)
+            added = 0
+            for file_path in file_reads:
+                if file_path not in entries:
+                    entries[file_path] = {
+                        "summary": "",
+                        "read_by": self.config.base_id,
+                        "read_at": now_iso,
+                        "workflow_step": step,
+                    }
+                    added += 1
+
+            if added == 0:
+                return
+
+            cache_data = {
+                "root_task_id": root_task_id,
+                "entries": entries,
+            }
+            atomic_write_text(cache_file, json.dumps(cache_data))
+            self.logger.debug(f"Read cache: added {added} paths ({len(entries)} total) for {root_task_id}")
+        except Exception as e:
+            self.logger.warning(f"Failed to populate read cache for {task.id}: {e}")
 
     def _save_pre_scan_findings(self, task: Task, response) -> None:
         """Persist QA pre-scan results so downstream agents can load them.

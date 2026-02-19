@@ -284,3 +284,57 @@ class TestRedaction:
         event = json.loads(session_log_path.read_text().strip())
         assert "hunter2" not in json.dumps(event)
         assert "-u user:***" in event["input"]["command"]
+
+
+# -- extract_file_reads --
+
+
+class TestExtractFileReads:
+    def test_extracts_read_paths(self, logs_dir, session_log_path):
+        sl = SessionLogger(logs_dir, "test-task-123", log_tool_inputs=True)
+        sl.log_tool_call("Read", {"file_path": "/src/server.py"})
+        sl.log_tool_call("Grep", {"pattern": "def main"})
+        sl.log_tool_call("Read", {"file_path": "/src/models.py"})
+        sl.close()
+
+        sl2 = SessionLogger(logs_dir, "test-task-123", enabled=True)
+        reads = sl2.extract_file_reads()
+        assert reads == ["/src/server.py", "/src/models.py"]
+
+    def test_deduplicates_same_file(self, logs_dir):
+        sl = SessionLogger(logs_dir, "test-task-dup", log_tool_inputs=True)
+        for _ in range(5):
+            sl.log_tool_call("Read", {"file_path": "/src/server.py"})
+        sl.log_tool_call("Read", {"file_path": "/src/other.py"})
+        sl.close()
+
+        sl2 = SessionLogger(logs_dir, "test-task-dup", enabled=True)
+        reads = sl2.extract_file_reads()
+        assert reads == ["/src/server.py", "/src/other.py"]
+
+    def test_empty_when_no_reads(self, logs_dir):
+        sl = SessionLogger(logs_dir, "test-task-empty", log_tool_inputs=True)
+        sl.log_tool_call("Bash", {"command": "ls"})
+        sl.log_tool_call("Grep", {"pattern": "foo"})
+        sl.close()
+
+        sl2 = SessionLogger(logs_dir, "test-task-empty", enabled=True)
+        assert sl2.extract_file_reads() == []
+
+    def test_empty_when_disabled(self, logs_dir):
+        sl = SessionLogger(logs_dir, "test-task-off", enabled=False)
+        assert sl.extract_file_reads() == []
+
+    def test_empty_when_no_file(self, logs_dir):
+        sl = SessionLogger(logs_dir, "test-task-nofile", enabled=True)
+        # Don't write anything — file doesn't exist
+        assert sl.extract_file_reads() == []
+
+    def test_skips_read_without_file_path(self, logs_dir):
+        sl = SessionLogger(logs_dir, "test-task-nofp", log_tool_inputs=True)
+        sl.log_tool_call("Read", {})  # missing file_path
+        sl.log_tool_call("Read", {"file_path": "/src/good.py"})
+        sl.close()
+
+        sl2 = SessionLogger(logs_dir, "test-task-nofp", enabled=True)
+        assert sl2.extract_file_reads() == ["/src/good.py"]

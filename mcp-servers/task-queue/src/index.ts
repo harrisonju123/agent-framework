@@ -19,6 +19,7 @@ import {
 import { consultAgent, getRemainingConsultations, decrementConsultations } from "./consultation.js";
 import { shareKnowledge, getKnowledge } from "./knowledge.js";
 import { debateTopic } from "./debate.js";
+import { cacheFileRead, getCachedReads } from "./read-cache.js";
 import type { QueueTaskInput, AgentId } from "./types.js";
 
 const logger = createLogger();
@@ -365,6 +366,34 @@ const TOOLS: Tool[] = [
       required: ["reason"],
     },
   },
+  {
+    name: "cache_file_read",
+    description:
+      "Cache a summary of a file you just read, so other agents in the workflow chain can reuse your analysis instead of re-reading the same file. Call this after reading any important file.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_path: {
+          type: "string",
+          description: "Relative path to the file you read",
+        },
+        summary: {
+          type: "string",
+          description: "Brief summary of contents and key findings (2-3 sentences)",
+        },
+      },
+      required: ["file_path", "summary"],
+    },
+  },
+  {
+    name: "get_cached_reads",
+    description:
+      "Check which files were already read and analyzed by previous agents in this workflow chain. Call this BEFORE reading files to avoid duplicate work. Returns summaries of all previously-read files.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
 ];
 
 const server = new Server(
@@ -494,6 +523,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error(`${name}: AGENT_TASK_ID not set in environment`);
         }
         result = writeRoutingSignal(workspace, taskId, targetAgent, reason, sourceAgent);
+        break;
+      }
+      case "cache_file_read": {
+        const { file_path, summary } = args as Record<string, unknown>;
+        if (typeof file_path !== "string" || typeof summary !== "string") {
+          throw new Error("cache_file_read requires string file_path and summary");
+        }
+        const rootTaskId = process.env.AGENT_ROOT_TASK_ID || process.env.AGENT_TASK_ID;
+        if (!rootTaskId) {
+          throw new Error("cache_file_read: AGENT_ROOT_TASK_ID or AGENT_TASK_ID not set");
+        }
+        const agentId = process.env.AGENT_ID || "unknown";
+        const workflowStep = process.env.WORKFLOW_STEP || "unknown";
+        result = cacheFileRead(workspace, rootTaskId, file_path, summary, agentId, workflowStep);
+        break;
+      }
+      case "get_cached_reads": {
+        const rootId = process.env.AGENT_ROOT_TASK_ID || process.env.AGENT_TASK_ID;
+        if (!rootId) {
+          throw new Error("get_cached_reads: AGENT_ROOT_TASK_ID or AGENT_TASK_ID not set");
+        }
+        result = getCachedReads(workspace, rootId);
         break;
       }
       default:

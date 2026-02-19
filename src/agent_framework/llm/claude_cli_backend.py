@@ -276,6 +276,10 @@ class ClaudeCLIBackend(LLMBackend):
             cmd.extend(["--allowedTools", ",".join(request.allowed_tools)])
             logger.debug(f"Tool restriction active: allowed_tools={request.allowed_tools}")
 
+        # Behavioral directive appended to the LLM's system prompt (e.g. read-efficiency hints)
+        if request.append_system_prompt:
+            cmd.extend(["--append-system-prompt", request.append_system_prompt])
+
         # Build prompt (combine system + user)
         full_prompt = ""
         if request.system_prompt:
@@ -318,6 +322,13 @@ class ClaudeCLIBackend(LLMBackend):
                 env.pop(key, None)
             if task_id:
                 env['AGENT_TASK_ID'] = task_id
+                # Root task ID for cross-step read cache keying
+                root_id = request.context.get('_root_task_id', task_id) if request.context else task_id
+                env['AGENT_ROOT_TASK_ID'] = root_id
+                # Workflow step for read cache attribution
+                workflow_step = request.context.get('workflow_step', '') if request.context else ''
+                if workflow_step:
+                    env['WORKFLOW_STEP'] = workflow_step
 
             # Determine working directory for subprocess
             # Use working_dir from request if provided, otherwise inherit current directory
