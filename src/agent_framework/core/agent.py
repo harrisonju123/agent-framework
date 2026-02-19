@@ -1254,23 +1254,53 @@ class Agent:
         _tool_call_count = [0]
         _last_write_time = [0.0]
         _consecutive_bash = [0]
+        _bash_commands: list[list[str]] = [[]]  # mutable list for closure access
+        _soft_threshold_logged = [False]
         _circuit_breaker_event = asyncio.Event()
+
+        _DIVERSITY_THRESHOLD = 0.5
+        _HARD_CAP_MULTIPLIER = 2
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
             try:
                 _tool_call_count[0] += 1
 
-                # Circuit breaker: track consecutive Bash calls
+                # Circuit breaker: track consecutive Bash calls with command diversity
                 if tool_name == "Bash":
                     _consecutive_bash[0] += 1
-                    if _consecutive_bash[0] >= self._max_consecutive_tool_calls:
-                        self.logger.warning(
-                            f"Circuit breaker: {_consecutive_bash[0]} consecutive Bash calls, "
-                            f"threshold={self._max_consecutive_tool_calls}"
-                        )
-                        _circuit_breaker_event.set()
+                    _bash_commands[0].append(tool_input_summary or "")
+                    count = _consecutive_bash[0]
+                    threshold = self._max_consecutive_tool_calls
+                    hard_cap = threshold * _HARD_CAP_MULTIPLIER
+
+                    if count >= threshold:
+                        unique = len(set(_bash_commands[0]))
+                        diversity = unique / count if count > 0 else 0.0
+
+                        if count >= hard_cap:
+                            self.logger.warning(
+                                f"Circuit breaker hard cap: {count} consecutive Bash calls "
+                                f"(diversity={diversity:.2f}, unique_commands={unique})"
+                            )
+                            _circuit_breaker_event.set()
+                        elif diversity <= _DIVERSITY_THRESHOLD:
+                            self.logger.warning(
+                                f"Circuit breaker: {count} consecutive Bash calls, "
+                                f"low diversity={diversity:.2f} (unique_commands={unique})"
+                            )
+                            _circuit_breaker_event.set()
+                        elif not _soft_threshold_logged[0]:
+                            # Diverse commands — log once and let them continue
+                            self.logger.info(
+                                f"Circuit breaker deferred: {count} consecutive Bash calls "
+                                f"but diversity={diversity:.2f} (unique_commands={unique}), "
+                                f"hard cap at {hard_cap}"
+                            )
+                            _soft_threshold_logged[0] = True
                 else:
                     _consecutive_bash[0] = 0
+                    _bash_commands[0] = []
+                    _soft_threshold_logged[0] = False
 
                 now = time.time()
                 if now - _last_write_time[0] < 1.0:
@@ -1356,10 +1386,18 @@ class Agent:
         if circuit_breaker_task in done:
             # Stuck agent detected — kill subprocess and return synthetic failure
             count = _consecutive_bash[0]
+            commands = _bash_commands[0]
+            unique = len(set(commands))
+            diversity = unique / count if count > 0 else 0.0
             self.logger.warning(
                 f"Circuit breaker tripped for task {task.id}: "
-                f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls})"
+                f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls}, "
+                f"diversity={diversity:.2f}, unique_commands={unique})"
             )
+
+            # Auto-commit WIP before killing — prevents code loss
+            await self._auto_commit_wip(task, working_dir, count)
+
             self.llm.cancel()
             llm_task.cancel()
             watcher_task.cancel()
@@ -1373,12 +1411,14 @@ class Agent:
                 "circuit_breaker",
                 consecutive_bash=count,
                 threshold=self._max_consecutive_tool_calls,
+                unique_commands=unique,
+                diversity=round(diversity, 2),
             )
             self.activity_manager.append_event(ActivityEvent(
                 type="circuit_breaker",
                 agent=self.config.id,
                 task_id=task.id,
-                title=f"Circuit breaker: {count} consecutive Bash calls",
+                title=f"Circuit breaker: {count} consecutive Bash calls (diversity={diversity:.2f})",
                 timestamp=datetime.now(timezone.utc),
             ))
             return LLMResponse(
@@ -1390,8 +1430,8 @@ class Agent:
                 latency_ms=0,
                 success=False,
                 error=(
-                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types. "
-                    "Working directory may be deleted or inaccessible."
+                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
+                    f"(diversity={diversity:.2f}). Working directory may be deleted or inaccessible."
                 ),
             )
 
@@ -1437,6 +1477,31 @@ class Agent:
             except asyncio.CancelledError:
                 pass
             return llm_task.result()
+
+    async def _auto_commit_wip(self, task: Task, working_dir: Path, bash_count: int) -> None:
+        """Best-effort WIP commit so code isn't lost when circuit breaker trips."""
+        try:
+            from ..utils.subprocess_utils import run_git_command
+
+            status = run_git_command(
+                ["status", "--porcelain"], cwd=working_dir, check=True, timeout=10
+            )
+            if not status.stdout.strip():
+                self.logger.debug("No uncommitted changes to auto-save")
+                return
+
+            run_git_command(["add", "-A"], cwd=working_dir, check=True, timeout=10)
+            run_git_command(
+                [
+                    "commit", "-m",
+                    f"WIP: auto-save before circuit breaker ({bash_count} consecutive Bash calls)",
+                ],
+                cwd=working_dir, check=True, timeout=10,
+            )
+            self.logger.info(f"Auto-committed WIP changes for task {task.id}")
+            self._session_logger.log("wip_auto_commit", task_id=task.id, bash_count=bash_count)
+        except Exception as e:
+            self.logger.debug(f"WIP auto-commit failed (non-fatal): {e}")
 
     def _process_llm_completion(self, response, task: Task) -> None:
         """Log LLM completion and update context window manager."""
