@@ -24,6 +24,7 @@ class LLMRequest:
     file_count: int = 0  # Number of files involved (for complexity-based routing)
     allowed_tools: Optional[List[str]] = None  # Restrict to these tools via --allowedTools (None = all tools allowed)
     append_system_prompt: Optional[str] = None  # Appended to Claude CLI's system prompt via --append-system-prompt
+    env_vars: Optional[dict] = None  # Extra env vars merged into subprocess environment (e.g. venv PATH)
 
 
 @dataclass

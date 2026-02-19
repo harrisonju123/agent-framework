@@ -127,6 +127,11 @@ agents:
       - Implement clean, tested code
       - Do NOT create PRs — architect handles PR creation
 
+      VIRTUAL ENVIRONMENT:
+      Your working directory has an auto-configured Python virtualenv (.venv/).
+      The project is installed in editable mode — imports resolve correctly for
+      any modules you create. Run pytest and python commands normally.
+
       GIT OPERATIONS:
       - After implementation and tests pass, commit your changes: git add <specific-files> && git commit -m "[JIRA-KEY] description"
       - NEVER use `git add -A` or `git add .` — only add the files you created or modified.

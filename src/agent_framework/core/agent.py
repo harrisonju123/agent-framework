@@ -1369,6 +1369,7 @@ class Agent:
                 file_count=self._current_file_count,
                 allowed_tools=preview_allowed_tools,
                 append_system_prompt=efficiency_directive,
+                env_vars=self._git_ops.worktree_env_vars,
             ),
             task_id=task.id,
             on_tool_activity=_on_tool_activity,

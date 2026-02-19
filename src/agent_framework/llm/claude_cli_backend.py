@@ -318,8 +318,11 @@ class ClaudeCLIBackend(LLMBackend):
             else:
                 env.update(self.proxy_env)
             env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1'
+            if request.env_vars:
+                env.update(request.env_vars)
             for key in _SENSITIVE_ENV_VARS:
                 env.pop(key, None)
+
             if task_id:
                 env['AGENT_TASK_ID'] = task_id
                 # Root task ID for cross-step read cache keying

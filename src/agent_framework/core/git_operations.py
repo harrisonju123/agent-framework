@@ -8,7 +8,7 @@ we achieve better separation of concerns and make the Agent class more focused.
 import hashlib
 import json
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..workspace.worktree_manager import WorktreeManager
@@ -68,6 +68,24 @@ class GitOperationsManager:
 
         # Track active worktree for cleanup (mutable state)
         self._active_worktree: Optional[Path] = None
+        self._worktree_env_vars: Optional[Dict[str, str]] = None
+
+    @property
+    def worktree_env_vars(self) -> Optional[Dict[str, str]]:
+        """Env vars for the active worktree's virtualenv (PATH, VIRTUAL_ENV)."""
+        return self._worktree_env_vars
+
+    def _setup_worktree_venv(self, worktree_path: Path) -> None:
+        """Create a per-worktree virtualenv for Python projects.
+
+        Non-fatal: failure is logged but doesn't block the worktree.
+        """
+        try:
+            from ..workspace.venv_manager import VenvManager
+            self._worktree_env_vars = VenvManager().setup_venv(worktree_path)
+        except Exception as e:
+            self.logger.warning(f"Venv setup skipped: {e}")
+            self._worktree_env_vars = None
 
     def get_working_directory(self, task: Task) -> Path:
         """Get working directory for task (worktree, target repo, or framework workspace).
@@ -78,6 +96,9 @@ class GitOperationsManager:
         2. If multi_repo_manager available, use shared clone
         3. Fall back to framework workspace
         """
+        # Reset from previous task — non-worktree paths don't call _setup_worktree_venv
+        self._worktree_env_vars = None
+
         github_repo = task.context.get("github_repo")
 
         # PR creation tasks that reference an upstream implementation branch
@@ -122,6 +143,7 @@ class GitOperationsManager:
                 if existing:
                     if existing.exists():
                         self._active_worktree = existing
+                        self._setup_worktree_venv(existing)
                         task.context["worktree_branch"] = branch_name
                         self.logger.info(f"Reusing worktree for branch {branch_name}: {existing}")
                         return existing
@@ -142,6 +164,7 @@ class GitOperationsManager:
                         allow_cross_agent=is_chain,
                     )
                     self._active_worktree = worktree_path
+                    self._setup_worktree_venv(worktree_path)
                     task.context["worktree_branch"] = branch_name
                     self.logger.info(f"Using worktree: {github_repo} at {worktree_path}")
                     return worktree_path

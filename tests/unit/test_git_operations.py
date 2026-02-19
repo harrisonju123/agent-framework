@@ -1041,3 +1041,106 @@ class TestCleanupWorktreeNeverRemoves:
         mock_logger.info.assert_any_call("Pushed unpushed commits during cleanup")
         mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
         mock_worktree_manager.remove_worktree.assert_not_called()
+
+
+class TestWorktreeEnvVars:
+    """Tests for worktree_env_vars property and venv integration."""
+
+    def test_worktree_env_vars_none_by_default(self, git_ops):
+        """worktree_env_vars is None before any worktree setup."""
+        assert git_ops.worktree_env_vars is None
+
+    @patch("agent_framework.core.git_operations.GitOperationsManager._setup_worktree_venv")
+    def test_worktree_env_vars_populated_after_new_worktree(
+        self, mock_setup_venv, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """worktree_env_vars is set after get_working_directory creates a new worktree."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+        mock_worktree_manager.find_worktree_by_branch.return_value = None
+
+        new_worktree = tmp_path / "new-worktree"
+        mock_worktree_manager.create_worktree.return_value = new_worktree
+
+        from datetime import datetime, timezone
+        task = Task(
+            id="task-venv", title="T", description="D", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={"github_repo": "owner/repo"},
+        )
+
+        git_ops.get_working_directory(task)
+        mock_setup_venv.assert_called_once_with(new_worktree)
+
+    @patch("agent_framework.core.git_operations.GitOperationsManager._setup_worktree_venv")
+    def test_worktree_env_vars_populated_on_reuse(
+        self, mock_setup_venv, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """worktree_env_vars is set when reusing an existing worktree."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+
+        existing_wt = tmp_path / "existing-worktree"
+        existing_wt.mkdir()
+        mock_worktree_manager.find_worktree_by_branch.return_value = existing_wt
+
+        from datetime import datetime, timezone
+        task = Task(
+            id="task-reuse", title="T", description="D", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={"github_repo": "owner/repo", "worktree_branch": "agent/engineer/test-abc"},
+        )
+
+        git_ops.get_working_directory(task)
+        mock_setup_venv.assert_called_once_with(existing_wt)
+
+    def test_venv_failure_does_not_block_worktree(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """Venv setup failure doesn't prevent worktree from being returned."""
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue,
+            logger=mock_logger, worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
+        mock_worktree_manager.find_worktree_by_branch.return_value = None
+
+        new_worktree = tmp_path / "new-worktree"
+        mock_worktree_manager.create_worktree.return_value = new_worktree
+
+        from datetime import datetime, timezone
+        task = Task(
+            id="task-fail-venv", title="T", description="D", type="implementation",
+            status="pending", priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={"github_repo": "owner/repo"},
+        )
+
+        with patch("agent_framework.workspace.venv_manager.VenvManager.setup_venv",
+                    side_effect=Exception("venv boom")):
+            result = git_ops.get_working_directory(task)
+
+        assert result == new_worktree
+        assert git_ops.worktree_env_vars is None
+
+    def test_worktree_env_vars_cleared_between_tasks(self, git_ops, sample_task):
+        """Stale env vars from a previous worktree task are cleared."""
+        git_ops._worktree_env_vars = {"VIRTUAL_ENV": "/old/.venv", "PATH": "/old/.venv/bin:/usr/bin"}
+
+        # Task without worktree — falls through to workspace
+        sample_task.context = {}
+        result = git_ops.get_working_directory(sample_task)
+
+        assert result == git_ops.workspace
+        assert git_ops.worktree_env_vars is None
