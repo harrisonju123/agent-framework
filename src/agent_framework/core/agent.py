@@ -773,6 +773,9 @@ class Agent:
             else:
                 self.logger.warning("Architect plan step completed but no PlanDocument found in response")
 
+        # Verdict must be set before serialization so it persists to disk
+        self._set_structured_verdict(task, response)
+
         # Mark completed
         self.logger.debug(f"Marking task {task.id} as completed")
         task.mark_completed(self.config.id)
@@ -874,40 +877,15 @@ class Agent:
                 self.logger.debug(f"Checking if code review needed for {task.id}")
                 self._review_cycle.queue_code_review_if_needed(task, response)
                 self._review_cycle.queue_review_fix_if_needed(task, response, self._sync_jira_status)
-            # Store structured verdict so condition evaluators use it
-            # instead of falling back to fragile keyword matching.
-            # Only for review agents — engineer output may contain
-            # stray keywords ("CRITICAL" in logs) that cause false verdicts.
-            if has_workflow and self.config.base_id in ("qa", "architect"):
-                outcome = self._review_cycle.parse_review_outcome(
-                    getattr(response, "content", "") or ""
-                )
-                if outcome.approved:
-                    task.context["verdict"] = self._approval_verdict(task)
-                elif outcome.needs_fix:
-                    task.context["verdict"] = "needs_fix"
-                else:
-                    # No explicit approval keywords AND no rejection signals —
-                    # treat as implicit approval so condition evaluators don't
-                    # fall through to the NeedsFixCondition keyword fallback,
-                    # which defaults to True and loops back to implement.
-                    task.context["verdict"] = self._approval_verdict(task)
 
-            # Detect "no changes needed" — architect at plan step determines
-            # the work is already done or not applicable.
-            # When triggered, terminate the workflow here — there's nothing
-            # to implement or PR, so skip chain enforcement entirely.
-            skip_chain = False
-            if (has_workflow and self.config.base_id == "architect"
-                    and task.context.get("workflow_step", task.type) in ("plan", "planning")):
-                content = getattr(response, "content", "") or ""
-                if self._is_no_changes_response(content):
-                    task.context["verdict"] = "no_changes"
-                    skip_chain = True
-                    self.logger.info(
-                        f"No-changes verdict at plan step for task {task.id} — "
-                        f"terminating workflow (nothing to implement or PR)"
-                    )
+            # Verdict was already set in _handle_successful_completion() before
+            # serialization. Check it here to decide whether to skip chain enforcement.
+            skip_chain = task.context.get("verdict") == "no_changes"
+            if skip_chain:
+                self.logger.info(
+                    f"No-changes verdict at plan step for task {task.id} — "
+                    f"terminating workflow (nothing to implement or PR)"
+                )
 
             self._git_ops.detect_implementation_branch(task)
 
@@ -940,6 +918,33 @@ class Agent:
         if task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS:
             return "preview_approved"
         return "approved"
+
+    def _set_structured_verdict(self, task: Task, response) -> None:
+        """Parse review outcome and store verdict before task serialization.
+
+        Only qa/architect agents with a workflow produce verdicts.
+        Engineer output may contain stray keywords that cause false verdicts.
+        """
+        if not task.context.get("workflow"):
+            return
+        if self.config.base_id not in ("qa", "architect"):
+            return
+
+        outcome = self._review_cycle.parse_review_outcome(
+            getattr(response, "content", "") or ""
+        )
+        if outcome.approved:
+            task.context["verdict"] = self._approval_verdict(task)
+        elif outcome.needs_fix:
+            task.context["verdict"] = "needs_fix"
+        else:
+            task.context["verdict"] = self._approval_verdict(task)
+
+        if (self.config.base_id == "architect"
+                and task.context.get("workflow_step", task.type) in ("plan", "planning")):
+            content = getattr(response, "content", "") or ""
+            if self._is_no_changes_response(content):
+                task.context["verdict"] = "no_changes"
 
     @staticmethod
     def _is_no_changes_response(content: str) -> bool:
@@ -1122,15 +1127,16 @@ class Agent:
 
     @staticmethod
     def _normalize_workflow(task: Task) -> None:
-        """Map legacy workflow names to 'default'.
+        """Map legacy workflow names to 'default' and assign default when missing.
 
         Old tasks in queues may have 'simple', 'standard', or 'full'.
-        Normalize them so the rest of the pipeline only sees 'default'.
+        Tasks from issue_to_task() may have no workflow at all.
+        Normalize so the rest of the pipeline only sees 'default' (or a known name).
         """
-        if not task.context:
+        if task.context is None:
             return
         workflow = task.context.get("workflow")
-        if workflow in ("simple", "standard", "full"):
+        if not workflow or workflow in ("simple", "standard", "full"):
             task.context["workflow"] = "default"
 
     def _setup_task_context(self, task: Task, task_start_time) -> None:

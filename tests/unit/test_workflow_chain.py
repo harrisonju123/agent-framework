@@ -363,11 +363,11 @@ class TestNormalizeWorkflow:
         assert task.context["workflow"] == "custom"
 
     def test_normalize_workflow_no_workflow_key(self, agent):
-        """Tasks without a workflow key in context are left untouched."""
+        """Tasks without a workflow key get assigned 'default'."""
         task = _make_task(workflow="default")
         del task.context["workflow"]
         agent._normalize_workflow(task)
-        assert "workflow" not in task.context
+        assert task.context["workflow"] == "default"
 
     def test_normalize_workflow_none_context(self, agent):
         """Handles task with None context without raising."""
@@ -1741,36 +1741,24 @@ class TestVerdictStorageAndClearing:
     """Verify verdict is stored before workflow routing and cleared in chain tasks."""
 
     def test_verdict_stored_before_workflow_routing(self, agent, queue):
-        """_run_post_completion_flow stores verdict in task.context for review agents."""
-        # Verdict only stored for qa/architect — switch from default engineer
+        """_set_structured_verdict stores verdict in task.context for review agents."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
-        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
         response = _make_response("All checks pass, approved")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "approved"
 
     def test_needs_fix_verdict_stored(self, agent, queue):
         """Verdict 'needs_fix' stored when review finds issues."""
         agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
-        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default")
-        # CRITICAL: (uppercase) triggers parse_review_outcome's critical_issues pattern
         response = _make_response("CRITICAL: auth module has SQL injection vulnerability")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "needs_fix"
 
@@ -1779,12 +1767,8 @@ class TestVerdictStorageAndClearing:
         task = _make_task(workflow="default")
         response = _make_response("Implemented feature. CRITICAL log line was added.")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
 
@@ -1814,12 +1798,8 @@ class TestVerdictStorageAndClearing:
         del task.context["workflow"]
         response = _make_response("approved")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
 
@@ -1830,16 +1810,11 @@ class TestVerdictStorageAndClearing:
         instead of the generic approved edge, routing to implement rather than qa_review.
         """
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
-        agent._workflow_router.config = agent.config
         task = _make_task(workflow="preview", workflow_step="preview_review")
         response = _make_response("VERDICT: APPROVE")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "preview_approved"
 
@@ -1850,17 +1825,11 @@ class TestVerdictStorageAndClearing:
         doesn't stall when the architect writes a nuanced response without the verdict keyword.
         """
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
-        agent._workflow_router.config = agent.config
         task = _make_task(workflow="preview", workflow_step="preview_review")
-        # No APPROVE/REQUEST_CHANGES keyword — falls to the else branch
         response = _make_response("The plan looks comprehensive and well-structured.")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "preview_approved"
 
@@ -1870,16 +1839,11 @@ class TestVerdictStorageAndClearing:
         Regression guard: the new preview_review branching must not affect code_review.
         """
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
-        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="code_review")
         response = _make_response("VERDICT: APPROVE")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "approved"
 
@@ -1892,23 +1856,17 @@ class TestNoChangesVerdict:
     def test_no_changes_verdict_set_at_plan_step(self, agent, queue):
         """Architect at plan step with [NO_CHANGES_NEEDED] marker → verdict='no_changes'."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
-        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="plan")
         response = _make_response("[NO_CHANGES_NEEDED]\nThe feature already exists in production.")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "no_changes"
 
     def test_no_changes_verdict_set_for_original_planning_task(self, agent, queue):
         """Original planning task (type=PLANNING, no workflow_step) → verdict='no_changes'."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
-        agent._workflow_router.config = agent.config
         # Original planning task: type=PLANNING but no workflow_step in context
         task = Task(
             id="task-abc123def456",
@@ -1924,28 +1882,19 @@ class TestNoChangesVerdict:
         )
         response = _make_response("[NO_CHANGES_NEEDED]\nThe feature already exists in production.")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "no_changes"
 
     def test_no_changes_verdict_not_set_at_code_review(self, agent, queue):
         """Architect at code_review step → no 'no_changes' verdict even with marker."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
-        agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="code_review")
         response = _make_response("[NO_CHANGES_NEEDED]\nNothing to change, already implemented.")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         # Should get "approved" verdict from review outcome, not "no_changes"
         assert task.context.get("verdict") != "no_changes"
@@ -1955,12 +1904,8 @@ class TestNoChangesVerdict:
         task = _make_task(workflow="default", workflow_step="plan")
         response = _make_response("[NO_CHANGES_NEEDED]\nFeature already exists.")
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-
-        agent._run_post_completion_flow(task, response, None, 0)
+        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
+        agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") != "no_changes"
 
@@ -1969,6 +1914,8 @@ class TestNoChangesVerdict:
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent._workflow_router.config = agent.config
         task = _make_task(workflow="default", workflow_step="plan")
+        # Verdict is now set by _set_structured_verdict before _run_post_completion_flow
+        task.context["verdict"] = "no_changes"
         response = _make_response("[NO_CHANGES_NEEDED]\nNo engineering work needed.")
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
