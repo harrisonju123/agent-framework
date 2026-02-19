@@ -1758,6 +1758,7 @@ class Agent:
         """
         try:
             from ..utils.atomic_io import atomic_write_text
+            from ..utils.file_summarizer import summarize_file
 
             file_reads = self._session_logger.extract_file_reads()
             if not file_reads:
@@ -1785,7 +1786,7 @@ class Agent:
             for file_path in file_reads:
                 if file_path not in entries:
                     entries[file_path] = {
-                        "summary": "",
+                        "summary": summarize_file(file_path),
                         "read_by": self.config.base_id,
                         "read_at": now_iso,
                         "workflow_step": step,

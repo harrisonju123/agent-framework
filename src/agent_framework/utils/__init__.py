@@ -19,6 +19,7 @@ from .subprocess_utils import (
     get_command_output,
 )
 from .process_utils import kill_process_tree
+from .file_summarizer import summarize_file
 from .type_helpers import get_type_str
 from .validators import validate_branch_name, validate_identifier, validate_owner_repo
 
@@ -45,6 +46,8 @@ __all__ = [
     "get_command_output",
     # Process management
     "kill_process_tree",
+    # File summarizer
+    "summarize_file",
     # Type helpers
     "get_type_str",
     # Validators

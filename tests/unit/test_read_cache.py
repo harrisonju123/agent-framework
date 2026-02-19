@@ -192,3 +192,58 @@ class TestPopulateReadCache:
 
         data = json.loads((cache_dir / "root1.json").read_text())
         assert "/src/file.py" in data["entries"]
+
+    def test_auto_generates_summaries_for_real_files(self, agent, task, workspace):
+        """When files exist on disk, summaries are auto-generated."""
+        src_dir = workspace / "src"
+        src_dir.mkdir()
+        py_file = src_dir / "models.py"
+        py_file.write_text("class User:\n    pass\n\ndef get_user():\n    pass\n")
+
+        agent._session_logger.extract_file_reads.return_value = [str(py_file)]
+
+        agent._populate_read_cache(task)
+
+        cache_file = workspace / ".agent-communication" / "read-cache" / "root1.json"
+        data = json.loads(cache_file.read_text())
+        entry = data["entries"][str(py_file)]
+        assert "classes: User" in entry["summary"]
+        assert "funcs: get_user" in entry["summary"]
+
+    def test_auto_summary_empty_for_missing_file(self, agent, task, workspace):
+        """Missing files get empty summary (graceful degradation)."""
+        agent._session_logger.extract_file_reads.return_value = ["/nonexistent/file.py"]
+
+        agent._populate_read_cache(task)
+
+        cache_file = workspace / ".agent-communication" / "read-cache" / "root1.json"
+        data = json.loads(cache_file.read_text())
+        assert data["entries"]["/nonexistent/file.py"]["summary"] == ""
+
+
+class TestDisplayPath:
+    """Test PromptBuilder._display_path() strips workspace prefix."""
+
+    @pytest.fixture
+    def builder(self, tmp_path):
+        from agent_framework.core.prompt_builder import PromptBuilder
+
+        ctx = MagicMock()
+        ctx.workspace = tmp_path
+        config = MagicMock()
+        builder = PromptBuilder.__new__(PromptBuilder)
+        builder.ctx = ctx
+        builder.config = config
+        builder.logger = MagicMock()
+        return builder
+
+    def test_strips_workspace_prefix(self, builder, tmp_path):
+        full = str(tmp_path / "src" / "main.py")
+        assert builder._display_path(full) == "src/main.py"
+
+    def test_preserves_external_path(self, builder):
+        assert builder._display_path("/other/repo/file.py") == "/other/repo/file.py"
+
+    def test_strips_trailing_slash(self, builder, tmp_path):
+        full = str(tmp_path) + "/file.py"
+        assert builder._display_path(full) == "file.py"

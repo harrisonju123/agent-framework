@@ -1051,7 +1051,14 @@ If a tool call fails:
         return " ".join(parts)
 
     # Budget for read cache section — keeps prompt size under control
-    _READ_CACHE_MAX_CHARS = 3000
+    _READ_CACHE_MAX_CHARS = 6000
+
+    def _display_path(self, full_path: str) -> str:
+        """Strip workspace prefix for shorter table display."""
+        ws = str(self.ctx.workspace)
+        if full_path.startswith(ws):
+            return full_path[len(ws):].lstrip("/")
+        return full_path
 
     def _inject_read_cache(self, prompt: str, task: Task) -> str:
         """Inject read cache manifest from previous chain steps.
@@ -1093,7 +1100,7 @@ If a tool call fails:
                 # Truncate long summaries per-row
                 if len(summary) > 120:
                     summary = summary[:117] + "..."
-                lines.append(f"| {file_path} | {summary} | {agent_label} |")
+                lines.append(f"| {self._display_path(file_path)} | {summary} | {agent_label} |")
             lines.append("")
             footer = "Do NOT re-read these files unless you need to verify specific line-level details."
             if self.ctx.mcp_enabled:
@@ -1101,7 +1108,7 @@ If a tool call fails:
             lines.append(footer + "\n")
         else:
             # Framework-populated paths only — no summaries
-            paths = list(entries.keys())
+            paths = [self._display_path(p) for p in entries.keys()]
             paths_str = ", ".join(paths[:30])
             if len(paths) > 30:
                 paths_str += f", ... ({len(paths) - 30} more)"
