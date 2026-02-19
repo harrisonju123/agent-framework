@@ -435,13 +435,15 @@ class WorkflowExecutor:
             context.pop("_step_instructions", None)
         # worktree_branch is ephemeral per-agent — each agent creates its own worktree
         context.pop("worktree_branch", None)
-        # Prevent same-agent self-referential upstream context — an agent
-        # should never see its own output labeled as "UPSTREAM AGENT FINDINGS"
-        upstream_source = context.get("upstream_source_agent")
-        if upstream_source and upstream_source == target_step.agent:
+        # Prevent same-step self-referential upstream context — only clear when
+        # the exact same workflow step produced the upstream (e.g. engineer→engineer).
+        # Different steps on the same agent (plan→create_pr, both architect) keep context.
+        upstream_source_step = context.get("upstream_source_step")
+        if upstream_source_step and upstream_source_step == target_step.id:
             context.pop("upstream_summary", None)
             context.pop("upstream_context_file", None)
             context.pop("upstream_source_agent", None)
+            context.pop("upstream_source_step", None)
         if task.context.get("fan_in"):
             context["fan_in"] = True
             context["parent_task_id"] = task.context.get("parent_task_id")
@@ -449,12 +451,24 @@ class WorkflowExecutor:
 
         # Prepend review findings so the fix-cycle engineer sees what to address
         description = task.description
+        user_goal = task.context.get("user_goal", "")
+
         if is_review_to_engineer:
             upstream = task.context.get("upstream_summary", "")
             if upstream:
                 workflow_step = task.context.get("workflow_step", "")
                 header = "CODE REVIEW FINDINGS TO ADDRESS" if workflow_step == "code_review" else "QA FINDINGS TO ADDRESS"
-                description = f"## {header}\n{upstream}\n\n## ORIGINAL TASK\n{description}"
+                description = f"## {header}\n{upstream}\n\n## ORIGINAL TASK\n{user_goal or description}"
+        elif user_goal and target_step.id != task.context.get("workflow_step"):
+            step_directives = {
+                "implement": "Implement the following changes",
+                "code_review": "Review the implementation for the following task",
+                "qa_review": "Test and verify the implementation for the following task",
+                "create_pr": "Create a pull request for the following completed work",
+            }
+            directive = step_directives.get(target_step.id)
+            if directive:
+                description = f"## {directive}\n\n{user_goal}"
 
         return Task(
             id=chain_id,

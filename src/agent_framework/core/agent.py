@@ -1628,6 +1628,9 @@ class Agent:
             # Store inline for cross-worktree portability (file path may not resolve)
             task.context["upstream_summary"] = content[:self.UPSTREAM_INLINE_MAX_CHARS]
             task.context["upstream_source_agent"] = self.config.base_id
+            step = task.context.get("workflow_step")
+            if step:
+                task.context["upstream_source_step"] = step
             self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")

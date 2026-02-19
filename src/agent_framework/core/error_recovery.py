@@ -139,6 +139,8 @@ class ErrorRecoveryManager:
             # retried agent from seeing its own previous output as upstream input
             task.context.pop("upstream_summary", None)
             task.context.pop("upstream_context_file", None)
+            task.context.pop("upstream_source_agent", None)
+            task.context.pop("upstream_source_step", None)
 
             # Reset task to pending so it can be retried
             self.logger.warning(

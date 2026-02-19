@@ -1220,6 +1220,115 @@ class TestUpstreamSummaryInChainTask:
         assert chain_task.description == "Build the thing."
 
 
+# -- Step-aware descriptions --
+
+class TestStepAwareDescriptions:
+    """Verify chain tasks get step-appropriate descriptions when user_goal is set."""
+
+    @pytest.fixture
+    def executor(self, queue):
+        from agent_framework.workflow.executor import WorkflowExecutor
+        return WorkflowExecutor(queue, queue.queue_dir)
+
+    def _task_with_goal(self, step="plan", **extra):
+        return _make_task(
+            workflow="default",
+            workflow_step=step,
+            user_goal="Add authentication to the API",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+            **extra,
+        )
+
+    def test_implement_step_gets_directive(self, executor):
+        from agent_framework.workflow.dag import WorkflowStep
+        task = self._task_with_goal(step="plan")
+        step = WorkflowStep(id="implement", agent="engineer")
+
+        chain = executor._build_chain_task(task, step, "architect")
+
+        assert chain.description.startswith("## Implement the following changes")
+        assert "Add authentication to the API" in chain.description
+
+    def test_code_review_step_gets_directive(self, executor):
+        from agent_framework.workflow.dag import WorkflowStep
+        task = self._task_with_goal(step="implement")
+        step = WorkflowStep(id="code_review", agent="architect")
+
+        chain = executor._build_chain_task(task, step, "engineer")
+
+        assert chain.description.startswith("## Review the implementation")
+        assert "Add authentication to the API" in chain.description
+
+    def test_qa_review_step_gets_directive(self, executor):
+        from agent_framework.workflow.dag import WorkflowStep
+        task = self._task_with_goal(step="code_review")
+        step = WorkflowStep(id="qa_review", agent="qa")
+
+        chain = executor._build_chain_task(task, step, "architect")
+
+        assert chain.description.startswith("## Test and verify")
+        assert "Add authentication to the API" in chain.description
+
+    def test_create_pr_step_gets_directive(self, executor):
+        from agent_framework.workflow.dag import WorkflowStep
+        task = self._task_with_goal(step="qa_review")
+        step = WorkflowStep(id="create_pr", agent="architect")
+
+        chain = executor._build_chain_task(task, step, "qa")
+
+        assert chain.description.startswith("## Create a pull request")
+        assert "Add authentication to the API" in chain.description
+
+    def test_same_step_fallback_to_original_description(self, executor):
+        """When target step == current step, directive guard skips rewrite."""
+        from agent_framework.workflow.dag import WorkflowStep
+        task = self._task_with_goal(step="implement")
+        step = WorkflowStep(id="implement", agent="engineer")
+
+        chain = executor._build_chain_task(task, step, "engineer")
+
+        assert chain.description == "Build the thing."
+
+    def test_no_user_goal_preserves_original(self, executor):
+        """Without user_goal, description passes through unchanged."""
+        from agent_framework.workflow.dag import WorkflowStep
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            _chain_depth=1,
+            _root_task_id="root-1",
+            _global_cycle_count=1,
+        )
+        step = WorkflowStep(id="implement", agent="engineer")
+
+        chain = executor._build_chain_task(task, step, "architect")
+
+        assert chain.description == "Build the thing."
+
+    def test_review_to_engineer_uses_user_goal_in_original_section(self, executor):
+        """QA→engineer description uses user_goal for ORIGINAL TASK section."""
+        from agent_framework.workflow.dag import WorkflowStep
+        task = self._task_with_goal(
+            step="qa_review",
+            upstream_summary="Tests failing in auth module",
+            upstream_source_step="qa_review",
+        )
+        step = WorkflowStep(id="implement", agent="engineer")
+
+        chain = executor._build_chain_task(
+            task, step, "qa", is_review_to_engineer=True,
+        )
+
+        assert "## QA FINDINGS TO ADDRESS" in chain.description
+        assert "Tests failing in auth module" in chain.description
+        assert "## ORIGINAL TASK" in chain.description
+        assert "Add authentication to the API" in chain.description
+        # user_goal should be used, not the raw task description
+        assert "Build the thing." not in chain.description
+
+
 # -- Code review cycle cap and findings header --
 
 class TestCodeReviewCycleCap:
@@ -2047,8 +2156,8 @@ class TestNoChangesRouting:
 class TestSameAgentUpstreamClearing:
     """Prevent self-referential upstream context when chain routes back to same agent."""
 
-    def test_chain_to_same_agent_clears_upstream_summary(self, queue):
-        """Chain task targeting the same agent that produced upstream clears it."""
+    def test_chain_to_same_step_clears_upstream_summary(self, queue):
+        """Chain task targeting the same step that produced upstream clears it."""
         from agent_framework.workflow.executor import WorkflowExecutor
         from agent_framework.workflow.dag import WorkflowStep
 
@@ -2056,21 +2165,50 @@ class TestSameAgentUpstreamClearing:
 
         task = _make_task(
             workflow="default",
-            upstream_summary="Previous architect analysis...",
+            upstream_summary="Previous code review analysis...",
             upstream_context_file="/tmp/ctx.md",
             upstream_source_agent="architect",
+            upstream_source_step="code_review",
             _chain_depth=2,
             _root_task_id="root-1",
             _global_cycle_count=2,
         )
 
-        # Route back to architect — same agent that produced the upstream
+        # Route back to code_review — same step that produced the upstream
         architect_step = WorkflowStep(id="code_review", agent="architect")
         chain_task = executor._build_chain_task(task, architect_step, "qa")
 
         assert "upstream_summary" not in chain_task.context
         assert "upstream_context_file" not in chain_task.context
         assert "upstream_source_agent" not in chain_task.context
+        assert "upstream_source_step" not in chain_task.context
+
+    def test_chain_to_same_agent_different_step_preserves_upstream(self, queue):
+        """Chain from architect/plan to architect/code_review keeps upstream context."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            upstream_summary="Plan output: implement auth module",
+            upstream_context_file="/tmp/plan-ctx.md",
+            upstream_source_agent="architect",
+            upstream_source_step="plan",
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        # Route to code_review — different step, same agent
+        code_review_step = WorkflowStep(id="code_review", agent="architect")
+        chain_task = executor._build_chain_task(task, code_review_step, "architect")
+
+        assert chain_task.context["upstream_summary"] == "Plan output: implement auth module"
+        assert chain_task.context["upstream_context_file"] == "/tmp/plan-ctx.md"
+        assert chain_task.context["upstream_source_agent"] == "architect"
+        assert chain_task.context["upstream_source_step"] == "plan"
 
     def test_chain_to_different_agent_preserves_upstream_summary(self, queue):
         """Chain task targeting a different agent keeps upstream context intact."""
@@ -2084,6 +2222,7 @@ class TestSameAgentUpstreamClearing:
             upstream_summary="QA findings: tests failing",
             upstream_context_file="/tmp/qa-ctx.md",
             upstream_source_agent="qa",
+            upstream_source_step="qa_review",
             _chain_depth=2,
             _root_task_id="root-1",
             _global_cycle_count=2,
@@ -2097,8 +2236,8 @@ class TestSameAgentUpstreamClearing:
         assert chain_task.context["upstream_context_file"] == "/tmp/qa-ctx.md"
         assert chain_task.context["upstream_source_agent"] == "qa"
 
-    def test_upstream_source_agent_stored_on_save(self, tmp_path):
-        """_save_upstream_context stores upstream_source_agent in task.context."""
+    def test_upstream_source_agent_and_step_stored_on_save(self, tmp_path):
+        """_save_upstream_context stores both upstream_source_agent and upstream_source_step."""
         agent = MagicMock()
         agent.config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="p",
@@ -2107,12 +2246,13 @@ class TestSameAgentUpstreamClearing:
         agent.UPSTREAM_CONTEXT_MAX_CHARS = Agent.UPSTREAM_CONTEXT_MAX_CHARS
         agent.logger = MagicMock()
 
-        task = _make_task()
+        task = _make_task(workflow_step="plan")
         response = _make_response("Analysis complete: all looks good.")
 
         Agent._save_upstream_context(agent, task, response)
 
         assert task.context["upstream_source_agent"] == "architect"
+        assert task.context["upstream_source_step"] == "plan"
 
 
 # -- Stale worktree_branch clearing --
