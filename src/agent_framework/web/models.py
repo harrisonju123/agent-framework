@@ -293,3 +293,55 @@ class SetupStatusResponse(BaseModel):
     repositories_registered: int
     mcp_enabled: bool
     ready_to_start: bool
+
+
+# Observability / agentic metrics models
+
+class MemoryMetricsData(BaseModel):
+    """Memory store utilization metrics."""
+    total_memories: int
+    accessed_memories: int
+    hit_rate: float
+    by_category: Dict[str, int]
+
+
+class SelfEvalMetricsData(BaseModel):
+    """Self-evaluation verdict distribution and retry rate."""
+    total_tasks_evaluated: int
+    tasks_with_failures: int
+    retry_rate: float
+    pass_count: int
+    fail_count: int
+    auto_pass_count: int
+
+
+class ReplanMetricsData(BaseModel):
+    """Dynamic replanning trigger and outcome metrics."""
+    total_tasks_with_replan: int
+    total_replan_events: int
+    success_after_replan: int
+    trigger_rate_pct: float
+
+
+class SpecializationMetricsData(BaseModel):
+    """Specialization profile usage distribution."""
+    profiles: Dict[str, int]
+    total_specializations: int
+
+
+class ContextBudgetMetricsData(BaseModel):
+    """Context window budget utilization."""
+    critical_budget_events: int
+    total_token_budget_warnings: int
+    avg_output_token_ratio_pct: float
+
+
+class AgenticMetricsResponse(BaseModel):
+    """Complete agentic observability report returned by the API."""
+    generated_at: datetime
+    time_range_hours: int
+    memory: MemoryMetricsData
+    self_eval: SelfEvalMetricsData
+    replan: ReplanMetricsData
+    specialization: SpecializationMetricsData
+    context_budget: ContextBudgetMetricsData

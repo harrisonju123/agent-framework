@@ -711,6 +711,42 @@ class DashboardDataProvider:
 
         return positions
 
+    def get_agentic_metrics(self, hours: int = 24):
+        """Return aggregated agentic observability metrics.
+
+        Delegates to AgenticMetrics (with its own 30s cache) and maps the
+        result to the web model so the rest of the stack stays independent
+        of the analytics package's internal types.
+        """
+        from ..analytics.agentic_metrics import AgenticMetrics
+        from .models import (
+            AgenticMetricsResponse,
+            MemoryMetricsData,
+            SelfEvalMetricsData,
+            ReplanMetricsData,
+            SpecializationMetricsData,
+            ContextBudgetMetricsData,
+        )
+
+        if not hasattr(self, "_agentic_metrics"):
+            self._agentic_metrics = AgenticMetrics(self.workspace)
+
+        report = self._agentic_metrics.get_report(hours=hours)
+
+        return AgenticMetricsResponse(
+            generated_at=report.generated_at,
+            time_range_hours=report.time_range_hours,
+            memory=MemoryMetricsData(**report.memory.model_dump()),
+            self_eval=SelfEvalMetricsData(**report.self_eval.model_dump()),
+            replan=ReplanMetricsData(**report.replan.model_dump()),
+            specialization=SpecializationMetricsData(
+                **report.specialization.model_dump()
+            ),
+            context_budget=ContextBudgetMetricsData(
+                **report.context_budget.model_dump()
+            ),
+        )
+
     def get_active_claude_cli_tasks(self) -> Dict[str, str]:
         """Get mapping of agent_id to current task_id for active agents.
 

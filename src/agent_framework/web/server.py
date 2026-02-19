@@ -41,6 +41,7 @@ from .models import (
     SetupConfiguration,
     SetupStatusResponse,
     TeamSessionData,
+    AgenticMetricsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -536,6 +537,18 @@ def register_routes(app: FastAPI):
         except Exception as e:
             logger.exception(f"Error translating error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ============== Observability API ==============
+
+    @app.get("/api/observability/metrics", response_model=AgenticMetricsResponse)
+    async def get_agentic_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Get aggregated agentic observability metrics.
+
+        Returns memory hit rate, self-eval retry rate, replan trigger/success
+        rate, specialization profile distribution, and context budget stats
+        for the requested time window (default: last 24 hours, max 7 days).
+        """
+        return app.state.data_provider.get_agentic_metrics(hours=hours)
 
     # ============== Teams API ==============
 

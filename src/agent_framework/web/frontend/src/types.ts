@@ -148,6 +148,51 @@ export interface OperationResponse {
   message: string
 }
 
+// Observability / agentic metrics types
+export interface MemoryMetrics {
+  total_memories: number
+  accessed_memories: number
+  hit_rate: number
+  by_category: Record<string, number>
+}
+
+export interface SelfEvalMetrics {
+  total_tasks_evaluated: number
+  tasks_with_failures: number
+  retry_rate: number
+  pass_count: number
+  fail_count: number
+  auto_pass_count: number
+}
+
+export interface ReplanMetrics {
+  total_tasks_with_replan: number
+  total_replan_events: number
+  success_after_replan: number
+  trigger_rate_pct: number
+}
+
+export interface SpecializationMetrics {
+  profiles: Record<string, number>
+  total_specializations: number
+}
+
+export interface ContextBudgetMetrics {
+  critical_budget_events: number
+  total_token_budget_warnings: number
+  avg_output_token_ratio_pct: number
+}
+
+export interface AgenticMetrics {
+  generated_at: string
+  time_range_hours: number
+  memory: MemoryMetrics
+  self_eval: SelfEvalMetrics
+  replan: ReplanMetrics
+  specialization: SpecializationMetrics
+  context_budget: ContextBudgetMetrics
+}
+
 // Log streaming types
 export interface LogEntry {
   id?: number  // Client-side ID for Vue key binding

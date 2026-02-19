@@ -6,6 +6,7 @@ const routes = [
   { path: '/tasks', name: 'tasks', component: () => import('../pages/TasksPage.vue'), meta: { title: 'Tasks' } },
   { path: '/logs', name: 'logs', component: () => import('../pages/LogsPage.vue'), meta: { title: 'Logs' } },
   { path: '/settings', name: 'settings', component: () => import('../pages/SettingsPage.vue'), meta: { title: 'Settings' } },
+  { path: '/observability', name: 'observability', component: () => import('../pages/ObservabilityPage.vue'), meta: { title: 'Observability' } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

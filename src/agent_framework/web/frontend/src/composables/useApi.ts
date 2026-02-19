@@ -9,6 +9,7 @@ import type {
   RunTicketRequest,
   CreateTaskRequest,
   OperationResponse,
+  AgenticMetrics,
 } from '../types'
 
 const baseUrl = '/api'
@@ -159,6 +160,15 @@ export function useApi() {
     )
   }
 
+  // Observability metrics — no loading state to avoid flicker on background polls
+  async function getAgenticMetrics(hours: number = 24): Promise<AgenticMetrics | null> {
+    try {
+      return await fetchJson<AgenticMetrics>(`/observability/metrics?hours=${hours}`)
+    } catch {
+      return null
+    }
+  }
+
   return {
     loading,
     error,
@@ -177,5 +187,6 @@ export function useApi() {
     createWork,
     analyzeRepo,
     runTicket,
+    getAgenticMetrics,
   }
 }
