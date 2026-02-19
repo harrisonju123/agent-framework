@@ -309,12 +309,15 @@ Focus on reviewing the code changes.
         # Render plan as human-readable section (empty string when no plan)
         plan_section = self._render_plan_section(task)
 
+        # Per-step instructions override (e.g. create_pr gets PR-specific instructions)
+        step_instructions = self._build_step_instructions_section(task)
+
         return f"""You are {self.ctx.config.id}.
 
 TASK DETAILS:
 {task_json}
 
-{mcp_guidance}{upstream_context}{prescan_context}{plan_section}
+{mcp_guidance}{upstream_context}{prescan_context}{plan_section}{step_instructions}
 YOUR RESPONSIBILITIES:
 {agent_prompt}
 
@@ -392,6 +395,9 @@ IMPORTANT:
         # Render plan as human-readable section (empty string when no plan)
         plan_section = self._render_plan_section(task)
 
+        # Per-step instructions override (e.g. create_pr gets PR-specific instructions)
+        step_instructions = self._build_step_instructions_section(task)
+
         # Build optimized prompt (shorter, focused on essentials)
         agent_prompt = prompt_override or self.ctx.config.prompt
         return f"""You are {self.ctx.config.id}.
@@ -399,7 +405,7 @@ IMPORTANT:
 TASK:
 {task_json}
 
-{context_note}{dep_context}{chain_note}{upstream_context}{prescan_context}{plan_section}
+{context_note}{dep_context}{chain_note}{upstream_context}{prescan_context}{plan_section}{step_instructions}
 {agent_prompt}
 
 IMPORTANT:
@@ -647,6 +653,26 @@ Your output MUST end with exactly one of:
   VERDICT: REQUEST_CHANGES  (send back with specific required changes)
 
 """
+
+    def _build_step_instructions_section(self, task: Task) -> str:
+        """Build a high-priority instructions section from per-step config.
+
+        When a workflow step defines custom instructions (via YAML), they override
+        the general agent prompt for that step. This prevents e.g. the create_pr
+        step from receiving generic architect planning instructions.
+        """
+        instructions = task.context.get("_step_instructions")
+        if instructions is None:
+            return ""
+
+        step_name = task.context.get("workflow_step", "unknown")
+        return (
+            f"## CURRENT STEP: {step_name}\n\n"
+            f"## STEP INSTRUCTIONS\n"
+            f"{instructions}\n\n"
+            "You MUST follow the step instructions above. "
+            "Ignore any conflicting guidance in the agent responsibilities section below.\n\n"
+        )
 
     def _build_error_handling_guidance(self) -> str:
         """Build error handling guidance for MCP tools."""

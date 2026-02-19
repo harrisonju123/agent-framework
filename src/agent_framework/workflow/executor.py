@@ -428,6 +428,11 @@ class WorkflowExecutor:
         }
         # Clear stale verdict so the next agent's output is evaluated fresh
         context.pop("verdict", None)
+        # Thread step-specific instructions into the chain task for prompt injection
+        if target_step.instructions is not None:
+            context["_step_instructions"] = target_step.instructions
+        else:
+            context.pop("_step_instructions", None)
         # worktree_branch is ephemeral per-agent — each agent creates its own worktree
         context.pop("worktree_branch", None)
         # Prevent same-agent self-referential upstream context — an agent

@@ -52,6 +52,7 @@ class WorkflowStep:
     agent: str  # Agent responsible for this step
     next: List[WorkflowEdge] = field(default_factory=list)
     task_type_override: Optional[str] = None  # Override default task type for this agent
+    instructions: Optional[str] = None  # Per-step instructions injected into prompts
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):

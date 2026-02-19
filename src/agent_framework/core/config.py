@@ -251,6 +251,7 @@ class WorkflowStepDefinition(BaseModel):
     agent: str
     next: Optional[List[Dict[str, Any]]] = None  # List of edge definitions
     task_type: Optional[str] = None  # Override default task type
+    instructions: Optional[str] = None  # Per-step instructions injected into prompts
 
 
 class WorkflowDefinition(BaseModel):
@@ -358,6 +359,7 @@ class WorkflowDefinition(BaseModel):
                 agent=step_def.agent,
                 next=edges,
                 task_type_override=step_def.task_type,
+                instructions=step_def.instructions,
             )
 
         dag = WorkflowDAG(
