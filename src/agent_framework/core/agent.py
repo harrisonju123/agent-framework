@@ -206,6 +206,13 @@ class Agent:
         self._optimization_config = MappingProxyType(sanitized_config)
         self.logger.info(f"🔧 Optimization config: {self._get_active_optimizations()}")
 
+        # Initialize model success store for intelligent routing
+        self._model_success_store = None
+        ir_cfg = sanitized_config.get("intelligent_routing", {})
+        if ir_cfg.get("enabled", False):
+            from ..llm.model_success_store import ModelSuccessStore
+            self._model_success_store = ModelSuccessStore(workspace, enabled=True)
+
         self.retry_handler = RetryHandler(max_retries=self.config.max_retries)
         enable_error_truncation = self._optimization_config.get("enable_error_truncation", False)
         self.escalation_handler = EscalationHandler(enable_error_truncation=enable_error_truncation)
@@ -509,6 +516,7 @@ class Agent:
             llm=llm,
             workspace=workspace,
             activity_manager=self.activity_manager,
+            model_success_store=self._model_success_store,
         )
 
     # Backward-compatibility delegation shims for tests that call Agent._* methods
@@ -1101,6 +1109,19 @@ class Agent:
             error_message=task.last_error
         ))
 
+        # Record failure outcome for intelligent routing
+        if self._model_success_store is not None and response.model_used:
+            repo_slug = task.context.get("github_repo", "")
+            task_type_str = task.type if isinstance(task.type, str) else task.type.value
+            cost = self._budget.estimate_cost(response)
+            self._model_success_store.record_outcome(
+                repo_slug=repo_slug,
+                model_tier=response.model_used,
+                task_type=task_type_str,
+                success=False,
+                cost=cost,
+            )
+
         await self._handle_failure(task)
 
     def _cleanup_task_execution(self, task: Task, lock) -> None:
@@ -1421,6 +1442,18 @@ class Agent:
         )
         efficiency_directive = " ".join(efficiency_parts)
 
+        # Compute routing signals for intelligent model selection
+        _estimated_lines = 0
+        if task.plan:
+            from .task_decomposer import estimate_plan_lines
+            _estimated_lines = estimate_plan_lines(task.plan)
+
+        _budget_remaining_usd = None
+        _budget_ceiling = task.context.get("_budget_ceiling")
+        _cumulative_cost = task.context.get("_cumulative_cost", 0.0)
+        if _budget_ceiling is not None:
+            _budget_remaining_usd = max(0.0, _budget_ceiling - _cumulative_cost)
+
         # Race LLM execution against pause/stop signal watcher
         llm_coro = self.llm.complete(
             LLMRequest(
@@ -1432,6 +1465,8 @@ class Agent:
                 agents=team_agents,
                 specialization_profile=self._current_specialization.id if self._current_specialization else None,
                 file_count=self._current_file_count,
+                estimated_lines=_estimated_lines,
+                budget_remaining_usd=_budget_remaining_usd,
                 allowed_tools=preview_allowed_tools,
                 append_system_prompt=efficiency_directive,
                 env_vars=self._git_ops.worktree_env_vars,
@@ -1583,6 +1618,31 @@ class Agent:
         except Exception as e:
             self.logger.debug(f"WIP auto-commit failed (non-fatal): {e}")
 
+    def _log_routing_decision(self, task: Task, response) -> None:
+        """Log intelligent routing decision if one was made."""
+        backend = self.llm
+        selector = getattr(backend, 'model_selector', None)
+        decision = getattr(selector, '_last_routing_decision', None) if selector else None
+        if decision is None:
+            return
+        # Clear stashed decision so it doesn't leak to the next call
+        selector._last_routing_decision = None
+        self._session_logger.log(
+            "model_routing_decision",
+            chosen_tier=decision.chosen_tier,
+            scores=decision.scores,
+            signals=decision.signals,
+            fallback=decision.fallback,
+            model_used=response.model_used,
+        )
+        self.activity_manager.append_event(ActivityEvent(
+            type="model_routing_decision",
+            agent=self.config.id,
+            task_id=task.id,
+            title=f"Intelligent routing: {decision.chosen_tier} (scores: {decision.scores})",
+            timestamp=datetime.now(timezone.utc),
+        ))
+
     def _process_llm_completion(self, response, task: Task) -> None:
         """Log LLM completion and update context window manager."""
         from datetime import datetime
@@ -1695,6 +1755,7 @@ class Agent:
 
             # Process LLM completion (logging, context window updates)
             self._process_llm_completion(response, task)
+            self._log_routing_decision(task, response)
 
             # Handle response
             if response.success:

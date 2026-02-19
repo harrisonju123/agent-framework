@@ -42,6 +42,8 @@ class LiteLLMBackend(LLMBackend):
         premium_model: str = "claude-sonnet-4-5-20250929",
         logs_dir: Optional[Path] = None,
         timeout: int = DEFAULT_TIMEOUT,
+        intelligent_routing_config: Optional[dict] = None,
+        model_success_store: Optional[object] = None,
     ):
         if not LITELLM_AVAILABLE:
             raise ImportError(
@@ -56,6 +58,22 @@ class LiteLLMBackend(LLMBackend):
         )
         self.logs_dir = logs_dir or Path("logs")
         self.timeout = timeout
+
+        # Intelligent routing (optional)
+        self._intelligent_router = None
+        self._model_success_store = model_success_store
+        ir_cfg = intelligent_routing_config or {}
+        if ir_cfg.get("enabled") and model_success_store is not None:
+            from .intelligent_router import IntelligentRouter
+            self._intelligent_router = IntelligentRouter(
+                success_store=model_success_store,
+                complexity_weight=ir_cfg.get("complexity_weight", 0.3),
+                historical_weight=ir_cfg.get("historical_weight", 0.25),
+                specialization_weight=ir_cfg.get("specialization_weight", 0.2),
+                budget_weight=ir_cfg.get("budget_weight", 0.15),
+                retry_weight=ir_cfg.get("retry_weight", 0.1),
+                min_historical_samples=ir_cfg.get("min_historical_samples", 5),
+            )
 
     async def complete(
         self,
@@ -79,6 +97,8 @@ class LiteLLMBackend(LLMBackend):
                 request.retry_count,
                 request.specialization_profile,
                 request.file_count,
+                request.estimated_lines,
+                request.budget_remaining_usd,
             )
         else:
             model = self.model_selector.default_model
@@ -193,11 +213,30 @@ class LiteLLMBackend(LLMBackend):
         retry_count: int,
         specialization_profile: str = None,
         file_count: int = 0,
+        estimated_lines: int = 0,
+        budget_remaining_usd: Optional[float] = None,
     ) -> str:
         """Select appropriate model based on task type, retry count, and specialization."""
+        router = self._intelligent_router
+        routing_signals = None
+
+        if router is not None:
+            from .intelligent_router import RoutingSignals
+            task_type_str = task_type.value if hasattr(task_type, 'value') else str(task_type)
+            routing_signals = RoutingSignals(
+                task_type=task_type_str,
+                retry_count=retry_count,
+                specialization_profile=specialization_profile,
+                file_count=file_count,
+                estimated_lines=estimated_lines,
+                budget_remaining_usd=budget_remaining_usd,
+            )
+
         return self.model_selector.select(
             task_type,
             retry_count,
             specialization_profile,
             file_count,
+            intelligent_router=router,
+            routing_signals=routing_signals,
         )

@@ -98,8 +98,29 @@ class ContextWindowConfig(BaseModel):
     min_message_retention: int = 3
 
 
+class IntelligentRoutingConfig(BaseModel):
+    """Configuration for multi-signal intelligent model routing."""
+    enabled: bool = False
+    complexity_weight: float = 0.3
+    historical_weight: float = 0.25
+    specialization_weight: float = 0.2
+    budget_weight: float = 0.15
+    retry_weight: float = 0.1
+    min_historical_samples: int = 5  # Minimum outcomes before historical signal is trusted
+
+    @field_validator('min_historical_samples')
+    @classmethod
+    def validate_min_samples(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"min_historical_samples must be >= 1, got {v}")
+        return v
+
+
 class OptimizationConfig(BaseModel):
     """Optimization configuration for token usage reduction."""
+    # Intelligent model routing
+    intelligent_routing: IntelligentRoutingConfig = Field(default_factory=IntelligentRoutingConfig)
+
     # Quick wins (Phase 1)
     enable_minimal_prompts: bool = False
     enable_compact_json: bool = False

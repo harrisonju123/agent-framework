@@ -22,6 +22,8 @@ class LLMRequest:
     agents: Optional[dict] = None  # Teammate definitions for Claude Agent Teams (--agents flag)
     specialization_profile: Optional[str] = None  # Specialization ID (backend, frontend, infrastructure)
     file_count: int = 0  # Number of files involved (for complexity-based routing)
+    estimated_lines: int = 0  # Estimated implementation lines (for intelligent routing complexity signal)
+    budget_remaining_usd: Optional[float] = None  # Remaining USD budget for the task tree (for intelligent routing)
     allowed_tools: Optional[List[str]] = None  # Restrict to these tools via --allowedTools (None = all tools allowed)
     append_system_prompt: Optional[str] = None  # Appended to Claude CLI's system prompt via --append-system-prompt
     env_vars: Optional[dict] = None  # Extra env vars merged into subprocess environment (e.g. venv PATH)
@@ -81,6 +83,8 @@ class LLMBackend(ABC):
         retry_count: int,
         specialization_profile: str = None,
         file_count: int = 0,
+        estimated_lines: int = 0,
+        budget_remaining_usd: Optional[float] = None,
     ) -> str:
         """
         Select appropriate model based on task type, retry count, and specialization.
@@ -91,5 +95,8 @@ class LLMBackend(ABC):
         - IMPLEMENTATION + backend/infra + high file count -> opus (premium)
         - IMPLEMENTATION + frontend + low file count -> haiku (cheap)
         - default -> sonnet
+
+        When intelligent routing is enabled, delegates to IntelligentRouter
+        for multi-signal scoring.
         """
         pass
