@@ -92,6 +92,11 @@ class IndexQuery:
             return ""
         return "\n".join(self._format_overview(index))
 
+    def get_project_language(self, repo_slug: str) -> Optional[str]:
+        """Return the indexed project language, or None if no index exists."""
+        index = self._store.load(repo_slug)
+        return index.language if index else None
+
     def _try_semantic_query(self, repo_slug: str, task_goal: str) -> list[dict]:
         """Best-effort semantic search. Returns empty list on any failure."""
         if self._embedder is None:

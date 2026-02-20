@@ -8,10 +8,11 @@ agent prompts to reduce token waste on subsequent tasks.
 
 import json
 import logging
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,128 @@ def compute_tool_usage_stats(tool_calls: List[Dict[str, Any]]) -> ToolUsageStats
         files_read=list(files_read_ordered.keys()),
         files_written=written_files,
     )
+
+
+# --- Language mismatch detection ---
+
+# Local copy of indexer's _EXTENSION_MAP to avoid cross-package coupling
+_EXT_TO_LANG: Dict[str, str] = {
+    ".py": "python",
+    ".go": "go",
+    ".rb": "ruby",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".jsx": "javascript",
+    ".tsx": "typescript",
+}
+
+# Extensions that don't imply a specific project language
+_AGNOSTIC_EXTENSIONS = {".json", ".md", ".yaml", ".yml", ".toml", ".txt", ".cfg", ".ini", ".env", ".lock"}
+
+_GLOB_EXT_RE = re.compile(r"\*\.(\w+)")
+
+# ripgrep --type names don't always match extensions (e.g. "rust" → ".rs")
+_RG_TYPE_TO_EXT: Dict[str, str] = {
+    "py": ".py",
+    "python": ".py",
+    "go": ".go",
+    "ruby": ".rb",
+    "rb": ".rb",
+    "js": ".js",
+    "javascript": ".js",
+    "ts": ".ts",
+    "typescript": ".ts",
+    "jsx": ".jsx",
+    "tsx": ".tsx",
+    "rust": ".rs",
+    "java": ".java",
+    "cpp": ".cpp",
+    "c": ".c",
+}
+
+
+@dataclass
+class LanguageMismatch:
+    """A tool call that targeted a file extension belonging to a different language."""
+    project_language: str
+    searched_extension: str
+    searched_language: str
+    tool: str
+    pattern: str
+
+
+def _extract_extensions(tool: str, inp: Dict[str, Any]) -> List[tuple[str, str]]:
+    """Extract (extension, source_pattern) pairs from a tool call's input.
+
+    Returns list of (ext_with_dot, raw_pattern) tuples.
+    """
+    results = []
+    if tool == "Glob":
+        raw = inp.get("pattern", "")
+        for m in _GLOB_EXT_RE.finditer(raw):
+            results.append((f".{m.group(1)}", raw))
+    elif tool == "Grep":
+        raw = inp.get("glob", "")
+        for m in _GLOB_EXT_RE.finditer(raw):
+            results.append((f".{m.group(1)}", raw))
+        rg_type = inp.get("type", "")
+        if rg_type:
+            ext = _RG_TYPE_TO_EXT.get(rg_type.lower())
+            if ext:
+                results.append((ext, f"type={rg_type}"))
+    elif tool == "Read":
+        fp = inp.get("file_path", "")
+        if fp:
+            suffix = PurePosixPath(fp).suffix
+            if suffix:
+                results.append((suffix, fp))
+    return results
+
+
+def detect_language_mismatches(
+    tool_calls: List[Dict[str, Any]],
+    project_language: str,
+) -> List[LanguageMismatch]:
+    """Find tool calls that target file extensions belonging to a different language.
+
+    Pure function — no I/O. Deduplicates by (extension, tool).
+    """
+    if not project_language:
+        return []
+
+    project_lang = project_language.lower()
+    seen: set[tuple[str, str]] = set()
+    mismatches: List[LanguageMismatch] = []
+
+    for call in tool_calls:
+        tool = call.get("tool", "")
+        inp = call.get("input") or {}
+
+        for ext, pattern in _extract_extensions(tool, inp):
+            ext_lower = ext.lower()
+            if ext_lower in _AGNOSTIC_EXTENSIONS:
+                continue
+
+            searched_lang = _EXT_TO_LANG.get(ext_lower)
+            if searched_lang is None:
+                continue
+            if searched_lang == project_lang:
+                continue
+
+            key = (ext_lower, tool)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            mismatches.append(LanguageMismatch(
+                project_language=project_lang,
+                searched_extension=ext_lower,
+                searched_language=searched_lang,
+                tool=tool,
+                pattern=pattern,
+            ))
+
+    return mismatches
 
 
 @dataclass
