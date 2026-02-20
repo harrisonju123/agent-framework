@@ -69,6 +69,9 @@ class FileQueue:
         Uses atomic write: write to .tmp then mv.
         Rejects tasks that already exist in completed/ to prevent
         stale worktree copies from resurrecting finished work.
+
+        Side effect: sets task.assigned_to = queue_id so the in-memory
+        object stays consistent with its on-disk queue location.
         """
         completed_file = self.completed_dir / f"{task.id}.json"
         if completed_file.exists():
@@ -81,6 +84,10 @@ class FileQueue:
         queue_path.mkdir(parents=True, exist_ok=True)
 
         task_file = queue_path / f"{task.id}.json"
+
+        # Keep assigned_to in sync with the actual queue directory so that
+        # update() and move_to_completed() resolve the correct file path
+        task.assigned_to = queue_id
 
         # Atomic write
         atomic_write_model(task_file, task)
@@ -147,6 +154,12 @@ class FileQueue:
 
                 # Check dependencies
                 if not self._dependencies_met(task):
+                    continue
+
+                # Defense in depth: stale queue file for already-completed task
+                if self._is_already_completed(task.id):
+                    task_file.unlink(missing_ok=True)
+                    non_pending.add(task_file.name)
                     continue
 
                 return task
@@ -261,6 +274,14 @@ class FileQueue:
                 # Atomic: try to lock before returning the task
                 lock = FileLock(self.lock_dir, task.id)
                 if lock.acquire():
+                    # Defense in depth: stale queue file for already-completed task
+                    if self._is_already_completed(task.id):
+                        try:
+                            task_file.unlink(missing_ok=True)
+                            non_pending.add(task_file.name)
+                        finally:
+                            lock.release()
+                        continue
                     return (task, lock)
 
                 # Another worker claimed it — skip to next candidate

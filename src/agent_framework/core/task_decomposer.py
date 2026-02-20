@@ -23,6 +23,18 @@ _PREP_VERBS = re.compile(
     re.IGNORECASE,
 )
 
+# Execution-tier classification for subtask dependency inference.
+# Higher tiers depend on all lower tiers; same-tier boundaries are independent.
+_INFRA_DIRS = frozenset({
+    "config", "setup", "infra", "infrastructure",
+    "migrations", "schema", "scripts", "deploy",
+})
+_TEST_DIRS = frozenset({
+    "tests", "test", "spec", "specs", "e2e",
+    "integration", "testing", "__tests__",
+})
+_DEFAULT_TIER = 1
+
 
 def extract_requirements_checklist(plan: PlanDocument) -> list[dict]:
     """Parse plan approach steps into a numbered checklist of discrete deliverables.
@@ -168,6 +180,7 @@ class TaskDecomposer:
                 boundary=boundary,
                 index=index + 1,
                 total=len(boundaries),
+                plan=plan,
             )
             subtasks.append(subtask)
 
@@ -230,7 +243,7 @@ class TaskDecomposer:
                     approach_steps=self._extract_relevant_steps(
                         plan.approach, group_files
                     ),
-                    depends_on_subtasks=[],  # Assume independent for now
+                    depends_on_subtasks=[],
                     estimated_lines=group_estimated,
                 )
                 boundaries.append(boundary)
@@ -241,6 +254,9 @@ class TaskDecomposer:
 
         # Filter out boundaries that are too small
         boundaries = [b for b in boundaries if b.estimated_lines >= self.MIN_SUBTASK_SIZE]
+
+        # Infer execution-order dependencies between surviving boundaries
+        self._infer_boundary_dependencies(boundaries)
 
         # Ensure we have at least 2 boundaries
         if len(boundaries) < 2:
@@ -309,6 +325,47 @@ class TaskDecomposer:
 
         return boundaries
 
+    @staticmethod
+    def _classify_boundary_tier(boundary: SubtaskBoundary) -> int:
+        """Classify a boundary into an execution tier based on its file paths.
+
+        Tier 0 = infrastructure (config, migrations, scripts, etc.)
+        Tier 1 = source code (default)
+        Tier 2 = tests
+        """
+        for file_path in boundary.files:
+            for part in Path(file_path).parts:
+                part_lower = part.lower()
+                if part_lower in _TEST_DIRS:
+                    return 2
+                if part_lower in _INFRA_DIRS:
+                    return 0
+        return _DEFAULT_TIER
+
+    def _infer_boundary_dependencies(
+        self, boundaries: list[SubtaskBoundary]
+    ) -> None:
+        """Set depends_on_subtasks based on execution-tier ordering.
+
+        Higher-tier boundaries depend on all lower-tier boundaries.
+        Same-tier boundaries are independent (parallelizable).
+        Mutates boundaries in place. Only overwrites when multiple tiers
+        exist — preserves manually-set deps (e.g. from approach-step fallback)
+        when all boundaries land on the same tier.
+        """
+        if len(boundaries) < 2:
+            return
+
+        tiers = [self._classify_boundary_tier(b) for b in boundaries]
+
+        # All same tier → nothing to infer, preserve existing deps
+        if len(set(tiers)) < 2:
+            return
+
+        for i, boundary in enumerate(boundaries):
+            deps = [j for j, tier in enumerate(tiers) if tier < tiers[i]]
+            boundary.depends_on_subtasks = deps
+
     def _extract_relevant_steps(
         self, approach_steps: list[str], files: list[str]
     ) -> list[str]:
@@ -332,7 +389,8 @@ class TaskDecomposer:
         return relevant_steps
 
     def _create_subtask(
-        self, parent: Task, boundary: SubtaskBoundary, index: int, total: int
+        self, parent: Task, boundary: SubtaskBoundary, index: int, total: int,
+        plan: PlanDocument | None = None,
     ) -> Task:
         """
         Build a child Task from a boundary.
@@ -342,22 +400,28 @@ class TaskDecomposer:
             boundary: SubtaskBoundary defining this subtask's scope
             index: 1-based index (e.g., 1, 2, 3...)
             total: Total number of subtasks
+            plan: The architect's plan (preferred over parent.plan which may be unset)
 
         Returns:
             A new Task configured as a subtask
         """
         subtask_id = f"{parent.id}-sub{index}"
 
+        # Prefer the explicitly-passed plan, fall back to parent.plan
+        source_plan = plan or parent.plan
+
         # Create scoped plan for this subtask
         subtask_plan = PlanDocument(
-            objectives=[f"Complete {boundary.name} for parent task"],
-            approach=boundary.approach_steps,
-            risks=parent.plan.risks if parent.plan else [],
-            success_criteria=[
-                f"All changes in {len(boundary.files)} files are implemented and tested"
+            objectives=(source_plan.objectives if source_plan and source_plan.objectives
+                        else [f"Complete {boundary.name}"]) + [
+                f"Scope: {boundary.name} ({len(boundary.files)} files)"
             ],
+            approach=boundary.approach_steps,
+            risks=source_plan.risks if source_plan else [],
+            success_criteria=(source_plan.success_criteria if source_plan and source_plan.success_criteria
+                              else [f"All changes in {len(boundary.files)} files are implemented and tested"]),
             files_to_modify=boundary.files,
-            dependencies=parent.plan.dependencies if parent.plan else [],
+            dependencies=source_plan.dependencies if source_plan else [],
         )
 
         # Build depends_on from boundary dependencies
@@ -373,11 +437,16 @@ class TaskDecomposer:
             status=TaskStatus.PENDING,
             priority=parent.priority,
             created_by=parent.created_by,
-            assigned_to=parent.assigned_to,
+            assigned_to="engineer",
             created_at=datetime.now(UTC),
             title=f"{parent.title} - {boundary.name}",
-            description=f"Subtask {index}/{total} of {parent.id}\n\n{boundary.name}\n\nFiles:\n"
-            + "\n".join(f"- {f}" for f in boundary.files),
+            description=(
+                f"Subtask {index}/{total} of {parent.id}\n\n"
+                f"Goal: {parent.context.get('user_goal', parent.description)}\n\n"
+                f"Scope: {boundary.name}\n\n"
+                f"Files:\n"
+                + "\n".join(f"- {f}" for f in boundary.files)
+            ),
             depends_on=depends_on_task_ids,
             blocks=[],
             parent_task_id=parent.id,

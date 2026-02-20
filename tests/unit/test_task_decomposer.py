@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -202,10 +203,9 @@ class TestTaskDecomposer:
             assert "subtask_total" in subtask.context
 
     def test_independent_subtasks_have_no_depends_on(self):
-        """Test that parallel/independent subtasks have empty depends_on."""
+        """Source-only subtasks are independent; test subtasks depend on source."""
         decomposer = TaskDecomposer()
         parent = _make_task(id="parent-def")
-        # Different directories should create independent subtasks
         plan = _make_plan(
             files_to_modify=[
                 "src/core/file1.py",
@@ -216,9 +216,15 @@ class TestTaskDecomposer:
 
         subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
 
-        # At least some subtasks should be independent (empty depends_on)
-        independent_count = sum(1 for st in subtasks if len(st.depends_on) == 0)
-        assert independent_count >= 1
+        # Source subtasks should be independent
+        source_subtasks = [st for st in subtasks if not any("test" in f for f in st.plan.files_to_modify)]
+        for st in source_subtasks:
+            assert st.depends_on == [], f"{st.title} should be independent"
+
+        # Test subtasks should depend on source subtask IDs
+        test_subtasks = [st for st in subtasks if any("test" in f for f in st.plan.files_to_modify)]
+        for st in test_subtasks:
+            assert len(st.depends_on) > 0, f"{st.title} should depend on source subtasks"
 
     def test_backward_compatible_deserialization(self):
         """Test that old task JSON without new fields loads fine."""
@@ -288,6 +294,80 @@ class TestTaskDecomposer:
             # Plan should have objectives and approach
             assert len(subtask.plan.objectives) > 0
             assert len(subtask.plan.approach) >= 0  # May be empty if no relevant steps
+
+            # Objectives should include parent's objectives + a scope note at the end
+            assert "Complete the feature" in subtask.plan.objectives
+            assert subtask.plan.objectives[-1].startswith("Scope:")
+
+    def test_subtask_description_includes_user_goal(self):
+        """Subtask description includes user_goal so engineers know the task purpose."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(
+            id="parent-goal",
+            context={"user_goal": "Implement cross-feature learning loop"},
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            assert "Goal: Implement cross-feature learning loop" in subtask.description
+
+    def test_subtask_description_falls_back_to_parent_description(self):
+        """Without user_goal, subtask description falls back to parent.description."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(
+            id="parent-fallback",
+            description="Build the authentication module",
+            context={},
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            assert "Goal: Build the authentication module" in subtask.description
+
+    def test_subtask_inherits_parent_success_criteria(self):
+        """Subtask inherits architect-authored success criteria from parent plan."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-criteria")
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"],
+            success_criteria=["Response time under 200ms", "100% backward compatible"],
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            assert subtask.plan.success_criteria == [
+                "Response time under 200ms",
+                "100% backward compatible",
+            ]
+
+    def test_subtask_falls_back_to_generic_when_no_plan(self):
+        """When both plan arg and parent.plan are None, generic fallbacks are used."""
+        decomposer = TaskDecomposer()
+        boundary = SubtaskBoundary(
+            name="Changes in src",
+            files=["src/a.py", "src/b.py"],
+            approach_steps=["Do stuff"],
+            depends_on_subtasks=[],
+            estimated_lines=200,
+        )
+        parent = _make_task(id="parent-noplan", plan=None)
+
+        subtask = decomposer._create_subtask(parent, boundary, index=1, total=1)
+
+        # Generic fallback for objectives
+        assert subtask.plan.objectives[0] == "Complete Changes in src"
+        assert subtask.plan.objectives[-1].startswith("Scope:")
+        # Generic fallback for success criteria
+        assert "2 files are implemented and tested" in subtask.plan.success_criteria[0]
 
     def test_subtask_id_pattern(self):
         """Test that subtask IDs follow the pattern {parent_id}-sub{index}."""
@@ -395,6 +475,154 @@ class TestTaskDecomposer:
         assert task_restored.parent_task_id == "parent-123"
         assert task_restored.subtask_ids == ["child-1", "child-2"]
         assert task_restored.decomposition_strategy == "by_feature"
+
+
+class TestBoundaryDependencyInference:
+    """Tests for execution-tier dependency inference between subtask boundaries."""
+
+    def test_test_subtasks_depend_on_source_subtasks(self):
+        """src + tests plan → tests subtask depends_on includes src subtask ID."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-tier")
+        plan = _make_plan(
+            files_to_modify=[
+                "src/core/feature.py",
+                "src/core/utils.py",
+                "tests/test_feature.py",
+                "tests/test_utils.py",
+            ]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        src_ids = {st.id for st in subtasks if any("src/" in f for f in st.plan.files_to_modify)}
+        test_subtasks = [st for st in subtasks if any("tests/" in f for f in st.plan.files_to_modify)]
+
+        assert len(test_subtasks) > 0, "Should have at least one test subtask"
+        for st in test_subtasks:
+            assert set(st.depends_on) == src_ids, (
+                f"Test subtask {st.id} should depend on all source subtasks"
+            )
+
+    def test_all_source_dirs_are_independent(self):
+        """Multiple source dirs at the same tier → no dependencies between them."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-parallel")
+        plan = _make_plan(
+            files_to_modify=[
+                "src/core/a.py",
+                "src/core/b.py",
+                "src/api/c.py",
+                "src/api/d.py",
+                "lib/helper.py",
+                "lib/util.py",
+            ]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for st in subtasks:
+            assert st.depends_on == [], f"{st.title} should be independent (all tier 1)"
+
+    def test_three_tier_ordering(self):
+        """config + src + tests → config independent, src→config, tests→config+src."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-3tier")
+        plan = _make_plan(
+            files_to_modify=[
+                "config/settings.py",
+                "config/schema.py",
+                "src/core/feature.py",
+                "src/core/utils.py",
+                "tests/test_feature.py",
+                "tests/test_utils.py",
+            ],
+            approach=["Step " + str(i) for i in range(6)],
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=900)
+
+        by_dir = {}
+        for st in subtasks:
+            top_dir = Path(st.plan.files_to_modify[0]).parts[0]
+            by_dir[top_dir] = st
+
+        assert "config" in by_dir, "Should have config subtask"
+        assert "src" in by_dir, "Should have src subtask"
+        assert "tests" in by_dir, "Should have tests subtask"
+
+        # Config (tier 0) is independent
+        assert by_dir["config"].depends_on == []
+
+        # Src (tier 1) depends on config (tier 0)
+        assert by_dir["config"].id in by_dir["src"].depends_on
+
+        # Tests (tier 2) depends on both config and src
+        assert by_dir["config"].id in by_dir["tests"].depends_on
+        assert by_dir["src"].id in by_dir["tests"].depends_on
+
+    def test_classify_boundary_tier(self):
+        """Unit test tier classification with various directory patterns."""
+        classify = TaskDecomposer._classify_boundary_tier
+
+        # Tier 0: infrastructure
+        assert classify(SubtaskBoundary("infra", ["config/db.py"], [], [], 100)) == 0
+        assert classify(SubtaskBoundary("migr", ["migrations/001.sql"], [], [], 100)) == 0
+        assert classify(SubtaskBoundary("deploy", ["deploy/k8s.yaml"], [], [], 100)) == 0
+        assert classify(SubtaskBoundary("nested", ["src/infra/setup.py"], [], [], 100)) == 0
+
+        # Tier 1: source code (default)
+        assert classify(SubtaskBoundary("src", ["src/core/agent.py"], [], [], 100)) == 1
+        assert classify(SubtaskBoundary("lib", ["lib/utils.py"], [], [], 100)) == 1
+
+        # Tier 2: tests
+        assert classify(SubtaskBoundary("tests", ["tests/test_agent.py"], [], [], 100)) == 2
+        assert classify(SubtaskBoundary("spec", ["spec/feature_spec.rb"], [], [], 100)) == 2
+        assert classify(SubtaskBoundary("e2e", ["e2e/login.test.ts"], [], [], 100)) == 2
+        assert classify(SubtaskBoundary("nested", ["src/__tests__/foo.test.js"], [], [], 100)) == 2
+
+    def test_same_tier_preserves_existing_deps(self):
+        """When all boundaries are same tier, manually-set deps are preserved."""
+        decomposer = TaskDecomposer()
+        boundaries = [
+            SubtaskBoundary("First phase", ["src/a.py"], ["s1"], [], 200),
+            SubtaskBoundary("Second phase", ["src/b.py"], ["s2"], [0], 200),
+        ]
+
+        decomposer._infer_boundary_dependencies(boundaries)
+
+        # Same tier (both tier 1) → inference skips, manual dep preserved
+        assert boundaries[0].depends_on_subtasks == []
+        assert boundaries[1].depends_on_subtasks == [0]
+
+    def test_dependencies_survive_full_decompose(self):
+        """End-to-end: decompose() produces Task objects with correct depends_on IDs."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-e2e")
+        plan = _make_plan(
+            files_to_modify=[
+                "src/models/user.py",
+                "src/models/group.py",
+                "tests/test_user.py",
+                "tests/test_group.py",
+            ]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+        assert len(subtasks) >= 2
+
+        src_subtask = next(st for st in subtasks if any("src/" in f for f in st.plan.files_to_modify))
+        test_subtask = next(st for st in subtasks if any("tests/" in f for f in st.plan.files_to_modify))
+
+        # Source subtask is independent
+        assert src_subtask.depends_on == []
+
+        # Test subtask depends on source subtask via task ID
+        assert src_subtask.id in test_subtask.depends_on
+
+        # Verify these are proper task IDs (not boundary indices)
+        for dep_id in test_subtask.depends_on:
+            assert dep_id.startswith("parent-e2e-sub")
 
 
 class TestExtractRequirementsChecklist:
@@ -537,3 +765,27 @@ class TestDecomposeThresholdChange:
         plan = _make_plan(files_to_modify=["a.py", "b.py"])
 
         assert decomposer.should_decompose(plan, 250, requirements_count=5) is False
+
+
+class TestSubtaskAssignedTo:
+    """Subtasks must always be assigned to 'engineer' regardless of parent."""
+
+    def test_subtask_assigned_to_is_always_engineer(self):
+        """Parent with assigned_to='architect' still produces engineer subtasks."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(
+            id="parent-arch",
+            assigned_to="architect",
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        assert len(subtasks) >= 2
+        for subtask in subtasks:
+            assert subtask.assigned_to == "engineer", (
+                f"Subtask {subtask.id} should be assigned to engineer, "
+                f"got {subtask.assigned_to}"
+            )

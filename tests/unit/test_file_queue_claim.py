@@ -10,6 +10,7 @@ import pytest
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.queue.file_queue import FileQueue
 from agent_framework.queue.locks import FileLock
+from agent_framework.utils.atomic_io import atomic_write_model
 
 
 def _make_task(task_id="task-1", status=TaskStatus.PENDING, **kwargs):
@@ -155,3 +156,84 @@ class TestPushCompletedGuard:
         # Task should now be in the queue again
         task_file = queue.queue_dir / "engineer" / "task-retry.json"
         assert task_file.exists()
+
+
+class TestPushAssignedToSync:
+    """push() syncs task.assigned_to with the target queue directory."""
+
+    def test_push_syncs_assigned_to(self, queue):
+        """Task created with assigned_to='architect' pushed to 'engineer' queue
+        should have assigned_to corrected to 'engineer'."""
+        task = _make_task(task_id="mismatch-1")
+        task.assigned_to = "architect"
+
+        queue.push(task, "engineer")
+
+        assert task.assigned_to == "engineer"
+
+    def test_update_works_after_push_sync(self, queue):
+        """update() resolves the correct file after push() fixed assigned_to."""
+        task = _make_task(task_id="mismatch-2")
+        task.assigned_to = "architect"
+
+        queue.push(task, "engineer")
+
+        # Mutate and update — should find file in queues/engineer/
+        task.status = TaskStatus.IN_PROGRESS
+        queue.update(task)
+
+        # Verify file was actually updated
+        task_file = queue.queue_dir / "engineer" / "mismatch-2.json"
+        reloaded = queue.load_task_file(task_file)
+        assert reloaded.status == TaskStatus.IN_PROGRESS
+
+    def test_move_to_completed_works_after_push_sync(self, queue):
+        """move_to_completed() removes the correct queue file after push() fixed assigned_to."""
+        task = _make_task(task_id="mismatch-3")
+        task.assigned_to = "architect"
+
+        queue.push(task, "engineer")
+
+        task.status = TaskStatus.COMPLETED
+        queue.move_to_completed(task)
+
+        # Queue file should be gone, completed file should exist
+        assert not (queue.queue_dir / "engineer" / "mismatch-3.json").exists()
+        assert (queue.completed_dir / "mismatch-3.json").exists()
+
+
+class TestClaimCompletedGuard:
+    """claim() skips and cleans up stale queue files for already-completed tasks."""
+
+    def test_stale_pending_file_cleaned_up(self, queue):
+        """A PENDING file that also exists in completed/ is deleted, claim returns None."""
+        task = _make_task(task_id="stale-1")
+        queue.push(task, "engineer")
+
+        # Simulate: task was completed via a different path, but queue file remains
+        task.status = TaskStatus.COMPLETED
+        atomic_write_model(queue.completed_dir / "stale-1.json", task)
+
+        result = queue.claim("engineer", "engineer-1")
+
+        assert result is None
+        # Stale file should have been cleaned up
+        assert not (queue.queue_dir / "engineer" / "stale-1.json").exists()
+
+    def test_claim_returns_next_task_after_stale_cleanup(self, queue):
+        """After cleaning up a stale file, claim returns the next valid task."""
+        stale = _make_task(task_id="stale-2")
+        valid = _make_task(task_id="valid-1")
+        queue.push(stale, "engineer")
+        queue.push(valid, "engineer")
+
+        # Mark stale-2 as completed externally
+        stale.status = TaskStatus.COMPLETED
+        atomic_write_model(queue.completed_dir / "stale-2.json", stale)
+
+        result = queue.claim("engineer", "engineer-1")
+
+        assert result is not None
+        claimed_task, lock = result
+        assert claimed_task.id == "valid-1"
+        lock.release()
