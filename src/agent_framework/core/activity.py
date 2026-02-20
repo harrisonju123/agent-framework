@@ -121,6 +121,7 @@ class ActivityEvent(BaseModel):
     input_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
     cost: Optional[float] = None
+    tool_call_count: Optional[int] = None
 
 
 class ActivityManager:

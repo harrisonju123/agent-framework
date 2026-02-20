@@ -40,6 +40,7 @@ class StepRecord:
     files_modified: List[str] = field(default_factory=list)  # git diff --name-only
     commit_shas: List[str] = field(default_factory=list)     # commits made
     findings: Optional[List[Dict[str, Any]]] = None  # structured findings (review steps)
+    tool_stats: Optional[Dict[str, Any]] = None       # quantitative tool usage stats
     error: Optional[str] = None       # if step failed
 
 
@@ -123,6 +124,7 @@ def append_step(
     agent_id: str,
     response_content: str,
     working_dir: Optional[Path] = None,
+    tool_stats: Optional[Dict[str, Any]] = None,
 ) -> ChainState:
     """Append a completed step record to the chain state.
 
@@ -183,6 +185,7 @@ def append_step(
         files_modified=files_modified,
         commit_shas=commit_shas,
         findings=findings,
+        tool_stats=tool_stats,
     )
 
     state.steps.append(record)
@@ -414,6 +417,7 @@ def _render_for_code_review(state: ChainState) -> str:
             lines.append("### COMMIT LOG")
             lines.append(", ".join(impl_step.commit_shas))
             lines.append("")
+        lines.extend(_render_tool_stats(impl_step))
 
     return _truncate("\n".join(lines))
 
@@ -439,6 +443,10 @@ def _render_for_qa_review(state: ChainState) -> str:
         for f in impl_step.files_modified:
             lines.append(f"- {f}")
         lines.append("")
+
+    # Tool usage from implementation
+    if impl_step:
+        lines.extend(_render_tool_stats(impl_step))
 
     # Code review result
     review_step = _find_step(state, "code_review")
@@ -508,6 +516,39 @@ def _render_generic(state: ChainState) -> str:
 
     lines.append("")
     return _truncate("\n".join(lines))
+
+
+def _render_tool_stats(step: StepRecord) -> List[str]:
+    """Render tool stats block for review contexts."""
+    if not step.tool_stats:
+        return []
+
+    stats = step.tool_stats
+    total = stats.get("total_calls", 0)
+    if total == 0:
+        return []
+
+    lines = ["### TOOL USAGE"]
+
+    # Distribution summary — top tools sorted by count
+    dist = stats.get("tool_distribution", {})
+    if dist:
+        parts = [f"{t}: {c}" for t, c in sorted(dist.items(), key=lambda x: -x[1])]
+        lines.append(f"{total} calls ({', '.join(parts)})")
+
+    # Duplicate reads
+    dupes = stats.get("duplicate_reads", {})
+    if dupes:
+        dupe_parts = [f"{f}: {c}x" for f, c in sorted(dupes.items(), key=lambda x: -x[1])]
+        lines.append(f"{len(dupes)} duplicate reads ({', '.join(dupe_parts)})")
+
+    # Edit density
+    density = stats.get("edit_density")
+    if density is not None:
+        lines.append(f"Edit density: {density * 100:.1f}%")
+
+    lines.append("")
+    return lines
 
 
 def _find_step(state: ChainState, step_id: str) -> Optional[StepRecord]:

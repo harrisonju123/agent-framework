@@ -146,7 +146,10 @@ class BudgetManager:
         ceilings = self.optimization_config.get("effort_budget_ceilings", {})
         return ceilings.get(effort_key)
 
-    def log_task_completion_metrics(self, task: Task, response: "LLMResponse", task_start_time: datetime) -> None:
+    def log_task_completion_metrics(
+        self, task: Task, response: "LLMResponse", task_start_time: datetime,
+        *, tool_call_count: Optional[int] = None,
+    ) -> None:
         """Log token usage, cost, and completion events."""
         total_tokens = response.input_tokens + response.output_tokens
         budget = self.get_token_budget(task.type)
@@ -186,7 +189,8 @@ class BudgetManager:
             pr_url=pr_url,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
-            cost=cost
+            cost=cost,
+            tool_call_count=tool_call_count,
         ))
 
         self.session_logger.log(

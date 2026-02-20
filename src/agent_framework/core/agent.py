@@ -973,15 +973,15 @@ class Agent:
             self._git_ops.manage_pr_lifecycle(task)
 
         self._extract_and_store_memories(task, response)
-        self._analyze_tool_patterns(task)
-        self._log_task_completion_metrics(task, response, task_start_time)
+        tool_call_count = self._analyze_tool_patterns(task)
+        self._log_task_completion_metrics(task, response, task_start_time, tool_call_count=tool_call_count)
 
-    def _log_task_completion_metrics(self, task: Task, response, task_start_time) -> None:
+    def _log_task_completion_metrics(self, task: Task, response, task_start_time, *, tool_call_count=None) -> None:
         """Log token usage, cost, and completion events.
 
         Delegated to BudgetManager.
         """
-        self._budget.log_task_completion_metrics(task, response, task_start_time)
+        self._budget.log_task_completion_metrics(task, response, task_start_time, tool_call_count=tool_call_count)
 
     def _approval_verdict(self, task: Task) -> str:
         """Return the appropriate approval verdict for the current workflow step.
@@ -2142,6 +2142,11 @@ class Agent:
         try:
             from .chain_state import append_step
 
+            # Compute tool stats from session log (session is fully flushed by this point)
+            tool_stats_dict = None
+            if self._session_logging_enabled:
+                tool_stats_dict = self._compute_tool_stats_for_chain(task)
+
             content = getattr(response, "content", "") or ""
             state = append_step(
                 workspace=self.workspace,
@@ -2149,6 +2154,7 @@ class Agent:
                 agent_id=self.config.base_id,
                 response_content=content,
                 working_dir=working_dir,
+                tool_stats=tool_stats_dict,
             )
 
             # Store files_modified in task context for chain propagation
@@ -2163,6 +2169,37 @@ class Agent:
             )
         except Exception as e:
             self.logger.warning(f"Failed to save chain state for {task.id}: {e}")
+
+    def _compute_tool_stats_for_chain(self, task: Task) -> Optional[Dict]:
+        """Compute tool usage stats dict for embedding in chain state.
+
+        Returns a plain dict suitable for JSON serialization, or None
+        if the session log doesn't exist or has no tool calls.
+
+        Caches on task.context["_tool_stats_cache"] so _analyze_tool_patterns
+        can reuse the parsed result without re-reading the session log.
+        """
+        session_path = self._session_logs_dir / "sessions" / f"{task.id}.jsonl"
+        if not session_path.exists():
+            return None
+
+        try:
+            from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer, compute_tool_usage_stats
+            from dataclasses import asdict
+
+            analyzer = ToolPatternAnalyzer()
+            tool_calls = analyzer.extract_tool_calls(session_path)
+            if not tool_calls:
+                return None
+
+            stats = compute_tool_usage_stats(tool_calls)
+            stats_dict = asdict(stats)
+            # Cache for reuse by _analyze_tool_patterns (avoids double-parse)
+            task.context["_tool_stats_cache"] = stats_dict
+            return stats_dict
+        except Exception as e:
+            self.logger.debug(f"Tool stats computation failed (non-fatal): {e}")
+            return None
 
     def _populate_read_cache(self, task: Task, working_dir: Optional[Path] = None) -> None:
         """Populate shared read cache with files read during this session.
@@ -2397,33 +2434,65 @@ class Agent:
 
     # -- Tool Pattern Analysis --
 
-    def _analyze_tool_patterns(self, task: Task) -> None:
-        """Run post-task analysis on session log to detect inefficient tool usage."""
-        if not self._tool_tips_enabled or not self._session_logging_enabled:
-            return
+    def _analyze_tool_patterns(self, task: Task) -> Optional[int]:
+        """Run post-task analysis on session log to detect inefficient tool usage.
 
-        repo_slug = self._get_repo_slug(task)
-        if not repo_slug:
-            return
+        Returns total tool call count (or None if analysis was skipped).
+        """
+        if not self._session_logging_enabled:
+            return None
 
         session_path = self._session_logs_dir / "sessions" / f"{task.id}.jsonl"
         if not session_path.exists():
-            return
+            return None
 
+        tool_call_count = None
         try:
+            from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer, compute_tool_usage_stats
+
             analyzer = ToolPatternAnalyzer()
-            recommendations = analyzer.analyze_session(session_path)
-            if recommendations:
-                count = self._tool_pattern_store.store_patterns(repo_slug, recommendations)
-                self.logger.debug(f"Stored {count} tool pattern recommendations")
-                self._session_logger.log(
-                    "tool_patterns_analyzed",
-                    repo=repo_slug,
-                    patterns_found=len(recommendations),
-                    patterns_stored=count,
-                )
+
+            # Reuse stats from _compute_tool_stats_for_chain if available
+            cached = task.context.pop("_tool_stats_cache", None)
+            if cached:
+                tool_call_count = cached.get("total_calls")
+                self._session_logger.log("tool_usage_stats", **cached)
+            else:
+                tool_calls = analyzer.extract_tool_calls(session_path)
+                if tool_calls:
+                    stats = compute_tool_usage_stats(tool_calls)
+                    tool_call_count = stats.total_calls
+                    self._session_logger.log(
+                        "tool_usage_stats",
+                        total_calls=stats.total_calls,
+                        tool_distribution=stats.tool_distribution,
+                        duplicate_reads=stats.duplicate_reads,
+                        read_before_write_ratio=stats.read_before_write_ratio,
+                        edit_write_count=stats.edit_write_count,
+                        exploration_count=stats.exploration_count,
+                        edit_density=stats.edit_density,
+                        files_read=stats.files_read,
+                        files_written=stats.files_written,
+                    )
+
+            # Qualitative anti-pattern detection (gated by tool_tips config)
+            if self._tool_tips_enabled:
+                repo_slug = self._get_repo_slug(task)
+                if repo_slug:
+                    recommendations = analyzer.analyze_session(session_path)
+                    if recommendations:
+                        count = self._tool_pattern_store.store_patterns(repo_slug, recommendations)
+                        self.logger.debug(f"Stored {count} tool pattern recommendations")
+                        self._session_logger.log(
+                            "tool_patterns_analyzed",
+                            repo=repo_slug,
+                            patterns_found=len(recommendations),
+                            patterns_stored=count,
+                        )
         except Exception as e:
             self.logger.debug(f"Tool pattern analysis failed (non-fatal): {e}")
+
+        return tool_call_count
 
     async def _self_evaluate(self, task: Task, response, *, test_passed=None, working_dir=None) -> bool:
         """Review agent's own output against acceptance criteria.

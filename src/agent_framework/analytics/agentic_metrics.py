@@ -89,6 +89,19 @@ class DebateMetrics(BaseModel):
     avg_trade_offs_count: float = 0.0
 
 
+class ToolUsageMetrics(BaseModel):
+    """Aggregate tool usage statistics across all observed tasks."""
+    total_tasks_analyzed: int
+    avg_tool_calls_per_task: float
+    max_tool_calls: int
+    tool_distribution: Dict[str, int]
+    duplicate_read_rate: float              # fraction of tasks with duplicate reads
+    avg_duplicate_reads_per_task: float
+    avg_read_before_write_ratio: float
+    avg_edit_density: float
+    top_tasks_by_calls: Dict[str, int]      # top 5 task_id → count
+
+
 class ContextBudgetMetrics(BaseModel):
     """Prompt length distribution as a proxy for context budget utilization."""
     sample_count: int
@@ -108,6 +121,8 @@ class TrendBucket(BaseModel):
     replan_trigger_rate: float
     avg_prompt_length: int
     task_count: int
+    avg_tool_calls: float = 0.0
+    avg_edit_density: float = 0.0
 
 
 class AgenticMetricsReport(BaseModel):
@@ -122,6 +137,7 @@ class AgenticMetricsReport(BaseModel):
     specialization: SpecializationMetrics
     debate: DebateMetrics
     context_budget: ContextBudgetMetrics
+    tool_usage: ToolUsageMetrics
     trends: List[TrendBucket] = []
 
 
@@ -161,6 +177,7 @@ class AgenticMetrics:
         specialization = self._read_specialization_distribution()
         context_budget = self._aggregate_context_budget(events_by_task)
         debate = self._aggregate_debates(cutoff)
+        tool_usage = self._aggregate_tool_usage(events_by_task)
         trends = self._aggregate_trends(events_by_task)
 
         return AgenticMetricsReport(
@@ -174,6 +191,7 @@ class AgenticMetrics:
             specialization=specialization,
             debate=debate,
             context_budget=context_budget,
+            tool_usage=tool_usage,
             trends=trends,
         )
 
@@ -499,6 +517,20 @@ class AgenticMetrics:
             ]
             avg_prompt = int(sum(prompt_lengths) / len(prompt_lengths)) if prompt_lengths else 0
 
+            # Tool usage stats from this bucket
+            tool_call_counts = []
+            edit_densities_bucket = []
+            for evts in task_events.values():
+                for e in evts:
+                    if e.get("event") == "tool_usage_stats":
+                        tc = e.get("total_calls", 0)
+                        if tc > 0:
+                            tool_call_counts.append(tc)
+                        ed = e.get("edit_density")
+                        if ed is not None:
+                            edit_densities_bucket.append(ed)
+                        break
+
             result.append(TrendBucket(
                 timestamp=bucket_ts,
                 memory_recall_rate=round(tasks_with_recall / task_count, 3) if task_count > 0 else 0.0,
@@ -507,9 +539,80 @@ class AgenticMetrics:
                 replan_trigger_rate=round(tasks_with_replan / task_count, 3) if task_count > 0 else 0.0,
                 avg_prompt_length=avg_prompt,
                 task_count=task_count,
+                avg_tool_calls=round(sum(tool_call_counts) / len(tool_call_counts), 1) if tool_call_counts else 0.0,
+                avg_edit_density=round(sum(edit_densities_bucket) / len(edit_densities_bucket), 3) if edit_densities_bucket else 0.0,
             ))
 
         return result
+
+    def _aggregate_tool_usage(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> ToolUsageMetrics:
+        """Aggregate tool_usage_stats events across all tasks."""
+        task_call_counts: Dict[str, int] = {}
+        total_distribution: Dict[str, int] = defaultdict(int)
+        tasks_with_dupes = 0
+        total_dupe_count = 0
+        rbw_ratios: List[float] = []
+        edit_densities: List[float] = []
+
+        for task_id, events in events_by_task.items():
+            for e in events:
+                if e.get("event") != "tool_usage_stats":
+                    continue
+
+                total = e.get("total_calls", 0)
+                if total == 0:
+                    continue
+
+                task_call_counts[task_id] = total
+
+                dist = e.get("tool_distribution", {})
+                for tool, count in dist.items():
+                    total_distribution[tool] += count
+
+                dupes = e.get("duplicate_reads", {})
+                if dupes:
+                    tasks_with_dupes += 1
+                    total_dupe_count += len(dupes)
+
+                rbw = e.get("read_before_write_ratio")
+                if rbw is not None:
+                    rbw_ratios.append(rbw)
+
+                density = e.get("edit_density")
+                if density is not None:
+                    edit_densities.append(density)
+
+                # Only process first tool_usage_stats per task
+                break
+
+        n = len(task_call_counts)
+        if n == 0:
+            return ToolUsageMetrics(
+                total_tasks_analyzed=0,
+                avg_tool_calls_per_task=0.0,
+                max_tool_calls=0,
+                tool_distribution={},
+                duplicate_read_rate=0.0,
+                avg_duplicate_reads_per_task=0.0,
+                avg_read_before_write_ratio=0.0,
+                avg_edit_density=0.0,
+                top_tasks_by_calls={},
+            )
+
+        all_counts = list(task_call_counts.values())
+        top_5 = sorted(task_call_counts.items(), key=lambda x: -x[1])[:5]
+
+        return ToolUsageMetrics(
+            total_tasks_analyzed=n,
+            avg_tool_calls_per_task=round(sum(all_counts) / n, 1),
+            max_tool_calls=max(all_counts),
+            tool_distribution=dict(total_distribution),
+            duplicate_read_rate=round(tasks_with_dupes / n, 3),
+            avg_duplicate_reads_per_task=round(total_dupe_count / n, 1),
+            avg_read_before_write_ratio=round(sum(rbw_ratios) / len(rbw_ratios), 3) if rbw_ratios else 0.0,
+            avg_edit_density=round(sum(edit_densities) / len(edit_densities), 3) if edit_densities else 0.0,
+            top_tasks_by_calls=dict(top_5),
+        )
 
     def _aggregate_context_budget(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> ContextBudgetMetrics:
         """

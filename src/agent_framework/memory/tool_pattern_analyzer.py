@@ -9,6 +9,7 @@ agent prompts to reduce token waste on subsequent tasks.
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -48,6 +49,93 @@ _TIPS = {
 _BASH_SEARCH_COMMANDS = {"grep", "find", "cat", "head", "tail", "rg", "ack"}
 
 
+_WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
+_EXPLORATION_TOOLS = {"Read", "Grep", "Glob", "Bash"}
+
+
+@dataclass
+class ToolUsageStats:
+    """Quantitative tool usage statistics from a single session."""
+    total_calls: int
+    tool_distribution: Dict[str, int]
+    duplicate_reads: Dict[str, int]       # file → count (only files read >= 2 times)
+    read_before_write_ratio: float        # written_files_that_were_read / written_files
+    edit_write_count: int                 # Edit + Write + NotebookEdit calls
+    exploration_count: int                # Read + Grep + Glob + Bash calls
+    edit_density: float                   # edit_write_count / total_calls
+    files_read: List[str]                 # unique, ordered by first-seen
+    files_written: List[str]              # unique, ordered by first-seen
+
+
+def compute_tool_usage_stats(tool_calls: List[Dict[str, Any]]) -> ToolUsageStats:
+    """Compute quantitative stats from a list of tool_call event dicts.
+
+    Pure function — no I/O. Expects the same format that
+    ToolPatternAnalyzer.extract_tool_calls() produces.
+    """
+    if not tool_calls:
+        return ToolUsageStats(
+            total_calls=0,
+            tool_distribution={},
+            duplicate_reads={},
+            read_before_write_ratio=0.0,
+            edit_write_count=0,
+            exploration_count=0,
+            edit_density=0.0,
+            files_read=[],
+            files_written=[],
+        )
+
+    distribution: Dict[str, int] = {}
+    read_counts: Dict[str, int] = {}
+    files_read_ordered: OrderedDict[str, None] = OrderedDict()
+    files_written_ordered: OrderedDict[str, None] = OrderedDict()
+
+    for call in tool_calls:
+        tool = call.get("tool", "")
+        distribution[tool] = distribution.get(tool, 0) + 1
+
+        inp = call.get("input") or {}
+
+        if tool == "Read":
+            fp = inp.get("file_path", "")
+            if fp:
+                read_counts[fp] = read_counts.get(fp, 0) + 1
+                if fp not in files_read_ordered:
+                    files_read_ordered[fp] = None
+
+        if tool in _WRITE_TOOLS:
+            fp = inp.get("file_path", "") or inp.get("notebook_path", "")
+            if fp:
+                if fp not in files_written_ordered:
+                    files_written_ordered[fp] = None
+
+    total = len(tool_calls)
+    duplicate_reads = {f: c for f, c in read_counts.items() if c >= 2}
+    edit_write_count = sum(distribution.get(t, 0) for t in _WRITE_TOOLS)
+    exploration_count = sum(distribution.get(t, 0) for t in _EXPLORATION_TOOLS)
+
+    written_files = list(files_written_ordered.keys())
+    if written_files:
+        read_set = set(files_read_ordered.keys())
+        written_that_were_read = sum(1 for f in written_files if f in read_set)
+        rbw_ratio = round(written_that_were_read / len(written_files), 3)
+    else:
+        rbw_ratio = 0.0
+
+    return ToolUsageStats(
+        total_calls=total,
+        tool_distribution=distribution,
+        duplicate_reads=duplicate_reads,
+        read_before_write_ratio=rbw_ratio,
+        edit_write_count=edit_write_count,
+        exploration_count=exploration_count,
+        edit_density=round(edit_write_count / total, 3) if total > 0 else 0.0,
+        files_read=list(files_read_ordered.keys()),
+        files_written=written_files,
+    )
+
+
 @dataclass
 class ToolPatternRecommendation:
     """A single tool-usage recommendation derived from session analysis."""
@@ -65,6 +153,14 @@ class ToolPatternAnalyzer:
     """
 
     WINDOW_SIZE = 5
+
+    def extract_tool_calls(self, session_path: Path) -> List[Dict[str, Any]]:
+        """Parse JSONL and return ordered list of tool_call events.
+
+        Public wrapper around _extract_tool_calls for use by callers
+        that need the raw tool call list (e.g. compute_tool_usage_stats).
+        """
+        return self._extract_tool_calls(session_path)
 
     def analyze_session(self, session_path: Path) -> List[ToolPatternRecommendation]:
         """Parse a session JSONL file and return detected anti-patterns."""

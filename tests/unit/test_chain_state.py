@@ -16,6 +16,7 @@ from agent_framework.core.chain_state import (
     render_for_step,
     _build_step_summary,
     _find_step,
+    _render_tool_stats,
     _chain_state_path,
     CHAIN_STATE_MAX_PROMPT_CHARS,
 )
@@ -505,3 +506,136 @@ class TestFindStep:
         step = _find_step(state, "implement")
         assert step.task_id == "t2"
         assert step.summary == "second"
+
+
+class TestToolStats:
+    def test_tool_stats_default_none(self):
+        record = StepRecord(
+            step_id="implement", agent_id="engineer", task_id="t1",
+            completed_at="2026-02-19T10:00:00+00:00", summary="test",
+        )
+        assert record.tool_stats is None
+
+    def test_tool_stats_roundtrip(self, workspace):
+        """tool_stats survives save → load cycle."""
+        tool_stats = {
+            "total_calls": 42,
+            "tool_distribution": {"Read": 20, "Edit": 10, "Grep": 7, "Bash": 5},
+            "duplicate_reads": {"/config.py": 3},
+            "edit_density": 0.238,
+        }
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00", summary="done",
+                    tool_stats=tool_stats,
+                ),
+            ],
+        )
+        save_chain_state(workspace, state)
+        loaded = load_chain_state(workspace, "root-1")
+        assert loaded.steps[0].tool_stats is not None
+        assert loaded.steps[0].tool_stats["total_calls"] == 42
+        assert loaded.steps[0].tool_stats["duplicate_reads"] == {"/config.py": 3}
+
+    def test_render_tool_stats_with_data(self):
+        record = StepRecord(
+            step_id="implement", agent_id="engineer", task_id="t1",
+            completed_at="2026-02-19T10:00:00+00:00", summary="done",
+            tool_stats={
+                "total_calls": 74,
+                "tool_distribution": {"Read": 35, "Grep": 10, "Bash": 12, "Edit": 8, "Write": 5, "Glob": 4},
+                "duplicate_reads": {"/config.py": 4, "/models.py": 3},
+                "edit_density": 0.176,
+            },
+        )
+        lines = _render_tool_stats(record)
+        text = "\n".join(lines)
+        assert "TOOL USAGE" in text
+        assert "74 calls" in text
+        assert "Read: 35" in text
+        assert "2 duplicate reads" in text
+        assert "/config.py: 4x" in text
+        assert "17.6%" in text
+
+    def test_render_tool_stats_none(self):
+        record = StepRecord(
+            step_id="implement", agent_id="engineer", task_id="t1",
+            completed_at="2026-02-19T10:00:00+00:00", summary="done",
+        )
+        assert _render_tool_stats(record) == []
+
+    def test_render_tool_stats_zero_calls(self):
+        record = StepRecord(
+            step_id="implement", agent_id="engineer", task_id="t1",
+            completed_at="2026-02-19T10:00:00+00:00", summary="done",
+            tool_stats={"total_calls": 0, "tool_distribution": {}},
+        )
+        assert _render_tool_stats(record) == []
+
+    def test_code_review_renders_tool_stats(self):
+        """Code review context includes tool stats from implement step."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00", summary="planned",
+                    plan={"objectives": ["do stuff"]},
+                ),
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t2",
+                    completed_at="2026-02-19T10:05:00+00:00", summary="done",
+                    files_modified=["src/a.py"],
+                    tool_stats={
+                        "total_calls": 50,
+                        "tool_distribution": {"Read": 30, "Edit": 20},
+                        "duplicate_reads": {},
+                        "edit_density": 0.4,
+                    },
+                ),
+            ],
+        )
+        result = render_for_step(state, "code_review")
+        assert "TOOL USAGE" in result
+        assert "50 calls" in result
+
+    def test_qa_review_renders_tool_stats(self):
+        """QA review context includes tool stats from implement step."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00", summary="planned",
+                    plan={"success_criteria": ["tests pass"]},
+                ),
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t2",
+                    completed_at="2026-02-19T10:05:00+00:00", summary="done",
+                    files_modified=["src/a.py"],
+                    tool_stats={
+                        "total_calls": 30,
+                        "tool_distribution": {"Read": 20, "Edit": 10},
+                        "duplicate_reads": {"/a.py": 2},
+                        "edit_density": 0.333,
+                    },
+                ),
+                StepRecord(
+                    step_id="code_review", agent_id="architect", task_id="t3",
+                    completed_at="2026-02-19T10:10:00+00:00", summary="approved",
+                    verdict="approved",
+                ),
+            ],
+        )
+        result = render_for_step(state, "qa_review")
+        assert "TOOL USAGE" in result
+        assert "30 calls" in result
