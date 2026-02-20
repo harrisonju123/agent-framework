@@ -336,6 +336,16 @@ class Agent:
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
         self._replan_model = replan_cfg.get("model", "haiku")
 
+        # Cross-feature learning loop — ProfileRegistry is optional, only
+        # needed when specialization is used and debates produce domain feedback
+        from .profile_registry import ProfileRegistry
+        feedback_registry = ProfileRegistry(self.workspace) if self._memory_enabled else None
+        self._feedback_bus = FeedbackBus(
+            memory_store=self._memory_store,
+            agent_type=self.config.base_id,
+            profile_registry=feedback_registry,
+        )
+
     def _init_session_logging(self, session_logging_config):
         """Initialize session logging configuration."""
         sl_cfg = session_logging_config or {}
@@ -937,6 +947,10 @@ class Agent:
                 working_dir=working_dir,
             )
             if not passed:
+                # Store missed criteria for cross-feature learning
+                critique = task.context.get("_self_eval_critique", "")
+                if critique:
+                    self._feedback_bus.on_self_eval_fail(task, critique)
                 return  # Task was reset for self-eval retry
 
         # Deliverable gate: context-exhausted sessions exit 0 with no code changes
@@ -1093,6 +1107,21 @@ class Agent:
                 self.logger.debug(f"Checking if code review needed for {task.id}")
                 self._review_cycle.queue_code_review_if_needed(task, response)
                 self._review_cycle.queue_review_fix_if_needed(task, response, self._sync_jira_status)
+
+            # Feed QA findings into cross-feature learning loop
+            if self.config.base_id == "qa" and response and response.content:
+                outcome = self._review_cycle.parse_review_outcome(response.content)
+                if outcome.structured_findings:
+                    findings_dicts = [
+                        {
+                            "file": f.file,
+                            "severity": f.severity,
+                            "category": f.category,
+                            "description": f.description,
+                        }
+                        for f in outcome.structured_findings
+                    ]
+                    self._feedback_bus.on_qa_findings(task, findings_dicts)
 
             # Verdict was already set in _handle_successful_completion() before
             # serialization. Check it here to decide whether to skip chain enforcement.
@@ -3005,6 +3034,17 @@ class Agent:
         # Store successful recovery pattern so future replans can reference it
         if task.replan_history and task.status == TaskStatus.COMPLETED:
             self._error_recovery.store_replan_outcome(task, repo_slug)
+            self._feedback_bus.on_replan_success(task, repo_slug)
+
+        # Feed debate results into cross-feature learning loop
+        debate_result = task.context.get("_debate_result")
+        if debate_result and isinstance(debate_result, dict):
+            profile_id = None
+            if self._current_specialization:
+                profile_id = self._current_specialization.id
+            self._feedback_bus.on_debate_complete(
+                task, debate_result, current_profile_id=profile_id,
+            )
 
     # -- Tool Pattern Analysis --
 
