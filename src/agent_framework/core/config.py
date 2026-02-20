@@ -89,6 +89,7 @@ class SafeguardsConfig(BaseModel):
     heartbeat_timeout: int = 90  # Agent considered dead after N seconds without heartbeat
     watchdog_interval: int = 60
     max_consecutive_tool_calls: int = 15  # Circuit breaker: kill subprocess after N consecutive Bash calls
+    max_consecutive_diagnostic_calls: int = 5  # Diagnostic circuit breaker: kill after N consecutive env-probing commands
 
 
 class ContextWindowConfig(BaseModel):

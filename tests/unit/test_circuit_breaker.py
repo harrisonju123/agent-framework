@@ -45,6 +45,7 @@ def agent():
     a._current_file_count = 0
     a._mcp_enabled = False
     a._max_consecutive_tool_calls = 5  # Low threshold for fast tests
+    a._max_consecutive_diagnostic_calls = 5  # Diagnostic breaker threshold
     a.config = MagicMock()
     a.config.id = "test-agent"
     a.logger = MagicMock()
@@ -538,9 +539,9 @@ class TestCircuitBreakerProductiveCommands:
         """Activity event includes productive_ratio when circuit breaker trips."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # Trip with non-productive commands
+        # Trip with non-productive, non-diagnostic commands
         for _ in range(5):
-            on_tool("Bash", "ls -la")
+            on_tool("Bash", "cat foo.py")
 
         await asyncio.wait_for(result_task, timeout=5.0)
 
@@ -563,3 +564,134 @@ class TestCircuitBreakerProductiveCommands:
         ]
         assert len(log_calls) == 1
         assert "productive_ratio" in log_calls[0][1]
+
+
+class TestDiagnosticCircuitBreaker:
+    """Diagnostic circuit breaker trips on consecutive environment-probing commands."""
+
+    @pytest.mark.asyncio
+    async def test_pwd_trips_at_diagnostic_threshold(self, agent, task):
+        """pwd x5 trips diagnostic breaker even though diversity=1.0."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(5):
+            on_tool("Bash", "pwd")
+
+        result = await asyncio.wait_for(result_task, timeout=5.0)
+
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"
+        assert "diagnostic" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_path_prefixed_commands_trip(self, agent, task):
+        """/bin/echo x5 trips — path prefix is stripped before matching."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(5):
+            on_tool("Bash", "/usr/bin/echo hello")
+
+        result = await asyncio.wait_for(result_task, timeout=5.0)
+
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"
+
+    @pytest.mark.asyncio
+    async def test_non_diagnostic_does_not_trip(self, agent, task):
+        """git status x5 does NOT trip the diagnostic breaker."""
+        # Raise volume threshold so only the diagnostic breaker is under test
+        agent._max_consecutive_tool_calls = 50
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(5):
+            on_tool("Bash", "git status")
+
+        await asyncio.sleep(0.05)
+        assert not result_task.done(), "Non-diagnostic commands should not trip diagnostic breaker"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_counter_resets_on_non_bash(self, agent, task):
+        """Diagnostic counter resets on non-Bash tool: pwd x4 → Read → pwd x4 → no trip."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(4):
+            on_tool("Bash", "pwd")
+        on_tool("Read", "some/file.py")  # Resets both counters
+        for _ in range(4):
+            on_tool("Bash", "pwd")
+
+        await asyncio.sleep(0.05)
+        assert not result_task.done(), "Diagnostic breaker should not trip after reset"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_counter_resets_on_non_diagnostic_bash(self, agent, task):
+        """Diagnostic counter resets on non-diagnostic Bash: pwd x4 → git status → pwd x4."""
+        # Raise volume threshold so only the diagnostic breaker is under test
+        agent._max_consecutive_tool_calls = 50
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(4):
+            on_tool("Bash", "pwd")
+        on_tool("Bash", "git status")  # Non-diagnostic Bash resets diagnostic counter
+        for _ in range(4):
+            on_tool("Bash", "pwd")
+
+        await asyncio.sleep(0.05)
+        assert not result_task.done(), "Diagnostic breaker should not trip after non-diagnostic reset"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_session_log_has_diagnostic_trigger(self, agent, task):
+        """Session log has trigger='diagnostic' field on diagnostic trip."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(5):
+            on_tool("Bash", "pwd")
+
+        await asyncio.wait_for(result_task, timeout=5.0)
+
+        log_calls = [
+            c for c in agent._session_logger.log.call_args_list
+            if c[0][0] == "circuit_breaker"
+        ]
+        assert len(log_calls) == 1
+        assert log_calls[0][1]["trigger"] == "diagnostic"
+        assert log_calls[0][1]["consecutive_diagnostic"] == 5
+        assert log_calls[0][1]["threshold"] == 5  # diagnostic threshold, not volume
+
+    @pytest.mark.asyncio
+    async def test_activity_event_title_contains_diagnostic(self, agent, task):
+        """Activity event title contains 'Diagnostic' on diagnostic trip."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(5):
+            on_tool("Bash", "ls")
+
+        await asyncio.wait_for(result_task, timeout=5.0)
+
+        agent.activity_manager.append_event.assert_called_once()
+        event = agent.activity_manager.append_event.call_args[0][0]
+        assert "Diagnostic" in event.title
+
+    def test_config_default(self):
+        """SafeguardsConfig has max_consecutive_diagnostic_calls=5 by default."""
+        from agent_framework.core.config import SafeguardsConfig
+        cfg = SafeguardsConfig()
+        assert cfg.max_consecutive_diagnostic_calls == 5

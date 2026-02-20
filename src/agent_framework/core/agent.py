@@ -85,11 +85,33 @@ _PRODUCTIVE_PREFIXES = frozenset({
 _PRODUCTIVE_THRESHOLD_MULTIPLIER = 3
 _PRODUCTIVE_RATIO_THRESHOLD = 0.7
 
+# Diagnostic commands: environment-probing commands that indicate the agent is
+# stuck (usually after its working directory is deleted). 5+ consecutive
+# diagnostic commands trips a dedicated circuit breaker that the diversity
+# heuristic misses because pwd/echo/ls/which/find are inherently diverse.
+_DIAGNOSTIC_PREFIXES = frozenset({
+    "pwd", "echo", "test", "[", "cd",     # shell builtins
+    "ls", "find", "stat", "file",         # filesystem probes
+    "readlink", "realpath",               # path resolution
+    "which", "type", "env", "printenv",   # environment probes
+    "whoami", "id", "uname", "hostname",  # identity probes
+    "dirname", "basename",                # path utilities
+})
+
 
 def _is_productive_command(cmd: str) -> bool:
     """Check if a bash command is a productive tool (test/build/lint/git)."""
     cmd_stripped = cmd.strip().lower()
     return any(cmd_stripped.startswith(p) for p in _PRODUCTIVE_PREFIXES)
+
+
+def _is_diagnostic_command(cmd: str) -> bool:
+    """Check if a bash command is an environment-probing diagnostic."""
+    stripped = cmd.strip()
+    token = stripped.split()[0] if stripped else ""
+    # Strip path prefix: /usr/bin/echo → echo
+    bare = token.split("/")[-1].lower()
+    return bare in _DIAGNOSTIC_PREFIXES
 
 
 def _repo_cache_slug(github_repo: str) -> str:
@@ -420,10 +442,12 @@ class Agent:
         code_indexing_config: Optional[dict] = None,
         heartbeat_interval: int = 15,
         max_consecutive_tool_calls: int = 15,
+        max_consecutive_diagnostic_calls: int = 5,
     ):
         """Initialize Agent with modular subsystem setup."""
         self._heartbeat_interval = heartbeat_interval
         self._max_consecutive_tool_calls = max_consecutive_tool_calls
+        self._max_consecutive_diagnostic_calls = max_consecutive_diagnostic_calls
 
         # Core dependencies and basic state
         self._init_core_dependencies(
@@ -1385,9 +1409,11 @@ class Agent:
         _tool_call_count = [0]
         _last_write_time = [0.0]
         _consecutive_bash = [0]
+        _consecutive_diagnostic = [0]
         _bash_commands: list[list[str]] = [[]]  # mutable list for closure access
         _soft_threshold_logged = [False]
         _circuit_breaker_event = asyncio.Event()
+        _diagnostic_trip = [False]  # tracks which trigger fired
 
         _DIVERSITY_THRESHOLD = 0.5
         _COMMIT_CHECKPOINT_INTERVAL = 25
@@ -1402,6 +1428,18 @@ class Agent:
                     _bash_commands[0].append(tool_input_summary or "")
                     count = _consecutive_bash[0]
                     threshold = self._max_consecutive_tool_calls
+
+                    # Diagnostic sub-breaker: catches stuck agents probing their
+                    # environment after worktree deletion. These commands are
+                    # inherently diverse so the main diversity heuristic never fires.
+                    if _is_diagnostic_command(tool_input_summary or ""):
+                        _consecutive_diagnostic[0] += 1
+                        if _consecutive_diagnostic[0] >= self._max_consecutive_diagnostic_calls:
+                            _diagnostic_trip[0] = True
+                            _circuit_breaker_event.set()
+                            return
+                    else:
+                        _consecutive_diagnostic[0] = 0
 
                     if count >= threshold:
                         unique = len(set(_bash_commands[0]))
@@ -1443,6 +1481,7 @@ class Agent:
                             _soft_threshold_logged[0] = True
                 else:
                     _consecutive_bash[0] = 0
+                    _consecutive_diagnostic[0] = 0
                     _bash_commands[0] = []
                     _soft_threshold_logged[0] = False
 
@@ -1560,17 +1599,28 @@ class Agent:
         if circuit_breaker_task in done:
             # Stuck agent detected — kill subprocess and return synthetic failure
             count = _consecutive_bash[0]
+            diag_count = _consecutive_diagnostic[0]
+            is_diagnostic = _diagnostic_trip[0]
             commands = _bash_commands[0]
             unique = len(set(commands))
             diversity = unique / count if count > 0 else 0.0
             productive = sum(1 for c in commands if _is_productive_command(c))
             productive_ratio = productive / count if count > 0 else 0.0
-            self.logger.warning(
-                f"Circuit breaker tripped for task {task.id}: "
-                f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls}, "
-                f"diversity={diversity:.2f}, unique_commands={unique}, "
-                f"productive_ratio={productive_ratio:.2f})"
-            )
+            trigger = "diagnostic" if is_diagnostic else "volume"
+
+            if is_diagnostic:
+                self.logger.warning(
+                    f"Diagnostic circuit breaker tripped for task {task.id}: "
+                    f"{diag_count} consecutive diagnostic commands "
+                    f"(threshold={self._max_consecutive_diagnostic_calls})"
+                )
+            else:
+                self.logger.warning(
+                    f"Circuit breaker tripped for task {task.id}: "
+                    f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls}, "
+                    f"diversity={diversity:.2f}, unique_commands={unique}, "
+                    f"productive_ratio={productive_ratio:.2f})"
+                )
 
             # Auto-commit WIP before killing — prevents code loss
             await self._auto_commit_wip(task, working_dir, count)
@@ -1600,20 +1650,39 @@ class Agent:
 
             self._session_logger.log(
                 "circuit_breaker",
+                trigger=trigger,
                 consecutive_bash=count,
-                threshold=self._max_consecutive_tool_calls,
+                consecutive_diagnostic=diag_count,
+                threshold=self._max_consecutive_diagnostic_calls if is_diagnostic else self._max_consecutive_tool_calls,
                 unique_commands=unique,
                 diversity=round(diversity, 2),
                 productive_ratio=round(productive_ratio, 2),
             )
+
+            if is_diagnostic:
+                event_title = (
+                    f"Diagnostic circuit breaker: {diag_count} consecutive diagnostic commands"
+                )
+                error_msg = (
+                    f"Stuck agent detected: {diag_count} consecutive diagnostic commands — "
+                    f"working directory likely deleted"
+                )
+            else:
+                event_title = (
+                    f"Circuit breaker: {count} consecutive Bash calls "
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
+                )
+                error_msg = (
+                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
+                    f"Working directory may be deleted or inaccessible."
+                )
+
             self.activity_manager.append_event(ActivityEvent(
                 type="circuit_breaker",
                 agent=self.config.id,
                 task_id=task.id,
-                title=(
-                    f"Circuit breaker: {count} consecutive Bash calls "
-                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
-                ),
+                title=event_title,
                 timestamp=datetime.now(timezone.utc),
             ))
             return LLMResponse(
@@ -1624,11 +1693,7 @@ class Agent:
                 finish_reason="circuit_breaker",
                 latency_ms=0,
                 success=False,
-                error=(
-                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
-                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
-                    f"Working directory may be deleted or inaccessible."
-                ),
+                error=error_msg,
             )
 
         if watcher_task in done:
@@ -2220,13 +2285,16 @@ class Agent:
             self.logger.debug(f"Tool stats computation failed (non-fatal): {e}")
             return None
 
-    def _populate_read_cache(self, task: Task, working_dir: Optional[Path] = None) -> None:
+    def _populate_read_cache(self, task: Task, working_dir: Optional[Path] = None) -> list[str]:
         """Populate shared read cache with files read during this session.
 
         Appends to .agent-communication/read-cache/{root_task_id}.json so
         downstream chain steps can skip re-reading the same files.
         Cache keys are repo-relative so they match across worktrees.
         Non-fatal — workflow continues even if this fails.
+
+        Returns the raw file_reads list so callers can reuse it without
+        re-parsing the session log.
         """
         try:
             from ..utils.atomic_io import atomic_write_text
@@ -2234,7 +2302,7 @@ class Agent:
 
             file_reads = self._session_logger.extract_file_reads()
             if not file_reads:
-                return
+                return file_reads
 
             root_task_id = task.root_id
             cache_dir = self.workspace / ".agent-communication" / "read-cache"
