@@ -106,6 +106,16 @@ class ToolUsageMetrics(BaseModel):
     exploration_alert_threshold: int = 50   # config reference
     sessions_exceeding_threshold: int = 0   # count above threshold
     by_agent: Dict[str, float] = {}         # agent_id → avg tool calls
+    by_step: Dict[str, int] = {}            # workflow_step → count of sessions exceeding
+
+
+class LanguageMismatchMetrics(BaseModel):
+    """Path confusion: agents searching for wrong language file types."""
+    total_tasks_with_mismatches: int
+    total_mismatch_events: int
+    by_searched_language: Dict[str, int]
+    by_tool: Dict[str, int]
+    mismatch_rate: float
 
 
 class ContextBudgetMetrics(BaseModel):
@@ -136,6 +146,27 @@ class UpstreamContextMetrics(BaseModel):
     fallthrough_rate: float
 
 
+class SubagentMetrics(BaseModel):
+    """Subagent lifecycle metrics from Task tool calls."""
+    total_sessions_with_subagents: int
+    total_subagents_spawned: int
+    avg_subagents_per_session: float
+    sessions_with_orphan_risk: int
+    orphan_risk_rate: float
+    outcome_distribution: Dict[str, int]
+
+
+class RetryContextQualityMetrics(BaseModel):
+    """How much context carries from attempt N to N+1."""
+    total_retries: int
+    avg_summary_chars: float
+    zero_commits_rate: float
+    has_branch_work_rate: float
+    has_git_diff_rate: float
+    has_replan_rate: float
+    avg_summary_chars_by_agent: Dict[str, float]
+
+
 class TrendBucket(BaseModel):
     """Hourly time-series bucket for trend charts."""
     timestamp: datetime
@@ -164,6 +195,9 @@ class AgenticMetricsReport(BaseModel):
     context_budget: ContextBudgetMetrics
     tool_usage: ToolUsageMetrics
     upstream_context: UpstreamContextMetrics
+    subagent: SubagentMetrics
+    language_mismatch: LanguageMismatchMetrics
+    retry_context_quality: RetryContextQualityMetrics
     trends: List[TrendBucket] = []
 
 
@@ -205,6 +239,9 @@ class AgenticMetrics:
         debate = self._aggregate_debates(cutoff)
         tool_usage = self._aggregate_tool_usage(events_by_task)
         upstream_context = self._aggregate_upstream_context(events_by_task)
+        subagent = self._aggregate_subagent(events_by_task)
+        retry_context_quality = self._aggregate_retry_context_quality(events_by_task)
+        language_mismatch = self._aggregate_language_mismatches(events_by_task)
         trends = self._aggregate_trends(events_by_task)
 
         return AgenticMetricsReport(
@@ -220,6 +257,9 @@ class AgenticMetrics:
             context_budget=context_budget,
             tool_usage=tool_usage,
             upstream_context=upstream_context,
+            subagent=subagent,
+            language_mismatch=language_mismatch,
+            retry_context_quality=retry_context_quality,
             trends=trends,
         )
 
@@ -540,6 +580,7 @@ class AgenticMetrics:
         edit_densities: List[float] = []
         agent_call_totals: Dict[str, List[int]] = defaultdict(list)
         sessions_exceeding = 0
+        step_exceeding: Dict[str, int] = defaultdict(int)
         alert_threshold = 50  # default; overwritten from first exploration_alert event
 
         for task_id, events in events_by_task.items():
@@ -550,6 +591,8 @@ class AgenticMetrics:
                     t = e.get("threshold")
                     if isinstance(t, int) and t > 0:
                         alert_threshold = t
+                    step = e.get("workflow_step") or "standalone"
+                    step_exceeding[step] += 1
                     break
 
             for e in events:
@@ -626,6 +669,7 @@ class AgenticMetrics:
             exploration_alert_threshold=alert_threshold,
             sessions_exceeding_threshold=sessions_exceeding,
             by_agent=by_agent,
+            by_step=dict(step_exceeding),
         )
 
     def _aggregate_context_budget(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> ContextBudgetMetrics:
@@ -755,4 +799,124 @@ class AgenticMetrics:
             source_rates=source_rates,
             avg_chars_by_source=avg_chars,
             fallthrough_rate=fallthrough_rate,
+        )
+
+    def _aggregate_subagent(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> SubagentMetrics:
+        """Aggregate subagent_summary events to measure Task subagent lifecycle."""
+        sessions_with_subagents = 0
+        total_spawned = 0
+        orphan_risk_sessions = 0
+        outcome_dist: Dict[str, int] = defaultdict(int)
+
+        for events in events_by_task.values():
+            for e in events:
+                if e.get("event") != "subagent_summary":
+                    continue
+
+                sessions_with_subagents += 1
+                total_spawned += e.get("total_spawned", 0)
+                if e.get("orphan_risk"):
+                    orphan_risk_sessions += 1
+                outcome = e.get("session_outcome", "unknown")
+                outcome_dist[outcome] += 1
+                break  # one summary per session
+
+        return SubagentMetrics(
+            total_sessions_with_subagents=sessions_with_subagents,
+            total_subagents_spawned=total_spawned,
+            avg_subagents_per_session=round(
+                total_spawned / sessions_with_subagents, 1
+            ) if sessions_with_subagents > 0 else 0.0,
+            sessions_with_orphan_risk=orphan_risk_sessions,
+            orphan_risk_rate=round(
+                orphan_risk_sessions / sessions_with_subagents, 3
+            ) if sessions_with_subagents > 0 else 0.0,
+            outcome_distribution=dict(outcome_dist),
+        )
+
+    def _aggregate_retry_context_quality(
+        self, events_by_task: Dict[str, List[Dict[str, Any]]]
+    ) -> RetryContextQualityMetrics:
+        """Aggregate retry_context_quality events to measure cross-attempt context transfer."""
+        summary_chars: List[int] = []
+        zero_commits = 0
+        has_branch_work = 0
+        has_git_diff = 0
+        has_replan = 0
+        agent_chars: Dict[str, List[int]] = defaultdict(list)
+
+        for events in events_by_task.values():
+            for e in events:
+                if e.get("event") != "retry_context_quality":
+                    continue
+
+                chars = e.get("summary_chars", 0)
+                summary_chars.append(chars)
+
+                if e.get("previous_commits", 0) == 0:
+                    zero_commits += 1
+                if e.get("has_branch_work"):
+                    has_branch_work += 1
+                if e.get("has_git_diff"):
+                    has_git_diff += 1
+                if e.get("has_replan"):
+                    has_replan += 1
+
+                agent_id = e.get("agent_id")
+                if agent_id:
+                    agent_chars[agent_id].append(chars)
+
+        n = len(summary_chars)
+        if n == 0:
+            return RetryContextQualityMetrics(
+                total_retries=0,
+                avg_summary_chars=0.0,
+                zero_commits_rate=0.0,
+                has_branch_work_rate=0.0,
+                has_git_diff_rate=0.0,
+                has_replan_rate=0.0,
+                avg_summary_chars_by_agent={},
+            )
+
+        return RetryContextQualityMetrics(
+            total_retries=n,
+            avg_summary_chars=round(sum(summary_chars) / n, 1),
+            zero_commits_rate=round(zero_commits / n, 3),
+            has_branch_work_rate=round(has_branch_work / n, 3),
+            has_git_diff_rate=round(has_git_diff / n, 3),
+            has_replan_rate=round(has_replan / n, 3),
+            avg_summary_chars_by_agent={
+                aid: round(sum(chars_list) / len(chars_list), 1)
+                for aid, chars_list in agent_chars.items()
+            },
+        )
+
+    def _aggregate_language_mismatches(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> LanguageMismatchMetrics:
+        """Aggregate language_mismatch events — path confusion signal."""
+        tasks_with = 0
+        total_events = 0
+        by_lang: Dict[str, int] = defaultdict(int)
+        by_tool: Dict[str, int] = defaultdict(int)
+
+        for events in events_by_task.values():
+            task_mismatches = [e for e in events if e.get("event") == "language_mismatch"]
+            if not task_mismatches:
+                continue
+            tasks_with += 1
+            for e in task_mismatches:
+                mismatches = e.get("mismatches", [])
+                total_events += len(mismatches)
+                for m in mismatches:
+                    lang = m.get("searched_language", "unknown")
+                    tool = m.get("tool", "unknown")
+                    by_lang[lang] += 1
+                    by_tool[tool] += 1
+
+        total_tasks = len(events_by_task)
+        return LanguageMismatchMetrics(
+            total_tasks_with_mismatches=tasks_with,
+            total_mismatch_events=total_events,
+            by_searched_language=dict(by_lang),
+            by_tool=dict(by_tool),
+            mismatch_rate=round(tasks_with / total_tasks, 3) if total_tasks > 0 else 0.0,
         )

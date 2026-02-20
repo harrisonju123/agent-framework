@@ -567,6 +567,54 @@ class TestPromptInjections:
         assert "abc1234" in result
 
 
+class TestRetryContextQualityEmission:
+    """Tests for retry_context_quality session event emission."""
+
+    def test_inject_retry_context_emits_quality_metric(self, prompt_builder, sample_task):
+        """Retry with context emits retry_context_quality with correct fields."""
+        mock_logger = Mock()
+        prompt_builder.ctx.session_logger = mock_logger
+        sample_task.retry_count = 1
+        sample_task.last_error = "Some error"
+        sample_task.context["_previous_attempt_summary"] = "Started auth module"
+        sample_task.context["_previous_attempt_branch_work"] = {
+            "commit_count": 2,
+            "insertions": 150,
+            "deletions": 5,
+            "commit_log": "abc1234 Auth\ndef5678 Tests",
+            "file_list": ["src/auth.py", "src/test_auth.py"],
+            "diffstat": " src/auth.py | 100 +++\n",
+        }
+        sample_task.context["_revised_plan"] = "New approach using OAuth"
+
+        prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        mock_logger.log.assert_called_once()
+        call_args = mock_logger.log.call_args
+        assert call_args[0][0] == "retry_context_quality"
+        kwargs = call_args[1]
+        assert kwargs["attempt_number"] == 2
+        assert kwargs["summary_chars"] == len("Started auth module")
+        assert kwargs["has_branch_work"] is True
+        assert kwargs["previous_commits"] == 2
+        assert kwargs["previous_files_modified"] == 2
+        assert kwargs["has_git_diff"] is False
+        assert kwargs["has_replan"] is True
+        assert kwargs["has_progress"] is True
+
+    def test_inject_retry_context_no_emission_on_first_attempt(
+        self, prompt_builder, sample_task
+    ):
+        """First attempt (retry_count=0) returns early — no log call."""
+        mock_logger = Mock()
+        prompt_builder.ctx.session_logger = mock_logger
+        sample_task.retry_count = 0
+
+        prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        mock_logger.log.assert_not_called()
+
+
 class TestStructuredFindings:
     """Test structured QA findings formatting for engineer prompts."""
 

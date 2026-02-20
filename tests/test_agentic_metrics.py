@@ -525,6 +525,68 @@ class TestToolUsageMetrics:
         assert report.trends[0].sessions_exceeding_threshold == 1
 
 
+class TestByStepBreakdown:
+    """Tests for by_step breakdown in ToolUsageMetrics."""
+
+    def test_by_step_from_exploration_alerts(self, workspace):
+        """exploration_alert events with workflow_step → correct by_step dict."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "exploration_alert", "task_id": "t1",
+             "total_tool_calls": 85, "threshold": 80, "workflow_step": "plan",
+             "agent_type": "architect"},
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 85, "tool_distribution": {"Read": 85},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "exploration_alert", "task_id": "t2",
+             "total_tool_calls": 55, "threshold": 50, "workflow_step": "implement",
+             "agent_type": "engineer"},
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t2",
+             "total_calls": 55, "tool_distribution": {"Read": 55},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "exploration_alert", "task_id": "t3",
+             "total_tool_calls": 60, "threshold": 50, "workflow_step": "implement",
+             "agent_type": "engineer"},
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t3",
+             "total_calls": 60, "tool_distribution": {"Read": 60},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        by_step = report.tool_usage.by_step
+        assert by_step == {"plan": 1, "implement": 2}
+        assert report.tool_usage.sessions_exceeding_threshold == 3
+
+    def test_standalone_bucketed_correctly(self, workspace):
+        """Alert without workflow_step → bucketed as 'standalone'."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "exploration_alert", "task_id": "t1",
+             "total_tool_calls": 55, "threshold": 50},
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 55, "tool_distribution": {"Read": 55},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.tool_usage.by_step == {"standalone": 1}
+
+    def test_no_alerts_empty_by_step(self, workspace):
+        """No exploration_alert events → by_step is empty."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 30, "tool_distribution": {"Read": 30},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.tool_usage.by_step == {}
+
+
 class TestUpstreamContextMetrics:
     """Tests for _aggregate_upstream_context."""
 
@@ -645,6 +707,121 @@ class TestUpstreamContextMetrics:
         assert report.upstream_context.total_observed == 0
 
 
+class TestRetryContextQualityMetrics:
+    """Tests for retry context quality aggregation."""
+
+    def test_no_retries_returns_zeros(self, workspace):
+        """No retry_context_quality events → zero-value metrics."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 3000},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        rcq = report.retry_context_quality
+        assert rcq.total_retries == 0
+        assert rcq.avg_summary_chars == 0.0
+        assert rcq.zero_commits_rate == 0.0
+        assert rcq.avg_summary_chars_by_agent == {}
+
+    def test_single_retry_with_rich_context(self, workspace):
+        """Branch work present → rates reflect it."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t1",
+             "agent_id": "engineer-1", "attempt_number": 2,
+             "summary_chars": 450, "has_branch_work": True,
+             "previous_commits": 3, "previous_files_modified": 5,
+             "has_git_diff": True, "has_replan": False},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        rcq = report.retry_context_quality
+        assert rcq.total_retries == 1
+        assert rcq.avg_summary_chars == 450.0
+        assert rcq.zero_commits_rate == 0.0
+        assert rcq.has_branch_work_rate == 1.0
+        assert rcq.has_git_diff_rate == 1.0
+        assert rcq.has_replan_rate == 0.0
+
+    def test_zero_commits_rate(self, workspace):
+        """2 events, 1 with zero commits → rate = 0.5."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t1",
+             "agent_id": "engineer-1", "attempt_number": 2,
+             "summary_chars": 200, "has_branch_work": True,
+             "previous_commits": 3, "previous_files_modified": 2,
+             "has_git_diff": False, "has_replan": False},
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t1",
+             "agent_id": "engineer-1", "attempt_number": 3,
+             "summary_chars": 100, "has_branch_work": False,
+             "previous_commits": 0, "previous_files_modified": 0,
+             "has_git_diff": False, "has_replan": True},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        rcq = report.retry_context_quality
+        assert rcq.total_retries == 2
+        assert rcq.zero_commits_rate == 0.5
+        assert rcq.has_replan_rate == 0.5
+
+    def test_per_agent_summary_chars(self, workspace):
+        """Per-agent breakdown separates engineer vs architect."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t1",
+             "agent_id": "engineer-1", "attempt_number": 2,
+             "summary_chars": 300, "has_branch_work": False,
+             "previous_commits": 0, "previous_files_modified": 0,
+             "has_git_diff": False, "has_replan": False},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t2",
+             "agent_id": "architect-1", "attempt_number": 2,
+             "summary_chars": 800, "has_branch_work": True,
+             "previous_commits": 5, "previous_files_modified": 8,
+             "has_git_diff": True, "has_replan": False},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        rcq = report.retry_context_quality
+        assert rcq.total_retries == 2
+        assert rcq.avg_summary_chars_by_agent["engineer-1"] == 300.0
+        assert rcq.avg_summary_chars_by_agent["architect-1"] == 800.0
+        assert rcq.avg_summary_chars == 550.0
+
+    def test_missing_agent_id_excluded_from_per_agent(self, workspace):
+        """Event with no agent_id counts toward totals but not per-agent breakdown."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t1",
+             "agent_id": None, "attempt_number": 2,
+             "summary_chars": 120, "has_branch_work": False,
+             "previous_commits": 0, "previous_files_modified": 0,
+             "has_git_diff": False, "has_replan": False},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        rcq = report.retry_context_quality
+        assert rcq.total_retries == 1
+        assert rcq.avg_summary_chars == 120.0
+        assert rcq.avg_summary_chars_by_agent == {}
+
+    def test_multi_retry_same_task_counted(self, workspace):
+        """Multiple retries within one task session are each counted."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t1",
+             "agent_id": "engineer-1", "attempt_number": 2,
+             "summary_chars": 200, "has_branch_work": False,
+             "previous_commits": 0, "previous_files_modified": 0,
+             "has_git_diff": False, "has_replan": False},
+            {"ts": _now_iso(), "event": "retry_context_quality", "task_id": "t1",
+             "agent_id": "engineer-1", "attempt_number": 3,
+             "summary_chars": 400, "has_branch_work": True,
+             "previous_commits": 2, "previous_files_modified": 3,
+             "has_git_diff": True, "has_replan": False},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        rcq = report.retry_context_quality
+        assert rcq.total_retries == 2
+        assert rcq.avg_summary_chars == 300.0
+        assert rcq.has_branch_work_rate == 0.5
+        assert rcq.has_git_diff_rate == 0.5
+        assert rcq.zero_commits_rate == 0.5
+
+
 class TestReportShape:
     def test_report_is_well_formed(self, workspace):
         """Smoke test: report always returns a valid AgenticMetricsReport."""
@@ -656,3 +833,164 @@ class TestReportShape:
         assert report.debate.available
         assert report.debate.total_debates == 0
         assert report.trends == []
+        # Retry context quality present with zero values
+        assert report.retry_context_quality.total_retries == 0
+        # Subagent metrics present with zero values
+        assert report.subagent.total_sessions_with_subagents == 0
+        assert report.subagent.total_subagents_spawned == 0
+
+
+class TestSubagentMetrics:
+    """Tests for subagent lifecycle tracking aggregation."""
+
+    def test_no_subagent_events_returns_zeros(self, workspace):
+        """Empty session → zero-value subagent metrics."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t1"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        sa = report.subagent
+        assert sa.total_sessions_with_subagents == 0
+        assert sa.total_subagents_spawned == 0
+        assert sa.avg_subagents_per_session == 0.0
+        assert sa.sessions_with_orphan_risk == 0
+        assert sa.orphan_risk_rate == 0.0
+        assert sa.outcome_distribution == {}
+
+    def test_successful_session_no_orphans(self, workspace):
+        """Success outcome, orphan_risk=False → no orphan risk counted."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "subagent_spawned", "task_id": "t1",
+             "spawn_index": 1, "tool_input_summary": "explore codebase"},
+            {"ts": _now_iso(), "event": "subagent_spawned", "task_id": "t1",
+             "spawn_index": 2, "tool_input_summary": "run tests"},
+            {"ts": _now_iso(), "event": "subagent_summary", "task_id": "t1",
+             "total_spawned": 2, "session_outcome": "success",
+             "orphan_risk": False, "spawns": [
+                 {"summary": "explore codebase", "ts": _now_iso()},
+                 {"summary": "run tests", "ts": _now_iso()},
+             ]},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        sa = report.subagent
+        assert sa.total_sessions_with_subagents == 1
+        assert sa.total_subagents_spawned == 2
+        assert sa.avg_subagents_per_session == 2.0
+        assert sa.sessions_with_orphan_risk == 0
+        assert sa.orphan_risk_rate == 0.0
+        assert sa.outcome_distribution == {"success": 1}
+
+    def test_circuit_breaker_marks_orphan_risk(self, workspace):
+        """Circuit breaker outcome, orphan_risk=True → counted."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "subagent_summary", "task_id": "t1",
+             "total_spawned": 3, "session_outcome": "circuit_breaker",
+             "orphan_risk": True, "spawns": [
+                 {"summary": "s1", "ts": _now_iso()},
+                 {"summary": "s2", "ts": _now_iso()},
+                 {"summary": "s3", "ts": _now_iso()},
+             ]},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        sa = report.subagent
+        assert sa.total_sessions_with_subagents == 1
+        assert sa.total_subagents_spawned == 3
+        assert sa.sessions_with_orphan_risk == 1
+        assert sa.orphan_risk_rate == 1.0
+        assert sa.outcome_distribution == {"circuit_breaker": 1}
+
+    def test_mixed_sessions(self, workspace):
+        """Multiple sessions with mixed outcomes → correct aggregation."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "subagent_summary", "task_id": "t1",
+             "total_spawned": 2, "session_outcome": "success",
+             "orphan_risk": False, "spawns": []},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "subagent_summary", "task_id": "t2",
+             "total_spawned": 1, "session_outcome": "interrupted",
+             "orphan_risk": True, "spawns": []},
+        ])
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "subagent_summary", "task_id": "t3",
+             "total_spawned": 4, "session_outcome": "circuit_breaker",
+             "orphan_risk": True, "spawns": []},
+        ])
+        # t4 has no subagents
+        _write_session(workspace, "t4", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t4"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        sa = report.subagent
+        assert sa.total_sessions_with_subagents == 3
+        assert sa.total_subagents_spawned == 7  # 2 + 1 + 4
+        assert sa.avg_subagents_per_session == pytest.approx(2.3, abs=0.1)
+        assert sa.sessions_with_orphan_risk == 2
+        assert sa.orphan_risk_rate == pytest.approx(0.667, abs=0.001)
+        assert sa.outcome_distribution == {
+            "success": 1, "interrupted": 1, "circuit_breaker": 1,
+        }
+
+
+class TestLanguageMismatchMetrics:
+    def test_no_mismatch_events_returns_zeros(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t1"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        lm = report.language_mismatch
+        assert lm.total_tasks_with_mismatches == 0
+        assert lm.total_mismatch_events == 0
+        assert lm.by_searched_language == {}
+        assert lm.by_tool == {}
+        assert lm.mismatch_rate == 0.0
+
+    def test_single_event_with_two_mismatches(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "language_mismatch", "task_id": "t1",
+             "agent_id": "engineer", "project_language": "python", "repo": "myrepo",
+             "mismatch_count": 2,
+             "mismatches": [
+                 {"project_language": "python", "searched_extension": ".go",
+                  "searched_language": "go", "tool": "Glob", "pattern": "**/*.go"},
+                 {"project_language": "python", "searched_extension": ".rb",
+                  "searched_language": "ruby", "tool": "Read", "pattern": "/app.rb"},
+             ]},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        lm = report.language_mismatch
+        assert lm.total_tasks_with_mismatches == 1
+        assert lm.total_mismatch_events == 2
+        assert lm.by_searched_language == {"go": 1, "ruby": 1}
+        assert lm.by_tool == {"Glob": 1, "Read": 1}
+        assert lm.mismatch_rate == 1.0
+
+    def test_multiple_tasks_mismatch_rate(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "language_mismatch", "task_id": "t1",
+             "agent_id": "engineer", "project_language": "python", "repo": "r",
+             "mismatch_count": 1,
+             "mismatches": [
+                 {"project_language": "python", "searched_extension": ".go",
+                  "searched_language": "go", "tool": "Glob", "pattern": "**/*.go"},
+             ]},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t2"},
+        ])
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "language_mismatch", "task_id": "t3",
+             "agent_id": "architect", "project_language": "go", "repo": "r2",
+             "mismatch_count": 1,
+             "mismatches": [
+                 {"project_language": "go", "searched_extension": ".ts",
+                  "searched_language": "typescript", "tool": "Grep", "pattern": "*.ts"},
+             ]},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        lm = report.language_mismatch
+        assert lm.total_tasks_with_mismatches == 2
+        assert lm.total_mismatch_events == 2
+        assert lm.by_searched_language == {"go": 1, "typescript": 1}
+        assert lm.by_tool == {"Glob": 1, "Grep": 1}
+        assert lm.mismatch_rate == pytest.approx(0.667, abs=0.001)

@@ -1317,7 +1317,13 @@ If a tool call fails:
             lines.append("|------|---------|------|")
             for file_path, entry in entries.items():
                 summary = entry.get("summary", "").replace("|", "/")
-                role = "MODIFY" if self._matches_modify_set(file_path, modify_set) else "ref"
+                # Role priority: CHANGED (actually modified) > MODIFY (planned) > ref
+                if entry.get("modified_by"):
+                    role = "CHANGED"
+                elif self._matches_modify_set(file_path, modify_set):
+                    role = "MODIFY"
+                else:
+                    role = "ref"
                 # Truncate long summaries per-row
                 if len(summary) > 120:
                     summary = summary[:117] + "..."
@@ -1344,9 +1350,11 @@ If a tool call fails:
             section = section[:self._READ_CACHE_MAX_CHARS] + "\n[truncated]\n"
 
         if self.ctx.session_logger:
+            changed_count = sum(1 for e in entries.values() if e.get("modified_by"))
             self.ctx.session_logger.log(
                 "read_cache_injected",
                 entry_count=len(entries),
+                changed_count=changed_count,
                 chars=len(section),
                 has_summaries=has_summaries,
             )
@@ -1374,13 +1382,15 @@ If a tool call fails:
         if step == "implement":
             return (
                 "Files marked MODIFY are your primary targets — read them in full when "
-                "ready to edit. Files marked 'ref' were explored for context; prefer "
-                "using the summary and only read if you need specific signatures."
+                "ready to edit. Files marked CHANGED were modified in a previous "
+                "implementation pass. Files marked 'ref' were explored for context; "
+                "prefer using the summary and only read if you need specific signatures."
             )
         if step in ("code_review", "qa_review"):
             return (
-                "Focus on the git diff. Only read a file for surrounding context "
-                "the diff doesn't show."
+                "Files marked CHANGED were modified by the engineer — the summary "
+                "reflects post-modification state. Focus on the git diff for review. "
+                "Only read CHANGED files if the diff lacks surrounding context."
             )
         return "Check summaries before re-reading any file."
 
@@ -1493,6 +1503,20 @@ If a tool call fails:
                 sections.append("")
 
         has_progress = bool(prev_summary) or bool(prev_git_diff) or bool(branch_work)
+
+        if self.ctx.session_logger:
+            self.ctx.session_logger.log(
+                "retry_context_quality",
+                agent_id=self.ctx.config.id if self.ctx.config else None,
+                attempt_number=task.retry_count + 1,
+                summary_chars=len(prev_summary) if prev_summary else 0,
+                has_branch_work=bool(branch_work),
+                previous_commits=branch_work["commit_count"] if branch_work else 0,
+                previous_files_modified=len(branch_work["file_list"]) if branch_work else 0,
+                has_git_diff=bool(prev_git_diff),
+                has_replan="_revised_plan" in task.context,
+                has_progress=has_progress,
+            )
 
         if has_progress:
             if branch_work:
