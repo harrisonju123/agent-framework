@@ -597,8 +597,10 @@ class GitOperationsManager:
                     cwd=worktree, check=False, timeout=60,
                 )
                 if push_result.returncode != 0:
+                    self._log_push_event(branch, success=False, error=push_result.stderr)
                     self.logger.error(f"Failed to push branch: {push_result.stderr}")
                     return
+                self._log_push_event(branch, success=True)
 
             # Intermediate workflow steps: push code but skip PR creation.
             # Store the branch so downstream agents can create the PR later.
@@ -945,6 +947,15 @@ class GitOperationsManager:
         if pushed:
             self.logger.info("Pushed unpushed commits to remote (post-LLM safety push)")
         return pushed
+
+    def _log_push_event(self, branch: str, success: bool, error: Optional[str] = None) -> None:
+        """Log a git push event to the session logger for metrics collection."""
+        if not self.session_logger:
+            return
+        data = {"branch": branch, "success": success}
+        if error:
+            data["error"] = error[:500]
+        self.session_logger.log("git_push", **data)
 
     @property
     def active_worktree(self) -> Optional[Path]:
