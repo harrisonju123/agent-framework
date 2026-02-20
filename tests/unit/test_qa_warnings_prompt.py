@@ -1,6 +1,7 @@
 """Tests for QA warnings injection in PromptBuilder."""
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,7 @@ def _make_task(**overrides):
         priority=5,
         created_by="architect",
         assigned_to="engineer",
+        created_at=datetime.now(timezone.utc),
         title="Test task",
         description="A test task",
         context={"github_repo": "myorg/myrepo"},
