@@ -363,6 +363,22 @@ class ContextBudgetMetricsResponse(BaseModel):
     exhaustion_count: int = 0
 
 
+class ToolUsageMetricsResponse(BaseModel):
+    total_tasks_analyzed: int
+    avg_tool_calls_per_task: float
+    max_tool_calls: int
+    tool_distribution: Dict[str, int]
+    duplicate_read_rate: float
+    avg_duplicate_reads_per_task: float
+    avg_read_before_write_ratio: float
+    avg_edit_density: float
+    top_tasks_by_calls: Dict[str, int]
+    p90_tool_calls: int = 0
+    exploration_alert_threshold: int = 50
+    sessions_exceeding_threshold: int = 0
+    by_agent: Dict[str, float] = {}
+
+
 class TrendBucketResponse(BaseModel):
     timestamp: datetime
     memory_recall_rate: float
@@ -371,6 +387,9 @@ class TrendBucketResponse(BaseModel):
     replan_trigger_rate: float
     avg_prompt_length: int
     task_count: int
+    avg_tool_calls: float = 0.0
+    avg_edit_density: float = 0.0
+    sessions_exceeding_threshold: int = 0
 
 
 class AgenticMetricsResponse(BaseModel):
@@ -385,4 +404,5 @@ class AgenticMetricsResponse(BaseModel):
     specialization: SpecializationMetricsResponse
     debate: DebateMetricsResponse
     context_budget: ContextBudgetMetricsResponse
+    tool_usage: ToolUsageMetricsResponse
     trends: List[TrendBucketResponse] = []

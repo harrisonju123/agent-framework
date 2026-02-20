@@ -259,6 +259,7 @@ def main():
             heartbeat_interval=framework_config.safeguards.heartbeat_interval,
             max_consecutive_tool_calls=framework_config.safeguards.max_consecutive_tool_calls,
             max_consecutive_diagnostic_calls=framework_config.safeguards.max_consecutive_diagnostic_calls,
+            exploration_alert_threshold=framework_config.optimization.exploration_alert_threshold,
         )
 
         # Let SIGTERM trigger a clean exit through the polling loop

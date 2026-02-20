@@ -47,6 +47,7 @@ def agent():
     a._mcp_enabled = False
     a._max_consecutive_tool_calls = 5  # Low threshold for fast tests
     a._max_consecutive_diagnostic_calls = 5  # Diagnostic breaker threshold
+    a._exploration_alert_threshold = 999  # Don't trigger in circuit breaker tests
     a.config = MagicMock()
     a.config.id = "test-agent"
     a.workspace = Path("/tmp/test-workspace")
@@ -699,3 +700,142 @@ class TestDiagnosticCircuitBreaker:
         from agent_framework.core.config import SafeguardsConfig
         cfg = SafeguardsConfig()
         assert cfg.max_consecutive_diagnostic_calls == 5
+
+
+def _make_exploration_agent(threshold: int = 10):
+    """Create a mock agent for exploration alert tests.
+
+    Circuit breaker thresholds are set high so only the exploration alert is under test.
+    """
+    a = MagicMock()
+    a._execute_llm_with_interruption_watch = (
+        Agent._execute_llm_with_interruption_watch.__get__(a)
+    )
+    a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
+    a._auto_commit_wip = AsyncMock()
+    a._update_phase = MagicMock()
+    a._session_logger = MagicMock()
+    a._session_logger.log = MagicMock()
+    a._session_logger.log_tool_call = MagicMock()
+    a._context_window_manager = None
+    a._current_specialization = None
+    a._current_file_count = 0
+    a._mcp_enabled = False
+    a._max_consecutive_tool_calls = 999
+    a._max_consecutive_diagnostic_calls = 999
+    a._exploration_alert_threshold = threshold
+    a.config = MagicMock()
+    a.config.id = "test-agent"
+    a.workspace = Path("/tmp/test-workspace")
+    a.logger = MagicMock()
+    a.queue = MagicMock()
+    a.activity_manager = MagicMock()
+    return a
+
+
+class TestExplorationAlert:
+    """Exploration alert fires once when total tool calls exceed threshold."""
+
+    @pytest.mark.asyncio
+    async def test_alert_fires_at_threshold(self, task):
+        """10 diverse tool calls → session log event + activity event."""
+        a = _make_exploration_agent(threshold=10)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(10):
+            on_tool("Read", f"file_{i}.py")
+
+        await asyncio.sleep(0.05)
+
+        # Verify session log event
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 1
+        assert alert_logs[0][1]["total_tool_calls"] == 10
+        assert alert_logs[0][1]["threshold"] == 10
+
+        # Verify activity event
+        alert_events = [
+            c for c in a.activity_manager.append_event.call_args_list
+            if c[0][0].type == "exploration_alert"
+        ]
+        assert len(alert_events) == 1
+        assert "10 tool calls" in alert_events[0][0][0].title
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_alert_fires_once(self, task):
+        """20 calls past threshold=10 → only 1 alert."""
+        a = _make_exploration_agent(threshold=10)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(20):
+            on_tool("Read", f"file_{i}.py")
+
+        await asyncio.sleep(0.05)
+
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 1, "Alert should fire exactly once"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_no_alert_below_threshold(self, task):
+        """49 calls with threshold=50 → no alert."""
+        a = _make_exploration_agent(threshold=50)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(49):
+            on_tool("Read", f"file_{i}.py")
+
+        await asyncio.sleep(0.05)
+
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 0, "No alert below threshold"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_agent_continues_after_alert(self, task):
+        """LLM task is NOT cancelled after alert — agent keeps working."""
+        a = _make_exploration_agent(threshold=10)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(15):
+            on_tool("Read", f"file_{i}.py")
+
+        await asyncio.sleep(0.05)
+        assert not result_task.done(), "Agent should continue working after alert"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    def test_config_default_threshold(self):
+        """OptimizationConfig has exploration_alert_threshold=50 by default."""
+        from agent_framework.core.config import OptimizationConfig
+        cfg = OptimizationConfig()
+        assert cfg.exploration_alert_threshold == 50

@@ -401,6 +401,130 @@ class TestCodebaseIndexMetrics:
         assert report.trends[0].codebase_index_rate == 0.5
 
 
+class TestToolUsageMetrics:
+    def test_p90_computed(self, workspace):
+        """Sessions with varying tool counts → correct p90."""
+        # 10 sessions with tool counts 10, 20, ..., 100
+        for i in range(1, 11):
+            _write_session(workspace, f"t{i}", [
+                {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": f"t{i}",
+                 "total_calls": i * 10, "tool_distribution": {"Read": i * 10},
+                 "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+                 "edit_density": 0.5},
+            ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        tu = report.tool_usage
+        assert tu.total_tasks_analyzed == 10
+        assert tu.p90_tool_calls >= 90  # P90 of [10,20,...,100] should be ~90-91
+
+    def test_p90_single_task(self, workspace):
+        """Single session → p90 equals the only value."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 42, "tool_distribution": {"Read": 42},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.tool_usage.p90_tool_calls == 42
+
+    def test_sessions_exceeding_threshold(self, workspace):
+        """Sessions with exploration_alert events → counted."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "exploration_alert", "task_id": "t1",
+             "total_tool_calls": 55, "threshold": 50},
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 55, "tool_distribution": {"Read": 55},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t2",
+             "total_calls": 30, "tool_distribution": {"Read": 30},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.tool_usage.sessions_exceeding_threshold == 1
+
+    def test_threshold_extracted_from_events(self, workspace):
+        """exploration_alert_threshold reflects the runtime config, not hardcoded default."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "exploration_alert", "task_id": "t1",
+             "total_tool_calls": 75, "threshold": 75},
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 75, "tool_distribution": {"Read": 75},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.tool_usage.exploration_alert_threshold == 75
+
+    def test_no_sessions_exceeding(self, workspace):
+        """No exploration_alert events → count is 0."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 30, "tool_distribution": {"Read": 30},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.tool_usage.sessions_exceeding_threshold == 0
+
+    def test_by_agent_breakdown(self, workspace):
+        """Sessions with agent_id in tool_usage_stats → grouped correctly."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "agent_id": "architect", "total_calls": 60,
+             "tool_distribution": {"Read": 60}, "duplicate_reads": {},
+             "read_before_write_ratio": 1.0, "edit_density": 0.5},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t2",
+             "agent_id": "architect", "total_calls": 40,
+             "tool_distribution": {"Read": 40}, "duplicate_reads": {},
+             "read_before_write_ratio": 1.0, "edit_density": 0.5},
+        ])
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t3",
+             "agent_id": "engineer", "total_calls": 80,
+             "tool_distribution": {"Read": 80}, "duplicate_reads": {},
+             "read_before_write_ratio": 1.0, "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        by_agent = report.tool_usage.by_agent
+        assert by_agent["architect"] == 50.0  # avg(60, 40)
+        assert by_agent["engineer"] == 80.0
+
+    def test_by_agent_missing_id(self, workspace):
+        """Sessions without agent_id are excluded from by_agent breakdown."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 30, "tool_distribution": {"Read": 30},
+             "duplicate_reads": {}, "read_before_write_ratio": 1.0,
+             "edit_density": 0.5},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.tool_usage.by_agent == {}
+
+    def test_trend_sessions_exceeding_threshold(self, workspace):
+        """TrendBucket includes sessions_exceeding_threshold."""
+        now = datetime.now(timezone.utc)
+        _write_session(workspace, "t1", [
+            {"ts": now.isoformat(), "event": "exploration_alert", "task_id": "t1",
+             "total_tool_calls": 55, "threshold": 50},
+            {"ts": now.isoformat(), "event": "tool_usage_stats", "task_id": "t1",
+             "total_calls": 55, "tool_distribution": {"Read": 55},
+             "duplicate_reads": {}},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": now.isoformat(), "event": "task_start", "task_id": "t2"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert len(report.trends) == 1
+        assert report.trends[0].sessions_exceeding_threshold == 1
+
+
 class TestReportShape:
     def test_report_is_well_formed(self, workspace):
         """Smoke test: report always returns a valid AgenticMetricsReport."""

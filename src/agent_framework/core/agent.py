@@ -461,11 +461,13 @@ class Agent:
         heartbeat_interval: int = 15,
         max_consecutive_tool_calls: int = 15,
         max_consecutive_diagnostic_calls: int = 5,
+        exploration_alert_threshold: int = 50,
     ):
         """Initialize Agent with modular subsystem setup."""
         self._heartbeat_interval = heartbeat_interval
         self._max_consecutive_tool_calls = max_consecutive_tool_calls
         self._max_consecutive_diagnostic_calls = max_consecutive_diagnostic_calls
+        self._exploration_alert_threshold = exploration_alert_threshold
 
         # Core dependencies and basic state
         self._init_core_dependencies(
@@ -1473,6 +1475,7 @@ class Agent:
         _soft_threshold_logged = [False]
         _circuit_breaker_event = asyncio.Event()
         _diagnostic_trip = [False]  # tracks which trigger fired
+        _exploration_alerted = [False]
 
         _DIVERSITY_THRESHOLD = 0.5
         _COMMIT_CHECKPOINT_INTERVAL = 25
@@ -1543,6 +1546,27 @@ class Agent:
                     _consecutive_diagnostic[0] = 0
                     _bash_commands[0] = []
                     _soft_threshold_logged[0] = False
+
+                # Exploration metric: one-time alert when total calls exceed threshold
+                total = _tool_call_count[0]
+                if total >= self._exploration_alert_threshold and not _exploration_alerted[0]:
+                    _exploration_alerted[0] = True
+                    self.logger.info(
+                        f"Exploration alert: {total} tool calls in session "
+                        f"(threshold={self._exploration_alert_threshold})"
+                    )
+                    self._session_logger.log(
+                        "exploration_alert",
+                        total_tool_calls=total,
+                        threshold=self._exploration_alert_threshold,
+                    )
+                    self.activity_manager.append_event(ActivityEvent(
+                        type="exploration_alert",
+                        agent=self.config.id,
+                        task_id=task.id,
+                        title=f"Exploration: {total} tool calls (threshold={self._exploration_alert_threshold})",
+                        timestamp=datetime.now(timezone.utc),
+                    ))
 
                 # Periodic checkpoint: commit accumulated work so it's not lost
                 if (_tool_call_count[0] % _COMMIT_CHECKPOINT_INTERVAL == 0
@@ -2651,7 +2675,7 @@ class Agent:
             cached = task.context.pop("_tool_stats_cache", None)
             if cached:
                 tool_call_count = cached.get("total_calls")
-                self._session_logger.log("tool_usage_stats", **cached)
+                self._session_logger.log("tool_usage_stats", agent_id=self.config.id, **cached)
             else:
                 tool_calls = analyzer.extract_tool_calls(session_path)
                 if tool_calls:
@@ -2659,6 +2683,7 @@ class Agent:
                     tool_call_count = stats.total_calls
                     self._session_logger.log(
                         "tool_usage_stats",
+                        agent_id=self.config.id,
                         total_calls=stats.total_calls,
                         tool_distribution=stats.tool_distribution,
                         duplicate_reads=stats.duplicate_reads,

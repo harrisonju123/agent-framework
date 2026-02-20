@@ -210,6 +210,22 @@ export interface ContextBudgetMetrics {
   p90_prompt_length: number
 }
 
+export interface ToolUsageMetrics {
+  total_tasks_analyzed: number
+  avg_tool_calls_per_task: number
+  max_tool_calls: number
+  tool_distribution: Record<string, number>
+  duplicate_read_rate: number
+  avg_duplicate_reads_per_task: number
+  avg_read_before_write_ratio: number
+  avg_edit_density: number
+  top_tasks_by_calls: Record<string, number>
+  p90_tool_calls: number
+  exploration_alert_threshold: number
+  sessions_exceeding_threshold: number
+  by_agent: Record<string, number>
+}
+
 export interface TrendBucket {
   timestamp: string
   memory_recall_rate: number
@@ -217,6 +233,9 @@ export interface TrendBucket {
   replan_trigger_rate: number
   avg_prompt_length: number
   task_count: number
+  avg_tool_calls: number
+  avg_edit_density: number
+  sessions_exceeding_threshold: number
 }
 
 export interface AgenticMetricsReport {
@@ -229,6 +248,7 @@ export interface AgenticMetricsReport {
   specialization: SpecializationMetrics
   debate: DebateMetrics
   context_budget: ContextBudgetMetrics
+  tool_usage: ToolUsageMetrics
   trends: TrendBucket[]
 }
 

@@ -102,6 +102,10 @@ class ToolUsageMetrics(BaseModel):
     avg_read_before_write_ratio: float
     avg_edit_density: float
     top_tasks_by_calls: Dict[str, int]      # top 5 task_id → count
+    p90_tool_calls: int = 0                 # 90th percentile
+    exploration_alert_threshold: int = 50   # config reference
+    sessions_exceeding_threshold: int = 0   # count above threshold
+    by_agent: Dict[str, float] = {}         # agent_id → avg tool calls
 
 
 class ContextBudgetMetrics(BaseModel):
@@ -133,6 +137,7 @@ class TrendBucket(BaseModel):
     task_count: int
     avg_tool_calls: float = 0.0
     avg_edit_density: float = 0.0
+    sessions_exceeding_threshold: int = 0
 
 
 class AgenticMetricsReport(BaseModel):
@@ -482,7 +487,11 @@ class AgenticMetrics:
             # Tool usage stats from this bucket
             tool_call_counts = []
             edit_densities_bucket = []
+            bucket_exploration_alerts = 0
             for evts in task_events.values():
+                has_alert = any(e.get("event") == "exploration_alert" for e in evts)
+                if has_alert:
+                    bucket_exploration_alerts += 1
                 for e in evts:
                     if e.get("event") == "tool_usage_stats":
                         tc = e.get("total_calls", 0)
@@ -503,6 +512,7 @@ class AgenticMetrics:
                 task_count=task_count,
                 avg_tool_calls=round(sum(tool_call_counts) / len(tool_call_counts), 1) if tool_call_counts else 0.0,
                 avg_edit_density=round(sum(edit_densities_bucket) / len(edit_densities_bucket), 3) if edit_densities_bucket else 0.0,
+                sessions_exceeding_threshold=bucket_exploration_alerts,
             ))
 
         return result
@@ -515,8 +525,20 @@ class AgenticMetrics:
         total_dupe_count = 0
         rbw_ratios: List[float] = []
         edit_densities: List[float] = []
+        agent_call_totals: Dict[str, List[int]] = defaultdict(list)
+        sessions_exceeding = 0
+        alert_threshold = 50  # default; overwritten from first exploration_alert event
 
         for task_id, events in events_by_task.items():
+            for e in events:
+                if e.get("event") == "exploration_alert":
+                    sessions_exceeding += 1
+                    # Prefer the threshold actually used at runtime over the hardcoded default
+                    t = e.get("threshold")
+                    if isinstance(t, int) and t > 0:
+                        alert_threshold = t
+                    break
+
             for e in events:
                 if e.get("event") != "tool_usage_stats":
                     continue
@@ -526,6 +548,10 @@ class AgenticMetrics:
                     continue
 
                 task_call_counts[task_id] = total
+
+                agent_id = e.get("agent_id")
+                if agent_id:
+                    agent_call_totals[agent_id].append(total)
 
                 dist = e.get("tool_distribution", {})
                 for tool, count in dist.items():
@@ -564,6 +590,15 @@ class AgenticMetrics:
         all_counts = list(task_call_counts.values())
         top_5 = sorted(task_call_counts.items(), key=lambda x: -x[1])[:5]
 
+        # P90 calculation
+        p90 = int(quantiles(all_counts, n=10)[8]) if n >= 2 else all_counts[0]
+
+        # Per-agent average
+        by_agent = {
+            aid: round(sum(counts) / len(counts), 1)
+            for aid, counts in agent_call_totals.items()
+        }
+
         return ToolUsageMetrics(
             total_tasks_analyzed=n,
             avg_tool_calls_per_task=round(sum(all_counts) / n, 1),
@@ -574,6 +609,10 @@ class AgenticMetrics:
             avg_read_before_write_ratio=round(sum(rbw_ratios) / len(rbw_ratios), 3) if rbw_ratios else 0.0,
             avg_edit_density=round(sum(edit_densities) / len(edit_densities), 3) if edit_densities else 0.0,
             top_tasks_by_calls=dict(top_5),
+            p90_tool_calls=p90,
+            exploration_alert_threshold=alert_threshold,
+            sessions_exceeding_threshold=sessions_exceeding,
+            by_agent=by_agent,
         )
 
     def _aggregate_context_budget(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> ContextBudgetMetrics:

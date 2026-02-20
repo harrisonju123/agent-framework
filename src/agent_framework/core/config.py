@@ -147,6 +147,9 @@ class OptimizationConfig(BaseModel):
     # Budget warning threshold (e.g., 1.3 = warn at 130% of budget)
     budget_warning_threshold: float = 1.3
 
+    # Exploration alert: activity event when a session exceeds N tool calls
+    exploration_alert_threshold: int = 50
+
     # Per-task-tree USD budget ceilings by estimated effort (t-shirt size)
     enable_effort_budget_ceilings: bool = False
     effort_budget_ceilings: Dict[str, float] = Field(default_factory=lambda: {
