@@ -330,6 +330,77 @@ class TestTrends:
         assert report.trends[0].replan_trigger_rate == 0.5
 
 
+class TestCodebaseIndexMetrics:
+    def test_no_injections_returns_zeros(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t1"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        ci = report.codebase_index
+        assert ci.total_injections == 0
+        assert ci.tasks_with_injection == 0
+        assert ci.avg_chars_injected == 0.0
+        assert ci.injection_rate == 0.0
+
+    def test_counts_injections(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "codebase_index_injected", "task_id": "t1", "repo": "myrepo", "chars": 3000},
+            {"ts": _now_iso(), "event": "codebase_index_injected", "task_id": "t1", "repo": "myrepo", "chars": 3600},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        ci = report.codebase_index
+        assert ci.total_injections == 2
+        assert ci.tasks_with_injection == 1
+        assert ci.avg_chars_injected == 3300.0
+        assert ci.injection_rate == 1.0
+
+    def test_injection_rate_partial(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "codebase_index_injected", "task_id": "t1", "repo": "r", "chars": 500},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t2"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.codebase_index.injection_rate == 0.5
+
+    def test_positive_usefulness_delta(self, workspace):
+        """Tasks with index injection complete more often → positive delta."""
+        # 2 tasks with index: both complete
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "codebase_index_injected", "task_id": "t1", "repo": "r", "chars": 3000},
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t1"},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "codebase_index_injected", "task_id": "t2", "repo": "r", "chars": 2000},
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t2"},
+        ])
+        # 2 tasks without index: 1 completes, 1 fails
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "task_complete", "task_id": "t3"},
+        ])
+        _write_session(workspace, "t4", [
+            {"ts": _now_iso(), "event": "task_failed", "task_id": "t4"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        ci = report.codebase_index
+        assert ci.completion_rate_with_index == 1.0
+        assert ci.completion_rate_without_index == 0.5
+        assert ci.index_usefulness_delta == 0.5
+
+    def test_trend_includes_index_rate(self, workspace):
+        now = datetime.now(timezone.utc)
+        _write_session(workspace, "t1", [
+            {"ts": now.isoformat(), "event": "codebase_index_injected", "task_id": "t1", "repo": "r", "chars": 1000},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": now.isoformat(), "event": "task_start", "task_id": "t2"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert len(report.trends) == 1
+        assert report.trends[0].codebase_index_rate == 0.5
+
+
 class TestReportShape:
     def test_report_is_well_formed(self, workspace):
         """Smoke test: report always returns a valid AgenticMetricsReport."""

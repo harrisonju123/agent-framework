@@ -307,6 +307,16 @@ class MemoryMetricsResponse(BaseModel):
     recall_usefulness_delta: float = 0.0
 
 
+class CodebaseIndexMetricsResponse(BaseModel):
+    total_injections: int
+    tasks_with_injection: int
+    avg_chars_injected: float
+    injection_rate: float
+    completion_rate_with_index: float = 0.0
+    completion_rate_without_index: float = 0.0
+    index_usefulness_delta: float = 0.0
+
+
 class SelfEvalMetricsResponse(BaseModel):
     total_evals: int
     pass_count: int
@@ -349,6 +359,7 @@ class ContextBudgetMetricsResponse(BaseModel):
 class TrendBucketResponse(BaseModel):
     timestamp: datetime
     memory_recall_rate: float
+    codebase_index_rate: float
     self_eval_catch_rate: float
     replan_trigger_rate: float
     avg_prompt_length: int
@@ -361,6 +372,7 @@ class AgenticMetricsResponse(BaseModel):
     time_range_hours: int
     total_observed_tasks: int
     memory: MemoryMetricsResponse
+    codebase_index: CodebaseIndexMetricsResponse
     self_eval: SelfEvalMetricsResponse
     replan: ReplanMetricsResponse
     specialization: SpecializationMetricsResponse

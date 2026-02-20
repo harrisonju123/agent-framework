@@ -3,6 +3,7 @@ Agentic feature metrics collected from per-task session JSONL logs.
 
 Surfaces observable signals from the framework's agentic subsystems:
 - Memory recall frequency and usefulness proxy
+- Codebase index injection frequency and effectiveness
 - Self-evaluation catch rate (how often self-eval caught issues before QA)
 - Replanning trigger and success rate
 - Specialization profile distribution (from current agent activity)
@@ -38,6 +39,17 @@ class MemoryMetrics(BaseModel):
     completion_rate_with_recall: float = 0.0
     completion_rate_without_recall: float = 0.0
     recall_usefulness_delta: float = 0.0
+
+
+class CodebaseIndexMetrics(BaseModel):
+    """Codebase index injection frequency and effectiveness."""
+    total_injections: int
+    tasks_with_injection: int
+    avg_chars_injected: float
+    injection_rate: float  # tasks_with_injection / total_observed_tasks
+    completion_rate_with_index: float = 0.0
+    completion_rate_without_index: float = 0.0
+    index_usefulness_delta: float = 0.0
 
 
 class SelfEvalMetrics(BaseModel):
@@ -91,6 +103,7 @@ class TrendBucket(BaseModel):
     """Hourly time-series bucket for trend charts."""
     timestamp: datetime
     memory_recall_rate: float
+    codebase_index_rate: float
     self_eval_catch_rate: float
     replan_trigger_rate: float
     avg_prompt_length: int
@@ -103,6 +116,7 @@ class AgenticMetricsReport(BaseModel):
     time_range_hours: int
     total_observed_tasks: int
     memory: MemoryMetrics
+    codebase_index: CodebaseIndexMetrics
     self_eval: SelfEvalMetrics
     replan: ReplanMetrics
     specialization: SpecializationMetrics
@@ -141,6 +155,7 @@ class AgenticMetrics:
         events_by_task = self._load_session_events(cutoff)
 
         memory = self._aggregate_memory(events_by_task)
+        codebase_index = self._aggregate_codebase_index(events_by_task)
         self_eval = self._aggregate_self_eval(events_by_task)
         replan = self._aggregate_replan(events_by_task)
         specialization = self._read_specialization_distribution()
@@ -153,6 +168,7 @@ class AgenticMetrics:
             time_range_hours=hours,
             total_observed_tasks=len(events_by_task),
             memory=memory,
+            codebase_index=codebase_index,
             self_eval=self_eval,
             replan=replan,
             specialization=specialization,
@@ -246,6 +262,43 @@ class AgenticMetrics:
             completion_rate_with_recall=rate_with,
             completion_rate_without_recall=rate_without,
             recall_usefulness_delta=round(rate_with - rate_without, 3),
+        )
+
+    def _aggregate_codebase_index(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> CodebaseIndexMetrics:
+        """Aggregate codebase_index_injected events across all tasks."""
+        total_injections = 0
+        tasks_with_injection = 0
+        total_chars = 0
+        completed_with_index = 0
+        completed_without_index = 0
+        tasks_without_index = 0
+
+        for events in events_by_task.values():
+            injections = [e for e in events if e.get("event") == "codebase_index_injected"]
+            completed = any(e.get("event") == "task_complete" for e in events)
+            if injections:
+                tasks_with_injection += 1
+                total_injections += len(injections)
+                total_chars += sum(e.get("chars", 0) for e in injections)
+                if completed:
+                    completed_with_index += 1
+            else:
+                tasks_without_index += 1
+                if completed:
+                    completed_without_index += 1
+
+        total_tasks = len(events_by_task)
+        rate_with = round(completed_with_index / tasks_with_injection, 3) if tasks_with_injection > 0 else 0.0
+        rate_without = round(completed_without_index / tasks_without_index, 3) if tasks_without_index > 0 else 0.0
+
+        return CodebaseIndexMetrics(
+            total_injections=total_injections,
+            tasks_with_injection=tasks_with_injection,
+            avg_chars_injected=round(total_chars / total_injections, 1) if total_injections > 0 else 0.0,
+            injection_rate=round(tasks_with_injection / total_tasks, 3) if total_tasks > 0 else 0.0,
+            completion_rate_with_index=rate_with,
+            completion_rate_without_index=rate_without,
+            index_usefulness_delta=round(rate_with - rate_without, 3),
         )
 
     def _aggregate_self_eval(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> SelfEvalMetrics:
@@ -424,6 +477,10 @@ class AgenticMetrics:
                 1 for evts in task_events.values()
                 if any(e.get("event") == "memory_recall" for e in evts)
             )
+            tasks_with_index = sum(
+                1 for evts in task_events.values()
+                if any(e.get("event") == "codebase_index_injected" for e in evts)
+            )
 
             # Self-eval catch rate for this bucket
             se_pass = sum(1 for e in events if e.get("event") == "self_eval" and (e.get("verdict") or "").upper() == "PASS")
@@ -445,6 +502,7 @@ class AgenticMetrics:
             result.append(TrendBucket(
                 timestamp=bucket_ts,
                 memory_recall_rate=round(tasks_with_recall / task_count, 3) if task_count > 0 else 0.0,
+                codebase_index_rate=round(tasks_with_index / task_count, 3) if task_count > 0 else 0.0,
                 self_eval_catch_rate=catch_rate,
                 replan_trigger_rate=round(tasks_with_replan / task_count, 3) if task_count > 0 else 0.0,
                 avg_prompt_length=avg_prompt,
