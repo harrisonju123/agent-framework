@@ -181,6 +181,9 @@ class PromptBuilder:
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
 
+        # Inject QA warnings and missed criteria from cross-feature learning loop
+        prompt = self._inject_qa_warnings(prompt, task)
+
         # Inject tool efficiency tips from session analysis
         prompt = self._inject_tool_tips(prompt, task)
 
@@ -1079,6 +1082,63 @@ If a tool call fails:
             return prompt + "\n" + memory_section
 
         return prompt
+
+    def _inject_qa_warnings(self, prompt: str, task: Task) -> str:
+        """Inject known pitfalls from QA warnings and missed criteria.
+
+        Queries MemoryStore for 'qa_warnings' and 'missed_criteria' categories
+        and injects them as a 'Known Pitfalls' section so the engineer is aware
+        of recurring issues before starting work.
+        """
+        if not self.ctx.memory_retriever:
+            return prompt
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return prompt
+
+        # Only inject for engineer agents — reviewers don't need pitfall warnings
+        if self.ctx.config.base_id != "engineer":
+            return prompt
+
+        store = self.ctx.memory_retriever._store
+        if not store or not store.enabled:
+            return prompt
+
+        # Retrieve QA warnings and missed criteria (small limits to avoid noise)
+        qa_warnings = store.recall(
+            repo_slug, self.ctx.config.base_id,
+            category="qa_warnings", limit=5,
+        )
+        missed_criteria = store.recall(
+            repo_slug, self.ctx.config.base_id,
+            category="missed_criteria", limit=5,
+        )
+
+        if not qa_warnings and not missed_criteria:
+            return prompt
+
+        lines = ["\n## Known Pitfalls\n"]
+        lines.append(
+            "Based on past tasks in this repo, watch out for these recurring issues:\n"
+        )
+
+        if qa_warnings:
+            for entry in qa_warnings:
+                lines.append(f"- {entry.content}")
+
+        if missed_criteria:
+            for entry in missed_criteria:
+                lines.append(f"- {entry.content}")
+
+        lines.append("")
+
+        section = "\n".join(lines)
+        self.logger.debug(
+            "Injected %d QA warnings + %d missed criteria into prompt",
+            len(qa_warnings), len(missed_criteria),
+        )
+        return prompt + section
 
     def _inject_tool_tips(self, prompt: str, task: Task) -> str:
         """Append tool efficiency tips from previous session analysis."""

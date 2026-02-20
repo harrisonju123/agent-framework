@@ -196,6 +196,77 @@ class ProfileRegistry:
         self._save_entries(entries)
         logger.info("Stored generated profile '%s' (%d total)", entry.profile.id, len(entries))
 
+    def record_domain_feedback(
+        self,
+        profile_id: str,
+        domain_tags: List[str],
+        mismatch_signal: bool,
+    ) -> None:
+        """Record domain feedback from debate outcomes.
+
+        When a debate reveals the current specialization was a poor fit,
+        this stores a mismatch signal so future profile matching can
+        penalize profiles that don't align with the task's domain.
+
+        Args:
+            profile_id: ID of the profile that was a poor fit.
+            domain_tags: Domain keywords detected in the debate synthesis.
+            mismatch_signal: True if this is a negative signal (mismatch).
+        """
+        feedback = self._load_domain_feedback()
+
+        entry = feedback.get(profile_id, {"mismatches": [], "total_signals": 0})
+        entry["total_signals"] = entry.get("total_signals", 0) + 1
+
+        if mismatch_signal:
+            mismatches = entry.get("mismatches", [])
+            mismatches.append({
+                "domain_tags": domain_tags,
+                "timestamp": time.time(),
+            })
+            # Cap stored mismatches to avoid unbounded growth
+            if len(mismatches) > 50:
+                mismatches = mismatches[-50:]
+            entry["mismatches"] = mismatches
+
+        feedback[profile_id] = entry
+        self._save_domain_feedback(feedback)
+
+        logger.debug(
+            "Recorded domain feedback for profile '%s': mismatch=%s, domains=%s",
+            profile_id, mismatch_signal, domain_tags,
+        )
+
+    def get_domain_corrections(self, profile_id: str) -> Dict:
+        """Get accumulated domain feedback for a profile.
+
+        Returns dict with 'mismatches' list and 'total_signals' count.
+        Returns empty dict if no feedback exists.
+        """
+        feedback = self._load_domain_feedback()
+        return feedback.get(profile_id, {})
+
+    def _load_domain_feedback(self) -> Dict:
+        """Load domain feedback from disk."""
+        feedback_path = self._store_path.parent / "domain_feedback.json"
+        try:
+            raw = feedback_path.read_text()
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+        return {}
+
+    def _save_domain_feedback(self, feedback: Dict) -> None:
+        """Atomically persist domain feedback to disk."""
+        from ..utils.atomic_io import atomic_write_json
+
+        feedback_path = self._store_path.parent / "domain_feedback.json"
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(feedback, indent=2)
+        atomic_write_json(feedback_path, content)
+
     def _load_entries(self) -> List[GeneratedProfileEntry]:
         """Load entries from disk. Returns empty list on any I/O or parse error."""
         try:

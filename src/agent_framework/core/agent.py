@@ -36,6 +36,7 @@ from ..memory.memory_store import MemoryStore
 from ..memory.memory_retriever import MemoryRetriever
 from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer
 from ..memory.tool_pattern_store import ToolPatternStore
+from ..memory.feedback_bus import FeedbackBus
 from .session_logger import SessionLogger, noop_logger
 from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
