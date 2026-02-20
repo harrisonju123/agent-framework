@@ -15,6 +15,7 @@ from .llm_metrics import LlmMetrics, LlmMetricsReport
 from .decomposition_metrics import DecompositionMetrics, DecompositionReport
 from .chain_metrics import ChainMetrics, ChainMetricsReport
 from .git_metrics import GitMetrics, GitMetricsReport
+from .waste_metrics import WasteMetrics, WasteMetricsReport
 
 __all__ = [
     'PerformanceMetrics',
@@ -30,4 +31,6 @@ __all__ = [
     'ChainMetricsReport',
     'GitMetrics',
     'GitMetricsReport',
+    'WasteMetrics',
+    'WasteMetricsReport',
 ]
