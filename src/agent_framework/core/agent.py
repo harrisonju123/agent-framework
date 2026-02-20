@@ -2064,6 +2064,7 @@ class Agent:
         self._setup_context_window_manager_for_task(task)
 
         working_dir = None
+        _cost_before_try = task.context.get("_cumulative_cost", 0.0)
         try:
             # Initialize task execution state
             self._initialize_task_execution(task, task_start_time)
@@ -2178,11 +2179,15 @@ class Agent:
             task.last_error = str(e)
             self.logger.exception(f"Error processing task {task.id}: {e}")
 
-            # Salvage cost from response if LLM completed before the exception
+            # Salvage cost from response if LLM completed before the exception.
+            # Skip if _handle_failed_response / _run_post_completion_flow already
+            # accumulated cost (avoids double-counting when the exception originates
+            # from within those methods).
             _fail_cost = None
             _fail_in = 0
             _fail_out = 0
-            if 'response' in locals() and response is not None:
+            _already_accumulated = task.context.get("_cumulative_cost", 0.0) > _cost_before_try
+            if not _already_accumulated and 'response' in locals() and response is not None:
                 _fail_cost = self._budget.estimate_cost(response)
                 _fail_in = response.input_tokens
                 _fail_out = response.output_tokens

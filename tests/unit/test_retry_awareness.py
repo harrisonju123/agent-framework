@@ -44,6 +44,9 @@ def _make_agent():
     a._git_ops = MagicMock()
     a._git_ops.safety_commit.return_value = False
     a._model_success_store = None
+    a._budget = MagicMock()
+    a._budget.estimate_cost.return_value = 0.50
+    a._context_window_manager = None
     return a
 
 
@@ -294,3 +297,131 @@ class TestDiscoverBranchWorkIntegration:
                 task.context["_previous_attempt_branch_work"] = branch_work
 
         assert "_previous_attempt_branch_work" not in task.context
+
+
+class TestFailureCostRollup:
+    """_handle_failed_response accumulates cost and enriches events."""
+
+    @pytest.mark.asyncio
+    @patch("agent_framework.core.attempt_tracker.record_attempt")
+    async def test_accumulates_cumulative_cost(self, mock_record):
+        agent = _make_agent()
+        agent._budget.estimate_cost.return_value = 1.25
+        mock_record.return_value = None
+
+        task = _make_task()
+        response = LLMResponse(
+            content="partial",
+            model_used="sonnet",
+            input_tokens=5000,
+            output_tokens=1200,
+            finish_reason="error",
+            latency_ms=500,
+            success=False,
+            error="timeout",
+        )
+
+        await agent._handle_failed_response(task, response)
+
+        assert task.context["_cumulative_cost"] == 1.25
+
+    @pytest.mark.asyncio
+    @patch("agent_framework.core.attempt_tracker.record_attempt")
+    async def test_accumulates_across_retries(self, mock_record):
+        agent = _make_agent()
+        agent._budget.estimate_cost.return_value = 2.00
+        mock_record.return_value = None
+
+        task = _make_task(context={"github_repo": "org/repo", "_cumulative_cost": 1.50})
+        response = LLMResponse(
+            content="",
+            model_used="sonnet",
+            input_tokens=3000,
+            output_tokens=800,
+            finish_reason="error",
+            latency_ms=500,
+            success=False,
+            error="timeout",
+        )
+
+        await agent._handle_failed_response(task, response)
+
+        assert task.context["_cumulative_cost"] == 3.50
+
+    @pytest.mark.asyncio
+    @patch("agent_framework.core.attempt_tracker.record_attempt")
+    async def test_fail_activity_event_has_cost_fields(self, mock_record):
+        agent = _make_agent()
+        agent._budget.estimate_cost.return_value = 0.75
+        mock_record.return_value = None
+
+        task = _make_task()
+        response = LLMResponse(
+            content="",
+            model_used="sonnet",
+            input_tokens=4000,
+            output_tokens=900,
+            finish_reason="error",
+            latency_ms=500,
+            success=False,
+            error="fail",
+        )
+
+        await agent._handle_failed_response(task, response)
+
+        event = agent.activity_manager.append_event.call_args[0][0]
+        assert event.input_tokens == 4000
+        assert event.output_tokens == 900
+        assert event.cost == 0.75
+
+    @pytest.mark.asyncio
+    @patch("agent_framework.core.attempt_tracker.record_attempt")
+    async def test_session_log_has_cost_fields(self, mock_record):
+        agent = _make_agent()
+        agent._budget.estimate_cost.return_value = 0.50
+        mock_record.return_value = None
+
+        task = _make_task()
+        response = LLMResponse(
+            content="",
+            model_used="sonnet",
+            input_tokens=2000,
+            output_tokens=500,
+            finish_reason="error",
+            latency_ms=500,
+            success=False,
+            error="fail",
+        )
+
+        await agent._handle_failed_response(task, response)
+
+        call_kwargs = agent._session_logger.log.call_args[1]
+        assert call_kwargs["tokens_in"] == 2000
+        assert call_kwargs["tokens_out"] == 500
+        assert call_kwargs["cost"] == 0.50
+
+    @pytest.mark.asyncio
+    @patch("agent_framework.core.attempt_tracker.record_attempt")
+    async def test_finalize_receives_cost_fields(self, mock_record):
+        agent = _make_agent()
+        agent._budget.estimate_cost.return_value = 1.00
+        mock_record.return_value = None
+
+        task = _make_task()
+        response = LLMResponse(
+            content="partial work",
+            model_used="sonnet",
+            input_tokens=6000,
+            output_tokens=1500,
+            finish_reason="error",
+            latency_ms=500,
+            success=False,
+            error="context exhausted",
+        )
+
+        await agent._handle_failed_response(task, response, working_dir=Path("/tmp/worktree"))
+
+        call_kwargs = mock_record.call_args[1]
+        assert call_kwargs["input_tokens"] == 6000
+        assert call_kwargs["output_tokens"] == 1500
+        assert call_kwargs["cost_usd"] == 1.00

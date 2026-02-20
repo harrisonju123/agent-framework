@@ -449,3 +449,112 @@ class TestTruncateError:
 
     def test_none_returns_none(self):
         assert _truncate_error(None) is None
+
+
+class TestCostFields:
+    """Cost fields round-trip through disk and render correctly."""
+
+    def test_cost_fields_roundtrip(self, tmp_path):
+        record = _make_record(input_tokens=5000, output_tokens=1200, cost_usd=0.42)
+        history = AttemptHistory(task_id="task-cost", attempts=[record])
+
+        save_attempt_history(tmp_path, history)
+        loaded = load_attempt_history(tmp_path, "task-cost")
+
+        assert loaded is not None
+        a = loaded.attempts[0]
+        assert a.input_tokens == 5000
+        assert a.output_tokens == 1200
+        assert a.cost_usd == 0.42
+
+    def test_old_format_without_cost_fields(self, tmp_path):
+        """JSON from before cost fields were added loads with defaults."""
+        data = {
+            "task_id": "task-old",
+            "attempts": [{
+                "attempt_number": 1,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "agent_id": "engineer",
+                "branch": "feature/x",
+                "pushed": True,
+                "error": "timeout",
+            }],
+        }
+        path = tmp_path / ".agent-communication" / "attempt-history" / "task-old.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+
+        loaded = load_attempt_history(tmp_path, "task-old")
+        assert loaded is not None
+        a = loaded.attempts[0]
+        assert a.input_tokens == 0
+        assert a.output_tokens == 0
+        assert a.cost_usd is None
+
+    def test_render_includes_cost(self, tmp_path):
+        history = AttemptHistory(task_id="task-cost", attempts=[
+            _make_record(cost_usd=1.23, pushed=True),
+        ])
+        save_attempt_history(tmp_path, history)
+
+        rendered = render_for_retry(tmp_path, "task-cost")
+
+        assert "cost=$1.23" in rendered
+
+    def test_render_omits_cost_when_none(self, tmp_path):
+        history = AttemptHistory(task_id="task-nocost", attempts=[
+            _make_record(cost_usd=None, pushed=True),
+        ])
+        save_attempt_history(tmp_path, history)
+
+        rendered = render_for_retry(tmp_path, "task-nocost")
+
+        assert "cost=" not in rendered
+
+    @patch("agent_framework.core.attempt_tracker.run_git_command")
+    def test_record_attempt_passes_cost_fields(self, mock_git, tmp_path):
+        """record_attempt forwards cost kwargs into the persisted AttemptRecord."""
+        from agent_framework.core.attempt_tracker import record_attempt
+
+        def git_side_effect(args, **kwargs):
+            key = " ".join(args[:2])
+            responses = {
+                "rev-parse --abbrev-ref": MagicMock(returncode=0, stdout="agent/test/task-1\n"),
+                "rev-parse --short": MagicMock(returncode=0, stdout="abc123\n"),
+                "rev-parse --verify": MagicMock(returncode=0),
+                "status --porcelain": MagicMock(returncode=0, stdout=""),
+                "push origin": MagicMock(returncode=0),
+                "rev-list --count": MagicMock(returncode=0, stdout="1\n"),
+                "diff --stat": MagicMock(returncode=0, stdout=""),
+                "diff --name-only": MagicMock(returncode=0, stdout=""),
+            }
+            for pattern, result in responses.items():
+                if key.startswith(pattern.split()[0]) and all(p in key for p in pattern.split()):
+                    return result
+            return MagicMock(returncode=1, stdout="", stderr="")
+
+        mock_git.side_effect = git_side_effect
+
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+
+        task = _make_task()
+        result = record_attempt(
+            workspace=tmp_path,
+            task=task,
+            agent_id="engineer",
+            working_dir=worktree,
+            error="timeout",
+            input_tokens=8000,
+            output_tokens=2000,
+            cost_usd=1.75,
+        )
+
+        assert result is not None
+        assert result.input_tokens == 8000
+        assert result.output_tokens == 2000
+        assert result.cost_usd == 1.75
+
+        # Verify persisted
+        loaded = load_attempt_history(tmp_path, task.id)
+        assert loaded.attempts[0].cost_usd == 1.75

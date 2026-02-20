@@ -43,6 +43,10 @@ class AttemptRecord:
     deletions: int = 0
     error: Optional[str] = None
     error_type: Optional[str] = None
+    # Per-attempt cost visibility
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: Optional[float] = None
 
 
 @dataclass
@@ -111,6 +115,9 @@ def record_attempt(
     working_dir: Optional[Path],
     *,
     error: Optional[str] = None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cost_usd: Optional[float] = None,
     logger: Optional[logging.Logger] = None,
 ) -> Optional[AttemptRecord]:
     """Record attempt outcome: commit WIP, push, collect stats, persist to disk.
@@ -159,6 +166,9 @@ def record_attempt(
             deletions=stats.get("deletions", 0),
             error=_truncate_error(error),
             error_type=_classify_error(error),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
         )
 
         # Persist
@@ -200,6 +210,8 @@ def render_for_retry(workspace: Path, task_id: str) -> str:
         if a.commit_count:
             parts.append(f"{a.commit_count} commits ({a.insertions}+/{a.deletions}-)")
         parts.append(f"pushed={a.pushed}")
+        if a.cost_usd is not None:
+            parts.append(f"cost=${a.cost_usd:.2f}")
         lines.append("  ".join(parts))
 
         if a.error:
