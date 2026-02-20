@@ -354,6 +354,13 @@ class ContextBudgetMetricsResponse(BaseModel):
     min_prompt_length: int
     p50_prompt_length: int
     p90_prompt_length: int
+    tasks_with_utilization: int = 0
+    avg_utilization_at_completion: float = 0.0
+    p50_utilization: float = 0.0
+    p90_utilization: float = 0.0
+    near_limit_count: int = 0
+    critical_count: int = 0
+    exhaustion_count: int = 0
 
 
 class TrendBucketResponse(BaseModel):

@@ -839,6 +839,11 @@ class Agent:
                     "No code changes detected — likely context window exhaustion. "
                     "Retrying with a fresh context."
                 )
+                self._session_logger.log(
+                    "context_exhaustion",
+                    task_id=task.id,
+                    utilization_percent=self._context_window_manager.budget.utilization_percent if self._context_window_manager else None,
+                )
                 await self._handle_failure(task)
                 return
 
@@ -1010,10 +1015,12 @@ class Agent:
 
         Delegated to BudgetManager.
         """
+        ctx_status = self._context_window_manager.get_budget_status() if self._context_window_manager else None
         self._budget.log_task_completion_metrics(
             task, response, task_start_time,
             tool_call_count=tool_call_count,
             root_task_id=task.root_id,
+            context_budget_status=ctx_status,
         )
 
     def _approval_verdict(self, task: Task) -> str:
@@ -1216,6 +1223,7 @@ class Agent:
             finish_reason=response.finish_reason,
         )
 
+        ctx_budget = self._context_window_manager.budget if self._context_window_manager else None
         self.activity_manager.append_event(ActivityEvent(
             type="fail",
             agent=self.config.id,
@@ -1225,6 +1233,8 @@ class Agent:
             retry_count=task.retry_count,
             error_message=task.last_error,
             root_task_id=task.root_id,
+            context_utilization_percent=ctx_budget.utilization_percent if ctx_budget else None,
+            context_budget_tokens=ctx_budget.total_budget if ctx_budget else None,
         ))
 
         # Record failure outcome for intelligent routing
@@ -1824,6 +1834,14 @@ class Agent:
                 f"({budget_status['used_so_far']}/{budget_status['total_budget']} tokens)"
             )
 
+            self._session_logger.log(
+                "context_budget_update",
+                utilization_percent=budget_status["utilization_percent"],
+                used_tokens=budget_status["used_so_far"],
+                total_budget=budget_status["total_budget"],
+                remaining=budget_status["remaining"],
+            )
+
             # Check if we should trigger a checkpoint due to budget exhaustion
             if self._context_window_manager.should_trigger_checkpoint():
                 self.logger.warning(
@@ -1837,6 +1855,11 @@ class Agent:
                     title=f"Context budget >90%: consider task splitting",
                     timestamp=datetime.now(timezone.utc)
                 ))
+                self._session_logger.log(
+                    "context_budget_critical",
+                    task_id=task.id,
+                    utilization_percent=budget_status["utilization_percent"],
+                )
 
         # Clear tool activity after LLM completes
         try:
@@ -1985,6 +2008,7 @@ class Agent:
                 retry=task.retry_count,
             )
 
+            ctx_budget = self._context_window_manager.budget if self._context_window_manager else None
             self.activity_manager.append_event(ActivityEvent(
                 type="fail",
                 agent=self.config.id,
@@ -1994,6 +2018,8 @@ class Agent:
                 retry_count=task.retry_count,
                 error_message=task.last_error,
                 root_task_id=task.root_id,
+                context_utilization_percent=ctx_budget.utilization_percent if ctx_budget else None,
+                context_budget_tokens=ctx_budget.total_budget if ctx_budget else None,
             ))
 
             # Push whatever was committed before the error — prevents worktree

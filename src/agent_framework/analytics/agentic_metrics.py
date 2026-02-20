@@ -105,13 +105,21 @@ class ToolUsageMetrics(BaseModel):
 
 
 class ContextBudgetMetrics(BaseModel):
-    """Prompt length distribution as a proxy for context budget utilization."""
+    """Context budget utilization metrics from prompt lengths and token tracking."""
     sample_count: int
     avg_prompt_length: int
     max_prompt_length: int
     min_prompt_length: int
     p50_prompt_length: int
     p90_prompt_length: int
+    # Token-level utilization from task_complete events
+    tasks_with_utilization: int = 0
+    avg_utilization_at_completion: float = 0.0
+    p50_utilization: float = 0.0
+    p90_utilization: float = 0.0
+    near_limit_count: int = 0       # completed at >= 80%
+    critical_count: int = 0         # hit 90% threshold
+    exhaustion_count: int = 0       # context_exhaustion events
 
 
 class TrendBucket(BaseModel):
@@ -570,20 +578,51 @@ class AgenticMetrics:
 
     def _aggregate_context_budget(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> ContextBudgetMetrics:
         """
-        Derive context budget utilization from prompt_built event prompt lengths.
+        Derive context budget utilization from prompt lengths and token-level tracking.
 
-        prompt_length (chars) is a reasonable proxy for how much of the context
-        window is consumed by the system prompt + injected context.
+        Prompt lengths (chars) proxy system prompt + injected context size.
+        Token-level utilization comes from task_complete events that carry
+        context_utilization_percent (populated by BudgetManager).
         """
         lengths: List[int] = []
+        utilizations: List[float] = []
+        near_limit_count = 0
+        critical_count = 0
+        exhaustion_count = 0
 
         for events in events_by_task.values():
             for e in events:
-                if e.get("event") != "prompt_built":
-                    continue
-                length = e.get("prompt_length")
-                if isinstance(length, int) and length > 0:
-                    lengths.append(length)
+                evt = e.get("event")
+                if evt == "prompt_built":
+                    length = e.get("prompt_length")
+                    if isinstance(length, int) and length > 0:
+                        lengths.append(length)
+                elif evt == "task_complete":
+                    util = e.get("context_utilization_percent")
+                    if isinstance(util, (int, float)) and util > 0:
+                        utilizations.append(float(util))
+                        if util >= 80.0:
+                            near_limit_count += 1
+                elif evt == "context_budget_critical":
+                    critical_count += 1
+                elif evt == "context_exhaustion":
+                    exhaustion_count += 1
+
+        # Utilization percentile calculation (independent of prompt lengths)
+        n_util = len(utilizations)
+        avg_util = round(sum(utilizations) / n_util, 1) if n_util > 0 else 0.0
+        p50_util = round(median(utilizations), 1) if n_util > 0 else 0.0
+        p90_util = round(quantiles(utilizations, n=10)[8], 1) if n_util >= 2 else (round(utilizations[0], 1) if n_util == 1 else 0.0)
+
+        util_fields = dict(
+            tasks_with_utilization=n_util,
+            avg_utilization_at_completion=avg_util,
+            p50_utilization=p50_util,
+            p90_utilization=p90_util,
+            near_limit_count=near_limit_count,
+            critical_count=critical_count,
+            exhaustion_count=exhaustion_count,
+        )
 
         if not lengths:
             return ContextBudgetMetrics(
@@ -593,6 +632,7 @@ class AgenticMetrics:
                 min_prompt_length=0,
                 p50_prompt_length=0,
                 p90_prompt_length=0,
+                **util_fields,
             )
 
         sorted_lengths = sorted(lengths)
@@ -608,4 +648,5 @@ class AgenticMetrics:
             min_prompt_length=sorted_lengths[0],
             p50_prompt_length=p50,
             p90_prompt_length=p90,
+            **util_fields,
         )

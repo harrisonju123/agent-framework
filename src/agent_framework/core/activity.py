@@ -122,6 +122,9 @@ class ActivityEvent(BaseModel):
     output_tokens: Optional[int] = None
     cost: Optional[float] = None
     tool_call_count: Optional[int] = None
+    # Context budget tracking (for context exhaustion analytics)
+    context_utilization_percent: Optional[float] = None
+    context_budget_tokens: Optional[int] = None
     # Correlation fields for handoff latency measurement
     root_task_id: Optional[str] = None
     source_task_id: Optional[str] = None

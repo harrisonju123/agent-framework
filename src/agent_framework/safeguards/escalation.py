@@ -54,6 +54,10 @@ class EscalationHandler:
                 r"too many.*open files",
                 r"resource.*exhausted",
             ],
+            "context_exhaustion": [
+                r"context window exhaustion",
+                r"context.*exhaust",
+            ],
             "budget": [
                 r"budget.*exceed",
                 r"max budget",

@@ -150,6 +150,7 @@ class BudgetManager:
         self, task: Task, response: "LLMResponse", task_start_time: datetime,
         *, tool_call_count: Optional[int] = None,
         root_task_id: Optional[str] = None,
+        context_budget_status: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Log token usage, cost, and completion events."""
         total_tokens = response.input_tokens + response.output_tokens
@@ -180,6 +181,8 @@ class BudgetManager:
         # Append complete event
         duration_ms = int((datetime.now(timezone.utc) - task_start_time).total_seconds() * 1000)
         pr_url = task.context.get("pr_url")
+        ctx_util = context_budget_status.get("utilization_percent") if context_budget_status else None
+        ctx_tokens = context_budget_status.get("total_budget") if context_budget_status else None
         self.activity_manager.append_event(ActivityEvent(
             type="complete",
             agent=self.agent_id,
@@ -193,12 +196,17 @@ class BudgetManager:
             cost=cost,
             tool_call_count=tool_call_count,
             root_task_id=root_task_id,
+            context_utilization_percent=ctx_util,
+            context_budget_tokens=ctx_tokens,
         ))
 
         self.session_logger.log(
             "task_complete",
             status="completed",
             duration_ms=duration_ms,
+            context_utilization_percent=ctx_util,
+            context_budget_tokens=ctx_tokens,
+            context_used_tokens=context_budget_status.get("used_so_far") if context_budget_status else None,
         )
 
         # Record success outcome for intelligent routing
