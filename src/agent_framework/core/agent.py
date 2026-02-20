@@ -155,6 +155,14 @@ _JSON_FENCE_PATTERN = re.compile(r'```json\s*\n(.*?)\n?\s*```', re.DOTALL)
 
 _NO_CHANGES_MARKER = "[NO_CHANGES_NEEDED]"
 
+# Step classification for the deliverable gate — implementation steps must
+# produce git-visible code changes; prose-only steps (plan, review) are exempt.
+_IMPLEMENTATION_STEP_IDS = frozenset({"implement", "implementation"})
+_NON_CODE_STEP_IDS = frozenset({
+    "plan", "planning", "code_review", "qa_review", "create_pr",
+    "preview_review", "preview",
+})
+
 
 class Agent:
     """
@@ -795,6 +803,16 @@ class Agent:
             if not passed:
                 return  # Task was reset for self-eval retry
 
+        # Deliverable gate: context-exhausted sessions exit 0 with no code changes
+        if working_dir is not None and self._is_implementation_step(task):
+            if not self._error_recovery.has_deliverables(task, working_dir):
+                task.last_error = (
+                    "No code changes detected — likely context window exhaustion. "
+                    "Retrying with a fresh context."
+                )
+                await self._handle_failure(task)
+                return
+
         # Extract structured plan from architect's planning response
         if (task.plan is None
                 and self.config.base_id == "architect"
@@ -1021,6 +1039,21 @@ class Agent:
             return False
         # Marker must appear in the first 200 chars (before any plan body)
         return _NO_CHANGES_MARKER in content[:200]
+
+    def _is_implementation_step(self, task: Task) -> bool:
+        """Whether this task is an implementation step that must produce code.
+
+        Returns True for workflow "implement" steps and for engineer agents
+        running without an explicit workflow step (direct-queue work).
+        Returns False for prose-only steps (plan, review, QA, PR creation).
+        """
+        step = task.context.get("workflow_step")
+        if step in _IMPLEMENTATION_STEP_IDS:
+            return True
+        if step in _NON_CODE_STEP_IDS:
+            return False
+        # No explicit step — engineer agents doing direct-queue work
+        return self.config.base_id == "engineer"
 
     def _resolve_budget_ceiling(self, task: Task) -> Optional[float]:
         """Resolve USD budget ceiling from task effort and/or absolute cap.
@@ -1738,6 +1771,23 @@ class Agent:
             # Get working directory for task (worktree, target repo, or framework workspace)
             working_dir = self._get_validated_working_directory(task)
             self.logger.info(f"Working directory: {working_dir}")
+
+            # Discover committed work from previous attempts so retry prompt knows what exists
+            if task.retry_count > 0:
+                branch_work = self._git_ops.discover_branch_work(working_dir)
+                if branch_work:
+                    task.context["_previous_attempt_branch_work"] = branch_work
+                    self.logger.info(
+                        f"Discovered {branch_work['commit_count']} commits "
+                        f"({branch_work['insertions']}+/{branch_work['deletions']}-) "
+                        f"from previous attempt(s)"
+                    )
+                    self._session_logger.log(
+                        "branch_work_discovered",
+                        commit_count=branch_work["commit_count"],
+                        insertions=branch_work["insertions"],
+                        file_count=len(branch_work["file_list"]),
+                    )
 
             # Index codebase for structural context (cached by commit SHA)
             self._try_index_codebase(task, working_dir)

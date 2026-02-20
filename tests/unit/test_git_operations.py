@@ -1195,3 +1195,125 @@ class TestWorktreeEnvVars:
 
         assert result == git_ops.workspace
         assert git_ops.worktree_env_vars is None
+
+
+class TestDiscoverBranchWork:
+    """Tests for discover_branch_work() and _detect_default_branch()."""
+
+    def test_discover_branch_work_with_commits(self, git_ops):
+        """Valid branch with commits returns structured dict."""
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                # rev-parse --abbrev-ref HEAD
+                Mock(returncode=0, stdout="agent/engineer/task-abc\n"),
+                # symbolic-ref refs/remotes/origin/HEAD
+                Mock(returncode=0, stdout="refs/remotes/origin/main\n"),
+                # git log
+                Mock(returncode=0, stdout="abc1234 Add auth module\ndef5678 Add tests\n"),
+                # git diff --stat
+                Mock(returncode=0, stdout=" src/auth.py | 42 +++\n src/test.py | 10 ++\n 2 files changed, 52 insertions(+), 0 deletions(-)\n"),
+                # git diff --name-only
+                Mock(returncode=0, stdout="src/auth.py\nsrc/test.py\n"),
+            ]
+
+            result = git_ops.discover_branch_work("/tmp/worktree")
+
+        assert result is not None
+        assert result["commit_count"] == 2
+        assert result["insertions"] == 52
+        assert result["deletions"] == 0
+        assert "abc1234" in result["commit_log"]
+        assert result["file_list"] == ["src/auth.py", "src/test.py"]
+        assert "src/auth.py" in result["diffstat"]
+
+    def test_discover_branch_work_on_main_returns_none(self, git_ops):
+        """HEAD on main branch returns None (nothing to discover)."""
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.return_value = Mock(returncode=0, stdout="main\n")
+
+            result = git_ops.discover_branch_work("/tmp/worktree")
+
+        assert result is None
+
+    def test_discover_branch_work_no_commits_returns_none(self, git_ops):
+        """Branch with no commits beyond origin returns None."""
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                # rev-parse --abbrev-ref HEAD
+                Mock(returncode=0, stdout="agent/engineer/task-abc\n"),
+                # symbolic-ref refs/remotes/origin/HEAD
+                Mock(returncode=0, stdout="refs/remotes/origin/main\n"),
+                # git log — empty
+                Mock(returncode=0, stdout=""),
+            ]
+
+            result = git_ops.discover_branch_work("/tmp/worktree")
+
+        assert result is None
+
+    def test_discover_branch_work_git_failure_returns_none(self, git_ops):
+        """Git exception is caught and returns None (non-fatal)."""
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = RuntimeError("git not available")
+
+            result = git_ops.discover_branch_work("/tmp/worktree")
+
+        assert result is None
+
+    def test_detect_default_branch_symbolic_ref(self, git_ops):
+        """Successful symbolic-ref returns the correct branch name."""
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.return_value = Mock(
+                returncode=0, stdout="refs/remotes/origin/develop\n"
+            )
+
+            result = git_ops._detect_default_branch("/tmp/repo")
+
+        assert result == "develop"
+
+    def test_detect_default_branch_fallback_to_main(self, git_ops):
+        """symbolic-ref fails, falls back to probing main."""
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                # symbolic-ref fails
+                Mock(returncode=1, stdout=""),
+                # rev-parse --verify origin/main succeeds
+                Mock(returncode=0, stdout="abc123\n"),
+            ]
+
+            result = git_ops._detect_default_branch("/tmp/repo")
+
+        assert result == "main"
+
+    def test_detect_default_branch_fallback_to_master(self, git_ops):
+        """symbolic-ref fails and main doesn't exist, falls back to master."""
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                # symbolic-ref fails
+                Mock(returncode=1, stdout=""),
+                # origin/main doesn't exist
+                Mock(returncode=1, stdout=""),
+                # origin/master exists
+                Mock(returncode=0, stdout="abc123\n"),
+            ]
+
+            result = git_ops._detect_default_branch("/tmp/repo")
+
+        assert result == "master"
+
+    def test_discover_branch_work_caps_file_list(self, git_ops):
+        """File list is capped at 50 entries."""
+        files = "\n".join([f"src/file{i}.py" for i in range(60)])
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                Mock(returncode=0, stdout="feature/big\n"),
+                Mock(returncode=0, stdout="refs/remotes/origin/main\n"),
+                Mock(returncode=0, stdout="abc1234 Big change\n"),
+                Mock(returncode=0, stdout=" 60 files changed\n"),
+                Mock(returncode=0, stdout=files + "\n"),
+            ]
+
+            result = git_ops.discover_branch_work("/tmp/worktree")
+
+        assert result is not None
+        assert len(result["file_list"]) == 50
