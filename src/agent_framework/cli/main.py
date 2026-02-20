@@ -1912,7 +1912,10 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
                 is_stale = age_hours > wt_config.max_age_hours
                 exists = Path(wt.path).exists()
 
-                if wt.active and not force:
+                has_live_users = bool(wt.active_users)
+                if has_live_users and not force:
+                    status = "[blue]IN USE ({} user(s))[/]".format(len(wt.active_users))
+                elif wt.active and not force:
                     status = "[blue]ACTIVE[/]"
                 elif force or is_stale or not exists:
                     to_remove.append(wt)
@@ -1955,13 +1958,36 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
 
         # Perform cleanup
         removed = 0
+        skipped_active = 0
         for wt in to_remove:
             path = Path(wt.path)
-            if manager.remove_worktree(path, force=True):
+            # Reload registry to get fresh active_users (PIDs may have exited)
+            manager.reload_registry()
+            fresh_wt = None
+            for w in manager.list_worktrees():
+                if w.path == wt.path:
+                    fresh_wt = w
+                    break
+            if fresh_wt and fresh_wt.active_users and not force:
+                skipped_active += 1
+                console.print(
+                    f"  [yellow]Skipped (active users: "
+                    f"{[u.get('agent_id') for u in fresh_wt.active_users]}): {path.name}[/]"
+                )
+                continue
+            if fresh_wt and fresh_wt.active_users and force:
+                console.print(
+                    f"  [red]FORCE removing despite active users: "
+                    f"{[u.get('agent_id') for u in fresh_wt.active_users]}[/]"
+                )
+            if manager.remove_worktree(path, force=force):
                 removed += 1
                 console.print(f"  Removed: {path.name}")
 
-        console.print(f"\n[green]✓ Removed {removed} worktrees[/]")
+        summary = f"\n[green]✓ Removed {removed} worktrees[/]"
+        if skipped_active:
+            summary += f"  [yellow]({skipped_active} skipped — active users)[/]"
+        console.print(summary)
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")

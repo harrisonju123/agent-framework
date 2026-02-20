@@ -50,6 +50,7 @@ class WorktreeInfo:
     last_accessed: str
     base_repo: str
     active: bool = False
+    active_users: List[Dict] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON serialization."""
@@ -59,7 +60,7 @@ class WorktreeInfo:
     def from_dict(cls, data: Dict) -> "WorktreeInfo":
         """Create from dictionary."""
         # Filter to known fields for backwards compatibility with registries
-        # that don't yet have the 'active' field
+        # that don't yet have the 'active' field or 'active_users'
         valid_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in data.items() if k in valid_fields}
         return cls(**filtered)
@@ -160,6 +161,98 @@ class WorktreeManager:
     def reload_registry(self) -> None:
         """Reload registry from disk for cross-process visibility."""
         self._load_registry()
+
+    @contextmanager
+    def _atomic_registry(self):
+        """Atomic read-modify-write: load registry under lock, yield, then save."""
+        lock_path = self._get_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            registry_path = self._get_registry_path()
+            if registry_path.exists():
+                try:
+                    with open(registry_path) as f:
+                        data = json.load(f)
+                    self._registry = {
+                        key: WorktreeInfo.from_dict(val)
+                        for key, val in data.items()
+                    }
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Corrupt registry during atomic load, proceeding with in-memory state: {e}")
+            yield
+            try:
+                with open(self._get_registry_path(), "w") as f:
+                    json.dump(
+                        {key: val.to_dict() for key, val in self._registry.items()},
+                        f, indent=2,
+                    )
+                self._registry_dirty = False
+                self._last_registry_save = time.time()
+            except OSError as e:
+                logger.error(f"Failed to save registry in atomic block: {e}")
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
+
+    def acquire_worktree(self, path: Path, user_id: str, pid: Optional[int] = None) -> None:
+        """Register a user (agent process) as actively using a worktree."""
+        path = Path(path).resolve()
+        effective_pid = pid or os.getpid()
+        with self._atomic_registry():
+            self._prune_stale_users()
+            for key, info in self._registry.items():
+                if Path(info.path).resolve() == path:
+                    info.active_users = [
+                        u for u in info.active_users if u.get("agent_id") != user_id
+                    ]
+                    info.active_users.append({"agent_id": user_id, "pid": effective_pid})
+                    info.active = True
+                    info.last_accessed = datetime.now(timezone.utc).isoformat()
+                    return
+        logger.warning(f"acquire_worktree: no registry entry for {path}")
+
+    def release_worktree(self, path: Path, user_id: str) -> None:
+        """Unregister a user from a worktree. Sets active=False when no users remain."""
+        path = Path(path).resolve()
+        with self._atomic_registry():
+            for key, info in self._registry.items():
+                if Path(info.path).resolve() == path:
+                    info.active_users = [
+                        u for u in info.active_users if u.get("agent_id") != user_id
+                    ]
+                    info.active = len(info.active_users) > 0
+                    return
+        logger.debug(f"release_worktree: no registry entry for {path}")
+
+    def _prune_stale_users(self) -> int:
+        """Remove entries from active_users whose PID is no longer alive."""
+        pruned = 0
+        for info in self._registry.values():
+            live = []
+            for u in info.active_users:
+                pid = u.get("pid")
+                if pid and self._is_pid_alive(pid):
+                    live.append(u)
+                else:
+                    pruned += 1
+            info.active_users = live
+            # Only override active when we had ref-counted users to evaluate
+            if info.active_users or live:
+                info.active = len(live) > 0
+        return pruned
+
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        """Check if a process is still running."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
 
     def _save_registry(self) -> None:
         """Save worktree registry to disk with file locking."""
@@ -355,6 +448,7 @@ class WorktreeManager:
                 last_accessed=now,
                 base_repo=str(base_repo),
                 active=True,
+                active_users=[{"agent_id": agent_id, "pid": os.getpid()}],
             )
             self._save_registry()
 
@@ -434,6 +528,7 @@ class WorktreeManager:
                     last_accessed=now,
                     base_repo=str(base_repo),
                     active=True,
+                    active_users=[{"agent_id": agent_id, "pid": os.getpid()}],
                 )
                 self._save_registry()
                 return conflict_path
@@ -575,14 +670,24 @@ class WorktreeManager:
                     return self._remove_worktree_directory(path, base_repo, force)
             return False
 
-        # Refuse to remove active worktrees unless forced
-        if self._registry[worktree_key].active and not force:
-            logger.warning(
-                f"Refusing to remove active worktree: {path} "
-                f"(agent={self._registry[worktree_key].agent_id}, "
-                f"task={self._registry[worktree_key].task_id})"
-            )
-            return False
+        # Prune dead PIDs and check active_users under lock to avoid TOCTOU
+        with self._atomic_registry():
+            self._prune_stale_users()
+            entry = self._registry.get(worktree_key, self._registry[worktree_key])
+
+            if entry.active_users and not force:
+                logger.warning(
+                    f"Refusing to remove worktree with {len(entry.active_users)} active user(s): "
+                    f"{path} (users={[u.get('agent_id') for u in entry.active_users]})"
+                )
+                return False
+
+            if entry.active and not entry.active_users and not force:
+                logger.warning(
+                    f"Refusing to remove active worktree: {path} "
+                    f"(agent={entry.agent_id}, task={entry.task_id})"
+                )
+                return False
 
         # Remove worktree
         success = self._remove_worktree_directory(path, base_repo, force)
@@ -697,6 +802,10 @@ class WorktreeManager:
         """
         self._load_registry()
 
+        # Clean up dead PIDs
+        with self._atomic_registry():
+            self._prune_stale_users()
+
         pruned = 0
         keys_to_remove = []
         for key, info in self._registry.items():
@@ -741,18 +850,23 @@ class WorktreeManager:
         """
         return
 
-    def mark_worktree_inactive(self, path: Path) -> None:
+    def mark_worktree_inactive(self, path: Path, user_id: Optional[str] = None) -> None:
         """Mark a worktree as no longer actively used by an agent.
 
-        Called when the agent finishes (success or failure) so the worktree
-        becomes eligible for eviction again.
+        If user_id is provided, releases that specific user (ref-counted).
+        Otherwise falls back to clearing the active flag directly (legacy compat).
         """
-        # Reload so we don't overwrite another process's active=True with stale data
+        if user_id:
+            self.release_worktree(path, user_id)
+            return
+
+        # Legacy path
         self._load_registry()
         path = Path(path).resolve()
         for key, info in self._registry.items():
             if Path(info.path).resolve() == path:
                 info.active = False
+                info.active_users = []
                 self._save_registry()
                 logger.debug(f"Marked worktree inactive: {path}")
                 return

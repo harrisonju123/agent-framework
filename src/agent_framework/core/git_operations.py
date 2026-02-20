@@ -184,6 +184,7 @@ class GitOperationsManager:
                 if existing:
                     if existing.exists():
                         self._active_worktree = existing
+                        self.worktree_manager.acquire_worktree(existing, self.config.id)
                         self._setup_worktree_venv(existing)
                         task.context["worktree_branch"] = branch_name
                         self.logger.info(f"Reusing worktree for branch {branch_name}: {existing}")
@@ -211,6 +212,10 @@ class GitOperationsManager:
                         allow_cross_agent=is_chain,
                     )
                     self._active_worktree = worktree_path
+                    # create_worktree already registered effective_agent_id;
+                    # also acquire with our real config.id for proper ref counting
+                    if effective_agent_id != self.config.id:
+                        self.worktree_manager.acquire_worktree(worktree_path, self.config.id)
                     self._setup_worktree_venv(worktree_path)
                     task.context["worktree_branch"] = branch_name
                     self.logger.info(f"Using worktree: {github_repo} at {worktree_path}")
@@ -502,10 +507,10 @@ class GitOperationsManager:
         # Root plan tasks have workflow= but no chain_step= — they still
         # need the worktree for downstream implement/review/qa steps.
         has_downstream_steps = not self._is_at_terminal_workflow_step(task)
-        is_subtask = task.parent_task_id is not None
+        # Subtasks that inherit a workflow should keep the worktree active
+        # at non-terminal steps — the fan-in task handles terminal cleanup
         is_intermediate = (
             has_downstream_steps
-            and not is_subtask
             and (task.context.get("chain_step") or task.context.get("workflow"))
         )
         if is_intermediate:
@@ -514,17 +519,15 @@ class GitOperationsManager:
             self._active_worktree = None
             return
 
-        # Terminal or standalone — push any unpushed commits, then mark
-        # inactive. Physical deletion is deferred to cleanup_orphaned_worktrees()
+        # Terminal or standalone — push any unpushed commits, then release
+        # our ref. Physical deletion is deferred to cleanup_orphaned_worktrees()
         # which runs at startup and periodically with full safety checks.
-        # This prevents the P0 bug where removing a worktree during task
-        # completion destroyed sibling agents' active working directories.
         if self.worktree_manager.has_unpushed_commits(self._active_worktree):
             if self._try_push_worktree_branch(self._active_worktree):
                 self.logger.info("Pushed unpushed commits during cleanup")
 
-        self.worktree_manager.mark_worktree_inactive(self._active_worktree)
-        self.logger.debug(f"Marked worktree inactive (deferred cleanup): {self._active_worktree}")
+        self.worktree_manager.mark_worktree_inactive(self._active_worktree, user_id=self.config.id)
+        self.logger.debug(f"Released worktree (deferred cleanup): {self._active_worktree}")
 
         self._active_worktree = None
 

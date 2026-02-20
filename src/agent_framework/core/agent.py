@@ -682,9 +682,16 @@ class Agent:
             return None
 
     def _should_hot_restart(self) -> bool:
-        """Check if source code has changed since startup."""
+        """Check if source code has changed since startup.
+
+        Rate-limited to once per 60s to avoid spawning git subprocesses every poll cycle.
+        """
         if not hasattr(self, "_startup_code_version") or self._startup_code_version is None:
             return False
+        now = time.time()
+        if now - getattr(self, "_last_version_check", 0.0) < 60:
+            return False
+        self._last_version_check = now
         current = self._get_source_code_version()
         if current is None:
             return False
@@ -693,7 +700,11 @@ class Agent:
     def _hot_restart(self) -> None:
         """Replace the current process with a fresh one to pick up code changes.
 
-        Safe: only called between tasks (never mid-task). os.execv is atomic.
+        Safe: only called between tasks (never mid-task). os.execv is atomic —
+        it replaces the process image without running finally/atexit handlers.
+        File descriptors (locks, logs) are released by the OS on process replacement.
+        If execv fails (e.g. interpreter gone), OSError propagates and the agent
+        loop continues with the old code.
         """
         import sys
         import os as _os
@@ -723,6 +734,7 @@ class Agent:
         """
         self._running = True
         self._startup_code_version = self._get_source_code_version()
+        self._last_version_check: float = 0.0
         self.logger.info(
             f"🚀 Starting {self.config.id} runner "
             f"(code version: {(self._startup_code_version or 'unknown')[:12]})"

@@ -275,7 +275,7 @@ class TestCleanupWorktree:
         git_ops_with_worktree.cleanup_worktree(sample_task, success=True)
 
         git_ops_with_worktree.worktree_manager.remove_worktree.assert_not_called()
-        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         assert git_ops_with_worktree._active_worktree is None
 
     def test_marks_inactive_even_when_unpushed_commits(self, git_ops_with_worktree, sample_task, tmp_path):
@@ -287,7 +287,7 @@ class TestCleanupWorktree:
         git_ops_with_worktree.cleanup_worktree(sample_task, success=True)
 
         git_ops_with_worktree.worktree_manager.remove_worktree.assert_not_called()
-        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         assert git_ops_with_worktree._active_worktree is None
 
     def test_marks_inactive_even_when_uncommitted_changes(self, git_ops_with_worktree, sample_task, tmp_path):
@@ -299,7 +299,7 @@ class TestCleanupWorktree:
         git_ops_with_worktree.cleanup_worktree(sample_task, success=True)
 
         git_ops_with_worktree.worktree_manager.remove_worktree.assert_not_called()
-        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        git_ops_with_worktree.worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         assert git_ops_with_worktree._active_worktree is None
 
 
@@ -405,7 +405,7 @@ class TestCleanupWorktreeInactiveMarking:
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
 
     def test_marks_worktree_inactive_even_when_cleanup_skipped(self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task):
         """mark_worktree_inactive is called even when unpushed commits block removal."""
@@ -421,7 +421,7 @@ class TestCleanupWorktreeInactiveMarking:
 
         # Worktree not removed, but still marked inactive
         mock_worktree_manager.remove_worktree.assert_not_called()
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
 
 
 class TestCleanupWorktreeChainStepProtection:
@@ -465,7 +465,7 @@ class TestCleanupWorktreeChainStepProtection:
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         mock_worktree_manager.touch_worktree.assert_not_called()
 
     def test_non_chain_task_marks_inactive(
@@ -479,7 +479,7 @@ class TestCleanupWorktreeChainStepProtection:
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         mock_worktree_manager.touch_worktree.assert_not_called()
 
     def test_intermediate_chain_step_skips_removal(
@@ -529,13 +529,13 @@ class TestCleanupWorktreeChainStepProtection:
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         mock_worktree_manager.touch_worktree.assert_not_called()
 
-    def test_subtask_with_workflow_marks_inactive(
+    def test_subtask_with_workflow_keeps_worktree_active(
         self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path, sample_task
     ):
-        """Subtask (parent_task_id set) goes terminal even with workflow context."""
+        """Subtask at non-terminal step keeps worktree active for fan-in."""
         git_ops = self._make_git_ops(mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path)
         worktree_path = tmp_path / "worktree"
         git_ops._active_worktree = worktree_path
@@ -547,8 +547,9 @@ class TestCleanupWorktreeChainStepProtection:
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
-        mock_worktree_manager.touch_worktree.assert_not_called()
+        # Subtasks at non-terminal steps now preserve the worktree
+        mock_worktree_manager.touch_worktree.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_not_called()
 
 
 class TestCleanupWorktreePushBeforeRemoval:
@@ -575,7 +576,7 @@ class TestCleanupWorktreePushBeforeRemoval:
         git_ops.cleanup_worktree(sample_task, success=True)
 
         mock_worktree_manager.remove_worktree.assert_not_called()
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         mock_logger.info.assert_any_call("Pushed unpushed commits during cleanup")
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
@@ -599,7 +600,7 @@ class TestCleanupWorktreePushBeforeRemoval:
         git_ops.cleanup_worktree(sample_task, success=True)
 
         mock_worktree_manager.remove_worktree.assert_not_called()
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_skips_push_for_main_branch(
@@ -620,7 +621,7 @@ class TestCleanupWorktreePushBeforeRemoval:
         git_ops.cleanup_worktree(sample_task, success=True)
 
         mock_worktree_manager.remove_worktree.assert_not_called()
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
     def test_push_exception_handled_gracefully(
@@ -641,7 +642,7 @@ class TestCleanupWorktreePushBeforeRemoval:
 
         # Should not crash, worktree marked inactive (never removed)
         mock_worktree_manager.remove_worktree.assert_not_called()
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         assert git_ops._active_worktree is None
 
 
@@ -1070,7 +1071,7 @@ class TestCleanupWorktreeNeverRemoves:
 
         git_ops.cleanup_worktree(sample_task, success=True)
 
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         mock_worktree_manager.remove_worktree.assert_not_called()
         assert git_ops._active_worktree is None
 
@@ -1095,7 +1096,7 @@ class TestCleanupWorktreeNeverRemoves:
         git_ops.cleanup_worktree(sample_task, success=True)
 
         mock_logger.info.assert_any_call("Pushed unpushed commits during cleanup")
-        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path)
+        mock_worktree_manager.mark_worktree_inactive.assert_called_once_with(worktree_path, user_id="engineer")
         mock_worktree_manager.remove_worktree.assert_not_called()
 
 
