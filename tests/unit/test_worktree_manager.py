@@ -1368,10 +1368,10 @@ class TestCreateWorktreeNoBlanketPrune:
 
 
 class TestForceRemovalPrunesStaleEntry:
-    """Tests that force-removal fallback prunes only the specific stale entry."""
+    """Tests that removal prunes only the specific stale entry (not blanket prune)."""
 
-    def test_force_removal_prunes_stale_entry_after_rmtree(self, tmp_path):
-        """_prune_stale_entry called after shutil.rmtree fallback (not blanket prune)."""
+    def test_removal_prunes_stale_entry_after_rmtree(self, tmp_path):
+        """_prune_stale_entry called after shutil.rmtree (primary path, not fallback)."""
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
@@ -1380,15 +1380,9 @@ class TestForceRemovalPrunesStaleEntry:
         base_repo = tmp_path / "base"
         base_repo.mkdir()
 
-        def mock_run_git(args, cwd, timeout=30):
-            # The initial "git worktree remove" fails, triggering force fallback
-            if args[0] == "worktree" and args[1] == "remove":
-                raise subprocess.CalledProcessError(1, "git")
-            return MagicMock()
-
-        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
              patch.object(manager, '_prune_stale_entry') as mock_prune:
-            result = manager._remove_worktree_directory(wt_path, base_repo, force=True)
+            result = manager._remove_worktree_directory(wt_path, base_repo, force=False)
 
         assert result is True
         mock_prune.assert_called_once_with(base_repo, wt_path)
@@ -2276,3 +2270,159 @@ class TestCreateWorktreeStaleEntryRecovery:
                     task_id="task-stale-fail",
                     owner_repo="owner/repo",
                 )
+
+
+class TestSafeWorktreeRemoval:
+    """Tests that _remove_worktree_directory uses shutil.rmtree, not git worktree remove."""
+
+    def test_remove_uses_rmtree_not_git_worktree_remove(self, tmp_path):
+        """Primary removal uses shutil.rmtree; git worktree remove is never called."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-to-remove"
+        wt_path.mkdir()
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, '_run_git') as mock_git, \
+             patch.object(manager, '_prune_stale_entry'):
+            result = manager._remove_worktree_directory(wt_path, base_repo, force=False)
+
+        assert result is True
+        assert not wt_path.exists()
+        # No git commands invoked — removal is pure shutil.rmtree
+        mock_git.assert_not_called()
+
+    def test_remove_refuses_dirty_worktree_without_force(self, tmp_path):
+        """Worktree with uncommitted changes is not removed when force=False."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-dirty"
+        wt_path.mkdir()
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=True):
+            result = manager._remove_worktree_directory(wt_path, base_repo, force=False)
+
+        assert result is False
+        assert wt_path.exists()
+
+    def test_remove_force_overrides_dirty_check(self, tmp_path):
+        """force=True removes even with uncommitted changes."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-dirty"
+        wt_path.mkdir()
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=True), \
+             patch.object(manager, '_prune_stale_entry'):
+            result = manager._remove_worktree_directory(wt_path, base_repo, force=True)
+
+        assert result is True
+        assert not wt_path.exists()
+
+    def test_remove_prunes_stale_entry_after_rmtree(self, tmp_path):
+        """_prune_stale_entry is called after rmtree to clean git's internal tracking."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-to-remove"
+        wt_path.mkdir()
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        with patch.object(manager, 'has_uncommitted_changes', return_value=False), \
+             patch.object(manager, '_prune_stale_entry') as mock_prune:
+            manager._remove_worktree_directory(wt_path, base_repo, force=False)
+
+        mock_prune.assert_called_once_with(base_repo, wt_path)
+
+    def test_remove_already_gone_prunes_entry(self, tmp_path):
+        """When path is already gone, _prune_stale_entry is still called."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-already-gone"  # does not exist
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+
+        with patch.object(manager, '_prune_stale_entry') as mock_prune:
+            result = manager._remove_worktree_directory(wt_path, base_repo)
+
+        assert result is True
+        mock_prune.assert_called_once_with(base_repo, wt_path)
+
+
+class TestActiveWorktreeProtection:
+    """Tests that active worktrees are protected from removal."""
+
+    def test_remove_worktree_refuses_active(self, tmp_path):
+        """active=True, force=False → returns False without removing."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-active"
+        wt_path.mkdir()
+
+        now = datetime.now(timezone.utc).isoformat()
+        manager._registry["active-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="engineer", task_id="t1",
+            created_at=now, last_accessed=now, base_repo=str(tmp_path),
+            active=True,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory') as mock_remove:
+            result = manager.remove_worktree(wt_path, force=False)
+
+        assert result is False
+        mock_remove.assert_not_called()
+        assert wt_path.exists()
+
+    def test_remove_worktree_force_overrides_active(self, tmp_path):
+        """active=True, force=True → removes the worktree."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-active"
+        wt_path.mkdir()
+
+        now = datetime.now(timezone.utc).isoformat()
+        manager._registry["active-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="engineer", task_id="t1",
+            created_at=now, last_accessed=now, base_repo=str(tmp_path),
+            active=True,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory', return_value=True), \
+             patch.object(manager, '_save_registry'):
+            result = manager.remove_worktree(wt_path, force=True)
+
+        assert result is True
+
+    def test_remove_worktree_allows_inactive(self, tmp_path):
+        """active=False, force=False → removes normally."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-inactive"
+        wt_path.mkdir()
+
+        now = datetime.now(timezone.utc).isoformat()
+        manager._registry["inactive-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="engineer", task_id="t1",
+            created_at=now, last_accessed=now, base_repo=str(tmp_path),
+            active=False,
+        )
+
+        with patch.object(manager, '_remove_worktree_directory', return_value=True), \
+             patch.object(manager, '_save_registry'):
+            result = manager.remove_worktree(wt_path, force=False)
+
+        assert result is True

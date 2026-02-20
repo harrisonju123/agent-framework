@@ -196,10 +196,14 @@ class GitOperationsManager:
                         self.logger.warning(f"Worktree path missing, will recreate: {existing}")
 
                 try:
+                    # Chain steps share one worktree; use generic key so the
+                    # path reads "chain-{root_id}" instead of "architect-{root_id}"
+                    effective_agent_id = "chain" if is_chain else self.config.id
+
                     worktree_path = self.worktree_manager.create_worktree(
                         base_repo=base_repo,
                         branch_name=branch_name,
-                        agent_id=self.config.id,
+                        agent_id=effective_agent_id,
                         # Root ID keeps chain hops on the same worktree key
                         task_id=task.root_id,
                         owner_repo=github_repo,

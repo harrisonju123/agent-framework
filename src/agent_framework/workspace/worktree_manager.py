@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import time
 from contextlib import contextmanager
@@ -574,6 +575,15 @@ class WorktreeManager:
                     return self._remove_worktree_directory(path, base_repo, force)
             return False
 
+        # Refuse to remove active worktrees unless forced
+        if self._registry[worktree_key].active and not force:
+            logger.warning(
+                f"Refusing to remove active worktree: {path} "
+                f"(agent={self._registry[worktree_key].agent_id}, "
+                f"task={self._registry[worktree_key].task_id})"
+            )
+            return False
+
         # Remove worktree
         success = self._remove_worktree_directory(path, base_repo, force)
 
@@ -589,53 +599,44 @@ class WorktreeManager:
         base_repo: Optional[Path],
         force: bool = False,
     ) -> bool:
-        """Remove worktree directory using git worktree remove."""
-        try:
-            # Path already gone — prune only this entry's tracking, not all siblings
-            if not path.exists():
-                if base_repo and base_repo.exists():
-                    self._prune_stale_entry(base_repo, path)
-                logger.debug(f"Worktree already removed: {path}")
-                return True
+        """Remove worktree directory safely.
 
+        Uses shutil.rmtree instead of `git worktree remove` because the
+        git command can recursively delete empty parent directories,
+        destroying sibling worktrees under the same owner/repo parent.
+        """
+        # Path already gone — prune only this entry's tracking, not all siblings
+        if not path.exists():
             if base_repo and base_repo.exists():
-                # Use git worktree remove for proper cleanup
-                cmd = ["worktree", "remove", str(path)]
-                if force:
-                    cmd.append("--force")
-                self._run_git(cmd, cwd=base_repo, timeout=30)
-            elif path.exists():
-                # Fallback: direct removal if no base repo
-                import shutil
-                shutil.rmtree(path)
+                self._prune_stale_entry(base_repo, path)
+            logger.debug(f"Worktree already removed: {path}")
+            return True
+
+        # Dirty check: refuse to remove worktrees with uncommitted changes unless forced
+        if not force and self.has_uncommitted_changes(path):
+            logger.warning(f"Worktree has uncommitted changes, refusing to remove: {path}")
+            return False
+
+        try:
+            shutil.rmtree(path)
+
+            # Clean up git's internal tracking for just this entry
+            if base_repo and base_repo.exists():
+                self._prune_stale_entry(base_repo, path)
 
             logger.info(f"Removed worktree: {path}")
             self._guard_parent_directory(path)
             return True
 
-        except subprocess.CalledProcessError as e:
-            if force:
-                # Last resort: direct removal
-                try:
-                    import shutil
-                    shutil.rmtree(path)
-                    # Prune only this entry — not all siblings
-                    if base_repo and base_repo.exists():
-                        self._prune_stale_entry(base_repo, path)
-                    logger.info(f"Force removed worktree: {path}")
-                    self._guard_parent_directory(path)
-                    return True
-                except Exception:
-                    pass
+        except Exception as e:
             logger.error(f"Failed to remove worktree {path}: {e}")
             return False
 
     def _guard_parent_directory(self, removed_path: Path) -> None:
-        """Verify the parent directory still exists after worktree removal.
+        """Safety net: recreate parent directory if it vanished.
 
-        Git worktree removal or shutil.rmtree can sometimes take out the
-        parent directory, which destroys sibling worktrees. If we detect
-        this happened, recreate the parent immediately.
+        shutil.rmtree only deletes the target, but this guard protects
+        against unforeseen edge cases (e.g. symlink chains, filesystem bugs).
         """
         parent = removed_path.parent
         if parent != self.config.root and not parent.exists():

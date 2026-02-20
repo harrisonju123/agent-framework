@@ -2872,9 +2872,10 @@ class TestWorkingDirectoryValidation:
 
         assert result == real_dir
         assert validated_agent._git_ops.get_working_directory.call_count == 2
-        validated_agent.logger.warning.assert_called_once_with(
-            f"Working directory vanished, retrying: {vanished_dir}"
-        )
+        # Upgraded to error-level with diagnostic context (branch, root_id)
+        validated_agent.logger.error.assert_called_once()
+        log_msg = validated_agent.logger.error.call_args[0][0]
+        assert str(vanished_dir) in log_msg
 
     def test_raises_when_working_dir_vanishes_permanently(self, validated_agent, tmp_path):
         """When working dir doesn't exist after retry, raises RuntimeError."""

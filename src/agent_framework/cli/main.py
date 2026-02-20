@@ -1912,7 +1912,9 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
                 is_stale = age_hours > wt_config.max_age_hours
                 exists = Path(wt.path).exists()
 
-                if force or is_stale or not exists:
+                if wt.active and not force:
+                    status = "[blue]ACTIVE[/]"
+                elif force or is_stale or not exists:
                     to_remove.append(wt)
                     status = "[red]REMOVE[/]"
                 else:

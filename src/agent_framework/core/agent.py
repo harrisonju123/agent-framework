@@ -1265,7 +1265,12 @@ class Agent:
         """Get working directory with one retry if the path vanishes between creation and use."""
         working_dir = self._git_ops.get_working_directory(task)
         if not working_dir.exists():
-            self.logger.warning(f"Working directory vanished, retrying: {working_dir}")
+            branch = task.context.get("worktree_branch") or task.context.get("implementation_branch")
+            self.logger.error(
+                f"Working directory vanished after creation: {working_dir}. "
+                f"branch={branch}, root_id={task.root_id}. "
+                f"Possible cause: sibling worktree removal destroyed parent directory."
+            )
             working_dir = self._git_ops.get_working_directory(task)
             if not working_dir.exists():
                 raise RuntimeError(f"Working directory does not exist after retry: {working_dir}")

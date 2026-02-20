@@ -936,6 +936,8 @@ class TestChainTaskWorktreeReuse:
         assert result == new_worktree
         create_call = mock_worktree_manager.create_worktree.call_args
         assert create_call.kwargs.get("allow_cross_agent") is True
+        # Chain tasks use generic "chain" agent_id, not the agent's own id
+        assert create_call.kwargs.get("agent_id") == "chain"
 
     def test_non_chain_task_does_not_pass_allow_cross_agent(
         self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
@@ -969,6 +971,8 @@ class TestChainTaskWorktreeReuse:
         assert result == new_worktree
         create_call = mock_worktree_manager.create_worktree.call_args
         assert create_call.kwargs.get("allow_cross_agent") is False
+        # Non-chain tasks use the agent's own id
+        assert create_call.kwargs.get("agent_id") == "architect"
 
 
 class TestIsOwnBranch:
