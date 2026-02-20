@@ -222,6 +222,94 @@ class TestPopulateReadCache:
         data = json.loads(cache_file.read_text())
         assert data["entries"]["/nonexistent/file.py"]["summary"] == ""
 
+    def test_refreshes_entry_for_modified_file(self, agent, task, workspace):
+        """Engineer modifies a file cached by architect -> entry gets fresh summary + modified_by."""
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        existing = {
+            "root_task_id": "root1",
+            "entries": {
+                "src/server.py": {
+                    "summary": "Old summary from plan step",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:00:00Z",
+                    "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "root1.json").write_text(json.dumps(existing))
+
+        # Create the file so summarize_file produces a real summary
+        src_dir = workspace / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "server.py").write_text("class Server:\n    pass\n\ndef start():\n    pass\n")
+
+        agent._session_logger.extract_file_reads.return_value = [
+            str(workspace / "src" / "server.py"),
+        ]
+
+        # Mock _collect_files_modified to report server.py as modified
+        with unittest.mock.patch(
+            "agent_framework.core.chain_state._collect_files_modified",
+            return_value=["src/server.py"],
+        ):
+            agent._populate_read_cache(task, working_dir=workspace)
+
+        data = json.loads((cache_dir / "root1.json").read_text())
+        entry = data["entries"]["src/server.py"]
+        # Summary should be refreshed (not the old one)
+        assert entry["summary"] != "Old summary from plan step"
+        assert "classes: Server" in entry["summary"]
+        # Should have modification metadata
+        assert entry["modified_by"] == "engineer"
+        assert "modified_at" in entry
+        # Original reader lineage preserved
+        assert entry["read_by"] == "architect"
+        assert entry["workflow_step"] == "plan"
+
+    def test_preserves_unmodified_entries_alongside_refresh(self, agent, task, workspace):
+        """Only modified files get refreshed; unmodified entries keep original summary."""
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        existing = {
+            "root_task_id": "root1",
+            "entries": {
+                "src/server.py": {
+                    "summary": "Modified file",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:00:00Z",
+                    "workflow_step": "plan",
+                },
+                "src/config.py": {
+                    "summary": "Config module -- untouched",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:00:00Z",
+                    "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "root1.json").write_text(json.dumps(existing))
+
+        agent._session_logger.extract_file_reads.return_value = [
+            str(workspace / "src" / "server.py"),
+            str(workspace / "src" / "config.py"),
+        ]
+
+        # Only server.py was modified
+        with unittest.mock.patch(
+            "agent_framework.core.chain_state._collect_files_modified",
+            return_value=["src/server.py"],
+        ):
+            agent._populate_read_cache(task, working_dir=workspace)
+
+        data = json.loads((cache_dir / "root1.json").read_text())
+        # Unmodified entry preserved
+        assert data["entries"]["src/config.py"]["summary"] == "Config module -- untouched"
+        assert data["entries"]["src/config.py"]["read_by"] == "architect"
+        assert "modified_by" not in data["entries"]["src/config.py"]
+        # Modified entry refreshed
+        assert data["entries"]["src/server.py"]["modified_by"] == "engineer"
+
 
 class TestDisplayPath:
     """Test PromptBuilder._display_path() strips workspace prefix."""
@@ -693,6 +781,43 @@ class TestMeasureCacheEffectiveness:
         for call in agent._session_logger.log.call_args_list:
             assert call[0][0] != "read_cache_effectiveness"
 
+    def test_justified_vs_wasteful_rereads(self, agent, task, workspace):
+        """Re-reads of modified files are justified; unmodified re-reads are wasteful."""
+        # Write cache with one modified entry and one unmodified
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        cache_data = {
+            "root_task_id": "root1",
+            "entries": {
+                "src/a.py": {
+                    "summary": "A", "read_by": "engineer",
+                    "read_at": "2026-02-20T00:00:00Z", "workflow_step": "implement",
+                    "modified_by": "engineer", "modified_at": "2026-02-20T00:00:00Z",
+                },
+                "src/b.py": {
+                    "summary": "B", "read_by": "architect",
+                    "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan",
+                },
+                "src/c.py": {
+                    "summary": "C", "read_by": "architect",
+                    "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan",
+                },
+            },
+        }
+        (cache_dir / "root1.json").write_text(json.dumps(cache_data))
+
+        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py", "src/c.py"}
+        # Re-read a.py (modified) and b.py (not modified), skip c.py
+        file_reads = ["/workspace/src/a.py", "/workspace/src/b.py"]
+
+        agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
+
+        call_kwargs = agent._session_logger.log.call_args_list[-1][1]
+        assert call_kwargs["cache_misses"] == 2      # a.py + b.py
+        assert call_kwargs["justified_rereads"] == 1  # a.py (modified)
+        assert call_kwargs["wasteful_rereads"] == 1   # b.py (not modified)
+        assert call_kwargs["wasteful_rate"] == pytest.approx(1 / 3, abs=0.01)
+
 
 class TestInjectReadCacheRoleColumn:
     """Test role-tagged manifest table in _inject_read_cache."""
@@ -773,6 +898,62 @@ class TestInjectReadCacheRoleColumn:
         # Table should not have a MODIFY role cell
         assert "| MODIFY |" not in result
 
+    def test_role_changed_for_modified_entry(self, builder, workspace):
+        """Entry with modified_by gets CHANGED role."""
+        self._write_cache(workspace, {
+            "src/target.py": {
+                "summary": "Updated file",
+                "read_by": "engineer",
+                "read_at": "2026-02-20T12:00:00Z",
+                "workflow_step": "implement",
+                "modified_by": "engineer",
+                "modified_at": "2026-02-20T12:00:00Z",
+            },
+        })
+        task = Task(
+            id="chain-root1-review-d0", type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS, priority=1, created_by="test",
+            assigned_to="architect", created_at=datetime.now(timezone.utc),
+            title="Review", description="Review it",
+            context={"_root_task_id": "root1", "workflow_step": "code_review"},
+        )
+
+        result = builder._inject_read_cache("base prompt", task)
+
+        assert "| CHANGED |" in result
+
+    def test_role_priority_changed_over_modify(self, builder, workspace):
+        """Entry with both modified_by and in files_to_modify gets CHANGED (not MODIFY)."""
+        from agent_framework.core.task import PlanDocument
+
+        self._write_cache(workspace, {
+            "src/target.py": {
+                "summary": "Modified target",
+                "read_by": "engineer",
+                "read_at": "2026-02-20T12:00:00Z",
+                "workflow_step": "implement",
+                "modified_by": "engineer",
+                "modified_at": "2026-02-20T12:00:00Z",
+            },
+        })
+        task = Task(
+            id="chain-root1-impl-d0", type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS, priority=1, created_by="test",
+            assigned_to="engineer", created_at=datetime.now(timezone.utc),
+            title="Fix", description="Fix cycle",
+            context={"_root_task_id": "root1", "workflow_step": "implement"},
+        )
+        task.plan = PlanDocument(
+            objectives=["obj"], approach=["step1"], success_criteria=["done"],
+            files_to_modify=["src/target.py"],
+        )
+
+        result = builder._inject_read_cache("base prompt", task)
+
+        # CHANGED takes priority over MODIFY
+        assert "| CHANGED |" in result
+        assert "| MODIFY |" not in result
+
 
 class TestInjectReadCacheStepDirective:
     """Test step-aware directives in _inject_read_cache."""
@@ -817,30 +998,33 @@ class TestInjectReadCacheStepDirective:
         )
 
     def test_implement_step_directive(self, builder, workspace):
-        """Implement step gets MODIFY/ref guidance."""
+        """Implement step gets MODIFY/ref/CHANGED guidance."""
         self._write_cache(workspace)
         task = self._make_task("implement")
 
         result = builder._inject_read_cache("base", task)
 
         assert "MODIFY are your primary targets" in result
+        assert "CHANGED were modified in a previous" in result
 
     def test_review_step_directive(self, builder, workspace):
-        """Review step gets diff-focused guidance."""
+        """Review step gets CHANGED-aware diff-focused guidance."""
         self._write_cache(workspace)
         task = self._make_task("code_review")
 
         result = builder._inject_read_cache("base", task)
 
+        assert "CHANGED were modified by the engineer" in result
         assert "Focus on the git diff" in result
 
     def test_qa_review_step_directive(self, builder, workspace):
-        """QA review step also gets diff-focused guidance."""
+        """QA review step also gets CHANGED-aware diff-focused guidance."""
         self._write_cache(workspace)
         task = self._make_task("qa_review")
 
         result = builder._inject_read_cache("base", task)
 
+        assert "CHANGED were modified by the engineer" in result
         assert "Focus on the git diff" in result
 
 
@@ -966,3 +1150,34 @@ class TestReadCacheBypassMetric:
         assert kwargs["re_read_count"] == 0
         assert kwargs["bypass_rate"] == 0.0
         assert kwargs["new_reads"] == 1
+
+
+    def test_bypass_partitions_justified_vs_wasteful(self, agent, workspace):
+        """Re-reads of modified files are justified; others are wasteful."""
+        self._seed_cache(workspace, "root1", {
+            "/src/a.py": {"summary": "A", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+            "/src/b.py": {"summary": "B", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+            "/src/c.py": {"summary": "C", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+        })
+        task = self._make_task()
+        # Re-read all 3, but only a.py was modified
+        agent._session_logger.extract_file_reads.return_value = [
+            "/src/a.py", "/src/b.py", "/src/c.py",
+        ]
+
+        with unittest.mock.patch(
+            "agent_framework.core.chain_state._collect_files_modified",
+            return_value=["/src/a.py"],
+        ):
+            agent._populate_read_cache(task)
+
+        bypass_calls = [
+            c for c in agent._session_logger.log.call_args_list
+            if c[0][0] == "read_cache_bypass"
+        ]
+        assert len(bypass_calls) == 1
+        kwargs = bypass_calls[0][1]
+        assert kwargs["re_read_count"] == 3
+        assert kwargs["justified_rereads"] == 1   # a.py (modified)
+        assert kwargs["wasteful_rereads"] == 2    # b.py, c.py
+        assert kwargs["wasteful_rate"] == pytest.approx(2 / 3, abs=0.01)

@@ -238,6 +238,7 @@ def checkpoint_agent():
     a._max_consecutive_tool_calls = 999  # Don't trigger circuit breaker
     a._max_consecutive_diagnostic_calls = 999
     a._exploration_alert_threshold = 999  # Don't trigger exploration alert
+    a._exploration_alert_thresholds = {}
     a._git_ops = MagicMock()
     a._git_ops.safety_commit.return_value = False
     a._git_ops.worktree_env_vars = None

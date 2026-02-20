@@ -377,6 +377,7 @@ class ToolUsageMetricsResponse(BaseModel):
     exploration_alert_threshold: int = 50
     sessions_exceeding_threshold: int = 0
     by_agent: Dict[str, float] = {}
+    by_step: Dict[str, int] = {}
 
 
 class TrendBucketResponse(BaseModel):
@@ -392,6 +393,14 @@ class TrendBucketResponse(BaseModel):
     sessions_exceeding_threshold: int = 0
 
 
+class LanguageMismatchMetricsResponse(BaseModel):
+    total_tasks_with_mismatches: int
+    total_mismatch_events: int
+    by_searched_language: Dict[str, int]
+    by_tool: Dict[str, int]
+    mismatch_rate: float
+
+
 class AgenticMetricsResponse(BaseModel):
     """API response for /api/agentic-metrics."""
     generated_at: datetime
@@ -405,4 +414,5 @@ class AgenticMetricsResponse(BaseModel):
     debate: DebateMetricsResponse
     context_budget: ContextBudgetMetricsResponse
     tool_usage: ToolUsageMetricsResponse
+    language_mismatch: LanguageMismatchMetricsResponse
     trends: List[TrendBucketResponse] = []

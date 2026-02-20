@@ -150,6 +150,16 @@ class OptimizationConfig(BaseModel):
     # Exploration alert: activity event when a session exceeds N tool calls
     exploration_alert_threshold: int = 50
 
+    # Per-workflow-step thresholds — planning explores heavily by nature,
+    # while engineer/QA steps should be writing, not reading
+    exploration_alert_thresholds: Dict[str, int] = Field(default_factory=lambda: {
+        "plan": 80,
+        "implement": 50,
+        "code_review": 40,
+        "qa_review": 40,
+        "create_pr": 25,
+    })
+
     # Per-task-tree USD budget ceilings by estimated effort (t-shirt size)
     enable_effort_budget_ceilings: bool = False
     effort_budget_ceilings: Dict[str, float] = Field(default_factory=lambda: {

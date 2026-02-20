@@ -25,6 +25,8 @@ interface FileReadEntry {
   read_by: string;
   read_at: string;
   workflow_step: string;
+  modified_by?: string;
+  modified_at?: string;
 }
 
 interface ReadCacheStore {

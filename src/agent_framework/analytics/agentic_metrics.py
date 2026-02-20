@@ -118,6 +118,15 @@ class LanguageMismatchMetrics(BaseModel):
     mismatch_rate: float
 
 
+class LanguageMismatchMetrics(BaseModel):
+    """Path confusion: agents searching for wrong language file types."""
+    total_tasks_with_mismatches: int
+    total_mismatch_events: int
+    by_searched_language: Dict[str, int]
+    by_tool: Dict[str, int]
+    mismatch_rate: float
+
+
 class ContextBudgetMetrics(BaseModel):
     """Context budget utilization metrics from prompt lengths and token tracking."""
     sample_count: int
@@ -198,6 +207,7 @@ class AgenticMetricsReport(BaseModel):
     subagent: SubagentMetrics
     language_mismatch: LanguageMismatchMetrics
     retry_context_quality: RetryContextQualityMetrics
+    language_mismatch: LanguageMismatchMetrics
     trends: List[TrendBucket] = []
 
 
@@ -241,6 +251,7 @@ class AgenticMetrics:
         upstream_context = self._aggregate_upstream_context(events_by_task)
         subagent = self._aggregate_subagent(events_by_task)
         retry_context_quality = self._aggregate_retry_context_quality(events_by_task)
+        language_mismatch = self._aggregate_language_mismatches(events_by_task)
         language_mismatch = self._aggregate_language_mismatches(events_by_task)
         trends = self._aggregate_trends(events_by_task)
 
@@ -889,6 +900,36 @@ class AgenticMetrics:
                 aid: round(sum(chars_list) / len(chars_list), 1)
                 for aid, chars_list in agent_chars.items()
             },
+        )
+
+    def _aggregate_language_mismatches(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> LanguageMismatchMetrics:
+        """Aggregate language_mismatch events — path confusion signal."""
+        tasks_with = 0
+        total_events = 0
+        by_lang: Dict[str, int] = defaultdict(int)
+        by_tool: Dict[str, int] = defaultdict(int)
+
+        for events in events_by_task.values():
+            task_mismatches = [e for e in events if e.get("event") == "language_mismatch"]
+            if not task_mismatches:
+                continue
+            tasks_with += 1
+            for e in task_mismatches:
+                mismatches = e.get("mismatches", [])
+                total_events += len(mismatches)
+                for m in mismatches:
+                    lang = m.get("searched_language", "unknown")
+                    tool = m.get("tool", "unknown")
+                    by_lang[lang] += 1
+                    by_tool[tool] += 1
+
+        total_tasks = len(events_by_task)
+        return LanguageMismatchMetrics(
+            total_tasks_with_mismatches=tasks_with,
+            total_mismatch_events=total_events,
+            by_searched_language=dict(by_lang),
+            by_tool=dict(by_tool),
+            mismatch_rate=round(tasks_with / total_tasks, 3) if total_tasks > 0 else 0.0,
         )
 
     def _aggregate_language_mismatches(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> LanguageMismatchMetrics:

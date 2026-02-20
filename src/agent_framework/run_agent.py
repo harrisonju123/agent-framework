@@ -260,6 +260,7 @@ def main():
             max_consecutive_tool_calls=framework_config.safeguards.max_consecutive_tool_calls,
             max_consecutive_diagnostic_calls=framework_config.safeguards.max_consecutive_diagnostic_calls,
             exploration_alert_threshold=framework_config.optimization.exploration_alert_threshold,
+            exploration_alert_thresholds=framework_config.optimization.exploration_alert_thresholds,
         )
 
         # Let SIGTERM trigger a clean exit through the polling loop

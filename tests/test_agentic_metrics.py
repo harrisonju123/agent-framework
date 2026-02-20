@@ -994,3 +994,67 @@ class TestLanguageMismatchMetrics:
         assert lm.by_searched_language == {"go": 1, "typescript": 1}
         assert lm.by_tool == {"Glob": 1, "Grep": 1}
         assert lm.mismatch_rate == pytest.approx(0.667, abs=0.001)
+
+
+class TestLanguageMismatchMetrics:
+    def test_no_mismatch_events_returns_zeros(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t1"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        lm = report.language_mismatch
+        assert lm.total_tasks_with_mismatches == 0
+        assert lm.total_mismatch_events == 0
+        assert lm.by_searched_language == {}
+        assert lm.by_tool == {}
+        assert lm.mismatch_rate == 0.0
+
+    def test_single_event_with_two_mismatches(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "language_mismatch", "task_id": "t1",
+             "agent_id": "engineer", "project_language": "python", "repo": "myrepo",
+             "mismatch_count": 2,
+             "mismatches": [
+                 {"project_language": "python", "searched_extension": ".go",
+                  "searched_language": "go", "tool": "Glob", "pattern": "**/*.go"},
+                 {"project_language": "python", "searched_extension": ".rb",
+                  "searched_language": "ruby", "tool": "Read", "pattern": "/app.rb"},
+             ]},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        lm = report.language_mismatch
+        assert lm.total_tasks_with_mismatches == 1
+        assert lm.total_mismatch_events == 2
+        assert lm.by_searched_language == {"go": 1, "ruby": 1}
+        assert lm.by_tool == {"Glob": 1, "Read": 1}
+        assert lm.mismatch_rate == 1.0
+
+    def test_multiple_tasks_mismatch_rate(self, workspace):
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "language_mismatch", "task_id": "t1",
+             "agent_id": "engineer", "project_language": "python", "repo": "r",
+             "mismatch_count": 1,
+             "mismatches": [
+                 {"project_language": "python", "searched_extension": ".go",
+                  "searched_language": "go", "tool": "Glob", "pattern": "**/*.go"},
+             ]},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t2"},
+        ])
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "language_mismatch", "task_id": "t3",
+             "agent_id": "architect", "project_language": "go", "repo": "r2",
+             "mismatch_count": 1,
+             "mismatches": [
+                 {"project_language": "go", "searched_extension": ".ts",
+                  "searched_language": "typescript", "tool": "Grep", "pattern": "*.ts"},
+             ]},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        lm = report.language_mismatch
+        assert lm.total_tasks_with_mismatches == 2
+        assert lm.total_mismatch_events == 2
+        assert lm.by_searched_language == {"go": 1, "typescript": 1}
+        assert lm.by_tool == {"Glob": 1, "Grep": 1}
+        assert lm.mismatch_rate == pytest.approx(0.667, abs=0.001)

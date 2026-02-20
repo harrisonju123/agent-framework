@@ -224,6 +224,7 @@ export interface ToolUsageMetrics {
   exploration_alert_threshold: number
   sessions_exceeding_threshold: number
   by_agent: Record<string, number>
+  by_step: Record<string, number>
 }
 
 export interface TrendBucket {
@@ -238,6 +239,14 @@ export interface TrendBucket {
   sessions_exceeding_threshold: number
 }
 
+export interface LanguageMismatchMetrics {
+  total_tasks_with_mismatches: number
+  total_mismatch_events: number
+  by_searched_language: Record<string, number>
+  by_tool: Record<string, number>
+  mismatch_rate: number
+}
+
 export interface AgenticMetricsReport {
   generated_at: string
   time_range_hours: number
@@ -249,6 +258,7 @@ export interface AgenticMetricsReport {
   debate: DebateMetrics
   context_budget: ContextBudgetMetrics
   tool_usage: ToolUsageMetrics
+  language_mismatch: LanguageMismatchMetrics
   trends: TrendBucket[]
 }
 
