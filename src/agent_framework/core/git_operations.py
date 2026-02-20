@@ -70,6 +70,47 @@ class GitOperationsManager:
         self._active_worktree: Optional[Path] = None
         self._worktree_env_vars: Optional[Dict[str, str]] = None
 
+    def safety_commit(self, working_dir: Path, reason: str) -> bool:
+        """Best-effort commit of uncommitted changes. Returns True if committed.
+
+        Never raises — safe for finally blocks and error paths.
+        Uses [auto-commit] prefix to distinguish framework commits from LLM commits.
+        """
+        from ..utils.subprocess_utils import run_git_command
+
+        try:
+            if not working_dir.exists():
+                return False
+
+            status = run_git_command(
+                ["status", "--porcelain"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if status.returncode != 0 or not status.stdout.strip():
+                return False
+
+            add_result = run_git_command(
+                ["add", "-A"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if add_result.returncode != 0:
+                self.logger.debug(f"safety_commit: git add failed: {add_result.stderr}")
+                return False
+
+            commit_result = run_git_command(
+                ["commit", "-m", f"[auto-commit] {reason}"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if commit_result.returncode != 0:
+                self.logger.debug(f"safety_commit: git commit failed: {commit_result.stderr}")
+                return False
+
+            self.logger.info(f"safety_commit: {reason}")
+            return True
+        except Exception as e:
+            self.logger.debug(f"safety_commit failed (non-fatal): {e}")
+            return False
+
     @property
     def worktree_env_vars(self) -> Optional[Dict[str, str]]:
         """Env vars for the active worktree's virtualenv (PATH, VIRTUAL_ENV)."""

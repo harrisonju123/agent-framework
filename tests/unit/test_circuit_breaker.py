@@ -286,11 +286,12 @@ class TestCircuitBreakerWipCommit:
         assert call_args[0][2] == 5  # bash_count
 
     @pytest.mark.asyncio
-    async def test_auto_commit_with_changes(self):
-        """_auto_commit_wip commits when git status shows changes."""
+    async def test_auto_commit_delegates_to_safety_commit(self):
+        """_auto_commit_wip delegates to GitOperationsManager.safety_commit."""
         a = MagicMock()
         a._auto_commit_wip = Agent._auto_commit_wip.__get__(a)
-        a.logger = MagicMock()
+        a._git_ops = MagicMock()
+        a._git_ops.safety_commit.return_value = True
         a._session_logger = MagicMock()
 
         t = Task(
@@ -300,20 +301,19 @@ class TestCircuitBreakerWipCommit:
             context={},
         )
 
-        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
-            mock_git.return_value = MagicMock(stdout=" M file.py\n")
-            await a._auto_commit_wip(t, Path("/tmp/work"), 15)
+        await a._auto_commit_wip(t, Path("/tmp/work"), 15)
 
-            assert mock_git.call_count == 3  # status, add, commit
-            commit_call = mock_git.call_args_list[2]
-            assert "WIP: auto-save" in commit_call[0][0][2]
+        a._git_ops.safety_commit.assert_called_once()
+        assert "circuit breaker" in a._git_ops.safety_commit.call_args[0][1]
+        a._session_logger.log.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_auto_commit_no_changes(self):
-        """_auto_commit_wip skips commit when working tree is clean."""
+    async def test_auto_commit_no_session_log_when_clean(self):
+        """_auto_commit_wip skips session log when safety_commit returns False."""
         a = MagicMock()
         a._auto_commit_wip = Agent._auto_commit_wip.__get__(a)
-        a.logger = MagicMock()
+        a._git_ops = MagicMock()
+        a._git_ops.safety_commit.return_value = False
         a._session_logger = MagicMock()
 
         t = Task(
@@ -323,19 +323,18 @@ class TestCircuitBreakerWipCommit:
             context={},
         )
 
-        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
-            mock_git.return_value = MagicMock(stdout="")
-            await a._auto_commit_wip(t, Path("/tmp/work"), 15)
+        await a._auto_commit_wip(t, Path("/tmp/work"), 15)
 
-            # Only status check, no add/commit
-            assert mock_git.call_count == 1
+        a._git_ops.safety_commit.assert_called_once()
+        a._session_logger.log.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_auto_commit_exception_non_fatal(self):
-        """_auto_commit_wip swallows exceptions — never propagates."""
+    async def test_auto_commit_passes_bash_count(self):
+        """_auto_commit_wip includes the bash count in the commit message."""
         a = MagicMock()
         a._auto_commit_wip = Agent._auto_commit_wip.__get__(a)
-        a.logger = MagicMock()
+        a._git_ops = MagicMock()
+        a._git_ops.safety_commit.return_value = False
         a._session_logger = MagicMock()
 
         t = Task(
@@ -345,11 +344,10 @@ class TestCircuitBreakerWipCommit:
             context={},
         )
 
-        with patch("agent_framework.utils.subprocess_utils.run_git_command", side_effect=Exception("git broken")):
-            # Should not raise
-            await a._auto_commit_wip(t, Path("/tmp/work"), 15)
+        await a._auto_commit_wip(t, Path("/tmp/work"), 42)
 
-        a.logger.debug.assert_called()
+        msg = a._git_ops.safety_commit.call_args[0][1]
+        assert "42 consecutive Bash calls" in msg
 
 
 class TestCircuitBreakerConfig:

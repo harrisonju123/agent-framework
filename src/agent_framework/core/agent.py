@@ -847,6 +847,10 @@ class Agent:
         if task.context.get("workflow") or task.context.get("chain_step"):
             self._save_step_to_chain_state(task, response, working_dir=working_dir)
 
+        # Safety commit: catch any uncommitted work before marking done
+        if working_dir and working_dir.exists() and self._is_implementation_step(task):
+            self._git_ops.safety_commit(working_dir, f"WIP: uncommitted changes at task completion ({task.id})")
+
         # Mark completed
         self.logger.debug(f"Marking task {task.id} as completed")
         task.mark_completed(self.config.id)
@@ -1178,6 +1182,10 @@ class Agent:
                 cost=cost,
             )
 
+        # Safety commit before retry — preserve any partial work
+        if working_dir and working_dir.exists():
+            self._git_ops.safety_commit(working_dir, f"WIP: auto-save before retry ({task.id})")
+
         await self._handle_failure(task)
 
     def _cleanup_task_execution(self, task: Task, lock) -> None:
@@ -1190,6 +1198,12 @@ class Agent:
         from datetime import datetime
 
         task_succeeded = task.status == TaskStatus.COMPLETED
+        # Last-chance safety commit before worktree is cleaned up
+        if self._git_ops.active_worktree:
+            self._git_ops.safety_commit(
+                self._git_ops.active_worktree,
+                f"WIP: uncommitted changes at cleanup ({task.id})",
+            )
         self._git_ops.sync_worktree_queued_tasks()
         self._git_ops.cleanup_worktree(task, success=task_succeeded)
 
@@ -1366,6 +1380,7 @@ class Agent:
         _circuit_breaker_event = asyncio.Event()
 
         _DIVERSITY_THRESHOLD = 0.5
+        _COMMIT_CHECKPOINT_INTERVAL = 25
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
             try:
@@ -1420,6 +1435,14 @@ class Agent:
                     _consecutive_bash[0] = 0
                     _bash_commands[0] = []
                     _soft_threshold_logged[0] = False
+
+                # Periodic checkpoint: commit accumulated work so it's not lost
+                if (_tool_call_count[0] % _COMMIT_CHECKPOINT_INTERVAL == 0
+                        and working_dir and working_dir.exists()):
+                    self._git_ops.safety_commit(
+                        working_dir,
+                        f"WIP: periodic checkpoint (tool call {_tool_call_count[0]})",
+                    )
 
                 now = time.time()
                 if now - _last_write_time[0] < 1.0:
@@ -1618,6 +1641,10 @@ class Agent:
                     task.context["_previous_attempt_summary"] = summary
                     self.logger.debug(f"Preserved {len(summary)} chars of partial progress from interruption")
 
+            # Safety commit before resetting — preserve any work the LLM produced
+            if working_dir and working_dir.exists():
+                self._git_ops.safety_commit(working_dir, f"WIP: auto-save before interruption ({task.id})")
+
             task.last_error = "Interrupted during LLM execution"
             task.reset_to_pending()
             self.queue.update(task)
@@ -1643,27 +1670,14 @@ class Agent:
     async def _auto_commit_wip(self, task: Task, working_dir: Path, bash_count: int) -> None:
         """Best-effort WIP commit so code isn't lost when circuit breaker trips."""
         try:
-            from ..utils.subprocess_utils import run_git_command
-
-            status = run_git_command(
-                ["status", "--porcelain"], cwd=working_dir, check=True, timeout=10
+            committed = self._git_ops.safety_commit(
+                working_dir,
+                f"WIP: auto-save before circuit breaker ({bash_count} consecutive Bash calls)",
             )
-            if not status.stdout.strip():
-                self.logger.debug("No uncommitted changes to auto-save")
-                return
-
-            run_git_command(["add", "-A"], cwd=working_dir, check=True, timeout=10)
-            run_git_command(
-                [
-                    "commit", "-m",
-                    f"WIP: auto-save before circuit breaker ({bash_count} consecutive Bash calls)",
-                ],
-                cwd=working_dir, check=True, timeout=10,
-            )
-            self.logger.info(f"Auto-committed WIP changes for task {task.id}")
-            self._session_logger.log("wip_auto_commit", task_id=task.id, bash_count=bash_count)
-        except Exception as e:
-            self.logger.debug(f"WIP auto-commit failed (non-fatal): {e}")
+            if committed:
+                self._session_logger.log("wip_auto_commit", task_id=task.id, bash_count=bash_count)
+        except Exception:
+            pass
 
     def _log_routing_decision(self, task: Task, response) -> None:
         """Log intelligent routing decision if one was made."""
@@ -1764,6 +1778,7 @@ class Agent:
         # Initialize context window manager
         self._setup_context_window_manager_for_task(task)
 
+        working_dir = None
         try:
             # Initialize task execution state
             self._initialize_task_execution(task, task_start_time)
@@ -1869,8 +1884,11 @@ class Agent:
                     f"Post-completion error for task {task.id} (already completed): {e}"
                 )
             else:
-                # Capture git state before retry so next attempt knows what was written
                 if working_dir and working_dir.exists():
+                    # Safety commit before error recovery — preserve any partial work
+                    self._git_ops.safety_commit(working_dir, f"WIP: auto-save before error recovery ({task.id})")
+
+                    # Capture git state before retry so next attempt knows what was written
                     try:
                         git_evidence = self._error_recovery.gather_git_evidence(working_dir)
                         if git_evidence:
