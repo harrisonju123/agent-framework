@@ -11,11 +11,13 @@ from agent_framework.core.chain_state import (
     ChainState,
     StepRecord,
     append_step,
+    build_workflow_summary,
     load_chain_state,
     save_chain_state,
     render_for_step,
     _build_step_summary,
     _find_step,
+    _iso_delta_seconds,
     _parse_shortstat,
     _render_tool_stats,
     _chain_state_path,
@@ -749,3 +751,314 @@ class TestImplementSummaryFallback:
         )
         result = render_for_step(state, "implement")
         assert len(result) <= CHAIN_STATE_MAX_PROMPT_CHARS + 50
+
+
+class TestStepRecordTiming:
+    def test_started_at_and_duration_defaults(self):
+        record = StepRecord(
+            step_id="plan", agent_id="architect", task_id="t1",
+            completed_at="2026-02-19T10:00:00+00:00", summary="test",
+        )
+        assert record.started_at is None
+        assert record.duration_seconds is None
+
+    def test_started_at_and_duration_roundtrip(self, workspace):
+        """started_at and duration_seconds survive save → load."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:05:00+00:00",
+                    summary="planned",
+                    started_at="2026-02-19T10:00:00+00:00",
+                    duration_seconds=300.0,
+                ),
+            ],
+        )
+        save_chain_state(workspace, state)
+        loaded = load_chain_state(workspace, "root-1")
+        assert loaded.steps[0].started_at == "2026-02-19T10:00:00+00:00"
+        assert loaded.steps[0].duration_seconds == 300.0
+
+    @patch("agent_framework.core.chain_state._collect_files_modified")
+    @patch("agent_framework.core.chain_state._collect_commit_shas")
+    def test_append_step_computes_duration(self, mock_shas, mock_files, workspace, sample_task):
+        """append_step computes duration_seconds from started_at → completed_at."""
+        mock_files.return_value = []
+        mock_shas.return_value = []
+
+        started = datetime(2026, 2, 19, 10, 0, 0, tzinfo=timezone.utc)
+        state = append_step(
+            workspace=workspace,
+            task=sample_task,
+            agent_id="engineer",
+            response_content="Done",
+            started_at=started,
+        )
+
+        record = state.steps[0]
+        assert record.started_at == started.isoformat()
+        assert record.duration_seconds is not None
+        assert record.duration_seconds > 0
+
+    @patch("agent_framework.core.chain_state._collect_files_modified")
+    @patch("agent_framework.core.chain_state._collect_commit_shas")
+    def test_append_step_none_started_at(self, mock_shas, mock_files, workspace, sample_task):
+        """When started_at is not provided, both timing fields are None."""
+        mock_files.return_value = []
+        mock_shas.return_value = []
+
+        state = append_step(
+            workspace=workspace,
+            task=sample_task,
+            agent_id="engineer",
+            response_content="Done",
+        )
+
+        record = state.steps[0]
+        assert record.started_at is None
+        assert record.duration_seconds is None
+
+
+class TestBuildWorkflowSummary:
+    def test_empty_chain(self):
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+        )
+        summary = build_workflow_summary(state)
+        assert summary["root_task_id"] == "root-1"
+        assert summary["outcome"] == "empty"
+        assert summary["steps"] == []
+        assert summary["total_lines_added"] == 0
+        assert summary["total_duration_seconds"] is None
+
+    def test_happy_path_five_steps(self):
+        """Full workflow chain → correct waterfall structure."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Add auth",
+            workflow="default",
+            attempt=1,
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    started_at="2026-02-19T10:00:00+00:00",
+                    completed_at="2026-02-19T10:00:27+00:00",
+                    duration_seconds=27.0,
+                    summary="planned",
+                    verdict="approved",
+                ),
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t2",
+                    started_at="2026-02-19T10:00:30+00:00",
+                    completed_at="2026-02-19T10:05:30+00:00",
+                    duration_seconds=300.0,
+                    summary="implemented",
+                    files_modified=["src/auth.py", "src/middleware.py"],
+                    lines_added=500, lines_removed=20,
+                ),
+                StepRecord(
+                    step_id="code_review", agent_id="architect", task_id="t3",
+                    started_at="2026-02-19T10:06:00+00:00",
+                    completed_at="2026-02-19T10:07:00+00:00",
+                    duration_seconds=60.0,
+                    summary="approved",
+                    verdict="approved",
+                ),
+                StepRecord(
+                    step_id="qa_review", agent_id="qa", task_id="t4",
+                    started_at="2026-02-19T10:07:30+00:00",
+                    completed_at="2026-02-19T10:09:30+00:00",
+                    duration_seconds=120.0,
+                    summary="tests pass",
+                    verdict="approved",
+                ),
+                StepRecord(
+                    step_id="create_pr", agent_id="qa", task_id="t5",
+                    started_at="2026-02-19T10:10:00+00:00",
+                    completed_at="2026-02-19T10:10:30+00:00",
+                    duration_seconds=30.0,
+                    summary="PR created",
+                ),
+            ],
+        )
+
+        summary = build_workflow_summary(state)
+
+        assert summary["root_task_id"] == "root-1"
+        assert summary["workflow"] == "default"
+        assert summary["attempt"] == 1
+        assert summary["outcome"] == "completed"
+        assert len(summary["steps"]) == 5
+        assert summary["total_lines_added"] == 500
+        assert summary["total_lines_removed"] == 20
+        assert summary["files_modified_count"] == 2
+        # Total duration: 10:00:00 → 10:10:30 = 630s
+        assert summary["total_duration_seconds"] == 630.0
+
+        # Spot-check individual steps
+        plan_step = summary["steps"][0]
+        assert plan_step["step_id"] == "plan"
+        assert plan_step["agent_id"] == "architect"
+        assert plan_step["duration_seconds"] == 27.0
+        assert plan_step["outcome"] == "completed"
+
+    def test_with_retry_both_steps_appear(self):
+        """Plan fails + retries → both steps in waterfall with distinct outcomes."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            attempt=2,
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    started_at="2026-02-19T10:00:00+00:00",
+                    completed_at="2026-02-19T10:00:27+00:00",
+                    duration_seconds=27.0,
+                    summary="plan failed",
+                    error="Context exhausted",
+                ),
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1-retry",
+                    started_at="2026-02-19T10:01:00+00:00",
+                    completed_at="2026-02-19T10:03:00+00:00",
+                    duration_seconds=120.0,
+                    summary="plan succeeded on retry",
+                    verdict="approved",
+                ),
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t2",
+                    started_at="2026-02-19T10:03:30+00:00",
+                    completed_at="2026-02-19T10:08:30+00:00",
+                    duration_seconds=300.0,
+                    summary="implemented",
+                    lines_added=200,
+                ),
+            ],
+        )
+
+        summary = build_workflow_summary(state)
+
+        assert len(summary["steps"]) == 3
+        assert summary["steps"][0]["outcome"] == "failed"
+        assert summary["steps"][1]["outcome"] == "completed"
+        assert summary["steps"][2]["outcome"] == "completed"
+        assert summary["attempt"] == 2
+        # Total: 10:00:00 → 10:08:30 = 510s
+        assert summary["total_duration_seconds"] == 510.0
+
+    def test_no_changes_verdict(self):
+        """Single plan step with no_changes → chain outcome reflects it."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    started_at="2026-02-19T10:00:00+00:00",
+                    completed_at="2026-02-19T10:00:15+00:00",
+                    duration_seconds=15.0,
+                    summary="no changes needed",
+                    verdict="no_changes",
+                ),
+            ],
+        )
+
+        summary = build_workflow_summary(state)
+
+        assert summary["outcome"] == "no_changes"
+        assert len(summary["steps"]) == 1
+        assert summary["steps"][0]["outcome"] == "completed"
+        assert summary["total_lines_added"] == 0
+
+    def test_rejected_step(self):
+        """Step with needs_fix verdict → step outcome is 'rejected'."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="code_review", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="issues found",
+                    verdict="needs_fix",
+                ),
+            ],
+        )
+
+        summary = build_workflow_summary(state)
+        assert summary["steps"][0]["outcome"] == "rejected"
+
+    def test_falls_back_to_completed_at_when_no_started_at(self):
+        """Total duration uses completed_at timestamps when started_at is absent."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="planned",
+                ),
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t2",
+                    completed_at="2026-02-19T10:05:00+00:00",
+                    summary="done",
+                    lines_added=100,
+                    files_modified=["a.py"],
+                ),
+            ],
+        )
+
+        summary = build_workflow_summary(state)
+        # Falls back to completed_at: 10:00:00 → 10:05:00 = 300s
+        assert summary["total_duration_seconds"] == 300.0
+        assert summary["files_modified_count"] == 1
+
+    def test_aggregates_files_across_steps(self):
+        """files_modified_count deduplicates across steps."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="first pass",
+                    files_modified=["a.py", "b.py"],
+                    lines_added=50,
+                ),
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t2",
+                    completed_at="2026-02-19T10:05:00+00:00",
+                    summary="fix pass",
+                    files_modified=["a.py", "c.py"],
+                    lines_added=30,
+                ),
+            ],
+        )
+
+        summary = build_workflow_summary(state)
+        assert summary["files_modified_count"] == 3  # a.py, b.py, c.py
+        assert summary["total_lines_added"] == 80
+
+
+class TestIsoDeltaSeconds:
+    def test_valid_timestamps(self):
+        assert _iso_delta_seconds("2026-02-19T10:00:00+00:00", "2026-02-19T10:05:00+00:00") == 300.0
+
+    def test_invalid_start(self):
+        assert _iso_delta_seconds("not-a-date", "2026-02-19T10:00:00+00:00") is None
+
+    def test_none_input(self):
+        assert _iso_delta_seconds(None, "2026-02-19T10:00:00+00:00") is None

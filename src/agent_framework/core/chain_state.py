@@ -44,7 +44,10 @@ class StepRecord:
     lines_added: int = 0                                # git diff insertions
     lines_removed: int = 0                               # git diff deletions
     tool_stats: Optional[Dict[str, Any]] = None       # quantitative tool usage stats
+    verdict_audit: Optional[Dict[str, Any]] = None  # audit trail for verdict determination
     error: Optional[str] = None       # if step failed
+    started_at: Optional[str] = None  # ISO timestamp (when agent began processing)
+    duration_seconds: Optional[float] = None  # computed: completed_at - started_at
 
 
 @dataclass
@@ -128,6 +131,7 @@ def append_step(
     response_content: str,
     working_dir: Optional[Path] = None,
     tool_stats: Optional[Dict[str, Any]] = None,
+    started_at: Optional[datetime] = None,
 ) -> ChainState:
     """Append a completed step record to the chain state.
 
@@ -178,11 +182,21 @@ def append_step(
     if structured and isinstance(structured, dict):
         findings = structured.get("findings")
 
+    completed_at = datetime.now(timezone.utc)
+
+    # Compute per-step duration when we know when the agent started
+    started_at_iso = started_at.isoformat() if started_at else None
+    duration = None
+    if started_at is not None:
+        # Ensure both are tz-aware for safe subtraction
+        sa = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+        duration = max(0.0, round((completed_at - sa).total_seconds(), 1))
+
     record = StepRecord(
         step_id=step_id,
         agent_id=agent_id,
         task_id=task.id,
-        completed_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=completed_at.isoformat(),
         summary=summary[:2048],
         verdict=task.context.get("verdict"),
         plan=plan_dict,
@@ -191,7 +205,10 @@ def append_step(
         lines_removed=lines_removed,
         commit_shas=commit_shas,
         findings=findings,
+        verdict_audit=task.context.get("verdict_audit"),
         tool_stats=tool_stats,
+        started_at=started_at_iso,
+        duration_seconds=duration,
     )
 
     state.steps.append(record)
@@ -199,6 +216,96 @@ def append_step(
     save_chain_state(workspace, state)
 
     return state
+
+
+def build_workflow_summary(state: ChainState) -> Dict[str, Any]:
+    """Build waterfall summary of the entire workflow chain.
+
+    Produces a single dict capturing per-step timing, outcomes, and aggregate
+    stats — designed for the workflow_summary session event that makes
+    optimization bottlenecks visible at a glance.
+    """
+    if not state.steps:
+        return {
+            "root_task_id": state.root_task_id,
+            "workflow": state.workflow,
+            "total_duration_seconds": None,
+            "attempt": state.attempt,
+            "outcome": "empty",
+            "steps": [],
+            "total_lines_added": 0,
+            "total_lines_removed": 0,
+            "files_modified_count": 0,
+        }
+
+    step_summaries = []
+    total_added = 0
+    total_removed = 0
+    all_files: set[str] = set()
+
+    for step in state.steps:
+        # Derive per-step outcome from structured data
+        if step.error:
+            outcome = "failed"
+        elif step.verdict == "needs_fix":
+            outcome = "rejected"
+        else:
+            outcome = "completed"
+
+        step_summaries.append({
+            "step_id": step.step_id,
+            "agent_id": step.agent_id,
+            "started_at": step.started_at,
+            "completed_at": step.completed_at,
+            "duration_seconds": step.duration_seconds,
+            "verdict": step.verdict,
+            "outcome": outcome,
+            "lines_added": step.lines_added,
+            "lines_removed": step.lines_removed,
+        })
+
+        total_added += step.lines_added
+        total_removed += step.lines_removed
+        all_files.update(step.files_modified)
+
+    # Total duration: first started_at to last completed_at.
+    # Falls back to completed_at timestamps when started_at is absent.
+    first_ts = state.steps[0].started_at or state.steps[0].completed_at
+    last_ts = state.steps[-1].completed_at
+    total_duration = _iso_delta_seconds(first_ts, last_ts)
+
+    # Overall chain outcome: last step's error/verdict drives it.
+    # Note: halted chains (ambiguous verdict, not at terminal step) don't
+    # reach _emit_workflow_summary, so "completed" here is safe.
+    last_step = state.steps[-1]
+    if last_step.error:
+        chain_outcome = "failed"
+    elif last_step.verdict == "no_changes":
+        chain_outcome = "no_changes"
+    else:
+        chain_outcome = "completed"
+
+    return {
+        "root_task_id": state.root_task_id,
+        "workflow": state.workflow,
+        "total_duration_seconds": total_duration,
+        "attempt": state.attempt,
+        "outcome": chain_outcome,
+        "steps": step_summaries,
+        "total_lines_added": total_added,
+        "total_lines_removed": total_removed,
+        "files_modified_count": len(all_files),
+    }
+
+
+def _iso_delta_seconds(start_iso: str, end_iso: str) -> Optional[float]:
+    """Compute seconds between two ISO timestamp strings. Returns None on parse failure."""
+    try:
+        start = datetime.fromisoformat(start_iso)
+        end = datetime.fromisoformat(end_iso)
+        return max(0.0, round((end - start).total_seconds(), 1))
+    except (ValueError, TypeError):
+        return None
 
 
 def _build_step_summary(task: "Task", response_content: str, step_id: str) -> str:

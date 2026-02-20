@@ -1525,6 +1525,12 @@ class Agent:
         _circuit_breaker_event = asyncio.Event()
         _diagnostic_trip = [False]  # tracks which trigger fired
         _exploration_alerted = [False]
+        # Resolve once — workflow_step is immutable during a session
+        _workflow_step = task.context.get("workflow_step")
+        _exploration_threshold = (
+            self._exploration_alert_thresholds.get(_workflow_step, self._exploration_alert_threshold)
+            if _workflow_step else self._exploration_alert_threshold
+        )
         _subagent_spawns: list[list[dict]] = [[]]
 
         def _emit_subagent_summary(outcome: str, orphan_risk: bool):
@@ -1621,35 +1627,29 @@ class Agent:
 
                 # Exploration metric: one-time alert when total calls exceed threshold
                 total = _tool_call_count[0]
-                if not _exploration_alerted[0]:
-                    workflow_step = task.context.get("workflow_step")
-                    effective_threshold = (
-                        self._exploration_alert_thresholds.get(workflow_step, self._exploration_alert_threshold)
-                        if workflow_step else self._exploration_alert_threshold
+                if total >= _exploration_threshold and not _exploration_alerted[0]:
+                    _exploration_alerted[0] = True
+                    self.logger.info(
+                        f"Exploration alert: {total} tool calls in session "
+                        f"(threshold={_exploration_threshold}, step={_workflow_step or 'standalone'})"
                     )
-                    if total >= effective_threshold:
-                        _exploration_alerted[0] = True
-                        self.logger.info(
-                            f"Exploration alert: {total} tool calls in session "
-                            f"(threshold={effective_threshold}, step={workflow_step or 'standalone'})"
-                        )
-                        self._session_logger.log(
-                            "exploration_alert",
-                            total_tool_calls=total,
-                            threshold=effective_threshold,
-                            workflow_step=workflow_step,
-                            agent_type=self.config.base_id,
-                        )
-                        self.activity_manager.append_event(ActivityEvent(
-                            type="exploration_alert",
-                            agent=self.config.id,
-                            task_id=task.id,
-                            title=(
-                                f"Exploration: {total} calls "
-                                f"(threshold={effective_threshold}, step={workflow_step or 'standalone'})"
-                            ),
-                            timestamp=datetime.now(timezone.utc),
-                        ))
+                    self._session_logger.log(
+                        "exploration_alert",
+                        total_tool_calls=total,
+                        threshold=_exploration_threshold,
+                        workflow_step=_workflow_step,
+                        agent_type=self.config.base_id,
+                    )
+                    self.activity_manager.append_event(ActivityEvent(
+                        type="exploration_alert",
+                        agent=self.config.id,
+                        task_id=task.id,
+                        title=(
+                            f"Exploration: {total} calls "
+                            f"(threshold={_exploration_threshold}, step={_workflow_step or 'standalone'})"
+                        ),
+                        timestamp=datetime.now(timezone.utc),
+                    ))
 
                 # Periodic checkpoint: commit + push so work survives worktree deletion
                 if (_tool_call_count[0] % _COMMIT_CHECKPOINT_INTERVAL == 0
@@ -1702,8 +1702,7 @@ class Agent:
             "When you read a file, read it ONCE in full — never chunk through the same "
             "file with repeated Read calls at different offsets. After one full read, "
             "the contents are in your context; use your conversation history to recall "
-            "them. Use Grep for targeted searches instead of reading files at all. "
-            "Do not delegate file exploration to subagents — explore directly.",
+            "them. Use Grep for targeted searches instead of reading files at all.",
         ]
         efficiency_parts.append(
             "COMMIT DISCIPLINE: After completing each major deliverable, immediately "
@@ -1716,6 +1715,11 @@ class Agent:
             "STOP. Do not attempt more diagnostic commands. Instead, report what went wrong "
             "and what you were trying to do."
         )
+        if self.config.id == "architect":
+            efficiency_parts.append(
+                "EXPLORATION: Do not delegate file exploration to subagents — "
+                "explore the codebase directly with Grep and Read."
+            )
         efficiency_directive = " ".join(efficiency_parts)
 
         # Compute routing signals for intelligent model selection
@@ -1841,7 +1845,7 @@ class Agent:
                 productive_ratio=round(productive_ratio, 2),
                 working_dir=wd_str,
                 working_dir_exists=wd_exists,
-                last_commands=commands[-5:],
+                last_commands=[c[:200] for c in commands[-5:]],
             )
 
             self.activity_manager.append_event(ActivityEvent(
@@ -2454,7 +2458,11 @@ class Agent:
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
 
-    def _save_step_to_chain_state(self, task: Task, response, *, working_dir: Optional[Path] = None, task_start_time: Optional[datetime] = None) -> None:
+    def _save_step_to_chain_state(
+        self, task: Task, response, *,
+        working_dir: Optional[Path] = None,
+        task_start_time: Optional[datetime] = None,
+    ) -> None:
         """Append a structured step record to the chain state file.
 
         Called AFTER plan extraction + verdict setting so all structured
@@ -2610,17 +2618,23 @@ class Agent:
                 cache_key = _to_relative_path(file_path, working_dir)
                 is_modified = cache_key in modified_in_step
                 if cache_key not in entries or is_modified:
+                    # Preserve original reader lineage when refreshing modified entries
+                    old_entry = entries.get(cache_key, {})
                     entry = {
                         "summary": summarize_file(file_path),
-                        "read_by": self.config.base_id,
-                        "read_at": now_iso,
-                        "workflow_step": step,
+                        "read_by": old_entry.get("read_by", self.config.base_id),
+                        "read_at": old_entry.get("read_at", now_iso),
+                        "workflow_step": old_entry.get("workflow_step", step),
                     }
                     if is_modified:
                         entry["modified_by"] = self.config.base_id
                         entry["modified_at"] = now_iso
                         refreshed += 1
                     else:
+                        # New entry -- attribute to current agent
+                        entry["read_by"] = self.config.base_id
+                        entry["read_at"] = now_iso
+                        entry["workflow_step"] = step
                         added += 1
                     entries[cache_key] = entry
 
@@ -2633,7 +2647,7 @@ class Agent:
                 modified_keys = {k for k, v in entries.items() if v.get("modified_by")}
                 justified = sorted(re_read & modified_keys)
                 wasteful = sorted(re_read - modified_keys)
-                wasteful_rate = len(wasteful) / len(pre_existing_keys) if pre_existing_keys else 0.0
+                wasteful_rate = len(wasteful) / len(pre_existing_keys)
                 self._session_logger.log(
                     "read_cache_bypass",
                     cached_files=len(pre_existing_keys),
@@ -2947,18 +2961,18 @@ class Agent:
             repo_slug = self._get_repo_slug(task)
             if repo_slug and self._code_index_query:
                 try:
-                    index = self._code_index_query._store.load(repo_slug)
-                    if index and index.language:
-                        from ..memory.tool_pattern_analyzer import detect_language_mismatches
-                        from dataclasses import asdict
+                    from ..memory.tool_pattern_analyzer import detect_language_mismatches
+                    from dataclasses import asdict
+                    project_language = self._code_index_query.get_project_language(repo_slug)
+                    if project_language:
                         if tool_calls is None:
                             tool_calls = analyzer.extract_tool_calls(session_path)
-                        mismatches = detect_language_mismatches(tool_calls, index.language)
+                        mismatches = detect_language_mismatches(tool_calls, project_language)
                         if mismatches:
                             self._session_logger.log(
                                 "language_mismatch",
                                 agent_id=self.config.id,
-                                project_language=index.language,
+                                project_language=project_language,
                                 repo=repo_slug,
                                 mismatch_count=len(mismatches),
                                 mismatches=[asdict(m) for m in mismatches],

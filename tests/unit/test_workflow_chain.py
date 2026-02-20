@@ -1152,6 +1152,156 @@ class TestDAGReviewCycleCap:
         assert target_queue == "engineer"
         assert chain_task.context["_dag_review_cycles"] == 1
 
+    def test_review_cycle_emits_event_on_increment(self, queue, tmp_path):
+        """First fix cycle emits review_cycle_check with count_before=0, count_after=1."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        session_logger = MagicMock()
+        executor = WorkflowExecutor(queue, queue.queue_dir, session_logger=session_logger)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="qa_review",
+            _dag_review_cycles=0,
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"engineer": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        session_logger.log.assert_called_once()
+        call_kwargs = session_logger.log.call_args
+        assert call_kwargs[0][0] == "review_cycle_check"
+        assert call_kwargs[1]["count_before"] == 0
+        assert call_kwargs[1]["count_after"] == 1
+        assert call_kwargs[1]["enforced"] is False
+        assert call_kwargs[1]["phase_reset"] is False
+
+    def test_review_cycle_emits_event_on_enforcement(self, queue, tmp_path):
+        """At cap, emits review_cycle_check with enforced=True."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        session_logger = MagicMock()
+        executor = WorkflowExecutor(queue, queue.queue_dir, session_logger=session_logger)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="qa_review",
+            _dag_review_cycles=1,
+            _chain_depth=4,
+            _root_task_id="root-1",
+            _global_cycle_count=4,
+            implementation_branch="feature/xyz",
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        workflow = MagicMock()
+        workflow.steps = {"engineer": engineer_step, "create_pr": pr_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        session_logger.log.assert_called_once()
+        call_kwargs = session_logger.log.call_args
+        assert call_kwargs[0][0] == "review_cycle_check"
+        assert call_kwargs[1]["count_before"] == 1
+        assert call_kwargs[1]["count_after"] == 2
+        assert call_kwargs[1]["enforced"] is True
+        assert call_kwargs[1]["target_step"] == "create_pr"
+
+    def test_no_event_without_logger(self, queue, tmp_path):
+        """No session_logger configured — no crash, no event."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="qa_review",
+            _dag_review_cycles=0,
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"engineer": engineer_step}
+
+        # Should not raise
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+        queue.push.assert_called_once()
+
+    def test_review_cycle_emits_event_on_phase_reset(self, queue, tmp_path):
+        """preview_review → implement emits phase_reset=True and resets counter."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        session_logger = MagicMock()
+        executor = WorkflowExecutor(queue, queue.queue_dir, session_logger=session_logger)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="preview_review",
+            _dag_review_cycles=1,
+            _chain_depth=2,
+            _root_task_id="root-1",
+            _global_cycle_count=2,
+        )
+
+        implement_step = WorkflowStep(id="implement", agent="engineer")
+        workflow = MagicMock()
+        workflow.steps = {"implement": implement_step}
+
+        executor._route_to_step(task, implement_step, workflow, "architect", None)
+
+        session_logger.log.assert_called_once()
+        call_kwargs = session_logger.log.call_args
+        assert call_kwargs[0][0] == "review_cycle_check"
+        assert call_kwargs[1]["phase_reset"] is True
+        assert call_kwargs[1]["count_before"] == 1
+        assert call_kwargs[1]["count_after"] == 0
+
+    def test_review_cycle_emits_halted_when_no_pr_step(self, queue, tmp_path):
+        """Cap hit without create_pr step emits halted=True and stops the chain."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+        from agent_framework.workflow.dag import WorkflowStep
+
+        session_logger = MagicMock()
+        executor = WorkflowExecutor(queue, queue.queue_dir, session_logger=session_logger)
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="qa_review",
+            _dag_review_cycles=1,
+            _chain_depth=4,
+            _root_task_id="root-1",
+            _global_cycle_count=4,
+        )
+
+        engineer_step = WorkflowStep(id="engineer", agent="engineer")
+        workflow = MagicMock()
+        # No create_pr step in workflow
+        workflow.steps = {"engineer": engineer_step}
+
+        executor._route_to_step(task, engineer_step, workflow, "qa", None)
+
+        # Chain halted — no task queued
+        queue.push.assert_not_called()
+        session_logger.log.assert_called_once()
+        call_kwargs = session_logger.log.call_args
+        assert call_kwargs[0][0] == "review_cycle_check"
+        assert call_kwargs[1]["halted"] is True
+        assert call_kwargs[1]["enforced"] is False
+
 
 # -- Fix 3: QA findings injected in chain task description --
 
@@ -2843,6 +2993,7 @@ class TestWorkingDirectoryValidation:
         a = Agent.__new__(Agent)
         a.config = config
         a.logger = MagicMock()
+        a._session_logger = MagicMock()
         a._git_ops = MagicMock()
         a._get_validated_working_directory = Agent._get_validated_working_directory.__get__(a)
         return a
@@ -2888,6 +3039,172 @@ class TestWorkingDirectoryValidation:
 
         assert validated_agent._git_ops.get_working_directory.call_count == 2
 
+
+# -- Workflow Summary Emission --
+
+class TestEmitWorkflowSummary:
+    """Tests for _emit_workflow_summary and its integration with _run_post_completion_flow."""
+
+    def _make_chain_state_file(self, workspace, root_task_id, steps):
+        """Write a chain state file to disk for load_chain_state to find."""
+        from agent_framework.core.chain_state import ChainState, save_chain_state
+
+        state = ChainState(
+            root_task_id=root_task_id,
+            user_goal="test goal",
+            workflow="default",
+            steps=steps,
+        )
+        save_chain_state(workspace, state)
+
+    def test_emit_workflow_summary_at_terminal_step(self, agent):
+        """At terminal workflow step, workflow_summary is logged to session and activity."""
+        from agent_framework.core.chain_state import StepRecord
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="create_pr",
+            chain_step=True,
+        )
+
+        self._make_chain_state_file(agent.workspace, task.root_id, [
+            StepRecord(
+                step_id="plan", agent_id="architect", task_id="t1",
+                started_at="2026-02-19T10:00:00+00:00",
+                completed_at="2026-02-19T10:01:00+00:00",
+                duration_seconds=60.0,
+                summary="planned",
+            ),
+            StepRecord(
+                step_id="create_pr", agent_id="qa", task_id="t2",
+                started_at="2026-02-19T10:02:00+00:00",
+                completed_at="2026-02-19T10:02:30+00:00",
+                duration_seconds=30.0,
+                summary="PR created",
+            ),
+        ])
+
+        agent._session_logging_enabled = True
+        agent.activity_manager = MagicMock()
+        agent._emit_workflow_summary(task)
+
+        # Session logger should have been called with workflow_summary
+        agent._session_logger.log.assert_called_once()
+        call_args = agent._session_logger.log.call_args
+        assert call_args[0][0] == "workflow_summary"
+        logged_data = call_args[1]
+        assert logged_data["root_task_id"] == task.root_id
+        assert logged_data["outcome"] == "completed"
+        assert len(logged_data["steps"]) == 2
+
+        # Activity stream should have the event
+        agent.activity_manager.append_event.assert_called_once()
+        event = agent.activity_manager.append_event.call_args[0][0]
+        assert event.type == "workflow_summary"
+
+    @staticmethod
+    def _prepare_for_post_completion(agent):
+        """Set attributes needed by _run_post_completion_flow beyond base fixture."""
+        agent._session_logging_enabled = True
+        agent.activity_manager = MagicMock()
+        agent._git_ops = MagicMock()
+        agent._budget = MagicMock()
+        agent._budget.estimate_cost.return_value = 0.0
+        agent._memory_enabled = False
+        agent._analyze_tool_patterns = MagicMock(return_value=0)
+        agent._log_task_completion_metrics = MagicMock()
+
+    def test_no_workflow_summary_when_chain_continues(self, agent):
+        """When not at terminal step, no summary is emitted in _run_post_completion_flow."""
+        task = _make_task(
+            workflow="default",
+            workflow_step="implement",
+            chain_step=True,
+        )
+
+        self._prepare_for_post_completion(agent)
+
+        response = _make_response()
+
+        agent._run_post_completion_flow(task, response, None, datetime.now(timezone.utc))
+
+        # Session logger should NOT have workflow_summary call
+        for call in agent._session_logger.log.call_args_list:
+            if call[0] and call[0][0] == "workflow_summary":
+                pytest.fail("workflow_summary should not be emitted at non-terminal step")
+
+    def test_emit_workflow_summary_on_no_changes(self, agent):
+        """skip_chain=True (no_changes verdict) still emits workflow summary."""
+        from agent_framework.core.chain_state import StepRecord
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            chain_step=True,
+            verdict="no_changes",
+        )
+
+        self._make_chain_state_file(agent.workspace, task.root_id, [
+            StepRecord(
+                step_id="plan", agent_id="architect", task_id="t1",
+                started_at="2026-02-19T10:00:00+00:00",
+                completed_at="2026-02-19T10:00:15+00:00",
+                duration_seconds=15.0,
+                summary="no changes needed",
+                verdict="no_changes",
+            ),
+        ])
+
+        self._prepare_for_post_completion(agent)
+
+        response = _make_response()
+
+        agent._run_post_completion_flow(task, response, None, datetime.now(timezone.utc))
+
+        # Should have workflow_summary in session logger calls
+        summary_calls = [
+            c for c in agent._session_logger.log.call_args_list
+            if c[0] and c[0][0] == "workflow_summary"
+        ]
+        assert len(summary_calls) == 1
+        assert summary_calls[0][1]["outcome"] == "no_changes"
+
+    def test_emit_workflow_summary_no_chain_state_is_noop(self, agent):
+        """When chain state file doesn't exist, emission is silently skipped."""
+        task = _make_task(workflow="default", workflow_step="create_pr")
+
+        agent._session_logging_enabled = True
+        agent.activity_manager = MagicMock()
+        agent._emit_workflow_summary(task)
+
+        # Nothing should be logged
+        agent._session_logger.log.assert_not_called()
+        agent.activity_manager.append_event.assert_not_called()
+
+    def test_emit_includes_pr_url_from_context(self, agent):
+        """PR URL from task context is included in the summary."""
+        from agent_framework.core.chain_state import StepRecord
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="create_pr",
+            pr_url="https://github.com/org/repo/pull/99",
+        )
+
+        self._make_chain_state_file(agent.workspace, task.root_id, [
+            StepRecord(
+                step_id="create_pr", agent_id="qa", task_id="t1",
+                completed_at="2026-02-19T10:00:00+00:00",
+                summary="PR created",
+            ),
+        ])
+
+        agent._session_logging_enabled = True
+        agent.activity_manager = MagicMock()
+        agent._emit_workflow_summary(task)
+
+        logged_data = agent._session_logger.log.call_args[1]
+        assert logged_data["pr_url"] == "https://github.com/org/repo/pull/99"
 
 class TestStripToolCallMarkers:
     """Module-level _strip_tool_call_markers strips CLI-injected noise."""

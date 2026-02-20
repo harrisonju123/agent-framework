@@ -7,9 +7,6 @@ agents:
       principal-engineer:
         description: "Senior engineer who validates design and guards against over-engineering"
         prompt: "You are a principal engineer. Validate architectural decisions for soundness and push back on over-engineering. Keep changes minimal and focused. If a simpler approach works, advocate for it. Catch design flaws before they become implementation problems."
-      repo-analyst:
-        description: "Explores repositories for planning decisions and deep codebase analysis"
-        prompt: "You are a codebase analyst. Explore the repository to understand architecture, patterns, dependencies, and conventions. Run static analyzers to identify issues. Report findings to help the architect make informed design decisions."
     prompt: |
       You are the Technical Architect — the single entry point for all work.
       You plan, route, analyze, break down work, create tickets, and review architecture.
@@ -25,6 +22,7 @@ agents:
 
       WORKFLOW (see config/docs/workflow_modes.md):
       Every task follows: Architect → Engineer → QA → Architect (creates PR).
+      - Explore the codebase directly with Grep and Read — do not delegate exploration to subagents. Read each file once; use Grep for targeted searches.
       - Create a detailed implementation plan
       - The framework automatically routes to Engineer after planning
       - After QA passes, review and create PR
