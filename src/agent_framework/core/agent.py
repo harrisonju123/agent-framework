@@ -2409,6 +2409,7 @@ class Agent:
                     existing = {}
 
             entries = existing.get("entries", {})
+            pre_existing_keys = set(entries.keys())
             step = task.context.get("workflow_step", "unknown")
             now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -2425,6 +2426,22 @@ class Agent:
                         "workflow_step": step,
                     }
                     added += 1
+
+            # Measure cache bypass rate at the storage layer (complements
+            # _measure_cache_effectiveness which measures from prompt-injected paths)
+            if pre_existing_keys:
+                read_keys = {_to_relative_path(fp, working_dir) for fp in file_reads}
+                re_read = sorted(read_keys & pre_existing_keys)
+                bypass_rate = len(re_read) / len(pre_existing_keys)
+                self._session_logger.log(
+                    "read_cache_bypass",
+                    cached_files=len(pre_existing_keys),
+                    re_read_count=len(re_read),
+                    bypass_rate=round(bypass_rate, 3),
+                    new_reads=added,
+                    total_reads=len(file_reads),
+                    re_read_files=re_read[:20],
+                )
 
             if added == 0:
                 return file_reads

@@ -856,3 +856,113 @@ class TestEfficiencyDirectiveNoMcpCacheLine:
         # The old block appended "Before reading any file, call get_cached_reads()"
         # to efficiency_parts — verify it's gone
         assert "get_cached_reads" not in source
+
+
+class TestReadCacheBypassMetric:
+    """Test bypass rate metric logged during _populate_read_cache."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        return tmp_path
+
+    @pytest.fixture
+    def agent(self, workspace):
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent.workspace = workspace
+        agent.config = MagicMock()
+        agent.config.base_id = "engineer"
+        agent.logger = MagicMock()
+        agent._session_logger = MagicMock()
+        agent._populate_read_cache = Agent._populate_read_cache.__get__(agent)
+        return agent
+
+    def _seed_cache(self, workspace, root_id, entries):
+        cache_dir = workspace / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / f"{root_id}.json"
+        cache_file.write_text(json.dumps({
+            "root_task_id": root_id,
+            "entries": entries,
+        }))
+
+    def _make_task(self, root_id="root1"):
+        return Task(
+            id=f"chain-{root_id}-impl-d0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Implement feature",
+            description="Do the thing",
+            context={
+                "_root_task_id": root_id,
+                "workflow_step": "implement",
+            },
+        )
+
+    def test_bypass_logged_on_cache_hit(self, agent, workspace):
+        """3 cached files, engineer re-reads 2 + reads 1 new → bypass_rate=0.667."""
+        self._seed_cache(workspace, "root1", {
+            "/src/a.py": {"summary": "A", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+            "/src/b.py": {"summary": "B", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+            "/src/c.py": {"summary": "C", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+        })
+        task = self._make_task()
+        agent._session_logger.extract_file_reads.return_value = [
+            "/src/a.py",  # re-read (cached)
+            "/src/b.py",  # re-read (cached)
+            "/src/new.py",  # new read
+        ]
+
+        agent._populate_read_cache(task)
+
+        # Find the read_cache_bypass log call
+        bypass_calls = [
+            c for c in agent._session_logger.log.call_args_list
+            if c[0][0] == "read_cache_bypass"
+        ]
+        assert len(bypass_calls) == 1
+        kwargs = bypass_calls[0][1]
+        assert kwargs["cached_files"] == 3
+        assert kwargs["re_read_count"] == 2
+        assert kwargs["bypass_rate"] == 0.667
+        assert kwargs["new_reads"] == 1
+
+    def test_bypass_not_logged_for_empty_cache(self, agent, workspace):
+        """No pre-existing cache → no read_cache_bypass event."""
+        task = self._make_task()
+        agent._session_logger.extract_file_reads.return_value = ["/src/a.py"]
+
+        agent._populate_read_cache(task)
+
+        bypass_calls = [
+            c for c in agent._session_logger.log.call_args_list
+            if c[0][0] == "read_cache_bypass"
+        ]
+        assert len(bypass_calls) == 0
+
+    def test_bypass_zero_when_only_new_reads(self, agent, workspace):
+        """2 cached files, engineer reads only 1 new file → bypass_rate=0.0."""
+        self._seed_cache(workspace, "root1", {
+            "/src/a.py": {"summary": "A", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+            "/src/b.py": {"summary": "B", "read_by": "architect", "read_at": "2026-02-20T00:00:00Z", "workflow_step": "plan"},
+        })
+        task = self._make_task()
+        agent._session_logger.extract_file_reads.return_value = ["/src/new.py"]
+
+        agent._populate_read_cache(task)
+
+        bypass_calls = [
+            c for c in agent._session_logger.log.call_args_list
+            if c[0][0] == "read_cache_bypass"
+        ]
+        assert len(bypass_calls) == 1
+        kwargs = bypass_calls[0][1]
+        assert kwargs["cached_files"] == 2
+        assert kwargs["re_read_count"] == 0
+        assert kwargs["bypass_rate"] == 0.0
+        assert kwargs["new_reads"] == 1

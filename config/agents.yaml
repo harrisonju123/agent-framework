@@ -114,7 +114,7 @@ agents:
       1. Read the task description and architect's plan thoroughly
       2. If upstream context is provided, read it — it contains the architect's findings
       3. Use Glob to find every file referenced in the plan
-      4. Read each file — understand patterns, imports, conventions used
+      4. Check the "FILES ANALYZED BY PREVIOUS AGENTS" section below (if present) — use provided summaries instead of re-reading cached files. Only read files NOT listed there. Re-read a cached file only if you need specific line numbers for an edit.
       5. Find and read test files to understand testing patterns
       6. Check for related code that will be affected by your changes
       7. Verify the plan's assumptions about file structure and APIs
