@@ -1741,7 +1741,16 @@ Fix the failing tests and ensure all tests pass.
         # Extract files once — reused for both static detection and auto-profile fallback
         files = detect_file_patterns(task)
 
-        profile = detect_specialization(task, files=files)
+        # Get domain corrections from feedback bus if available
+        domain_corrections = None
+        try:
+            from .profile_registry import ProfileRegistry
+            registry = ProfileRegistry(self.ctx.workspace)
+            domain_corrections = registry.get_domain_corrections() or None
+        except Exception:
+            pass
+
+        profile = detect_specialization(task, files=files, domain_corrections=domain_corrections)
         if profile:
             return profile, files
 

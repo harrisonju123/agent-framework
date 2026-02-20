@@ -36,6 +36,7 @@ from ..memory.memory_store import MemoryStore
 from ..memory.memory_retriever import MemoryRetriever
 from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer
 from ..memory.tool_pattern_store import ToolPatternStore
+from ..memory.feedback_bus import FeedbackBus
 from .session_logger import SessionLogger, noop_logger
 from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
@@ -335,6 +336,9 @@ class Agent:
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
         self._replan_model = replan_cfg.get("model", "haiku")
 
+        # Feedback bus: cross-feature learning loop (initialized fully after session logger)
+        self._feedback_bus: Optional[FeedbackBus] = None
+
     def _init_session_logging(self, session_logging_config):
         """Initialize session logging configuration."""
         sl_cfg = session_logging_config or {}
@@ -518,6 +522,17 @@ class Agent:
             multi_repo_manager=multi_repo_manager,
         )
 
+        # Cross-feature learning loop: connects feature outputs to feature inputs
+        if self._memory_enabled:
+            from .profile_registry import ProfileRegistry
+            profile_registry = ProfileRegistry(workspace)
+            self._feedback_bus = FeedbackBus(
+                memory_store=self._memory_store,
+                session_logger=self._session_logger,
+                profile_registry=profile_registry,
+            )
+            self._error_recovery.feedback_bus = self._feedback_bus
+
         # Review cycle management: QA → Engineer feedback loop
         self._review_cycle = ReviewCycleManager(
             config=config,
@@ -526,6 +541,7 @@ class Agent:
             agent_definition=agent_definition,
             session_logger=self._session_logger,
             activity_manager=self.activity_manager,
+            feedback_bus=self._feedback_bus,
         )
 
         # Prompt builder: extracted prompt construction logic
@@ -538,6 +554,7 @@ class Agent:
             agent_definition=agent_definition,
             optimization_config=self._optimization_config,
             memory_retriever=self._memory_retriever,
+            memory_store=self._memory_store,
             tool_pattern_store=self._tool_pattern_store,
             context_window_manager=None,  # Set per-task
             session_logger=None,  # Set per-task

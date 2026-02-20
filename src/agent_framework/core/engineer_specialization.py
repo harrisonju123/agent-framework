@@ -453,6 +453,7 @@ def match_patterns(files: List[str], patterns: List[str]) -> int:
 def detect_specialization(
     task: Task,
     files: Optional[List[str]] = None,
+    domain_corrections: Optional[Dict[str, float]] = None,
 ) -> Optional[SpecializationProfile]:
     """Detect the appropriate engineer specialization based on task file patterns.
 
@@ -462,6 +463,8 @@ def detect_specialization(
     Args:
         task: Task to analyze
         files: Pre-extracted file list. Extracted from task if not provided.
+        domain_corrections: Optional scoring adjustments from debate feedback.
+            Maps profile_id to a float adjustment (capped at ±0.1).
 
     Returns:
         SpecializationProfile if a clear match is found, None for generic engineer
@@ -495,16 +498,20 @@ def detect_specialization(
 
     # Score each specialization profile
     scores = []
+    corrections = domain_corrections or {}
     for profile in profiles:
         match_count = match_patterns(files, profile.file_patterns)
         if match_count > 0:
-            scores.append((match_count, profile))
+            # Apply domain correction from debate feedback (capped ±0.1 of total_files)
+            adjustment = corrections.get(profile.id, 0.0)
+            adjusted_score = match_count + (adjustment * len(files)) if adjustment else match_count
+            scores.append((adjusted_score, profile))
 
     if not scores:
         logger.debug("No profile matched any files")
         return None
 
-    # Sort by match count (descending)
+    # Sort by score (descending)
     scores.sort(reverse=True, key=lambda x: x[0])
 
     total_files = len(files)

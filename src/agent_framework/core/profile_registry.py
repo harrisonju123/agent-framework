@@ -196,6 +196,92 @@ class ProfileRegistry:
         self._save_entries(entries)
         logger.info("Stored generated profile '%s' (%d total)", entry.profile.id, len(entries))
 
+    # -- Domain feedback for cross-feature learning --
+
+    # Cap adjustment to prevent drift
+    _DOMAIN_MAX_ADJUSTMENT = 0.1
+    _DOMAIN_MIN_SIGNALS = 3
+
+    def record_domain_feedback(
+        self,
+        task_id: str,
+        detected_domain: str,
+        original_profile_id: str,
+    ) -> None:
+        """Record a domain mismatch signal from debate synthesis.
+
+        Stores correction history so future specialization scoring can
+        account for systematic mismatches.
+        """
+        feedback = self._load_domain_feedback()
+
+        key = f"{original_profile_id}->{detected_domain}"
+        if key not in feedback:
+            feedback[key] = {
+                "original": original_profile_id,
+                "detected": detected_domain,
+                "count": 0,
+                "task_ids": [],
+            }
+
+        feedback[key]["count"] += 1
+        # Keep recent task IDs for auditability (cap at 10)
+        task_ids = feedback[key]["task_ids"]
+        if task_id not in task_ids:
+            task_ids.append(task_id)
+            if len(task_ids) > 10:
+                feedback[key]["task_ids"] = task_ids[-10:]
+
+        self._save_domain_feedback(feedback)
+        logger.debug(
+            "Recorded domain feedback: %s -> %s (count=%d)",
+            original_profile_id, detected_domain, feedback[key]["count"],
+        )
+
+    def get_domain_corrections(self) -> Dict[str, float]:
+        """Get scoring adjustments from accumulated domain feedback.
+
+        Returns a dict of {profile_id: adjustment} where adjustment is
+        capped at ±0.1 and requires 3+ signals before any adjustment applies.
+        """
+        feedback = self._load_domain_feedback()
+        adjustments: Dict[str, float] = {}
+
+        for key, data in feedback.items():
+            if data["count"] < self._DOMAIN_MIN_SIGNALS:
+                continue
+
+            # Penalize the original profile that keeps being wrong
+            original = data["original"]
+            detected = data["detected"]
+
+            penalty = min(self._DOMAIN_MAX_ADJUSTMENT, data["count"] * 0.02)
+            adjustments[original] = adjustments.get(original, 0.0) - penalty
+            adjustments[detected] = adjustments.get(detected, 0.0) + penalty
+
+        # Clamp all adjustments
+        for k in adjustments:
+            adjustments[k] = max(-self._DOMAIN_MAX_ADJUSTMENT,
+                                 min(self._DOMAIN_MAX_ADJUSTMENT, adjustments[k]))
+
+        return adjustments
+
+    def _domain_feedback_path(self) -> Path:
+        return self._store_path.parent / "domain_feedback.json"
+
+    def _load_domain_feedback(self) -> Dict:
+        try:
+            return json.loads(self._domain_feedback_path().read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_domain_feedback(self, feedback: Dict) -> None:
+        from ..utils.atomic_io import atomic_write_json
+
+        path = self._domain_feedback_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, json.dumps(feedback, indent=2))
+
     def _load_entries(self) -> List[GeneratedProfileEntry]:
         """Load entries from disk. Returns empty list on any I/O or parse error."""
         try:
