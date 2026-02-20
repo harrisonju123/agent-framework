@@ -1474,7 +1474,6 @@ If a tool call fails:
             if attempt_context:
                 sections.append("")
                 sections.append(attempt_context)
-                has_progress = True
         except Exception:
             pass
 

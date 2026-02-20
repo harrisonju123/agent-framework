@@ -1230,10 +1230,6 @@ class Agent:
                 cost=cost,
             )
 
-        # Safety commit before retry — preserve any partial work
-        if working_dir and working_dir.exists():
-            self._git_ops.safety_commit(working_dir, f"WIP: auto-save before retry ({task.id})")
-
         await self._handle_failure(task)
 
     def _cleanup_task_execution(self, task: Task, lock) -> None:

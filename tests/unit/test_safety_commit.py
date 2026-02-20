@@ -410,9 +410,13 @@ class TestPostCompletionCommit:
 class TestInterruptionPathCommit:
 
     @pytest.mark.asyncio
-    async def test_commits_before_reset(self, checkpoint_agent, task, tmp_path):
-        """safety_commit is called in the interruption path before reset_to_pending."""
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_commits_before_reset(self, mock_record, checkpoint_agent, task, tmp_path):
+        """_finalize_failed_attempt is called in the interruption path before reset_to_pending."""
         a = checkpoint_agent
+        a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
+        a._extract_partial_progress = Agent._extract_partial_progress
+        a.workspace = tmp_path
 
         # Make the watcher return immediately (simulate interruption)
         async def _interrupt_now():
@@ -433,22 +437,24 @@ class TestInterruptionPathCommit:
         )
 
         assert result is None  # Interrupted
-        a._git_ops.safety_commit.assert_called_once()
-        assert "interruption" in a._git_ops.safety_commit.call_args[0][1]
+        # Work preservation now happens via record_attempt inside _finalize_failed_attempt
+        mock_record.assert_called_once()
 
 
 class TestFailurePathCommit:
 
     @pytest.mark.asyncio
-    async def test_commits_before_retry(self, tmp_path):
-        """safety_commit is called in _handle_failed_response before retry."""
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_commits_before_retry(self, mock_record, tmp_path):
+        """_finalize_failed_attempt is called in _handle_failed_response to preserve work."""
         a = MagicMock()
         a._handle_failed_response = Agent._handle_failed_response.__get__(a)
+        a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
+        a._extract_partial_progress = Agent._extract_partial_progress
+        a.workspace = tmp_path
         a._git_ops = MagicMock()
         a._git_ops.safety_commit.return_value = True
         a._error_recovery = MagicMock()
-        a._error_recovery.gather_git_evidence.return_value = None
-        a._extract_partial_progress = MagicMock(return_value=None)
         a._handle_failure = AsyncMock()
         a._budget = MagicMock()
         a._budget.estimate_cost.return_value = 0.0
@@ -475,8 +481,8 @@ class TestFailurePathCommit:
         # Use tmp_path (real dir) so .exists() returns True
         await a._handle_failed_response(t, resp, working_dir=tmp_path)
 
-        a._git_ops.safety_commit.assert_called_once()
-        assert "before retry" in a._git_ops.safety_commit.call_args[0][1]
+        # Work preservation now happens via record_attempt inside _finalize_failed_attempt
+        mock_record.assert_called_once()
 
 
 class TestCleanupPathCommit:
@@ -572,15 +578,18 @@ class TestExceptionHandlerCommit:
         a._handle_failure.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_commits_when_working_dir_exists(self, tmp_path):
-        """safety_commit IS called when exception fires after working_dir is set."""
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_commits_when_working_dir_exists(self, mock_record, tmp_path):
+        """_finalize_failed_attempt is called when exception fires after working_dir is set."""
         a = MagicMock()
         a._handle_task = Agent._handle_task.__get__(a)
+        a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
+        a._extract_partial_progress = Agent._extract_partial_progress
+        a.workspace = tmp_path
         a._git_ops = MagicMock()
         a._git_ops.safety_commit.return_value = True
         a._get_validated_working_directory = MagicMock(return_value=tmp_path)
         a._error_recovery = MagicMock()
-        a._error_recovery.gather_git_evidence.return_value = None
         a._handle_failure = AsyncMock()
         a._normalize_workflow = MagicMock()
         a._validate_task_or_reject = MagicMock(return_value=True)
@@ -607,5 +616,5 @@ class TestExceptionHandlerCommit:
 
         await a._handle_task(t, lock=MagicMock())
 
-        a._git_ops.safety_commit.assert_called_once()
-        assert "error recovery" in a._git_ops.safety_commit.call_args[0][1]
+        # Work preservation now happens via record_attempt inside _finalize_failed_attempt
+        mock_record.assert_called_once()

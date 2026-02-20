@@ -2,7 +2,8 @@
 
 import asyncio
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -75,6 +76,7 @@ class TestInterruptionPartialProgress:
         a._execute_llm_with_interruption_watch = (
             Agent._execute_llm_with_interruption_watch.__get__(a)
         )
+        a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
         a._extract_partial_progress = Agent._extract_partial_progress
         a._update_phase = MagicMock()
         a._session_logger = MagicMock()
@@ -85,13 +87,15 @@ class TestInterruptionPartialProgress:
         a._current_file_count = 0
         a.config = MagicMock()
         a.config.id = "test-agent"
+        a.workspace = Path("/tmp/test-workspace")
         a.logger = MagicMock()
         a.queue = MagicMock()
         a.activity_manager = MagicMock()
         return a
 
     @pytest.mark.asyncio
-    async def test_interruption_saves_partial_progress(self, agent, task):
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_interruption_saves_partial_progress(self, _mock_record, agent, task):
         """When interruption wins the race and LLM has partial output, it's preserved."""
         # Make the watcher finish immediately (simulating interruption)
         agent._watch_for_interruption = AsyncMock(return_value=None)
@@ -117,7 +121,8 @@ class TestInterruptionPartialProgress:
         assert "token validation" in task.context["_previous_attempt_summary"]
 
     @pytest.mark.asyncio
-    async def test_interruption_no_partial_output(self, agent, task):
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_interruption_no_partial_output(self, _mock_record, agent, task):
         """When interruption happens but no output was generated, no summary is saved."""
         agent._watch_for_interruption = AsyncMock(return_value=None)
 
@@ -138,7 +143,8 @@ class TestInterruptionPartialProgress:
         assert "_previous_attempt_summary" not in task.context
 
     @pytest.mark.asyncio
-    async def test_interruption_only_tool_calls_no_summary(self, agent, task):
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_interruption_only_tool_calls_no_summary(self, _mock_record, agent, task):
         """Partial output that's all tool-call noise produces no summary."""
         agent._watch_for_interruption = AsyncMock(return_value=None)
 

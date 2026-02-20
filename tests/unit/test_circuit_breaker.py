@@ -35,6 +35,7 @@ def agent():
     a._execute_llm_with_interruption_watch = (
         Agent._execute_llm_with_interruption_watch.__get__(a)
     )
+    a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
     a._auto_commit_wip = AsyncMock()
     a._update_phase = MagicMock()
     a._session_logger = MagicMock()
@@ -48,6 +49,7 @@ def agent():
     a._max_consecutive_diagnostic_calls = 5  # Diagnostic breaker threshold
     a.config = MagicMock()
     a.config.id = "test-agent"
+    a.workspace = Path("/tmp/test-workspace")
     a.logger = MagicMock()
     a.queue = MagicMock()
     a.activity_manager = MagicMock()
@@ -369,7 +371,8 @@ class TestCircuitBreakerPartialOutput:
     """Circuit breaker harvests partial LLM output before killing the session."""
 
     @pytest.mark.asyncio
-    async def test_captures_partial_output_on_trip(self, agent, task):
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_captures_partial_output_on_trip(self, _mock_record, agent, task):
         """Partial progress is stored in task context when circuit breaker fires."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
@@ -394,7 +397,8 @@ class TestCircuitBreakerPartialOutput:
         assert "auth" in summary.lower()
 
     @pytest.mark.asyncio
-    async def test_no_partial_output_leaves_context_empty(self, agent, task):
+    @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
+    async def test_no_partial_output_leaves_context_empty(self, _mock_record, agent, task):
         """Empty partial output does not populate _previous_attempt_summary."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
