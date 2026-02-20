@@ -48,6 +48,7 @@ def agent():
     a._max_consecutive_tool_calls = 5  # Low threshold for fast tests
     a._max_consecutive_diagnostic_calls = 5  # Diagnostic breaker threshold
     a._exploration_alert_threshold = 999  # Don't trigger in circuit breaker tests
+    a._exploration_alert_thresholds = {}
     a.config = MagicMock()
     a.config.id = "test-agent"
     a.workspace = Path("/tmp/test-workspace")
@@ -87,7 +88,7 @@ async def _setup_and_get_callback(agent, task):
 
     async def _run():
         return await agent._execute_llm_with_interruption_watch(
-            task, "implement auth", MagicMock(), None
+            task, "implement auth", agent.workspace, None
         )
 
     result_task = asyncio.create_task(_run())
@@ -232,7 +233,7 @@ class TestCircuitBreakerEvents:
 
     @pytest.mark.asyncio
     async def test_emits_activity_event(self, agent, task):
-        """Circuit breaker appends an ActivityEvent with diversity info."""
+        """Circuit breaker appends an ActivityEvent with diversity info and working_dir."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
         # Repeated commands for low diversity
@@ -251,7 +252,7 @@ class TestCircuitBreakerEvents:
 
     @pytest.mark.asyncio
     async def test_logs_to_session_logger(self, agent, task):
-        """Circuit breaker logs diversity metrics to session logger."""
+        """Circuit breaker logs diversity metrics and working_dir to session logger."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
         # Repeated commands for low diversity
@@ -265,10 +266,14 @@ class TestCircuitBreakerEvents:
             if c[0][0] == "circuit_breaker"
         ]
         assert len(log_calls) == 1
-        assert log_calls[0][1]["consecutive_bash"] == 5
-        assert log_calls[0][1]["threshold"] == 5
-        assert log_calls[0][1]["unique_commands"] == 1
-        assert log_calls[0][1]["diversity"] == 0.2
+        kwargs = log_calls[0][1]
+        assert kwargs["consecutive_bash"] == 5
+        assert kwargs["threshold"] == 5
+        assert kwargs["unique_commands"] == 1
+        assert kwargs["diversity"] == 0.2
+        assert kwargs["working_dir"] == str(agent.workspace)
+        assert kwargs["working_dir_exists"] is False  # /tmp/test-workspace doesn't exist
+        assert kwargs["last_commands"] == ["git status"] * 5
 
 
 class TestCircuitBreakerWipCommit:
@@ -680,6 +685,10 @@ class TestDiagnosticCircuitBreaker:
         assert log_calls[0][1]["trigger"] == "diagnostic"
         assert log_calls[0][1]["consecutive_diagnostic"] == 5
         assert log_calls[0][1]["threshold"] == 5  # diagnostic threshold, not volume
+        kwargs = log_calls[0][1]
+        assert kwargs["working_dir"] == str(agent.workspace)
+        assert kwargs["working_dir_exists"] is False
+        assert kwargs["last_commands"] == ["pwd"] * 5
 
     @pytest.mark.asyncio
     async def test_activity_event_title_contains_diagnostic(self, agent, task):
@@ -702,7 +711,7 @@ class TestDiagnosticCircuitBreaker:
         assert cfg.max_consecutive_diagnostic_calls == 5
 
 
-def _make_exploration_agent(threshold: int = 10):
+def _make_exploration_agent(threshold: int = 10, thresholds: dict | None = None):
     """Create a mock agent for exploration alert tests.
 
     Circuit breaker thresholds are set high so only the exploration alert is under test.
@@ -724,8 +733,10 @@ def _make_exploration_agent(threshold: int = 10):
     a._max_consecutive_tool_calls = 999
     a._max_consecutive_diagnostic_calls = 999
     a._exploration_alert_threshold = threshold
+    a._exploration_alert_thresholds = thresholds or {}
     a.config = MagicMock()
     a.config.id = "test-agent"
+    a.config.base_id = "engineer"
     a.workspace = Path("/tmp/test-workspace")
     a.logger = MagicMock()
     a.queue = MagicMock()
@@ -762,7 +773,8 @@ class TestExplorationAlert:
             if c[0][0].type == "exploration_alert"
         ]
         assert len(alert_events) == 1
-        assert "10 tool calls" in alert_events[0][0][0].title
+        assert "10 calls" in alert_events[0][0][0].title
+        assert "standalone" in alert_events[0][0][0].title
 
         result_task.cancel()
         try:
@@ -839,3 +851,218 @@ class TestExplorationAlert:
         from agent_framework.core.config import OptimizationConfig
         cfg = OptimizationConfig()
         assert cfg.exploration_alert_threshold == 50
+        assert cfg.exploration_alert_thresholds == {
+            "plan": 80,
+            "implement": 50,
+            "code_review": 40,
+            "qa_review": 40,
+            "create_pr": 25,
+        }
+
+    @pytest.mark.asyncio
+    async def test_plan_step_uses_plan_threshold(self):
+        """Plan step with threshold=80: 60 calls → no alert; 85 calls → alert."""
+        thresholds = {"plan": 80, "implement": 50}
+        task = Task(
+            id="test-plan-1",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="test-agent",
+            created_at=datetime.now(timezone.utc),
+            title="Plan task",
+            description="Plan",
+            context={"github_repo": "org/repo", "workflow_step": "plan"},
+        )
+        a = _make_exploration_agent(threshold=50, thresholds=thresholds)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        # 60 calls — below plan threshold of 80
+        for i in range(60):
+            on_tool("Read", f"file_{i}.py")
+        await asyncio.sleep(0.05)
+
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 0, "60 calls should not trigger plan threshold of 80"
+
+        # 25 more calls → 85 total, exceeds plan threshold
+        for i in range(25):
+            on_tool("Read", f"extra_{i}.py")
+        await asyncio.sleep(0.05)
+
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 1
+        assert alert_logs[0][1]["workflow_step"] == "plan"
+        assert alert_logs[0][1]["threshold"] == 80
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_implement_step_uses_implement_threshold(self):
+        """Implement step fires alert at implement threshold (50)."""
+        thresholds = {"plan": 80, "implement": 50}
+        task = Task(
+            id="test-impl-1",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="test-agent",
+            created_at=datetime.now(timezone.utc),
+            title="Implement task",
+            description="Implement",
+            context={"github_repo": "org/repo", "workflow_step": "implement"},
+        )
+        a = _make_exploration_agent(threshold=999, thresholds=thresholds)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(50):
+            on_tool("Read", f"file_{i}.py")
+        await asyncio.sleep(0.05)
+
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 1
+        assert alert_logs[0][1]["workflow_step"] == "implement"
+        assert alert_logs[0][1]["threshold"] == 50
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_standalone_task_uses_global_default(self):
+        """Task without workflow_step falls back to global scalar threshold."""
+        thresholds = {"plan": 80, "implement": 50}
+        task = Task(
+            id="test-standalone-1",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="test-agent",
+            created_at=datetime.now(timezone.utc),
+            title="Standalone task",
+            description="Standalone",
+            context={"github_repo": "org/repo"},
+        )
+        a = _make_exploration_agent(threshold=30, thresholds=thresholds)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(30):
+            on_tool("Read", f"file_{i}.py")
+        await asyncio.sleep(0.05)
+
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 1
+        assert alert_logs[0][1]["workflow_step"] is None
+        assert alert_logs[0][1]["threshold"] == 30
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_event_includes_workflow_step_and_agent_type(self):
+        """Alert events carry workflow_step and agent_type for analytics."""
+        thresholds = {"implement": 10}
+        task = Task(
+            id="test-enriched-1",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="test-agent",
+            created_at=datetime.now(timezone.utc),
+            title="Enriched event task",
+            description="Test enrichment",
+            context={"github_repo": "org/repo", "workflow_step": "implement"},
+        )
+        a = _make_exploration_agent(threshold=999, thresholds=thresholds)
+        a.config.base_id = "engineer"
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(10):
+            on_tool("Read", f"file_{i}.py")
+        await asyncio.sleep(0.05)
+
+        # Session log fields
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 1
+        assert alert_logs[0][1]["workflow_step"] == "implement"
+        assert alert_logs[0][1]["agent_type"] == "engineer"
+
+        # Activity event title
+        alert_events = [
+            c for c in a.activity_manager.append_event.call_args_list
+            if c[0][0].type == "exploration_alert"
+        ]
+        assert len(alert_events) == 1
+        assert "step=implement" in alert_events[0][0][0].title
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_unknown_step_falls_back_to_global(self):
+        """Workflow step not in thresholds dict falls back to scalar default."""
+        thresholds = {"plan": 80, "implement": 50}
+        task = Task(
+            id="test-unknown-1",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="test-agent",
+            created_at=datetime.now(timezone.utc),
+            title="Unknown step task",
+            description="Unknown step",
+            context={"github_repo": "org/repo", "workflow_step": "lint"},
+        )
+        # Global default=30, thresholds dict has no "lint" entry
+        a = _make_exploration_agent(threshold=30, thresholds=thresholds)
+        result_task, on_tool = await _setup_and_get_callback(a, task)
+
+        for i in range(30):
+            on_tool("Read", f"file_{i}.py")
+        await asyncio.sleep(0.05)
+
+        alert_logs = [
+            c for c in a._session_logger.log.call_args_list
+            if c[0][0] == "exploration_alert"
+        ]
+        assert len(alert_logs) == 1
+        assert alert_logs[0][1]["workflow_step"] == "lint"
+        assert alert_logs[0][1]["threshold"] == 30
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass

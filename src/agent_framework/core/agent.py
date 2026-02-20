@@ -654,7 +654,11 @@ class Agent:
         Ported from scripts/async-agent-runner.sh lines 254-407.
         """
         self._running = True
-        self.logger.info(f"🚀 Starting {self.config.id} runner")
+        self._startup_code_version = self._get_source_code_version()
+        self.logger.info(
+            f"🚀 Starting {self.config.id} runner "
+            f"(code version: {(self._startup_code_version or 'unknown')[:12]})"
+        )
 
         # Write initial IDLE state when agent starts
         from datetime import datetime
@@ -673,6 +677,10 @@ class Agent:
         while self._running:
             # Belt-and-suspenders: also write heartbeat at top of each iteration
             self._write_heartbeat()
+
+            # Hot-reload: pick up code changes between tasks
+            if self._should_hot_restart():
+                self._hot_restart()
 
             # Check for pause signal before processing tasks
             if self._check_pause_signal():
