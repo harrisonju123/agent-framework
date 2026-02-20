@@ -381,8 +381,17 @@ def _is_fix_cycle(state: ChainState, consumer_step: str) -> bool:
 def _render_for_implement(state: ChainState) -> str:
     """Render context for the engineer's implementation step."""
     plan_step = _find_step(state, "plan")
-    if not plan_step or not plan_step.plan:
-        # No structured plan — fall through to legacy upstream_summary
+    if not plan_step:
+        return ""
+    if not plan_step.plan:
+        # Plan extraction failed but chain state captured a text summary —
+        # render it rather than falling through to noisy upstream_summary
+        if plan_step.summary:
+            lines = ["\n## CHAIN STATE — IMPLEMENTATION CONTEXT\n"]
+            lines.append("### PLAN (from upstream agent)")
+            lines.append(plan_step.summary)
+            lines.append("")
+            return _truncate("\n".join(lines))
         return ""
 
     lines = ["\n## CHAIN STATE — IMPLEMENTATION CONTEXT\n"]

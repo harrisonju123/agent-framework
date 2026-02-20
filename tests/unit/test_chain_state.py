@@ -664,3 +664,88 @@ class TestQAToolStats:
         result = render_for_step(state, "qa_review")
         assert "TOOL USAGE" in result
         assert "30 calls" in result
+
+
+class TestImplementSummaryFallback:
+    """_render_for_implement falls back to plan_step.summary when plan is None."""
+
+    def test_summary_fallback_when_plan_is_none(self):
+        """Plan extraction failed but chain state has a text summary."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Add auth",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="Plan objectives: Add JWT auth; Create middleware\nFiles to modify: src/auth.py",
+                    plan=None,
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert "IMPLEMENTATION CONTEXT" in result
+        assert "PLAN (from upstream agent)" in result
+        assert "JWT auth" in result
+
+    def test_returns_empty_when_no_plan_and_no_summary(self):
+        """Both plan and summary are empty — fall through to legacy."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="",
+                    plan=None,
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert result == ""
+
+    def test_returns_empty_when_no_plan_step(self):
+        """No plan step at all — fall through to legacy."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="implement", agent_id="engineer", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="Implemented",
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert result == ""
+
+    def test_structured_plan_still_preferred(self, chain_state_with_steps):
+        """When plan dict exists, it's rendered instead of summary text."""
+        chain_state_with_steps.steps = chain_state_with_steps.steps[:1]
+        result = render_for_step(chain_state_with_steps, "implement")
+        # Structured plan renders objectives as bullets, not the summary text
+        assert "Add user authentication" in result
+        assert "PLAN (from upstream agent)" not in result
+
+    def test_summary_fallback_respects_truncation(self):
+        """Long summary fallback is truncated to budget."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="test",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="x" * (CHAIN_STATE_MAX_PROMPT_CHARS + 1000),
+                    plan=None,
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert len(result) <= CHAIN_STATE_MAX_PROMPT_CHARS + 50

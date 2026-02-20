@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.agent import Agent, AgentConfig, _strip_tool_call_markers
 from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.config import WorkflowDefinition
 from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
@@ -2887,3 +2887,91 @@ class TestWorkingDirectoryValidation:
             validated_agent._get_validated_working_directory(task)
 
         assert validated_agent._git_ops.get_working_directory.call_count == 2
+
+
+class TestStripToolCallMarkers:
+    """Module-level _strip_tool_call_markers strips CLI-injected noise."""
+
+    def test_removes_single_marker(self):
+        content = "Analysis complete.\n[Tool Call: Read]\nThe code looks good."
+        result = _strip_tool_call_markers(content)
+        assert "[Tool Call:" not in result
+        assert "Analysis complete." in result
+        assert "The code looks good." in result
+
+    def test_removes_multiple_markers(self):
+        content = (
+            "I'll analyze the codebase.\n"
+            "[Tool Call: Read]\n"
+            "Found the auth module.\n"
+            "[Tool Call: Bash]\n"
+            "Tests pass.\n"
+            "[Tool Call: Grep]\n"
+            "No issues found."
+        )
+        result = _strip_tool_call_markers(content)
+        assert result.count("[Tool Call:") == 0
+        assert "I'll analyze the codebase." in result
+        assert "No issues found." in result
+
+    def test_compresses_triple_newlines(self):
+        content = "Line 1.\n[Tool Call: Read]\n\n\nLine 2."
+        result = _strip_tool_call_markers(content)
+        assert "\n\n\n" not in result
+
+    def test_empty_string(self):
+        assert _strip_tool_call_markers("") == ""
+
+    def test_none_treated_as_empty(self):
+        assert _strip_tool_call_markers(None) == ""
+
+    def test_no_markers_passthrough(self):
+        content = "Clean content with no markers."
+        assert _strip_tool_call_markers(content) == content
+
+    def test_marker_with_nested_brackets(self):
+        content = "Before\n[Tool Call: Read (src/auth.py)]\nAfter"
+        result = _strip_tool_call_markers(content)
+        assert "[Tool Call:" not in result
+        assert "Before" in result
+        assert "After" in result
+
+    def test_strips_leading_trailing_whitespace(self):
+        content = "\n[Tool Call: Read]\nActual content.\n[Tool Call: Bash]\n"
+        result = _strip_tool_call_markers(content)
+        assert result == "Actual content."
+
+
+class TestUpstreamContextFiltering:
+    """_save_upstream_context strips tool call markers before storing."""
+
+    @pytest.fixture
+    def ctx_agent(self, queue, tmp_path):
+        config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.workspace = tmp_path
+        a.logger = MagicMock()
+        a.UPSTREAM_CONTEXT_MAX_CHARS = 15000
+        a.UPSTREAM_INLINE_MAX_CHARS = 15000
+        a._save_upstream_context = Agent._save_upstream_context.__get__(a)
+        return a
+
+    def test_markers_stripped_from_file(self, ctx_agent, tmp_path):
+        task = _make_task(workflow="default")
+        response = _make_response(
+            content="Plan:\n[Tool Call: Read]\nStep 1: Add auth.\n[Tool Call: Bash]\nStep 2: Test."
+        )
+        ctx_agent._save_upstream_context(task, response)
+
+        saved = task.context["upstream_summary"]
+        assert "[Tool Call:" not in saved
+        assert "Step 1: Add auth." in saved
+        assert "Step 2: Test." in saved
+
+    def test_markers_stripped_from_inline_summary(self, ctx_agent, tmp_path):
+        task = _make_task(workflow="default")
+        response = _make_response(content="Good.\n[Tool Call: Read]\nDone.")
+        ctx_agent._save_upstream_context(task, response)
+
+        assert "[Tool Call:" not in task.context["upstream_summary"]

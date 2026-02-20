@@ -85,6 +85,20 @@ _PRODUCTIVE_PREFIXES = frozenset({
 _PRODUCTIVE_THRESHOLD_MULTIPLIER = 3
 _PRODUCTIVE_RATIO_THRESHOLD = 0.7
 
+# Matches synthetic [Tool Call: Read], [Tool Call: Bash] etc. markers injected
+# by the Claude CLI backend into response.content for logging visibility.
+# Harmless in session logs but pure noise for downstream agents reading upstream_summary.
+_TOOL_CALL_MARKER_RE = re.compile(r'\n?\[Tool Call: [^\]]+\]\n?')
+
+
+def _strip_tool_call_markers(content: str) -> str:
+    """Remove [Tool Call: ...] markers and compress resulting whitespace."""
+    if not content:
+        return ""
+    cleaned = _TOOL_CALL_MARKER_RE.sub('\n', content)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
+
 # Diagnostic commands: environment-probing commands that indicate the agent is
 # stuck (usually after its working directory is deleted). 5+ consecutive
 # diagnostic commands trips a dedicated circuit breaker that the diversity
@@ -2251,7 +2265,7 @@ class Agent:
             summaries_dir = self.workspace / ".agent-context" / "summaries"
             summaries_dir.mkdir(parents=True, exist_ok=True)
 
-            content = response.content or ""
+            content = _strip_tool_call_markers(response.content or "")
             if len(content) > self.UPSTREAM_CONTEXT_MAX_CHARS:
                 content = content[:self.UPSTREAM_CONTEXT_MAX_CHARS] + "\n\n[truncated]"
 
