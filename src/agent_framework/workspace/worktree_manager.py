@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 REGISTRY_FILENAME = ".worktree-registry.json"
 
 # Default limits
-DEFAULT_MAX_WORKTREES = 20
+DEFAULT_MAX_WORKTREES = 200
 DEFAULT_MAX_AGE_HOURS = 24
 
 # Active worktrees older than this are considered stale (crashed agent) and eligible for eviction
@@ -69,7 +69,7 @@ class WorktreeConfig:
     """Configuration for worktree management."""
     enabled: bool = False
     root: Path = field(default_factory=lambda: Path("~/.agent-workspaces/worktrees"))
-    cleanup_on_complete: bool = True
+    cleanup_on_complete: bool = False
     cleanup_on_failure: bool = False
     max_age_hours: int = DEFAULT_MAX_AGE_HOURS
     max_worktrees: int = DEFAULT_MAX_WORKTREES
@@ -280,20 +280,18 @@ class WorktreeManager:
                     self._save_registry()
                     return worktree_path
 
-                # Switch failed — remove and recreate
-                logger.warning(
-                    f"Branch switch failed, removing worktree for fresh creation: {worktree_path}"
+                # Switch failed — raise instead of deleting to avoid
+                # destroying work in active worktrees
+                raise RuntimeError(
+                    f"Cannot switch worktree branch at {worktree_path} "
+                    f"from {existing_branch} to {branch_name}"
                 )
-                if not self._remove_worktree_directory(worktree_path, base_repo, force=True):
-                    raise RuntimeError(
-                        f"Cannot switch branch and cannot remove worktree: {worktree_path}"
-                    )
-                del self._registry[worktree_key]
-                self._save_registry()
             else:
-                # Orphaned worktree, remove it first
-                logger.warning(f"Removing orphaned worktree: {worktree_path}")
-                self._remove_worktree_directory(worktree_path, base_repo)
+                # Orphaned worktree blocks path — raise instead of deleting
+                raise RuntimeError(
+                    f"Orphaned worktree blocks path: {worktree_path}. "
+                    f"Run `agent cleanup-worktrees` to remove stale worktrees."
+                )
 
         # Ensure parent directory exists
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
@@ -608,208 +606,63 @@ class WorktreeManager:
         self,
         protected_agent_ids: Optional[Set[str]] = None,
     ) -> Dict[str, int]:
-        """
-        Remove stale worktrees older than max_age.
+        """Prune stale registry entries whose paths no longer exist on disk.
+
+        No physical worktree deletion — worktrees are only removed via the
+        explicit CLI command `agent cleanup-worktrees`. This prevents race
+        conditions where active worktrees get deleted while agents use them.
 
         Args:
-            protected_agent_ids: Agent IDs with active work — their worktrees
-                are never evicted regardless of age or staleness.
+            protected_agent_ids: Unused, kept for API compatibility.
 
         Returns:
-            Dict with counts: {"registered": N, "unregistered": M, "total": N+M}
+            Dict with counts: {"registered": N, "unregistered": 0, "total": N}
         """
-        # Reload so we see worktrees registered by other agent processes
         self._load_registry()
 
-        registered_removed = 0
-        now = datetime.now(timezone.utc)
-        max_age_seconds = self.config.max_age_hours * 3600
-
+        pruned = 0
         keys_to_remove = []
         for key, info in self._registry.items():
-            try:
-                age_seconds = self._worktree_age_seconds(info)
+            path = Path(info.path)
+            if not path.exists():
+                keys_to_remove.append(key)
+                pruned += 1
+                logger.debug(f"Pruned stale registry entry (path gone): {key}")
 
-                # Never delete worktrees younger than MIN_WORKTREE_AGE_SECONDS
-                # regardless of active/inactive state — guards against race
-                # conditions where a worktree is incorrectly marked inactive
-                if age_seconds < MIN_WORKTREE_AGE_SECONDS:
-                    continue
-
-                if age_seconds > max_age_seconds:
-                    # Don't evict worktrees actively in use (unless stale)
-                    if info.active and not self._is_stale_active(info):
-                        continue
-
-                    path = Path(info.path)
-                    base_repo = Path(info.base_repo) if info.base_repo else None
-
-                    # Worktree path gone — always purge stale registry entry
-                    if not path.exists():
-                        keys_to_remove.append(key)
-                        registered_removed += 1
-                        logger.debug(f"Purged stale worktree from registry: {key}")
-                        continue
-
-                    # Never evict worktrees belonging to agents with active work
-                    if protected_agent_ids and info.agent_id in protected_agent_ids:
-                        continue
-
-                    # Don't destroy worktrees with uncommitted or unpushed work
-                    if self.has_uncommitted_changes(path) or self.has_unpushed_commits(path):
-                        logger.warning(
-                            f"Skipping stale worktree with unsaved work: {path}"
-                        )
-                        continue
-
-                    if self._remove_worktree_directory(path, base_repo, force=False):
-                        keys_to_remove.append(key)
-                        registered_removed += 1
-                        logger.info(f"Cleaned up stale registered worktree: {path} (age: {age_seconds/3600:.1f}h)")
-            except (ValueError, OSError) as e:
-                logger.warning(f"Error processing worktree {key}: {e}")
-
-        # Remove from registry
         for key in keys_to_remove:
             del self._registry[key]
 
-        if registered_removed:
+        if pruned:
             self._save_registry()
 
-        # Also clean up worktrees not in registry
-        unregistered_removed = self._cleanup_unregistered_worktrees(protected_agent_ids)
-
-        if unregistered_removed:
-            logger.info(f"Cleaned up {unregistered_removed} unregistered worktrees")
-
         return {
-            "registered": registered_removed,
-            "unregistered": unregistered_removed,
-            "total": registered_removed + unregistered_removed,
+            "registered": pruned,
+            "unregistered": 0,
+            "total": pruned,
         }
 
     def _cleanup_unregistered_worktrees(
         self,
         protected_agent_ids: Optional[Set[str]] = None,
     ) -> int:
-        """Clean up worktrees that exist on disk but not in registry.
+        """No-op. Automatic worktree deletion is disabled.
 
-        When protected_agent_ids is set, skip any unregistered worktree whose
-        directory name starts with a protected agent ID prefix (conservative —
-        we can't know the agent_id without a registry entry).
+        Worktrees are only cleaned up via the explicit CLI command
+        `agent cleanup-worktrees`.
         """
-        removed = 0
-
-        # Check if root exists and is accessible
-        if not self.config.root.exists():
-            return 0
-
-        try:
-            registered_paths = {Path(info.path).resolve() for info in self._registry.values()}
-
-            # Walk worktree root looking for .git files (worktree marker)
-            for owner_dir in self.config.root.iterdir():
-                if not owner_dir.is_dir() or owner_dir.name.startswith('.'):
-                    continue
-                try:
-                    for repo_dir in owner_dir.iterdir():
-                        if not repo_dir.is_dir():
-                            continue
-                        try:
-                            for worktree_dir in repo_dir.iterdir():
-                                if not worktree_dir.is_dir():
-                                    continue
-                                git_marker = worktree_dir / ".git"
-                                if git_marker.exists() and worktree_dir.resolve() not in registered_paths:
-                                    # Don't delete recently created worktrees — races with
-                                    # worktree creation where the registry write hasn't propagated yet
-                                    try:
-                                        dir_age = time.time() - worktree_dir.stat().st_mtime
-                                        if dir_age < 3600:  # 1 hour
-                                            logger.debug(f"Skipping young unregistered worktree ({dir_age:.0f}s old): {worktree_dir}")
-                                            continue
-                                    except OSError:
-                                        continue
-
-                                    # Skip if dir name matches a protected agent
-                                    # Worktree dirs are "{agent_id}-{ticket_key}", so match with trailing hyphen
-                                    if protected_agent_ids and any(
-                                        worktree_dir.name.startswith(aid + "-")
-                                        for aid in protected_agent_ids
-                                    ):
-                                        logger.debug(
-                                            f"Skipping unregistered worktree owned by protected agent: {worktree_dir}"
-                                        )
-                                        continue
-
-                                    # Don't destroy worktrees with uncommitted or unpushed work
-                                    if self.has_uncommitted_changes(worktree_dir) or self.has_unpushed_commits(worktree_dir):
-                                        logger.warning(
-                                            f"Skipping unregistered worktree with unsaved work: {worktree_dir}"
-                                        )
-                                        continue
-
-                                    base_repo = self._find_base_repo(worktree_dir)
-                                    if self._remove_worktree_directory(worktree_dir, base_repo, force=False):
-                                        removed += 1
-                                        logger.debug(f"Removed unregistered worktree: {worktree_dir}")
-                        except PermissionError as e:
-                            logger.warning(f"Permission denied accessing {repo_dir}: {e}")
-                except PermissionError as e:
-                    logger.warning(f"Permission denied accessing {owner_dir}: {e}")
-        except PermissionError as e:
-            logger.warning(f"Permission denied accessing worktree root {self.config.root}: {e}")
-        except OSError as e:
-            logger.error(f"Error cleaning unregistered worktrees: {e}")
-
-        return removed
+        return 0
 
     def _enforce_capacity_limit(
         self,
         protected_agent_ids: Optional[Set[str]] = None,
     ) -> None:
-        """Remove oldest worktrees if over capacity, skipping active ones."""
-        # Reload from disk so we see active flags set by other agent processes
-        self._load_registry()
+        """No-op. Automatic worktree deletion is disabled.
 
-        if len(self._registry) < self.config.max_worktrees:
-            return
-
-        # When caller doesn't specify protected agents (e.g. create_worktree),
-        # derive from registry so active agents aren't evicted by capacity limits
-        if protected_agent_ids is None:
-            protected_agent_ids = {
-                info.agent_id
-                for info in self._registry.values()
-                if info.active and not self._is_stale_active(info)
-            }
-
-        # Only consider inactive or stale-active worktrees for eviction,
-        # and never evict worktrees belonging to agents with active work
-        # or younger than MIN_WORKTREE_AGE_SECONDS
-        evictable = [
-            (key, info) for key, info in self._registry.items()
-            if (not info.active or self._is_stale_active(info))
-            and not (protected_agent_ids and info.agent_id in protected_agent_ids)
-            and self._worktree_age_seconds(info) > MIN_WORKTREE_AGE_SECONDS
-        ]
-
-        # Sort by last_accessed (oldest first)
-        evictable.sort(key=lambda x: x[1].last_accessed)
-
-        # Remove oldest until under limit
-        to_remove = len(self._registry) - self.config.max_worktrees + 1
-        removed = 0
-        for key, info in evictable[:to_remove]:
-            path = Path(info.path)
-            base_repo = Path(info.base_repo) if info.base_repo else None
-            if self._remove_worktree_directory(path, base_repo, force=True):
-                del self._registry[key]
-                logger.info(f"Removed oldest worktree (LRU): {path}")
-                removed += 1
-
-        if removed:
-            self._save_registry()
+        Worktrees are only cleaned up via the explicit CLI command
+        `agent cleanup-worktrees`. This prevents race conditions where
+        active worktrees get deleted while agents are still using them.
+        """
+        return
 
     def mark_worktree_inactive(self, path: Path) -> None:
         """Mark a worktree as no longer actively used by an agent.

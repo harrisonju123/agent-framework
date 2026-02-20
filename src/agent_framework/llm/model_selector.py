@@ -1,6 +1,11 @@
 """Model selection logic ported from Bash system."""
 
+import logging
+from typing import Optional
+
 from ..core.task import TaskType
+
+logger = logging.getLogger(__name__)
 
 
 class ModelSelector:
@@ -8,6 +13,7 @@ class ModelSelector:
     Model selection based on task type and retry count.
 
     Ported from scripts/async-agent-runner.sh lines 301-337.
+    Supports optional delegation to IntelligentRouter for multi-signal scoring.
     """
 
     def __init__(
@@ -26,17 +32,31 @@ class ModelSelector:
         self.timeout_bounded = timeout_bounded
         self.timeout_simple = timeout_simple
 
+    # Map tier names to model identifiers for intelligent router output
+    @property
+    def _tier_to_model(self):
+        return {
+            "haiku": self.cheap_model,
+            "sonnet": self.default_model,
+            "opus": self.premium_model,
+        }
+
     def select(
         self,
         task_type: TaskType,
         retry_count: int = 0,
         specialization_profile: str = None,
         file_count: int = 0,
+        intelligent_router: Optional[object] = None,
+        routing_signals: Optional[object] = None,
     ) -> str:
         """
         Select model based on task type, retry count, and specialization.
 
-        Routing priority:
+        When intelligent_router and routing_signals are provided, delegates to
+        the multi-signal scoring engine. Falls back to static logic on any error.
+
+        Routing priority (static fallback):
         1. retry_count >= 3 → premium (task is difficult)
         2. task_type in premium_types → premium (fixed premium tasks)
         3. (IMPLEMENTATION|ENHANCEMENT) + frontend + file_count <= 5 → cheap
@@ -52,7 +72,24 @@ class ModelSelector:
             specialization_profile: Specialization ID (backend, frontend, infrastructure, or
                 auto-generated IDs like "grpc")
             file_count: Number of files involved in the task
+            intelligent_router: Optional IntelligentRouter instance
+            routing_signals: Optional RoutingSignals for the intelligent router
         """
+        # Intelligent routing delegation (when enabled)
+        if intelligent_router is not None and routing_signals is not None:
+            try:
+                decision = intelligent_router.select(routing_signals)
+                model = self._tier_to_model.get(decision.chosen_tier, self.default_model)
+                logger.debug(
+                    f"Intelligent routing: tier={decision.chosen_tier}, model={model}, "
+                    f"scores={decision.scores}"
+                )
+                # Stash decision for caller to log — avoids coupling router to session logger
+                self._last_routing_decision = decision
+                return model
+            except Exception as e:
+                logger.warning(f"Intelligent router failed, falling back to static routing: {e}")
+
         # Priority 1: Escalate to stronger model if task keeps failing
         if retry_count >= 3:
             return self.premium_model

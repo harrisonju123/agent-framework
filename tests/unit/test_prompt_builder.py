@@ -498,6 +498,74 @@ class TestPromptInjections:
         assert "+def auth():" in result
         assert "Continue from the progress above" in result
 
+    def test_inject_retry_context_with_branch_work(self, prompt_builder, sample_task):
+        """Branch work from previous attempts is injected into retry context."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Circuit breaker tripped"
+        sample_task.context["_previous_attempt_branch_work"] = {
+            "commit_count": 3,
+            "insertions": 420,
+            "deletions": 15,
+            "commit_log": "abc1234 Add auth module\ndef5678 Add tests\nghi9012 Fix imports",
+            "file_list": ["src/auth.py", "src/test_auth.py", "src/utils.py"],
+            "diffstat": " src/auth.py | 200 +++\n src/test_auth.py | 180 +++\n src/utils.py | 55 +++\n",
+        }
+
+        result = prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        assert "Existing Code on Your Branch" in result
+        assert "3 commit(s)" in result
+        assert "420 insertions(+)" in result
+        assert "15 deletions(-)" in result
+        assert "Do NOT rewrite files" in result
+        assert "abc1234" in result
+        assert "src/auth.py" in result
+        assert "git diff origin/main..HEAD" in result
+
+    def test_inject_retry_context_branch_work_replaces_no_progress_fallback(
+        self, prompt_builder, sample_task
+    ):
+        """Branch work counts as progress — 'could not be captured' fallback should not appear."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Some error"
+        sample_task.context["_previous_attempt_branch_work"] = {
+            "commit_count": 1,
+            "insertions": 100,
+            "deletions": 0,
+            "commit_log": "abc1234 Initial implementation",
+            "file_list": ["src/main.py"],
+            "diffstat": " src/main.py | 100 +++\n",
+        }
+        # No _previous_attempt_summary or _previous_attempt_git_diff
+
+        result = prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        assert "progress could not be captured" not in result
+        assert "Existing Code on Your Branch" in result
+
+    def test_inject_retry_context_branch_work_coexists_with_git_diff(
+        self, prompt_builder, sample_task
+    ):
+        """Both branch work and git diff appear when both are present."""
+        sample_task.retry_count = 1
+        sample_task.last_error = "Some error"
+        sample_task.context["_previous_attempt_git_diff"] = "## Git Diff\n```\n+def new_func():\n```"
+        sample_task.context["_previous_attempt_branch_work"] = {
+            "commit_count": 2,
+            "insertions": 200,
+            "deletions": 10,
+            "commit_log": "abc1234 Feature\ndef5678 Tests",
+            "file_list": ["src/feature.py"],
+            "diffstat": " src/feature.py | 200 +++\n",
+        }
+
+        result = prompt_builder._inject_retry_context("Base prompt", sample_task)
+
+        assert "Code Changes From Previous Attempt" in result
+        assert "Existing Code on Your Branch" in result
+        assert "+def new_func():" in result
+        assert "abc1234" in result
+
 
 class TestStructuredFindings:
     """Test structured QA findings formatting for engineer prompts."""

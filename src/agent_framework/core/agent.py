@@ -43,7 +43,6 @@ from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
 from ..workflow.executor import PREVIEW_REVIEW_STEPS
 
-_WORKTREE_CLEANUP_INTERVAL_SECONDS = 2 * 3600  # 2 hours
 
 # Optional sandbox imports (only used if Docker is available)
 try:
@@ -67,6 +66,30 @@ SUMMARY_MAX_LENGTH = 500
 _CONVERSATIONAL_PREFIXES = ("i ", "i'", "thank", "sure", "certainly", "of course", "let me")
 BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
 _MAX_REPO_CACHE_ENTRIES = 200
+
+# Circuit breaker: commands that indicate productive work (test/build/lint/git)
+# rather than stuck-agent flailing (ls, pwd, echo). When most commands are
+# productive, we use a higher threshold to avoid killing legitimate workflows.
+_PRODUCTIVE_PREFIXES = frozenset({
+    "pytest", "python -m pytest", "python -m unittest",
+    "pip", "pip3", "uv ",
+    "npm", "yarn", "pnpm", "bun ",
+    "make", "cmake",
+    "cargo", "go test", "go build", "go vet",
+    "mvn", "gradle",
+    "docker", "docker-compose",
+    "bandit", "pylint", "mypy", "ruff", "flake8", "black", "isort", "tox",
+    "git commit", "git push", "git add", "git diff", "git log", "git stash",
+    "python", "node ",
+})
+_PRODUCTIVE_THRESHOLD_MULTIPLIER = 3
+_PRODUCTIVE_RATIO_THRESHOLD = 0.7
+
+
+def _is_productive_command(cmd: str) -> bool:
+    """Check if a bash command is a productive tool (test/build/lint/git)."""
+    cmd_stripped = cmd.strip().lower()
+    return any(cmd_stripped.startswith(p) for p in _PRODUCTIVE_PREFIXES)
 
 
 def _repo_cache_slug(github_repo: str) -> str:
@@ -131,6 +154,14 @@ class AgentConfig:
 _JSON_FENCE_PATTERN = re.compile(r'```json\s*\n(.*?)\n?\s*```', re.DOTALL)
 
 _NO_CHANGES_MARKER = "[NO_CHANGES_NEEDED]"
+
+# Step classification for the deliverable gate — implementation steps must
+# produce git-visible code changes; prose-only steps (plan, review) are exempt.
+_IMPLEMENTATION_STEP_IDS = frozenset({"implement", "implementation"})
+_NON_CODE_STEP_IDS = frozenset({
+    "plan", "planning", "code_review", "qa_review", "create_pr",
+    "preview_review", "preview",
+})
 
 
 class Agent:
@@ -205,6 +236,13 @@ class Agent:
         sanitized_config = self._sanitize_optimization_config(optimization_config or {})
         self._optimization_config = MappingProxyType(sanitized_config)
         self.logger.info(f"🔧 Optimization config: {self._get_active_optimizations()}")
+
+        # Initialize model success store for intelligent routing
+        self._model_success_store = None
+        ir_cfg = sanitized_config.get("intelligent_routing", {})
+        if ir_cfg.get("enabled", False):
+            from ..llm.model_success_store import ModelSuccessStore
+            self._model_success_store = ModelSuccessStore(workspace, enabled=True)
 
         self.retry_handler = RetryHandler(max_retries=self.config.max_retries)
         enable_error_truncation = self._optimization_config.get("enable_error_truncation", False)
@@ -509,6 +547,7 @@ class Agent:
             llm=llm,
             workspace=workspace,
             activity_manager=self.activity_manager,
+            model_success_store=self._model_success_store,
         )
 
     # Backward-compatibility delegation shims for tests that call Agent._* methods
@@ -764,6 +803,16 @@ class Agent:
             if not passed:
                 return  # Task was reset for self-eval retry
 
+        # Deliverable gate: context-exhausted sessions exit 0 with no code changes
+        if working_dir is not None and self._is_implementation_step(task):
+            if not self._error_recovery.has_deliverables(task, working_dir):
+                task.last_error = (
+                    "No code changes detected — likely context window exhaustion. "
+                    "Retrying with a fresh context."
+                )
+                await self._handle_failure(task)
+                return
+
         # Extract structured plan from architect's planning response
         if (task.plan is None
                 and self.config.base_id == "architect"
@@ -991,6 +1040,21 @@ class Agent:
         # Marker must appear in the first 200 chars (before any plan body)
         return _NO_CHANGES_MARKER in content[:200]
 
+    def _is_implementation_step(self, task: Task) -> bool:
+        """Whether this task is an implementation step that must produce code.
+
+        Returns True for workflow "implement" steps and for engineer agents
+        running without an explicit workflow step (direct-queue work).
+        Returns False for prose-only steps (plan, review, QA, PR creation).
+        """
+        step = task.context.get("workflow_step")
+        if step in _IMPLEMENTATION_STEP_IDS:
+            return True
+        if step in _NON_CODE_STEP_IDS:
+            return False
+        # No explicit step — engineer agents doing direct-queue work
+        return self.config.base_id == "engineer"
+
     def _resolve_budget_ceiling(self, task: Task) -> Optional[float]:
         """Resolve USD budget ceiling from task effort and/or absolute cap.
 
@@ -1101,6 +1165,19 @@ class Agent:
             error_message=task.last_error
         ))
 
+        # Record failure outcome for intelligent routing
+        if self._model_success_store is not None and response.model_used:
+            repo_slug = task.context.get("github_repo", "")
+            task_type_str = task.type if isinstance(task.type, str) else task.type.value
+            cost = self._budget.estimate_cost(response)
+            self._model_success_store.record_outcome(
+                repo_slug=repo_slug,
+                model_tier=response.model_used,
+                task_type=task_type_str,
+                success=False,
+                cost=cost,
+            )
+
         await self._handle_failure(task)
 
     def _cleanup_task_execution(self, task: Task, lock) -> None:
@@ -1115,18 +1192,6 @@ class Agent:
         task_succeeded = task.status == TaskStatus.COMPLETED
         self._git_ops.sync_worktree_queued_tasks()
         self._git_ops.cleanup_worktree(task, success=task_succeeded)
-
-        # Skip periodic cleanup for intermediate chain steps — only the
-        # terminal step (or standalone tasks) should risk evicting worktrees
-        has_downstream_steps = not self._git_ops._is_at_terminal_workflow_step(task)
-        is_subtask = task.parent_task_id is not None
-        is_intermediate_chain = (
-            has_downstream_steps
-            and not is_subtask
-            and (task.context.get("chain_step") or task.context.get("workflow"))
-        )
-        if not is_intermediate_chain:
-            self._maybe_run_periodic_worktree_cleanup()
 
         self.activity_manager.update_activity(AgentActivity(
             agent_id=self.config.id,
@@ -1149,39 +1214,13 @@ class Agent:
         return working_dir
 
     def _maybe_run_periodic_worktree_cleanup(self) -> None:
-        """Run orphaned worktree cleanup at most every 2 hours.
+        """No-op. Automatic worktree deletion is disabled.
 
-        Long-running agent sessions accumulate stale worktrees because
-        cleanup_orphaned_worktrees() only runs at startup. This timer
-        ensures periodic cleanup without blocking the main loop.
+        Worktrees are only cleaned up via the explicit CLI command
+        `agent cleanup-worktrees`. This prevents race conditions where
+        active worktrees get deleted while agents are still using them.
         """
-        if not self.worktree_manager:
-            return
-        now = time.time()
-        if now - self._last_worktree_cleanup < _WORKTREE_CLEANUP_INTERVAL_SECONDS:
-            return
-        self._last_worktree_cleanup = now
-        try:
-            protected = self._get_protected_agent_ids()
-            result = self.worktree_manager.cleanup_orphaned_worktrees(
-                protected_agent_ids=protected,
-            )
-            if result.get("total", 0) > 0:
-                self.logger.info(f"Periodic worktree cleanup: removed {result['total']} stale worktree(s)")
-        except Exception as e:
-            self.logger.debug(f"Periodic worktree cleanup failed: {e}")
-
-    def _get_protected_agent_ids(self) -> set:
-        """Collect agent IDs that are actively working and must not have their worktrees evicted."""
-        protected = set()
-        try:
-            from .activity import AgentStatus
-            for activity in self.activity_manager.get_all_activities():
-                if activity.status not in (AgentStatus.IDLE, AgentStatus.DEAD):
-                    protected.add(activity.agent_id)
-        except Exception:
-            pass
-        return protected
+        return
 
     async def _watch_for_interruption(self) -> None:
         """Poll for pause/stop signals during LLM execution.
@@ -1344,11 +1383,32 @@ class Agent:
                         diversity = unique / count if count > 0 else 0.0
 
                         if diversity <= _DIVERSITY_THRESHOLD:
-                            self.logger.warning(
-                                f"Circuit breaker: {count} consecutive Bash calls, "
-                                f"low diversity={diversity:.2f} (unique_commands={unique})"
-                            )
-                            _circuit_breaker_event.set()
+                            productive = sum(1 for c in _bash_commands[0] if _is_productive_command(c))
+                            productive_ratio = productive / count
+
+                            if productive_ratio > _PRODUCTIVE_RATIO_THRESHOLD:
+                                # Productive workflow — use higher threshold before tripping
+                                effective = threshold * _PRODUCTIVE_THRESHOLD_MULTIPLIER
+                                if count >= effective:
+                                    self.logger.warning(
+                                        f"Circuit breaker: {count} consecutive Bash calls, "
+                                        f"low diversity={diversity:.2f} (unique_commands={unique}), "
+                                        f"productive_ratio={productive_ratio:.2f} exceeded hard ceiling={effective}"
+                                    )
+                                    _circuit_breaker_event.set()
+                                elif not _soft_threshold_logged[0]:
+                                    self.logger.info(
+                                        f"Circuit breaker deferred: {count} consecutive Bash calls, "
+                                        f"productive_ratio={productive_ratio:.2f} (effective threshold={effective})"
+                                    )
+                                    _soft_threshold_logged[0] = True
+                            else:
+                                self.logger.warning(
+                                    f"Circuit breaker: {count} consecutive Bash calls, "
+                                    f"low diversity={diversity:.2f} (unique_commands={unique}), "
+                                    f"productive_ratio={productive_ratio:.2f}"
+                                )
+                                _circuit_breaker_event.set()
                         elif not _soft_threshold_logged[0]:
                             # Diverse commands — log once and let them continue
                             self.logger.info(
@@ -1421,6 +1481,18 @@ class Agent:
         )
         efficiency_directive = " ".join(efficiency_parts)
 
+        # Compute routing signals for intelligent model selection
+        _estimated_lines = 0
+        if task.plan:
+            from .task_decomposer import estimate_plan_lines
+            _estimated_lines = estimate_plan_lines(task.plan)
+
+        _budget_remaining_usd = None
+        _budget_ceiling = task.context.get("_budget_ceiling")
+        _cumulative_cost = task.context.get("_cumulative_cost", 0.0)
+        if _budget_ceiling is not None:
+            _budget_remaining_usd = max(0.0, _budget_ceiling - _cumulative_cost)
+
         # Race LLM execution against pause/stop signal watcher
         llm_coro = self.llm.complete(
             LLMRequest(
@@ -1432,6 +1504,8 @@ class Agent:
                 agents=team_agents,
                 specialization_profile=self._current_specialization.id if self._current_specialization else None,
                 file_count=self._current_file_count,
+                estimated_lines=_estimated_lines,
+                budget_remaining_usd=_budget_remaining_usd,
                 allowed_tools=preview_allowed_tools,
                 append_system_prompt=efficiency_directive,
                 env_vars=self._git_ops.worktree_env_vars,
@@ -1455,10 +1529,13 @@ class Agent:
             commands = _bash_commands[0]
             unique = len(set(commands))
             diversity = unique / count if count > 0 else 0.0
+            productive = sum(1 for c in commands if _is_productive_command(c))
+            productive_ratio = productive / count if count > 0 else 0.0
             self.logger.warning(
                 f"Circuit breaker tripped for task {task.id}: "
                 f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls}, "
-                f"diversity={diversity:.2f}, unique_commands={unique})"
+                f"diversity={diversity:.2f}, unique_commands={unique}, "
+                f"productive_ratio={productive_ratio:.2f})"
             )
 
             # Auto-commit WIP before killing — prevents code loss
@@ -1493,12 +1570,16 @@ class Agent:
                 threshold=self._max_consecutive_tool_calls,
                 unique_commands=unique,
                 diversity=round(diversity, 2),
+                productive_ratio=round(productive_ratio, 2),
             )
             self.activity_manager.append_event(ActivityEvent(
                 type="circuit_breaker",
                 agent=self.config.id,
                 task_id=task.id,
-                title=f"Circuit breaker: {count} consecutive Bash calls (diversity={diversity:.2f})",
+                title=(
+                    f"Circuit breaker: {count} consecutive Bash calls "
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
+                ),
                 timestamp=datetime.now(timezone.utc),
             ))
             return LLMResponse(
@@ -1511,7 +1592,8 @@ class Agent:
                 success=False,
                 error=(
                     f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
-                    f"(diversity={diversity:.2f}). Working directory may be deleted or inaccessible."
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
+                    f"Working directory may be deleted or inaccessible."
                 ),
             )
 
@@ -1582,6 +1664,31 @@ class Agent:
             self._session_logger.log("wip_auto_commit", task_id=task.id, bash_count=bash_count)
         except Exception as e:
             self.logger.debug(f"WIP auto-commit failed (non-fatal): {e}")
+
+    def _log_routing_decision(self, task: Task, response) -> None:
+        """Log intelligent routing decision if one was made."""
+        backend = self.llm
+        selector = getattr(backend, 'model_selector', None)
+        decision = getattr(selector, '_last_routing_decision', None) if selector else None
+        if decision is None:
+            return
+        # Clear stashed decision so it doesn't leak to the next call
+        selector._last_routing_decision = None
+        self._session_logger.log(
+            "model_routing_decision",
+            chosen_tier=decision.chosen_tier,
+            scores=decision.scores,
+            signals=decision.signals,
+            fallback=decision.fallback,
+            model_used=response.model_used,
+        )
+        self.activity_manager.append_event(ActivityEvent(
+            type="model_routing_decision",
+            agent=self.config.id,
+            task_id=task.id,
+            title=f"Intelligent routing: {decision.chosen_tier} (scores: {decision.scores})",
+            timestamp=datetime.now(timezone.utc),
+        ))
 
     def _process_llm_completion(self, response, task: Task) -> None:
         """Log LLM completion and update context window manager."""
@@ -1665,6 +1772,23 @@ class Agent:
             working_dir = self._get_validated_working_directory(task)
             self.logger.info(f"Working directory: {working_dir}")
 
+            # Discover committed work from previous attempts so retry prompt knows what exists
+            if task.retry_count > 0:
+                branch_work = self._git_ops.discover_branch_work(working_dir)
+                if branch_work:
+                    task.context["_previous_attempt_branch_work"] = branch_work
+                    self.logger.info(
+                        f"Discovered {branch_work['commit_count']} commits "
+                        f"({branch_work['insertions']}+/{branch_work['deletions']}-) "
+                        f"from previous attempt(s)"
+                    )
+                    self._session_logger.log(
+                        "branch_work_discovered",
+                        commit_count=branch_work["commit_count"],
+                        insertions=branch_work["insertions"],
+                        file_count=len(branch_work["file_list"]),
+                    )
+
             # Index codebase for structural context (cached by commit SHA)
             self._try_index_codebase(task, working_dir)
 
@@ -1695,6 +1819,7 @@ class Agent:
 
             # Process LLM completion (logging, context window updates)
             self._process_llm_completion(response, task)
+            self._log_routing_decision(task, response)
 
             # Handle response
             if response.success:

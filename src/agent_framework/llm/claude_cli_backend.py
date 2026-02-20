@@ -16,6 +16,11 @@ from ..core.task import TaskType
 
 logger = logging.getLogger(__name__)
 
+# Lazy imports for intelligent routing to avoid circular imports
+_IntelligentRouter = None
+_RoutingSignals = None
+_ModelSuccessStore = None
+
 # Env vars stripped from the Claude CLI subprocess to prevent the LLM's Bash tool
 # from accessing credentials. MCP servers get tokens from the expanded config file's
 # env block, not from the parent process environment.
@@ -185,6 +190,8 @@ class ClaudeCLIBackend(LLMBackend):
         proxy_env: Optional[dict] = None,
         use_max_account: bool = False,
         max_idle_timeouts: int = 5,
+        intelligent_routing_config: Optional[dict] = None,
+        model_success_store: Optional[object] = None,
     ):
         self.executable = executable
         self.max_turns = max_turns
@@ -199,6 +206,22 @@ class ClaudeCLIBackend(LLMBackend):
             timeout_simple=timeout_simple,
         )
         self.logs_dir = logs_dir or Path("logs")
+
+        # Intelligent routing (optional)
+        self._intelligent_router = None
+        self._model_success_store = model_success_store
+        ir_cfg = intelligent_routing_config or {}
+        if ir_cfg.get("enabled") and model_success_store is not None:
+            from .intelligent_router import IntelligentRouter
+            self._intelligent_router = IntelligentRouter(
+                success_store=model_success_store,
+                complexity_weight=ir_cfg.get("complexity_weight", 0.3),
+                historical_weight=ir_cfg.get("historical_weight", 0.25),
+                specialization_weight=ir_cfg.get("specialization_weight", 0.2),
+                budget_weight=ir_cfg.get("budget_weight", 0.15),
+                retry_weight=ir_cfg.get("retry_weight", 0.1),
+                min_historical_samples=ir_cfg.get("min_historical_samples", 5),
+            )
         self._current_process: Optional[asyncio.subprocess.Process] = None
         self._partial_output: list[str] = []
 
@@ -236,6 +259,8 @@ class ClaudeCLIBackend(LLMBackend):
                 request.retry_count,
                 request.specialization_profile,
                 request.file_count,
+                request.estimated_lines,
+                request.budget_remaining_usd,
             )
         else:
             model = self.model_selector.default_model
@@ -619,13 +644,36 @@ class ClaudeCLIBackend(LLMBackend):
         retry_count: int,
         specialization_profile: str = None,
         file_count: int = 0,
+        estimated_lines: int = 0,
+        budget_remaining_usd: Optional[float] = None,
     ) -> str:
-        """Select appropriate model based on task type, retry count, and specialization."""
+        """Select appropriate model based on task type, retry count, and specialization.
+
+        When intelligent routing is enabled, builds RoutingSignals and delegates
+        to the IntelligentRouter via ModelSelector.
+        """
+        router = self._intelligent_router
+        routing_signals = None
+
+        if router is not None:
+            from .intelligent_router import RoutingSignals
+            task_type_str = task_type.value if hasattr(task_type, 'value') else str(task_type)
+            routing_signals = RoutingSignals(
+                task_type=task_type_str,
+                retry_count=retry_count,
+                specialization_profile=specialization_profile,
+                file_count=file_count,
+                estimated_lines=estimated_lines,
+                budget_remaining_usd=budget_remaining_usd,
+            )
+
         return self.model_selector.select(
             task_type,
             retry_count,
             specialization_profile,
             file_count,
+            intelligent_router=router,
+            routing_signals=routing_signals,
         )
 
     def _expand_mcp_config(self, config_path: Path) -> Path:

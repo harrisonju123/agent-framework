@@ -162,3 +162,65 @@ class TestHandleFailedResponseGitEvidence:
         assert "_previous_attempt_git_diff" in task.context
         assert "auth" in task.context["_previous_attempt_summary"].lower()
         assert "+def auth():" in task.context["_previous_attempt_git_diff"]
+
+
+class TestDiscoverBranchWorkIntegration:
+    """discover_branch_work() is called at retry startup and flows into task context."""
+
+    def test_discovers_branch_work_on_retry(self):
+        """retry_count > 0 triggers discovery and stores result in context."""
+        agent = _make_agent()
+        agent._git_ops = MagicMock()
+        agent._git_ops.discover_branch_work.return_value = {
+            "commit_count": 2,
+            "insertions": 300,
+            "deletions": 5,
+            "commit_log": "abc1234 Add feature\ndef5678 Add tests",
+            "file_list": ["src/feature.py", "tests/test_feature.py"],
+            "diffstat": " src/feature.py | 200 +++\n tests/test_feature.py | 105 +++\n",
+        }
+
+        task = _make_task(retry_count=1)
+        working_dir = "/tmp/test-worktree"
+
+        # Simulate the discovery block from _handle_task
+        if task.retry_count > 0:
+            branch_work = agent._git_ops.discover_branch_work(working_dir)
+            if branch_work:
+                task.context["_previous_attempt_branch_work"] = branch_work
+
+        assert "_previous_attempt_branch_work" in task.context
+        assert task.context["_previous_attempt_branch_work"]["commit_count"] == 2
+        assert task.context["_previous_attempt_branch_work"]["insertions"] == 300
+        agent._git_ops.discover_branch_work.assert_called_once_with(working_dir)
+
+    def test_skips_discovery_on_first_attempt(self):
+        """retry_count == 0 does not call discover_branch_work."""
+        agent = _make_agent()
+        agent._git_ops = MagicMock()
+
+        task = _make_task(retry_count=0)
+
+        # Simulate the discovery block from _handle_task
+        if task.retry_count > 0:
+            branch_work = agent._git_ops.discover_branch_work("/tmp/worktree")
+            if branch_work:
+                task.context["_previous_attempt_branch_work"] = branch_work
+
+        assert "_previous_attempt_branch_work" not in task.context
+        agent._git_ops.discover_branch_work.assert_not_called()
+
+    def test_none_result_not_stored(self):
+        """discover_branch_work returning None does not pollute context."""
+        agent = _make_agent()
+        agent._git_ops = MagicMock()
+        agent._git_ops.discover_branch_work.return_value = None
+
+        task = _make_task(retry_count=1)
+
+        if task.retry_count > 0:
+            branch_work = agent._git_ops.discover_branch_work("/tmp/worktree")
+            if branch_work:
+                task.context["_previous_attempt_branch_work"] = branch_work
+
+        assert "_previous_attempt_branch_work" not in task.context

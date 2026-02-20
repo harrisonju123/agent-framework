@@ -423,3 +423,145 @@ class TestCircuitBreakerPartialOutput:
         # Should still return the circuit breaker response
         assert result.success is False
         assert result.finish_reason == "circuit_breaker"
+
+
+class TestCircuitBreakerProductiveCommands:
+    """Productive commands (test/build/lint) get a higher threshold before tripping."""
+
+    @pytest.mark.asyncio
+    async def test_productive_commands_bypass_at_threshold(self, agent, task):
+        """All-productive commands at base threshold → deferred (effective=15)."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        # 5× pytest at threshold=5 → productive_ratio=1.0 → effective=15
+        for _ in range(5):
+            on_tool("Bash", "pytest tests/ -v")
+
+        await asyncio.sleep(0.05)
+        assert not result_task.done(), "Productive commands should not trip at base threshold"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_productive_commands_trip_at_hard_ceiling(self, agent, task):
+        """All-productive commands at 3× threshold → trip (hard ceiling)."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        # 15× pytest at threshold=5 → effective=15 → trip
+        for _ in range(15):
+            on_tool("Bash", "pytest tests/ -v")
+
+        result = await asyncio.wait_for(result_task, timeout=5.0)
+
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"
+
+    @pytest.mark.asyncio
+    async def test_non_productive_commands_trip_normally(self, agent, task):
+        """Non-productive repeated commands trip at base threshold."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        # 5× ls at threshold=5 → productive_ratio=0.0 → trip immediately
+        for _ in range(5):
+            on_tool("Bash", "ls -la")
+
+        result = await asyncio.wait_for(result_task, timeout=5.0)
+
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"
+
+    @pytest.mark.asyncio
+    async def test_mixed_commands_below_productive_threshold(self, agent, task):
+        """60% productive (below 70% threshold) → trips at base threshold."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        # 3 productive + 2 non-productive = 60% productive < 70% → trips normally
+        on_tool("Bash", "pytest tests/")
+        on_tool("Bash", "pytest tests/")
+        on_tool("Bash", "pytest tests/")
+        on_tool("Bash", "ls -la")
+        on_tool("Bash", "ls -la")
+
+        result = await asyncio.wait_for(result_task, timeout=5.0)
+
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"
+
+    @pytest.mark.asyncio
+    async def test_mixed_commands_above_productive_threshold(self, agent, task):
+        """80% productive (above 70% threshold) → deferred."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        # 4 productive + 1 non-productive = 80% productive > 70% → deferred
+        on_tool("Bash", "pytest tests/")
+        on_tool("Bash", "pytest tests/")
+        on_tool("Bash", "pytest tests/")
+        on_tool("Bash", "pytest tests/")
+        on_tool("Bash", "ls -la")
+
+        await asyncio.sleep(0.05)
+        assert not result_task.done(), "80% productive should defer the circuit breaker"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_productive_ratio_logged_on_deferral(self, agent, task):
+        """Deferral log message includes productive_ratio."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(5):
+            on_tool("Bash", "pytest tests/ -v")
+
+        await asyncio.sleep(0.05)
+
+        # Check that the info log with productive_ratio was emitted
+        info_calls = [
+            str(c) for c in agent.logger.info.call_args_list
+            if "productive_ratio" in str(c)
+        ]
+        assert len(info_calls) >= 1, "Should log productive_ratio on deferral"
+
+        result_task.cancel()
+        try:
+            await result_task
+        except asyncio.CancelledError:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_productive_ratio_in_activity_event(self, agent, task):
+        """Activity event includes productive_ratio when circuit breaker trips."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        # Trip with non-productive commands
+        for _ in range(5):
+            on_tool("Bash", "ls -la")
+
+        await asyncio.wait_for(result_task, timeout=5.0)
+
+        event = agent.activity_manager.append_event.call_args[0][0]
+        assert "productive_ratio=" in event.title
+
+    @pytest.mark.asyncio
+    async def test_productive_ratio_in_session_log(self, agent, task):
+        """Session log includes productive_ratio field."""
+        result_task, on_tool = await _setup_and_get_callback(agent, task)
+
+        for _ in range(5):
+            on_tool("Bash", "git status")
+
+        await asyncio.wait_for(result_task, timeout=5.0)
+
+        log_calls = [
+            c for c in agent._session_logger.log.call_args_list
+            if c[0][0] == "circuit_breaker"
+        ]
+        assert len(log_calls) == 1
+        assert "productive_ratio" in log_calls[0][1]

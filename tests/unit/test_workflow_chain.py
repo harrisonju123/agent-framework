@@ -2822,48 +2822,15 @@ class TestCleanupTaskExecutionOrdering:
         assert "idle" in order
         assert order.index("cleanup_worktree") < order.index("idle")
 
-    def test_periodic_cleanup_skipped_for_intermediate_chain_step(self, cleanup_agent):
-        """Intermediate chain steps skip periodic worktree cleanup entirely."""
-        task = _make_task(
-            workflow="default",
-            chain_step=True,
-            workflow_step="implement",
-        )
-        task.status = TaskStatus.COMPLETED
-
-        # _is_at_terminal_workflow_step returns False for intermediate steps
-        cleanup_agent._git_ops._is_at_terminal_workflow_step.return_value = False
-
-        cleanup_agent._maybe_run_periodic_worktree_cleanup = MagicMock()
-        cleanup_agent._cleanup_task_execution(task, lock=None)
-
-        cleanup_agent._maybe_run_periodic_worktree_cleanup.assert_not_called()
-
-    def test_periodic_cleanup_runs_for_terminal_chain_step(self, cleanup_agent):
-        """Terminal chain steps do run periodic worktree cleanup."""
-        task = _make_task(
-            workflow="default",
-            chain_step=True,
-            workflow_step="qa_review",
-        )
-        task.status = TaskStatus.COMPLETED
-
-        cleanup_agent._git_ops._is_at_terminal_workflow_step.return_value = True
-
-        cleanup_agent._maybe_run_periodic_worktree_cleanup = MagicMock()
-        cleanup_agent._cleanup_task_execution(task, lock=None)
-
-        cleanup_agent._maybe_run_periodic_worktree_cleanup.assert_called_once()
-
-    def test_periodic_cleanup_runs_for_standalone_tasks(self, cleanup_agent):
-        """Non-chain tasks always run periodic cleanup."""
+    def test_periodic_cleanup_not_called_during_task_execution(self, cleanup_agent):
+        """Periodic worktree cleanup is disabled — never called from _cleanup_task_execution."""
         task = _make_task(workflow="default")
         task.status = TaskStatus.COMPLETED
 
         cleanup_agent._maybe_run_periodic_worktree_cleanup = MagicMock()
         cleanup_agent._cleanup_task_execution(task, lock=None)
 
-        cleanup_agent._maybe_run_periodic_worktree_cleanup.assert_called_once()
+        cleanup_agent._maybe_run_periodic_worktree_cleanup.assert_not_called()
 
 
 class TestWorkingDirectoryValidation:

@@ -1370,10 +1370,46 @@ If a tool call fails:
             sections.append(prev_git_diff)
             sections.append("")
 
-        has_progress = bool(prev_summary) or bool(prev_git_diff)
+        # Committed work discovered on the branch from previous attempts
+        branch_work = task.context.get("_previous_attempt_branch_work")
+        if branch_work:
+            sections.append("### Existing Code on Your Branch")
+            sections.append(
+                f"{branch_work['commit_count']} commit(s) with "
+                f"{branch_work['insertions']} insertions(+) and "
+                f"{branch_work['deletions']} deletions(-)."
+            )
+            sections.append("")
+            sections.append(
+                "This code is in your working directory RIGHT NOW. "
+                "Do NOT rewrite files that already contain your implementation."
+            )
+            sections.append("")
+            if branch_work.get("commit_log"):
+                sections.append("Commit log:")
+                sections.append(f"```\n{branch_work['commit_log']}\n```")
+                sections.append("")
+            if branch_work.get("diffstat"):
+                sections.append("Diffstat:")
+                sections.append(f"```\n{branch_work['diffstat']}\n```")
+                sections.append("")
+            if branch_work.get("file_list"):
+                file_display = branch_work["file_list"][:30]
+                sections.append("Files changed: " + ", ".join(file_display))
+                if len(branch_work["file_list"]) > 30:
+                    sections.append(f"  ... and {len(branch_work['file_list']) - 30} more")
+                sections.append("")
+
+        has_progress = bool(prev_summary) or bool(prev_git_diff) or bool(branch_work)
 
         if has_progress:
-            if task.last_error and task.last_error.startswith("Interrupted"):
+            if branch_work:
+                sections.append(
+                    "Do NOT restart from scratch. Run `git log --oneline` and "
+                    "`git diff origin/main..HEAD` to review your existing code, "
+                    "then continue from there."
+                )
+            elif task.last_error and task.last_error.startswith("Interrupted"):
                 sections.append(
                     "Do NOT restart from scratch. The previous attempt was interrupted "
                     "before completion. Continue from the progress above."

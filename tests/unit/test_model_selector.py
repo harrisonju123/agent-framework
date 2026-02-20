@@ -1,9 +1,16 @@
 """Tests for ModelSelector — model selection and timeout tiers."""
 
 import pytest
+from unittest.mock import MagicMock, patch
 
 from agent_framework.core.task import TaskType
 from agent_framework.llm.model_selector import ModelSelector
+from agent_framework.llm.intelligent_router import (
+    IntelligentRouter,
+    RoutingDecision,
+    RoutingSignals,
+)
+from agent_framework.llm.model_success_store import ModelSuccessStore
 
 
 @pytest.fixture
@@ -245,3 +252,91 @@ class TestSpecializationRouting:
             file_count=20,
         )
         assert model == "haiku"
+
+
+class TestIntelligentRouterDelegation:
+    """Intelligent router integration with ModelSelector."""
+
+    def test_delegates_to_intelligent_router(self, selector, tmp_path):
+        """When router and signals are provided, selector delegates to the router."""
+        store = ModelSuccessStore(tmp_path, enabled=True)
+        router = IntelligentRouter(store)
+        signals = RoutingSignals(
+            task_type="implementation",
+            estimated_lines=800,
+            file_count=10,
+        )
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            intelligent_router=router,
+            routing_signals=signals,
+        )
+        # High complexity → opus tier → maps to "opus" model
+        assert model == "opus"
+
+    def test_stashes_routing_decision(self, selector, tmp_path):
+        """Selector stashes the routing decision for caller to inspect."""
+        store = ModelSuccessStore(tmp_path, enabled=True)
+        router = IntelligentRouter(store)
+        signals = RoutingSignals(
+            task_type="implementation",
+            estimated_lines=50,
+            file_count=1,
+        )
+        selector.select(
+            TaskType.IMPLEMENTATION,
+            intelligent_router=router,
+            routing_signals=signals,
+        )
+        decision = selector._last_routing_decision
+        assert isinstance(decision, RoutingDecision)
+        assert decision.chosen_tier in ("haiku", "sonnet", "opus")
+
+    def test_fallback_on_router_error(self, selector):
+        """If the router raises, selector falls back to static logic."""
+        mock_router = MagicMock()
+        mock_router.select.side_effect = RuntimeError("boom")
+        signals = RoutingSignals(task_type="implementation")
+
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            intelligent_router=mock_router,
+            routing_signals=signals,
+        )
+        # Static logic: IMPLEMENTATION → sonnet
+        assert model == "sonnet"
+
+    def test_static_routing_when_no_router(self, selector):
+        """Without a router, static logic applies."""
+        model = selector.select(TaskType.IMPLEMENTATION)
+        assert model == "sonnet"
+
+    def test_static_routing_when_no_signals(self, selector, tmp_path):
+        """Router provided but no signals → static fallback."""
+        store = ModelSuccessStore(tmp_path, enabled=True)
+        router = IntelligentRouter(store)
+        model = selector.select(
+            TaskType.IMPLEMENTATION,
+            intelligent_router=router,
+        )
+        assert model == "sonnet"
+
+    def test_tier_to_model_mapping(self, selector, tmp_path):
+        """Router tier names map to selector's configured model identifiers."""
+        store = ModelSuccessStore(tmp_path, enabled=True)
+        router = IntelligentRouter(store)
+
+        # Low complexity → haiku
+        signals = RoutingSignals(task_type="implementation", estimated_lines=30, file_count=1)
+        model = selector.select(TaskType.IMPLEMENTATION, intelligent_router=router, routing_signals=signals)
+        assert model == "haiku"
+
+        # Medium complexity → sonnet
+        signals = RoutingSignals(task_type="implementation", estimated_lines=300, file_count=5)
+        model = selector.select(TaskType.IMPLEMENTATION, intelligent_router=router, routing_signals=signals)
+        assert model == "sonnet"
+
+        # High complexity → opus
+        signals = RoutingSignals(task_type="implementation", estimated_lines=800, file_count=10)
+        model = selector.select(TaskType.IMPLEMENTATION, intelligent_router=router, routing_signals=signals)
+        assert model == "opus"

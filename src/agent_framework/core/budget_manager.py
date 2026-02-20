@@ -38,6 +38,7 @@ class BudgetManager:
         llm: "LLMBackend",
         workspace: Path,
         activity_manager: "ActivityManager",
+        model_success_store: object = None,
     ):
         self.agent_id = agent_id
         self.optimization_config = optimization_config
@@ -46,6 +47,7 @@ class BudgetManager:
         self.llm = llm
         self.workspace = workspace
         self.activity_manager = activity_manager
+        self._model_success_store = model_success_store
 
     def get_token_budget(self, task_type: TaskType) -> int:
         """
@@ -192,3 +194,15 @@ class BudgetManager:
             status="completed",
             duration_ms=duration_ms,
         )
+
+        # Record success outcome for intelligent routing
+        if self._model_success_store is not None and response.model_used:
+            repo_slug = task.context.get("github_repo", "")
+            task_type_str = task.type if isinstance(task.type, str) else task.type.value
+            self._model_success_store.record_outcome(
+                repo_slug=repo_slug,
+                model_tier=response.model_used,
+                task_type=task_type_str,
+                success=True,
+                cost=cost,
+            )

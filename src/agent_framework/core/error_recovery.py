@@ -285,6 +285,29 @@ class ErrorRecoveryManager:
         lines.append("")
         return "\n".join(lines)
 
+    def has_deliverables(self, task: Task, working_dir: Path) -> bool:
+        """Check whether the agent produced any git-visible code changes.
+
+        Reuses _try_diff_strategies() — returns True if any strategy finds
+        a non-empty diff, False when all strategies come back empty (likely
+        context window exhaustion where Claude exits 0 without writing code).
+        """
+        stat_text, _ = self._try_diff_strategies(working_dir)
+        if stat_text:
+            return True
+
+        self.logger.warning(
+            f"Deliverable gate: no git changes detected for task {task.id} "
+            f"in {working_dir}"
+        )
+        self.session_logger.log(
+            "deliverable_gate",
+            task_id=task.id,
+            working_dir=str(working_dir),
+            result="no_changes",
+        )
+        return False
+
     def gather_git_evidence(self, working_dir: Path) -> str:
         """Collect git diff evidence for self-evaluation.
 

@@ -217,6 +217,116 @@ class GitOperationsManager:
         except Exception as e:
             self.logger.debug(f"Failed to detect implementation branch: {e}")
 
+    def _detect_default_branch(self, working_dir) -> str:
+        """Detect the default branch (main/master) for origin."""
+        from ..utils.subprocess_utils import run_git_command
+
+        try:
+            result = run_git_command(
+                ["symbolic-ref", "refs/remotes/origin/HEAD"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip().split("/")[-1]
+        except Exception:
+            pass
+
+        # Probe common names
+        for branch in ["main", "master"]:
+            try:
+                probe = run_git_command(
+                    ["rev-parse", "--verify", f"origin/{branch}"],
+                    cwd=working_dir, check=False, timeout=10,
+                )
+                if probe.returncode == 0:
+                    return branch
+            except Exception:
+                continue
+        return "main"
+
+    def discover_branch_work(self, working_dir) -> Optional[Dict]:
+        """Discover committed work on the current branch beyond origin's default.
+
+        Used at retry startup to give the LLM awareness of code from
+        previous attempts that was committed but not captured by the
+        truncated diff/summary in retry context.
+
+        Returns a dict with commit_count, insertions, deletions, commit_log,
+        file_list, and diffstat — or None if there's nothing to report.
+        """
+        from ..utils.subprocess_utils import run_git_command
+
+        try:
+            # What branch are we on?
+            head_result = run_git_command(
+                ["rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if head_result.returncode != 0:
+                return None
+            branch = head_result.stdout.strip()
+            if branch in ("main", "master", "HEAD"):
+                return None
+
+            default_branch = self._detect_default_branch(working_dir)
+            range_spec = f"origin/{default_branch}..HEAD"
+
+            # Commit log (capped at 20 entries, 2KB)
+            log_result = run_git_command(
+                ["log", range_spec, "--oneline", "-20"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if log_result.returncode != 0 or not log_result.stdout.strip():
+                return None
+            commit_log = log_result.stdout.strip()[:2048]
+
+            # Diffstat (capped at 2KB)
+            stat_result = run_git_command(
+                ["diff", "--stat", range_spec],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            diffstat = (stat_result.stdout.strip()[:2048]
+                        if stat_result.returncode == 0 else "")
+
+            # Parse insertions/deletions from the summary line
+            insertions = 0
+            deletions = 0
+            if diffstat:
+                summary_line = diffstat.split("\n")[-1]
+                import re
+                ins_match = re.search(r"(\d+) insertion", summary_line)
+                del_match = re.search(r"(\d+) deletion", summary_line)
+                if ins_match:
+                    insertions = int(ins_match.group(1))
+                if del_match:
+                    deletions = int(del_match.group(1))
+
+            # File list (capped at 50 entries)
+            names_result = run_git_command(
+                ["diff", "--name-only", range_spec],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            file_list = []
+            if names_result.returncode == 0 and names_result.stdout.strip():
+                file_list = [
+                    f for f in names_result.stdout.strip().split("\n") if f
+                ][:50]
+
+            commit_count = len(commit_log.split("\n"))
+
+            return {
+                "commit_count": commit_count,
+                "insertions": insertions,
+                "deletions": deletions,
+                "commit_log": commit_log,
+                "file_list": file_list,
+                "diffstat": diffstat,
+            }
+
+        except Exception as e:
+            self.logger.debug(f"Failed to discover branch work: {e}")
+            return None
+
     def _should_use_worktree(self, task: Task) -> bool:
         """Determine if worktree mode should be used for this task.
 
