@@ -22,6 +22,7 @@ from rich.text import Text
 from ..analytics.performance_metrics import PerformanceMetrics
 from ..analytics.failure_analyzer import FailureAnalyzer
 from ..analytics.shadow_mode_analyzer import ShadowModeAnalyzer
+from ..analytics.llm_metrics import LlmMetrics
 
 
 class AnalyticsDashboard:
@@ -36,10 +37,11 @@ class AnalyticsDashboard:
         self.performance_metrics = PerformanceMetrics(workspace)
         self.failure_analyzer = FailureAnalyzer(workspace)
         self.shadow_analyzer = ShadowModeAnalyzer(workspace)
+        self.llm_metrics = LlmMetrics(workspace)
 
-        # Current tab (0=Performance, 1=Failures, 2=Optimizations)
+        # Current tab (0=Performance, 1=Failures, 2=Optimizations, 3=LLM Costs)
         self.current_tab = 0
-        self.tab_names = ["Performance", "Failures", "Optimizations"]
+        self.tab_names = ["Performance", "Failures", "Optimizations", "LLM Costs"]
 
     def make_layout(self) -> Layout:
         """Create dashboard layout."""
@@ -291,6 +293,87 @@ class AnalyticsDashboard:
 
         return layout
 
+    def render_llm_costs_tab(self) -> Layout:
+        """Render LLM cost and token tracking tab."""
+        try:
+            report = self.llm_metrics.generate_report(hours=24)
+        except Exception as e:
+            return Layout(Panel(f"Error generating LLM metrics report: {e}", style="red"))
+
+        layout = Layout()
+        layout.split_column(
+            Layout(name="overview", size=10),
+            Layout(name="model_usage", ratio=1),
+            Layout(name="top_tasks", size=12),
+        )
+
+        # Overview panel
+        overview_text = Text()
+        overview_text.append(f"Total Cost: ", style="bold")
+        overview_text.append(f"${report.total_cost:.4f}\n")
+
+        overview_text.append(f"Total LLM Calls: ", style="bold")
+        overview_text.append(f"{report.total_llm_calls}\n")
+
+        overview_text.append(f"Token Efficiency (out/in): ", style="bold")
+        eff_style = "green" if report.overall_token_efficiency > 0.3 else "yellow"
+        overview_text.append(f"{report.overall_token_efficiency:.3f}\n", style=eff_style)
+
+        overview_text.append(f"Total Tokens In: ", style="bold")
+        overview_text.append(f"{report.total_tokens_in:,}\n")
+
+        overview_text.append(f"Total Tokens Out: ", style="bold")
+        overview_text.append(f"{report.total_tokens_out:,}\n")
+
+        overview_text.append(f"Time Range: ", style="bold")
+        overview_text.append(f"Last {report.time_range_hours} hours\n")
+
+        layout["overview"].update(Panel(overview_text, title="LLM Cost Overview", border_style="blue"))
+
+        # Model usage table
+        model_table = Table(title="Model Usage", expand=True)
+        model_table.add_column("Tier", style="cyan")
+        model_table.add_column("Calls", justify="right")
+        model_table.add_column("Total Cost", justify="right")
+        model_table.add_column("Avg Cost/Call", justify="right")
+        model_table.add_column("Avg Latency", justify="right")
+        model_table.add_column("Cost Share %", justify="right")
+
+        for tier in report.model_tiers:
+            model_table.add_row(
+                tier.tier,
+                str(tier.call_count),
+                f"${tier.total_cost:.4f}",
+                f"${tier.avg_cost_per_call:.6f}",
+                f"{tier.avg_duration_ms:.0f}ms",
+                f"{tier.cost_share_pct:.1f}%",
+            )
+
+        layout["model_usage"].update(model_table)
+
+        # Top cost tasks table
+        task_table = Table(title="Top Cost Tasks", expand=True)
+        task_table.add_column("Task ID", style="cyan")
+        task_table.add_column("Cost", justify="right")
+        task_table.add_column("LLM Calls", justify="right")
+        task_table.add_column("Tokens In", justify="right")
+        task_table.add_column("Tokens Out", justify="right")
+        task_table.add_column("Efficiency", justify="right")
+
+        for task in report.top_cost_tasks[:10]:
+            task_table.add_row(
+                task.task_id[:12],
+                f"${task.total_cost:.4f}",
+                str(task.llm_call_count),
+                f"{task.total_tokens_in:,}",
+                f"{task.total_tokens_out:,}",
+                f"{task.token_efficiency:.3f}",
+            )
+
+        layout["top_tasks"].update(task_table)
+
+        return layout
+
     def render_footer(self) -> Panel:
         """Render footer with help text."""
         text = Text()
@@ -315,8 +398,12 @@ class AnalyticsDashboard:
             layout["main"].update(self.render_performance_tab())
         elif self.current_tab == 1:
             layout["main"].update(self.render_failures_tab())
-        else:
+        elif self.current_tab == 2:
             layout["main"].update(self.render_optimizations_tab())
+        elif self.current_tab == 3:
+            layout["main"].update(self.render_llm_costs_tab())
+        else:
+            layout["main"].update(self.render_performance_tab())
 
         return layout
 

@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
+from ..analytics.llm_metrics import LlmMetricsReport
 from ..core.orchestrator import Orchestrator
 from ..queue.file_queue import FileQueue
 from .data_provider import DashboardDataProvider
@@ -322,6 +323,18 @@ def register_routes(app: FastAPI):
         collector = AgenticMetrics(app.state.workspace)
         report = collector.generate_report(hours=hours)
         return AgenticMetricsResponse(**report.model_dump())
+
+    @app.get("/api/llm-metrics", response_model=LlmMetricsReport)
+    async def get_llm_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """
+        Aggregate LLM cost and token metrics from session logs.
+
+        Scans per-task JSONL session logs for llm_complete events and computes
+        cost per task, model tier distribution, latency percentiles, and trends.
+        """
+        from ..analytics.llm_metrics import LlmMetrics
+        collector = LlmMetrics(app.state.workspace)
+        return collector.generate_report(hours=hours)
 
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():

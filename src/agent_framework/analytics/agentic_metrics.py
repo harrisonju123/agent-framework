@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from .session_loader import load_session_events
+
 logger = logging.getLogger(__name__)
 
 
@@ -168,7 +170,7 @@ class AgenticMetrics:
         activity files; debates from .agent-communication/debates/ JSON.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        events_by_task = self._load_session_events(cutoff)
+        events_by_task = load_session_events(self.sessions_dir, cutoff)
 
         memory = self._aggregate_memory(events_by_task)
         codebase_index = self._aggregate_codebase_index(events_by_task)
@@ -196,54 +198,6 @@ class AgenticMetrics:
         )
 
     # --- private helpers ---
-
-    def _load_session_events(self, cutoff: datetime) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Read session JSONL files modified after cutoff and bucket events by task_id.
-
-        We use file mtime as a fast pre-filter — if a file hasn't been touched
-        since the cutoff there's nothing new in it.
-        """
-        if not self.sessions_dir.exists():
-            return {}
-
-        events_by_task: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        cutoff_ts = cutoff.timestamp()
-
-        for path in self.sessions_dir.glob("*.jsonl"):
-            try:
-                if path.stat().st_mtime < cutoff_ts:
-                    continue
-            except OSError:
-                continue
-
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    # Filter by event timestamp, not just file mtime
-                    raw_ts = event.get("ts")
-                    if raw_ts:
-                        try:
-                            event_ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-                            if event_ts < cutoff:
-                                continue
-                        except (ValueError, TypeError):
-                            pass
-
-                    task_id = event.get("task_id", path.stem)
-                    events_by_task[task_id].append(event)
-
-            except OSError as e:
-                logger.debug(f"Could not read session log {path}: {e}")
-
-        return events_by_task
 
     def _aggregate_memory(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> MemoryMetrics:
         """Aggregate memory_recall events across all tasks."""

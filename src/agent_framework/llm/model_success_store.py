@@ -92,7 +92,7 @@ class ModelSuccessStore:
             return
 
         # Normalize model tier to family name
-        model_tier = _normalize_model_tier(model_tier)
+        model_tier = normalize_model_tier(model_tier)
         task_type = task_type.lower().replace("-", "_")
 
         key = (repo_slug, model_tier, task_type)
@@ -126,7 +126,7 @@ class ModelSuccessStore:
         task_type: str,
     ) -> Optional[float]:
         """Return success rate for (repo, model, task_type), or None if no data."""
-        model_tier = _normalize_model_tier(model_tier)
+        model_tier = normalize_model_tier(model_tier)
         task_type = task_type.lower().replace("-", "_")
 
         key = (repo_slug, model_tier, task_type)
@@ -142,7 +142,7 @@ class ModelSuccessStore:
         task_type: str,
     ) -> int:
         """Return total outcome count for (repo, model, task_type)."""
-        model_tier = _normalize_model_tier(model_tier)
+        model_tier = normalize_model_tier(model_tier)
         task_type = task_type.lower().replace("-", "_")
 
         key = (repo_slug, model_tier, task_type)
@@ -154,7 +154,7 @@ class ModelSuccessStore:
         return self._enabled
 
 
-def _normalize_model_tier(model: str) -> str:
+def normalize_model_tier(model: str) -> str:
     """Normalize model identifier to tier name (haiku/sonnet/opus)."""
     lower = model.lower()
     if "haiku" in lower:
@@ -164,3 +164,7 @@ def _normalize_model_tier(model: str) -> str:
     if "sonnet" in lower:
         return "sonnet"
     return lower
+
+
+# Backward-compat alias for external importers
+_normalize_model_tier = normalize_model_tier
