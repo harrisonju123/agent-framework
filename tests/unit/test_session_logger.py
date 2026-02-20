@@ -338,3 +338,51 @@ class TestExtractFileReads:
 
         sl2 = SessionLogger(logs_dir, "test-task-nofp", enabled=True)
         assert sl2.extract_file_reads() == ["/src/good.py"]
+
+
+# -- Tool Result Tracking --
+
+
+class TestToolResultTracking:
+    def test_log_tool_result_writes_event(self, logs_dir, session_log_path):
+        sl = SessionLogger(logs_dir, "test-task-123", enabled=True)
+        sl.log_tool_result("Glob", True, 42)
+        sl.close()
+        event = json.loads(session_log_path.read_text().strip())
+        assert event["event"] == "tool_result"
+        assert event["tool"] == "Glob"
+        assert event["success"] is True
+        assert event["result_size"] == 42
+        assert "tool_use_id" not in event
+
+    def test_log_tool_result_with_tool_use_id(self, logs_dir, session_log_path):
+        sl = SessionLogger(logs_dir, "test-task-123", enabled=True)
+        sl.log_tool_result("Read", False, 0, tool_use_id="toolu_abc")
+        sl.close()
+        event = json.loads(session_log_path.read_text().strip())
+        assert event["tool_use_id"] == "toolu_abc"
+        assert event["success"] is False
+
+    def test_log_tool_result_disabled(self, logs_dir, session_log_path):
+        sl = SessionLogger(logs_dir, "test-task-123", enabled=False)
+        sl.log_tool_result("Bash", True, 100)
+        sl.close()
+        assert not session_log_path.exists()
+
+    def test_log_tool_call_with_tool_use_id(self, logs_dir, session_log_path):
+        sl = SessionLogger(logs_dir, "test-task-123", log_tool_inputs=True)
+        sl.log_tool_call("Edit", {"file_path": "/a.py"}, tool_use_id="toolu_xyz")
+        sl.close()
+        event = json.loads(session_log_path.read_text().strip())
+        assert event["tool_use_id"] == "toolu_xyz"
+        assert event["tool"] == "Edit"
+        assert event["sequence"] == 1
+
+    def test_log_tool_call_without_tool_use_id_backward_compat(self, logs_dir, session_log_path):
+        """Existing 2-arg callers still work — no tool_use_id in output."""
+        sl = SessionLogger(logs_dir, "test-task-123", log_tool_inputs=True)
+        sl.log_tool_call("Read", {"file_path": "/foo"})
+        sl.close()
+        event = json.loads(session_log_path.read_text().strip())
+        assert "tool_use_id" not in event
+        assert event["tool"] == "Read"

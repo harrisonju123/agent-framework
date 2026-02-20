@@ -81,15 +81,26 @@ class SessionLogger:
         except Exception as e:
             logger.debug(f"Session log write failed (non-fatal): {e}")
 
-    def log_tool_call(self, tool_name: str, tool_input: Optional[dict] = None) -> None:
+    def log_tool_call(self, tool_name: str, tool_input: Optional[dict] = None, tool_use_id: Optional[str] = None) -> None:
         """Log a tool call with optional input parameters."""
         if not self._enabled:
             return
         self._sequence += 1
         data = {"tool": tool_name, "sequence": self._sequence}
+        if tool_use_id is not None:
+            data["tool_use_id"] = tool_use_id
         if self._log_tool_inputs and tool_input:
             data["input"] = _redact_sensitive_values(tool_input)
         self.log("tool_call", **data)
+
+    def log_tool_result(self, tool_name: str, success: bool, result_size: int, tool_use_id: Optional[str] = None) -> None:
+        """Log a tool result for post-hoc correlation with tool calls."""
+        if not self._enabled:
+            return
+        data: dict[str, Any] = {"tool": tool_name, "success": success, "result_size": result_size}
+        if tool_use_id is not None:
+            data["tool_use_id"] = tool_use_id
+        self.log("tool_result", **data)
 
     def log_prompt(self, prompt: str, **extra: Any) -> None:
         """Log prompt content (respects log_prompts config flag)."""

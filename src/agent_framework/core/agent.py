@@ -280,7 +280,7 @@ class Agent:
         ir_cfg = sanitized_config.get("intelligent_routing", {})
         if ir_cfg.get("enabled", False):
             from ..llm.model_success_store import ModelSuccessStore
-            self._model_success_store = ModelSuccessStore(workspace, enabled=True)
+            self._model_success_store = ModelSuccessStore(self.workspace, enabled=True)
 
         self.retry_handler = RetryHandler(max_retries=self.config.max_retries)
         enable_error_truncation = self._optimization_config.get("enable_error_truncation", False)
@@ -462,12 +462,14 @@ class Agent:
         max_consecutive_tool_calls: int = 15,
         max_consecutive_diagnostic_calls: int = 5,
         exploration_alert_threshold: int = 50,
+        exploration_alert_thresholds: Optional[Dict[str, int]] = None,
     ):
         """Initialize Agent with modular subsystem setup."""
         self._heartbeat_interval = heartbeat_interval
         self._max_consecutive_tool_calls = max_consecutive_tool_calls
         self._max_consecutive_diagnostic_calls = max_consecutive_diagnostic_calls
         self._exploration_alert_threshold = exploration_alert_threshold
+        self._exploration_alert_thresholds = exploration_alert_thresholds or {}
 
         # Core dependencies and basic state
         self._init_core_dependencies(
@@ -895,7 +897,7 @@ class Agent:
 
         # Append step to chain state file — structured data for step-aware rendering
         if task.context.get("workflow") or task.context.get("chain_step"):
-            self._save_step_to_chain_state(task, response, working_dir=working_dir)
+            self._save_step_to_chain_state(task, response, working_dir=working_dir, task_start_time=task_start_time)
 
         # Safety commit: catch any uncommitted work before marking done
         if working_dir and working_dir.exists() and self._is_implementation_step(task):
@@ -1017,6 +1019,11 @@ class Agent:
             if not skip_chain:
                 self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
+            # Emit waterfall summary when the chain terminates (either at
+            # terminal step or via no_changes early exit)
+            if skip_chain or self._is_at_terminal_workflow_step(task):
+                self._emit_workflow_summary(task)
+
             # Push + PR lifecycle after chain routing. Downstream agents pick up
             # from queue asynchronously, so push completes before they fetch the branch.
             self._git_ops.push_and_create_pr_if_needed(task)
@@ -1051,7 +1058,7 @@ class Agent:
         return "approved"
 
     def _set_structured_verdict(self, task: Task, response) -> None:
-        """Parse review outcome and store verdict before task serialization.
+        """Parse review outcome and store verdict + audit trail before task serialization.
 
         Only qa/architect agents with a workflow produce verdicts.
         Engineer output may contain stray keywords that cause false verdicts.
@@ -1061,31 +1068,44 @@ class Agent:
         if self.config.base_id not in ("qa", "architect"):
             return
 
-        outcome = self._review_cycle.parse_review_outcome(
-            getattr(response, "content", "") or ""
-        )
+        content = getattr(response, "content", "") or ""
+        outcome, audit = self._review_cycle._parse_review_outcome_audited(content)
+
+        workflow_step = task.context.get("workflow_step", "")
+
         if outcome.approved:
             task.context["verdict"] = self._approval_verdict(task)
+            audit.method = "review_outcome"
         elif outcome.needs_fix:
             task.context["verdict"] = "needs_fix"
+            audit.method = "review_outcome"
         else:
-            # At review steps, ambiguous outcome should halt the chain
-            # rather than default to "approved" and skip review.
             _REVIEW_STEP_IDS = PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
-            workflow_step = task.context.get("workflow_step")
             if workflow_step in _REVIEW_STEP_IDS:
                 self.logger.warning(
                     f"Ambiguous review outcome at step {workflow_step!r} for "
                     f"task {task.id} — not setting verdict (chain will halt)"
                 )
+                audit.method = "ambiguous_halt"
             else:
                 task.context["verdict"] = self._approval_verdict(task)
+                audit.method = "ambiguous_default"
 
+        # no_changes marker overrides any previous verdict at plan step
         if (self.config.base_id == "architect"
                 and task.context.get("workflow_step", task.type) in ("plan", "planning")):
-            content = getattr(response, "content", "") or ""
             if self._is_no_changes_response(content):
                 task.context["verdict"] = "no_changes"
+                audit.method = "no_changes_marker"
+                audit.no_changes_marker_found = True
+
+        audit.agent_id = self.config.id
+        audit.workflow_step = workflow_step
+        audit.task_id = task.id
+        audit.value = task.context.get("verdict")
+
+        task.context["verdict_audit"] = audit.to_dict()
+        self._session_logger.log("verdict_audit", **audit.to_dict())
 
     @staticmethod
     def _is_no_changes_response(content: str) -> bool:
@@ -1162,6 +1182,9 @@ class Agent:
         self, task: Task, working_dir: Optional[Path], *,
         content: Optional[str] = None,
         error: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: Optional[float] = None,
     ) -> None:
         """Consolidate all attempt preservation for retry awareness.
 
@@ -1183,6 +1206,9 @@ class Agent:
                 agent_id=self.config.id,
                 working_dir=working_dir,
                 error=error or task.last_error,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
                 logger=self.logger,
             )
             if record and record.branch:
@@ -1213,11 +1239,19 @@ class Agent:
 
         task.last_error = response.error or "Unknown error"
 
+        # Accumulate cost so budget ceilings see failed-attempt spend
+        this_cost = self._budget.estimate_cost(response)
+        prev = task.context.get("_cumulative_cost", 0.0)
+        task.context["_cumulative_cost"] = prev + this_cost
+
         # Record attempt: partial progress + commit WIP + push + persist
         self._finalize_failed_attempt(
             task, working_dir,
             content=response.content,
             error=response.error,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=this_cost,
         )
 
         # Log detailed error information for debugging
@@ -1237,6 +1271,9 @@ class Agent:
             retry=task.retry_count,
             model=response.model_used,
             finish_reason=response.finish_reason,
+            tokens_in=response.input_tokens,
+            tokens_out=response.output_tokens,
+            cost=this_cost,
         )
 
         ctx_budget = self._context_window_manager.budget if self._context_window_manager else None
@@ -1251,19 +1288,21 @@ class Agent:
             root_task_id=task.root_id,
             context_utilization_percent=ctx_budget.utilization_percent if ctx_budget else None,
             context_budget_tokens=ctx_budget.total_budget if ctx_budget else None,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost=this_cost,
         ))
 
         # Record failure outcome for intelligent routing
         if self._model_success_store is not None and response.model_used:
             repo_slug = task.context.get("github_repo", "")
             task_type_str = task.type if isinstance(task.type, str) else task.type.value
-            cost = self._budget.estimate_cost(response)
             self._model_success_store.record_outcome(
                 repo_slug=repo_slug,
                 model_tier=response.model_used,
                 task_type=task_type_str,
                 success=False,
-                cost=cost,
+                cost=this_cost,
             )
 
         await self._handle_failure(task)
@@ -1300,8 +1339,8 @@ class Agent:
     def _get_validated_working_directory(self, task: Task) -> Path:
         """Get working directory with one retry if the path vanishes between creation and use."""
         working_dir = self._git_ops.get_working_directory(task)
+        branch = task.context.get("worktree_branch") or task.context.get("implementation_branch")
         if not working_dir.exists():
-            branch = task.context.get("worktree_branch") or task.context.get("implementation_branch")
             self.logger.error(
                 f"Working directory vanished after creation: {working_dir}. "
                 f"branch={branch}, root_id={task.root_id}. "
@@ -1310,6 +1349,17 @@ class Agent:
             working_dir = self._git_ops.get_working_directory(task)
             if not working_dir.exists():
                 raise RuntimeError(f"Working directory does not exist after retry: {working_dir}")
+
+        try:
+            file_count = sum(1 for _ in working_dir.iterdir())
+        except OSError:
+            file_count = -1
+        self._session_logger.log(
+            "worktree_validated",
+            path=str(working_dir),
+            branch=branch,
+            file_count=file_count,
+        )
         return working_dir
 
     def _maybe_run_periodic_worktree_cleanup(self) -> None:
@@ -1326,19 +1376,17 @@ class Agent:
 
         Completes (returns) when an interruption is detected, which causes
         the asyncio.wait race in _handle_task to cancel the LLM call.
-        Also monitors worktree existence — logs CRITICAL when directory vanishes.
+        Also monitors worktree existence — returns (triggering LLM cancellation)
+        when directory vanishes instead of letting the LLM burn tool calls.
         """
-        _worktree_vanished_logged = False
         while self._running and not self._check_pause_signal():
             self._write_heartbeat()
-            # Worktree existence check — early warning when directory is destroyed
-            if not _worktree_vanished_logged:
-                wt = self._git_ops.active_worktree
-                if wt and not wt.exists():
-                    self.logger.critical(
-                        f"WORKTREE VANISHED during LLM execution: {wt}"
-                    )
-                    _worktree_vanished_logged = True
+            wt = self._git_ops.active_worktree
+            if wt and not wt.exists():
+                self.logger.critical(
+                    f"WORKTREE VANISHED during LLM execution: {wt}"
+                )
+                return
             await asyncio.sleep(2)
 
     @staticmethod
@@ -1373,8 +1421,9 @@ class Agent:
             log_prompts=self._session_log_prompts,
             log_tool_inputs=self._session_log_tool_inputs,
         )
-        # Update workflow router's session logger for this task
+        # Update workflow router and executor session loggers for this task
         self._workflow_router.set_session_logger(self._session_logger)
+        self._workflow_executor.set_session_logger(self._session_logger)
         self._session_logger.log(
             "task_start",
             agent=self.config.id,
@@ -1476,13 +1525,36 @@ class Agent:
         _circuit_breaker_event = asyncio.Event()
         _diagnostic_trip = [False]  # tracks which trigger fired
         _exploration_alerted = [False]
+        _subagent_spawns: list[list[dict]] = [[]]
+
+        def _emit_subagent_summary(outcome: str, orphan_risk: bool):
+            if _subagent_spawns[0]:
+                self._session_logger.log(
+                    "subagent_summary",
+                    total_spawned=len(_subagent_spawns[0]),
+                    session_outcome=outcome,
+                    orphan_risk=orphan_risk,
+                    spawns=_subagent_spawns[0],
+                )
 
         _DIVERSITY_THRESHOLD = 0.5
-        _COMMIT_CHECKPOINT_INTERVAL = 25
+        # Tighter interval for implementation steps to reduce max work loss
+        _COMMIT_CHECKPOINT_INTERVAL = 15 if self._is_implementation_step(task) else 25
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
             try:
                 _tool_call_count[0] += 1
+
+                if tool_name == "Task":
+                    _subagent_spawns[0].append({
+                        "summary": tool_input_summary,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    })
+                    self._session_logger.log(
+                        "subagent_spawned",
+                        spawn_index=len(_subagent_spawns[0]),
+                        tool_input_summary=tool_input_summary,
+                    )
 
                 # Circuit breaker: track consecutive Bash calls with command diversity
                 if tool_name == "Bash":
@@ -1549,32 +1621,45 @@ class Agent:
 
                 # Exploration metric: one-time alert when total calls exceed threshold
                 total = _tool_call_count[0]
-                if total >= self._exploration_alert_threshold and not _exploration_alerted[0]:
-                    _exploration_alerted[0] = True
-                    self.logger.info(
-                        f"Exploration alert: {total} tool calls in session "
-                        f"(threshold={self._exploration_alert_threshold})"
+                if not _exploration_alerted[0]:
+                    workflow_step = task.context.get("workflow_step")
+                    effective_threshold = (
+                        self._exploration_alert_thresholds.get(workflow_step, self._exploration_alert_threshold)
+                        if workflow_step else self._exploration_alert_threshold
                     )
-                    self._session_logger.log(
-                        "exploration_alert",
-                        total_tool_calls=total,
-                        threshold=self._exploration_alert_threshold,
-                    )
-                    self.activity_manager.append_event(ActivityEvent(
-                        type="exploration_alert",
-                        agent=self.config.id,
-                        task_id=task.id,
-                        title=f"Exploration: {total} tool calls (threshold={self._exploration_alert_threshold})",
-                        timestamp=datetime.now(timezone.utc),
-                    ))
+                    if total >= effective_threshold:
+                        _exploration_alerted[0] = True
+                        self.logger.info(
+                            f"Exploration alert: {total} tool calls in session "
+                            f"(threshold={effective_threshold}, step={workflow_step or 'standalone'})"
+                        )
+                        self._session_logger.log(
+                            "exploration_alert",
+                            total_tool_calls=total,
+                            threshold=effective_threshold,
+                            workflow_step=workflow_step,
+                            agent_type=self.config.base_id,
+                        )
+                        self.activity_manager.append_event(ActivityEvent(
+                            type="exploration_alert",
+                            agent=self.config.id,
+                            task_id=task.id,
+                            title=(
+                                f"Exploration: {total} calls "
+                                f"(threshold={effective_threshold}, step={workflow_step or 'standalone'})"
+                            ),
+                            timestamp=datetime.now(timezone.utc),
+                        ))
 
-                # Periodic checkpoint: commit accumulated work so it's not lost
+                # Periodic checkpoint: commit + push so work survives worktree deletion
                 if (_tool_call_count[0] % _COMMIT_CHECKPOINT_INTERVAL == 0
                         and working_dir and working_dir.exists()):
-                    self._git_ops.safety_commit(
+                    committed = self._git_ops.safety_commit(
                         working_dir,
                         f"WIP: periodic checkpoint (tool call {_tool_call_count[0]})",
                     )
+                    if committed:
+                        self._git_ops.push_if_unpushed()
 
                 now = time.time()
                 if now - _last_write_time[0] < 1.0:
@@ -1617,7 +1702,8 @@ class Agent:
             "When you read a file, read it ONCE in full — never chunk through the same "
             "file with repeated Read calls at different offsets. After one full read, "
             "the contents are in your context; use your conversation history to recall "
-            "them. Use Grep for targeted searches instead of reading files at all.",
+            "them. Use Grep for targeted searches instead of reading files at all. "
+            "Do not delegate file exploration to subagents — explore directly.",
         ]
         efficiency_parts.append(
             "COMMIT DISCIPLINE: After completing each major deliverable, immediately "
@@ -1664,6 +1750,7 @@ class Agent:
             task_id=task.id,
             on_tool_activity=_on_tool_activity,
             on_session_tool_call=self._session_logger.log_tool_call,
+            on_session_tool_result=self._session_logger.log_tool_result,
         )
         llm_task = asyncio.create_task(llm_coro)
         watcher_task = asyncio.create_task(self._watch_for_interruption())
@@ -1686,18 +1773,23 @@ class Agent:
             productive_ratio = productive / count if count > 0 else 0.0
             trigger = "diagnostic" if is_diagnostic else "volume"
 
+            wd_str = str(working_dir) if working_dir else "N/A"
+            wd_exists = working_dir.exists() if working_dir else None
+
             if is_diagnostic:
                 self.logger.warning(
                     f"Diagnostic circuit breaker tripped for task {task.id}: "
                     f"{diag_count} consecutive diagnostic commands "
                     f"(threshold={self._max_consecutive_diagnostic_calls})"
+                    f" (working_dir={wd_str}, exists={wd_exists})"
                 )
                 event_title = (
                     f"Diagnostic circuit breaker: {diag_count} consecutive diagnostic commands"
+                    f" — {wd_str}"
                 )
                 error_msg = (
                     f"Stuck agent detected: {diag_count} consecutive diagnostic commands — "
-                    f"working directory likely deleted"
+                    f"working directory {wd_str} (exists={wd_exists})"
                 )
             else:
                 self.logger.warning(
@@ -1705,15 +1797,17 @@ class Agent:
                     f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls}, "
                     f"diversity={diversity:.2f}, unique_commands={unique}, "
                     f"productive_ratio={productive_ratio:.2f})"
+                    f" (working_dir={wd_str}, exists={wd_exists})"
                 )
                 event_title = (
                     f"Circuit breaker: {count} consecutive Bash calls "
                     f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
+                    f" — {wd_str}"
                 )
                 error_msg = (
                     f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
                     f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
-                    f"Working directory may be deleted or inaccessible."
+                    f"Working directory {wd_str} (exists={wd_exists})."
                 )
 
             # Auto-commit WIP before killing — prevents code loss
@@ -1745,6 +1839,9 @@ class Agent:
                 unique_commands=unique,
                 diversity=round(diversity, 2),
                 productive_ratio=round(productive_ratio, 2),
+                working_dir=wd_str,
+                working_dir_exists=wd_exists,
+                last_commands=commands[-5:],
             )
 
             self.activity_manager.append_event(ActivityEvent(
@@ -1754,6 +1851,7 @@ class Agent:
                 title=event_title,
                 timestamp=datetime.now(timezone.utc),
             ))
+            _emit_subagent_summary("circuit_breaker", True)
             return LLMResponse(
                 content="",
                 model_used="",
@@ -1766,8 +1864,18 @@ class Agent:
             )
 
         if watcher_task in done:
-            # Pause or stop detected — cancel LLM and reset task
-            self.logger.info(f"Interruption detected during task {task.id}, cancelling LLM")
+            # Determine cause: worktree vanished vs pause/stop signal
+            wt = self._git_ops.active_worktree
+            worktree_gone = wt is not None and not wt.exists()
+
+            if worktree_gone:
+                error_msg = f"Worktree vanished during LLM execution: {wt}"
+                event_type = "worktree_vanished"
+            else:
+                error_msg = "Interrupted during LLM execution"
+                event_type = "interrupted"
+
+            self.logger.info(f"{error_msg} for task {task.id}, cancelling LLM")
             self.llm.cancel()
             llm_task.cancel()
             circuit_breaker_task.cancel()
@@ -1783,20 +1891,28 @@ class Agent:
             self._finalize_failed_attempt(
                 task, working_dir,
                 content=partial,
-                error="Interrupted during LLM execution",
+                error=error_msg,
             )
 
-            task.last_error = "Interrupted during LLM execution"
+            if worktree_gone:
+                self._session_logger.log(
+                    "worktree_vanished",
+                    path=str(wt),
+                    task_id=task.id,
+                )
+
+            task.last_error = error_msg
             task.reset_to_pending()
             self.queue.update(task)
             self.activity_manager.append_event(ActivityEvent(
-                type="interrupted",
+                type=event_type,
                 agent=self.config.id,
                 task_id=task.id,
                 title=task.title,
                 timestamp=datetime.now(timezone.utc),
             ))
-            self.logger.info(f"Task {task.id} reset to pending after interruption")
+            self.logger.info(f"Task {task.id} reset to pending after {event_type}")
+            _emit_subagent_summary(event_type, True)
             return None
         else:
             # LLM finished first — cancel watcher and circuit breaker, return response
@@ -1806,7 +1922,10 @@ class Agent:
                 await watcher_task
             except asyncio.CancelledError:
                 pass
-            return llm_task.result()
+            result = llm_task.result()
+            outcome = "success" if result and result.success else "failed"
+            _emit_subagent_summary(outcome, not (result and result.success))
+            return result
 
     async def _auto_commit_wip(self, task: Task, working_dir: Path, bash_count: int) -> None:
         """Best-effort WIP commit so code isn't lost when circuit breaker trips."""
@@ -1997,6 +2116,13 @@ class Agent:
             # Compose team for task execution
             team_agents = self._compose_team_for_task(task)
 
+            # Second validation: catch deletions during prompt build/indexing
+            if not working_dir.exists():
+                raise RuntimeError(
+                    f"Working directory vanished before LLM start: {working_dir}. "
+                    f"Likely deleted by sibling agent cleanup during prompt build."
+                )
+
             # Execute LLM with interruption watching
             response = await self._execute_llm_with_interruption_watch(task, prompt, working_dir, team_agents)
             if response is None:
@@ -2040,10 +2166,24 @@ class Agent:
             task.last_error = str(e)
             self.logger.exception(f"Error processing task {task.id}: {e}")
 
+            # Salvage cost from response if LLM completed before the exception
+            _fail_cost = None
+            _fail_in = 0
+            _fail_out = 0
+            if 'response' in locals() and response is not None:
+                _fail_cost = self._budget.estimate_cost(response)
+                _fail_in = response.input_tokens
+                _fail_out = response.output_tokens
+                prev = task.context.get("_cumulative_cost", 0.0)
+                task.context["_cumulative_cost"] = prev + _fail_cost
+
             self._session_logger.log(
                 "task_failed",
                 error=str(e),
                 retry=task.retry_count,
+                tokens_in=_fail_in,
+                tokens_out=_fail_out,
+                cost=_fail_cost,
             )
 
             ctx_budget = self._context_window_manager.budget if self._context_window_manager else None
@@ -2058,6 +2198,9 @@ class Agent:
                 root_task_id=task.root_id,
                 context_utilization_percent=ctx_budget.utilization_percent if ctx_budget else None,
                 context_budget_tokens=ctx_budget.total_budget if ctx_budget else None,
+                input_tokens=_fail_in,
+                output_tokens=_fail_out,
+                cost=_fail_cost,
             ))
 
             # Push whatever was committed before the error — prevents worktree
@@ -2069,7 +2212,10 @@ class Agent:
                     f"Post-completion error for task {task.id} (already completed): {e}"
                 )
             else:
-                self._finalize_failed_attempt(task, working_dir, error=str(e))
+                self._finalize_failed_attempt(
+                    task, working_dir, error=str(e),
+                    input_tokens=_fail_in, output_tokens=_fail_out, cost_usd=_fail_cost,
+                )
                 await self._handle_failure(task)
 
         finally:
@@ -2308,7 +2454,7 @@ class Agent:
         except Exception as e:
             self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
 
-    def _save_step_to_chain_state(self, task: Task, response, *, working_dir: Optional[Path] = None) -> None:
+    def _save_step_to_chain_state(self, task: Task, response, *, working_dir: Optional[Path] = None, task_start_time: Optional[datetime] = None) -> None:
         """Append a structured step record to the chain state file.
 
         Called AFTER plan extraction + verdict setting so all structured
@@ -2330,6 +2476,7 @@ class Agent:
                 response_content=content,
                 working_dir=working_dir,
                 tool_stats=tool_stats_dict,
+                started_at=task_start_time,
             )
 
             # Store files_modified in task context for chain propagation
@@ -2344,6 +2491,45 @@ class Agent:
             )
         except Exception as e:
             self.logger.warning(f"Failed to save chain state for {task.id}: {e}")
+
+    def _emit_workflow_summary(self, task: Task) -> None:
+        """Emit a waterfall summary event capturing the full workflow timeline.
+
+        Non-fatal — failure to emit doesn't block task completion.
+        """
+        try:
+            from .chain_state import load_chain_state, build_workflow_summary
+
+            state = load_chain_state(self.workspace, task.root_id)
+            if state is None or not state.steps:
+                return
+
+            summary = build_workflow_summary(state)
+
+            # Enrich with PR URL if available
+            pr_url = task.context.get("pr_url")
+            if pr_url:
+                summary["pr_url"] = pr_url
+
+            if self._session_logging_enabled:
+                self._session_logger.log("workflow_summary", **summary)
+
+            self.activity_manager.append_event(ActivityEvent(
+                type="workflow_summary",
+                agent=self.config.id,
+                task_id=task.id,
+                title=f"Workflow {summary.get('outcome', 'unknown')}: {len(summary.get('steps', []))} steps",
+                timestamp=datetime.now(timezone.utc),
+                root_task_id=task.root_id,
+                duration_ms=int(summary["total_duration_seconds"] * 1000) if summary.get("total_duration_seconds") else None,
+            ))
+
+            self.logger.info(
+                f"Workflow summary: {summary.get('outcome')} in {len(summary.get('steps', []))} steps, "
+                f"{summary.get('total_duration_seconds')}s"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to emit workflow summary for {task.id}: {e}")
 
     def _compute_tool_stats_for_chain(self, task: Task) -> Optional[Dict]:
         """Compute tool usage stats dict for embedding in chain state.
@@ -2413,37 +2599,55 @@ class Agent:
             step = task.context.get("workflow_step", "unknown")
             now_iso = datetime.now(timezone.utc).isoformat()
 
-            # Only populate paths not already cached (preserve LLM-written summaries)
+            # Detect files modified in this step so stale summaries get refreshed
+            from .chain_state import _collect_files_modified
+            modified_in_step = set(_collect_files_modified(working_dir))
+
             added = 0
+            refreshed = 0
             for file_path in file_reads:
                 # Store repo-relative key for cross-worktree portability
                 cache_key = _to_relative_path(file_path, working_dir)
-                if cache_key not in entries:
-                    entries[cache_key] = {
+                is_modified = cache_key in modified_in_step
+                if cache_key not in entries or is_modified:
+                    entry = {
                         "summary": summarize_file(file_path),
                         "read_by": self.config.base_id,
                         "read_at": now_iso,
                         "workflow_step": step,
                     }
-                    added += 1
+                    if is_modified:
+                        entry["modified_by"] = self.config.base_id
+                        entry["modified_at"] = now_iso
+                        refreshed += 1
+                    else:
+                        added += 1
+                    entries[cache_key] = entry
 
             # Measure cache bypass rate at the storage layer (complements
             # _measure_cache_effectiveness which measures from prompt-injected paths)
             if pre_existing_keys:
                 read_keys = {_to_relative_path(fp, working_dir) for fp in file_reads}
-                re_read = sorted(read_keys & pre_existing_keys)
-                bypass_rate = len(re_read) / len(pre_existing_keys)
+                re_read = read_keys & pre_existing_keys
+                # Partition: re-reads of modified files are justified, others are wasteful
+                modified_keys = {k for k, v in entries.items() if v.get("modified_by")}
+                justified = sorted(re_read & modified_keys)
+                wasteful = sorted(re_read - modified_keys)
+                wasteful_rate = len(wasteful) / len(pre_existing_keys) if pre_existing_keys else 0.0
                 self._session_logger.log(
                     "read_cache_bypass",
                     cached_files=len(pre_existing_keys),
                     re_read_count=len(re_read),
-                    bypass_rate=round(bypass_rate, 3),
+                    bypass_rate=round(len(re_read) / len(pre_existing_keys), 3),
+                    justified_rereads=len(justified),
+                    wasteful_rereads=len(wasteful),
+                    wasteful_rate=round(wasteful_rate, 3),
                     new_reads=added,
                     total_reads=len(file_reads),
-                    re_read_files=re_read[:20],
+                    re_read_files=sorted(re_read)[:20],
                 )
 
-            if added == 0:
+            if added + refreshed == 0:
                 return file_reads
 
             cache_data = {
@@ -2451,7 +2655,10 @@ class Agent:
                 "entries": entries,
             }
             atomic_write_text(cache_file, json.dumps(cache_data))
-            self.logger.debug(f"Read cache: added {added} paths ({len(entries)} total) for {root_task_id}")
+            self.logger.debug(
+                f"Read cache: added {added}, refreshed {refreshed} "
+                f"({len(entries)} total) for {root_task_id}"
+            )
 
             # Merge into repo-scoped cache for cross-attempt persistence
             github_repo = task.context.get("github_repo")
@@ -2481,14 +2688,35 @@ class Agent:
             cache_misses = injected & session_paths  # cached but re-read anyway
             new_reads = session_paths - injected     # not cached, first time
 
+            # Load cache to identify modified files for justified/wasteful split
+            modified_keys: set[str] = set()
+            root_task_id = task.root_id
+            cache_file = self.workspace / ".agent-communication" / "read-cache" / f"{root_task_id}.json"
+            if cache_file.exists():
+                try:
+                    cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    modified_keys = {
+                        k for k, v in cache_data.get("entries", {}).items()
+                        if v.get("modified_by")
+                    }
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            justified = cache_misses & modified_keys   # re-read because file changed
+            wasteful = cache_misses - modified_keys    # avoidable re-reads
+
             total_cached = len(injected)
             hit_rate = len(cache_hits) / total_cached if total_cached else 0.0
+            wasteful_rate = len(wasteful) / total_cached if total_cached else 0.0
 
             self._session_logger.log(
                 "read_cache_effectiveness",
                 total_cached=total_cached,
                 cache_hits=len(cache_hits),
                 cache_misses=len(cache_misses),
+                justified_rereads=len(justified),
+                wasteful_rereads=len(wasteful),
+                wasteful_rate=round(wasteful_rate, 3),
                 new_reads=len(new_reads),
                 hit_rate=round(hit_rate, 3),
                 missed_files=sorted(cache_misses)[:20],
@@ -2496,7 +2724,9 @@ class Agent:
             )
             self.logger.debug(
                 f"Read cache effectiveness: {len(cache_hits)}/{total_cached} hits "
-                f"({hit_rate:.0%}), {len(cache_misses)} re-reads, {len(new_reads)} new"
+                f"({hit_rate:.0%}), {len(cache_misses)} re-reads "
+                f"({len(justified)} justified, {len(wasteful)} wasteful), "
+                f"{len(new_reads)} new"
             )
         except Exception as e:
             self.logger.debug(f"Cache effectiveness measurement failed (non-fatal): {e}")
@@ -2683,6 +2913,7 @@ class Agent:
             return None
 
         tool_call_count = None
+        tool_calls = None
         try:
             from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer, compute_tool_usage_stats
 
@@ -2712,9 +2943,33 @@ class Agent:
                         files_written=stats.files_written,
                     )
 
+            # Language mismatch: flag searches for extensions belonging to a different language
+            repo_slug = self._get_repo_slug(task)
+            if repo_slug and self._code_index_query:
+                try:
+                    index = self._code_index_query._store.load(repo_slug)
+                    if index and index.language:
+                        from ..memory.tool_pattern_analyzer import detect_language_mismatches
+                        from dataclasses import asdict
+                        if tool_calls is None:
+                            tool_calls = analyzer.extract_tool_calls(session_path)
+                        mismatches = detect_language_mismatches(tool_calls, index.language)
+                        if mismatches:
+                            self._session_logger.log(
+                                "language_mismatch",
+                                agent_id=self.config.id,
+                                project_language=index.language,
+                                repo=repo_slug,
+                                mismatch_count=len(mismatches),
+                                mismatches=[asdict(m) for m in mismatches],
+                            )
+                except Exception as e:
+                    self.logger.debug(f"Language mismatch detection failed (non-fatal): {e}")
+
             # Qualitative anti-pattern detection (gated by tool_tips config)
             if self._tool_tips_enabled:
-                repo_slug = self._get_repo_slug(task)
+                if not repo_slug:
+                    repo_slug = self._get_repo_slug(task)
                 if repo_slug:
                     recommendations = analyzer.analyze_session(session_path)
                     if recommendations:

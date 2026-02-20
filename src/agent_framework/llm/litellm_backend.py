@@ -81,6 +81,7 @@ class LiteLLMBackend(LLMBackend):
         task_id: Optional[str] = None,
         on_tool_activity: Optional[Callable] = None,
         on_session_tool_call: Optional[Callable] = None,
+        on_session_tool_result: Optional[Callable] = None,
     ) -> LLMResponse:
         """Send a completion request via litellm.acompletion().
 

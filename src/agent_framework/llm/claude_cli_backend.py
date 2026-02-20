@@ -68,6 +68,8 @@ def _process_stream_line(
     log_file=None,
     on_tool_activity: Optional[Callable] = None,
     on_session_tool_call: Optional[Callable] = None,
+    on_session_tool_result: Optional[Callable] = None,
+    pending_tool_calls: Optional[dict] = None,
 ):
     """Parse a single JSON line from --output-format stream-json.
 
@@ -80,8 +82,11 @@ def _process_stream_line(
         usage_result: Dict to populate with usage data from result event
         log_file: Optional file handle for real-time log output
         on_tool_activity: Optional callback invoked with (tool_name, tool_input_summary)
-        on_session_tool_call: Optional callback invoked with (tool_name, tool_input_dict)
+        on_session_tool_call: Optional callback invoked with (tool_name, tool_input_dict, tool_use_id)
             for structured session logging
+        on_session_tool_result: Optional callback invoked with (tool_name, success, result_size, tool_use_id)
+            when a user event with tool_result blocks is parsed (dormant until Claude CLI emits these)
+        pending_tool_calls: Optional dict mapping tool_use_id → tool_name for correlation
     """
     line = line.strip()
     if not line:
@@ -123,17 +128,20 @@ def _process_stream_line(
                     log_file.flush()
             elif block.get("type") == "tool_use":
                 tool_name = block.get("name", "unknown")
+                tool_use_id = block.get("id")
                 marker = f"\n[Tool Call: {tool_name}]\n"
                 text_chunks.append(marker)
                 if log_file:
                     log_file.write(marker)
                     log_file.flush()
                 tool_input = block.get("input", {})
+                if pending_tool_calls is not None and tool_use_id:
+                    pending_tool_calls[tool_use_id] = tool_name
                 if on_tool_activity:
                     summary = _summarize_tool_input(tool_name, tool_input)
                     on_tool_activity(tool_name, summary)
                 if on_session_tool_call:
-                    on_session_tool_call(tool_name, tool_input)
+                    on_session_tool_call(tool_name, tool_input, tool_use_id)
 
     elif event_type == "result":
         # Result event carries authoritative session cost, but its usage field
@@ -159,6 +167,28 @@ def _process_stream_line(
             if subtype == "init" and session_id:
                 log_file.write(f"[Session: {session_id}]\n")
                 log_file.flush()
+
+    elif event_type == "user":
+        # Dormant until Claude CLI emits user events with tool_result blocks
+        if on_session_tool_result is not None:
+            message = event.get("message", {})
+            for block in message.get("content", []):
+                if block.get("type") == "tool_result":
+                    tool_use_id = block.get("tool_use_id")
+                    is_error = block.get("is_error", False)
+                    content = block.get("content", "")
+                    if isinstance(content, str):
+                        result_size = len(content)
+                    elif isinstance(content, list):
+                        result_size = sum(len(json.dumps(b)) for b in content)
+                    else:
+                        result_size = 0
+                    # Resolve tool name from pending_tool_calls correlation map
+                    # pop() to free memory after correlation
+                    tool_name = "unknown"
+                    if pending_tool_calls is not None and tool_use_id:
+                        tool_name = pending_tool_calls.pop(tool_use_id, "unknown")
+                    on_session_tool_result(tool_name, not is_error, result_size, tool_use_id)
 
     else:
         logger.debug(f"Unknown stream-json event type: {event_type}")
@@ -240,6 +270,7 @@ class ClaudeCLIBackend(LLMBackend):
         task_id: Optional[str] = None,
         on_tool_activity: Optional[Callable] = None,
         on_session_tool_call: Optional[Callable] = None,
+        on_session_tool_result: Optional[Callable] = None,
     ) -> LLMResponse:
         """
         Send a completion request via Claude CLI subprocess.
@@ -332,6 +363,12 @@ class ClaudeCLIBackend(LLMBackend):
                 log_file.flush()
                 logger.info(f"Streaming Claude CLI output to {log_file_path}")
 
+            # Init accumulators before subprocess so except handler can salvage partial data
+            text_chunks = []
+            usage_result = {}
+            pending_tool_calls = {}  # tool_use_id → tool_name for result correlation
+            stderr_chunks = []
+
             # Prepare clean environment (disable experimental betas for AWS Bedrock compatibility)
             # Note: CLAUDECODE is stripped at process startup in run_agent.py
             env = os.environ.copy()
@@ -381,11 +418,8 @@ class ClaudeCLIBackend(LLMBackend):
             await process.stdin.drain()
             process.stdin.close()
 
-            # Stream output with timeout
-            text_chunks = []     # Human-readable text extracted from JSON events
+            # Stream output — accumulators already initialized above
             self._partial_output = text_chunks  # Alias so partial output survives cancellation
-            usage_result = {}    # Token usage and cost from final result event
-            stderr_chunks = []
             timed_out = False
 
             # Track whether we've written the stderr header
@@ -428,6 +462,8 @@ class ClaudeCLIBackend(LLMBackend):
                                     text_chunks, usage_result, log_file,
                                     on_tool_activity,
                                     on_session_tool_call,
+                                    on_session_tool_result,
+                                    pending_tool_calls,
                                 )
                             break
                         consecutive_timeouts = 0
@@ -440,6 +476,8 @@ class ClaudeCLIBackend(LLMBackend):
                                 text_chunks, usage_result, log_file,
                                 on_tool_activity,
                                 on_session_tool_call,
+                                on_session_tool_result,
+                                pending_tool_calls,
                             )
                 except Exception as e:
                     logger.debug(f"Stream read error (stdout): {e}")
@@ -612,12 +650,13 @@ class ClaudeCLIBackend(LLMBackend):
             return LLMResponse(
                 content="",
                 model_used=model,
-                input_tokens=0,
-                output_tokens=0,
+                input_tokens=usage_result.get("input_tokens", 0),
+                output_tokens=usage_result.get("output_tokens", 0),
                 finish_reason="error",
                 latency_ms=latency_ms,
                 success=False,
                 error=str(e),
+                reported_cost_usd=usage_result.get("total_cost_usd"),
             )
 
         finally:

@@ -441,3 +441,275 @@ class TestContentPreference:
         assert "Step 2: Add tests" in content
         # result_text exists but is not used since text_chunks is non-empty
         assert usage_result["result_text"] == "Updated JIRA ticket status."
+
+
+class TestToolResultTracking:
+    """Test tool_use_id extraction and user event (tool_result) handling."""
+
+    def test_tool_use_id_extracted(self):
+        """on_session_tool_call receives tool_use_id as 3rd arg."""
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "toolu_abc123", "name": "Glob", "input": {"pattern": "**/*.go"}},
+                ]
+            }
+        }
+        calls = []
+        _process_stream_line(
+            json.dumps(event), [], {},
+            on_session_tool_call=lambda name, inp, tid: calls.append((name, inp, tid)),
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == "Glob"
+        assert calls[0][2] == "toolu_abc123"
+
+    def test_tool_use_id_none_when_missing(self):
+        """tool_use_id defaults to None when block has no id field."""
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "/foo"}},
+                ]
+            }
+        }
+        calls = []
+        _process_stream_line(
+            json.dumps(event), [], {},
+            on_session_tool_call=lambda name, inp, tid: calls.append((name, inp, tid)),
+        )
+        assert calls[0][2] is None
+
+    def test_user_event_invokes_result_callback(self):
+        """Full user event with tool_result block triggers on_session_tool_result."""
+        # First, register a tool_use so pending_tool_calls can correlate
+        pending = {"toolu_xyz": "Grep"}
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_xyz",
+                        "content": "Found 3 matches",
+                    }
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append((name, ok, size, tid)),
+            pending_tool_calls=pending,
+        )
+        assert len(results) == 1
+        assert results[0] == ("Grep", True, len("Found 3 matches"), "toolu_xyz")
+
+    def test_is_error_true_means_failure(self):
+        """is_error=True in tool_result maps to success=False."""
+        pending = {"toolu_err": "Bash"}
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_err",
+                        "is_error": True,
+                        "content": "Permission denied",
+                    }
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append((name, ok, size, tid)),
+            pending_tool_calls=pending,
+        )
+        assert results[0][1] is False
+        assert results[0][0] == "Bash"
+
+    def test_correlation_resolves_tool_name(self):
+        """assistant tool_use populates pending_tool_calls, user tool_result resolves it."""
+        pending = {}
+        # Step 1: assistant emits tool_use
+        assistant_event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "toolu_corr", "name": "Edit", "input": {}},
+                ]
+            }
+        }
+        _process_stream_line(
+            json.dumps(assistant_event), [], {},
+            pending_tool_calls=pending,
+        )
+        assert pending == {"toolu_corr": "Edit"}
+
+        # Step 2: user event with matching tool_use_id
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_corr", "content": "OK"}
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append((name, ok, size, tid)),
+            pending_tool_calls=pending,
+        )
+        assert results[0][0] == "Edit"
+
+    def test_task_tool_use_fires_both_callbacks(self):
+        """Task tool_use blocks invoke both on_tool_activity and on_session_tool_call."""
+        event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_task1",
+                        "name": "Task",
+                        "input": {"prompt": "Search for auth code", "subagent_type": "Explore"},
+                    },
+                ]
+            }
+        }
+        activity_calls = []
+        session_calls = []
+        _process_stream_line(
+            json.dumps(event), [], {},
+            on_tool_activity=lambda name, summary: activity_calls.append((name, summary)),
+            on_session_tool_call=lambda name, inp, tid: session_calls.append((name, inp, tid)),
+        )
+        assert len(activity_calls) == 1
+        assert activity_calls[0][0] == "Task"
+        assert len(session_calls) == 1
+        assert session_calls[0][0] == "Task"
+        assert session_calls[0][2] == "toolu_task1"
+
+    def test_unknown_tool_use_id(self):
+        """Unrecognized tool_use_id defaults tool_name to 'unknown'."""
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_missing", "content": "data"}
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append((name, ok, size, tid)),
+            pending_tool_calls={},
+        )
+        assert results[0][0] == "unknown"
+
+    def test_content_size_string(self):
+        """String content → len(content)."""
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_s", "content": "abcdef"}
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append(size),
+            pending_tool_calls={},
+        )
+        assert results[0] == 6
+
+    def test_content_size_list(self):
+        """List content → sum of JSON-serialized block sizes."""
+        blocks = [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}]
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_l", "content": blocks}
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append(size),
+            pending_tool_calls={},
+        )
+        expected = sum(len(json.dumps(b)) for b in blocks)
+        assert results[0] == expected
+
+    def test_content_empty(self):
+        """Missing content → result_size=0."""
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_e"}
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append(size),
+            pending_tool_calls={},
+        )
+        assert results[0] == 0
+
+    def test_no_user_events_backward_compat(self):
+        """Without user events, on_session_tool_result is never invoked."""
+        events = [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}},
+            {"type": "result", "usage": {"input_tokens": 10, "output_tokens": 5}},
+        ]
+        results = []
+        for event in events:
+            _process_stream_line(
+                json.dumps(event), [], {},
+                on_session_tool_result=lambda name, ok, size, tid: results.append(1),
+                pending_tool_calls={},
+            )
+        assert results == []
+
+    def test_pending_tool_calls_none_safe(self):
+        """pending_tool_calls=None doesn't crash on tool_use or user events."""
+        # tool_use with no pending dict
+        assistant_event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "toolu_np", "name": "Read", "input": {}},
+                ]
+            }
+        }
+        _process_stream_line(json.dumps(assistant_event), [], {})  # no crash
+
+        # user event with no pending dict
+        user_event = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_np", "content": "ok"}
+                ]
+            }
+        }
+        results = []
+        _process_stream_line(
+            json.dumps(user_event), [], {},
+            on_session_tool_result=lambda name, ok, size, tid: results.append(name),
+            pending_tool_calls=None,
+        )
+        assert results[0] == "unknown"
