@@ -1126,6 +1126,39 @@ class Agent:
 
         return joined
 
+    def _finalize_failed_attempt(
+        self, task: Task, working_dir: Optional[Path], *,
+        content: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Consolidate all attempt preservation for retry awareness.
+
+        Called from all failure/interruption paths before task reset.
+        Captures partial progress, records attempt to disk, preserves code.
+        """
+        # Extract partial progress from LLM content
+        if content:
+            summary = self._extract_partial_progress(content)
+            if summary:
+                task.context["_previous_attempt_summary"] = summary
+
+        # Record attempt: commit WIP, push, persist to disk
+        try:
+            from .attempt_tracker import record_attempt
+            record = record_attempt(
+                workspace=self.workspace,
+                task=task,
+                agent_id=self.config.id,
+                working_dir=working_dir,
+                error=error or task.last_error,
+                logger=self.logger,
+            )
+            if record and record.branch:
+                task.context["_previous_attempt_branch"] = record.branch
+                task.context["_previous_attempt_commit_sha"] = record.commit_sha
+        except Exception as e:
+            self.logger.debug(f"Attempt recording failed (non-fatal): {e}")
+
     def _can_salvage_verdict(self, task: Task, response) -> bool:
         """Check if a failed response contains a valid review verdict worth salvaging.
 
@@ -1148,21 +1181,12 @@ class Agent:
 
         task.last_error = response.error or "Unknown error"
 
-        # Preserve partial progress so the retry prompt can continue from it
-        if response.content:
-            summary = self._extract_partial_progress(response.content)
-            if summary:
-                task.context["_previous_attempt_summary"] = summary
-
-        # Capture git state from worktree so retry knows what code was written
-        if working_dir and working_dir.exists():
-            try:
-                git_evidence = self._error_recovery.gather_git_evidence(working_dir)
-                if git_evidence:
-                    task.context["_previous_attempt_git_diff"] = git_evidence
-                    self.logger.debug(f"Captured {len(git_evidence)} chars of git evidence for retry")
-            except Exception as e:
-                self.logger.debug(f"Git evidence capture failed (non-fatal): {e}")
+        # Record attempt: partial progress + commit WIP + push + persist
+        self._finalize_failed_attempt(
+            task, working_dir,
+            content=response.content,
+            error=response.error,
+        )
 
         # Log detailed error information for debugging
         self.logger.error(
@@ -1536,11 +1560,6 @@ class Agent:
             "the contents are in your context; use your conversation history to recall "
             "them. Use Grep for targeted searches instead of reading files at all.",
         ]
-        if self._mcp_enabled:
-            efficiency_parts.append(
-                "Before reading any file, call get_cached_reads() to check "
-                "if a previous agent already analyzed it."
-            )
         efficiency_parts.append(
             "COMMIT DISCIPLINE: After completing each major deliverable, immediately "
             "commit AND push your work (git add + git commit + git push origin HEAD). "
@@ -1614,6 +1633,13 @@ class Agent:
                     f"{diag_count} consecutive diagnostic commands "
                     f"(threshold={self._max_consecutive_diagnostic_calls})"
                 )
+                event_title = (
+                    f"Diagnostic circuit breaker: {diag_count} consecutive diagnostic commands"
+                )
+                error_msg = (
+                    f"Stuck agent detected: {diag_count} consecutive diagnostic commands — "
+                    f"working directory likely deleted"
+                )
             else:
                 self.logger.warning(
                     f"Circuit breaker tripped for task {task.id}: "
@@ -1621,24 +1647,27 @@ class Agent:
                     f"diversity={diversity:.2f}, unique_commands={unique}, "
                     f"productive_ratio={productive_ratio:.2f})"
                 )
+                event_title = (
+                    f"Circuit breaker: {count} consecutive Bash calls "
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
+                )
+                error_msg = (
+                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
+                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
+                    f"Working directory may be deleted or inaccessible."
+                )
 
             # Auto-commit WIP before killing — prevents code loss
             await self._auto_commit_wip(task, working_dir, count)
 
             self.llm.cancel()
 
-            # Harvest partial output before cancelling the task — mirrors interruption path
+            # Record attempt for retry awareness (partial progress + disk persistence)
             try:
                 partial = self.llm.get_partial_output()
-                if partial:
-                    summary = self._extract_partial_progress(partial)
-                    if summary:
-                        task.context["_previous_attempt_summary"] = summary
-                        self.logger.debug(
-                            f"Preserved {len(summary)} chars of partial progress from circuit breaker"
-                        )
-            except Exception as e:
-                self.logger.debug(f"Partial output harvest failed (non-fatal): {e}")
+            except Exception:
+                partial = None
+            self._finalize_failed_attempt(task, working_dir, content=partial, error=error_msg)
 
             llm_task.cancel()
             watcher_task.cancel()
@@ -1658,25 +1687,6 @@ class Agent:
                 diversity=round(diversity, 2),
                 productive_ratio=round(productive_ratio, 2),
             )
-
-            if is_diagnostic:
-                event_title = (
-                    f"Diagnostic circuit breaker: {diag_count} consecutive diagnostic commands"
-                )
-                error_msg = (
-                    f"Stuck agent detected: {diag_count} consecutive diagnostic commands — "
-                    f"working directory likely deleted"
-                )
-            else:
-                event_title = (
-                    f"Circuit breaker: {count} consecutive Bash calls "
-                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
-                )
-                error_msg = (
-                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
-                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
-                    f"Working directory may be deleted or inaccessible."
-                )
 
             self.activity_manager.append_event(ActivityEvent(
                 type="circuit_breaker",
@@ -1709,17 +1719,13 @@ class Agent:
             except Exception as e:
                 self.logger.debug(f"LLM task raised during cancellation: {e}")
 
-            # Harvest partial output so retry can continue from where we left off
+            # Harvest partial output and record attempt for retry awareness
             partial = self.llm.get_partial_output()
-            if partial:
-                summary = self._extract_partial_progress(partial)
-                if summary:
-                    task.context["_previous_attempt_summary"] = summary
-                    self.logger.debug(f"Preserved {len(summary)} chars of partial progress from interruption")
-
-            # Safety commit before resetting — preserve any work the LLM produced
-            if working_dir and working_dir.exists():
-                self._git_ops.safety_commit(working_dir, f"WIP: auto-save before interruption ({task.id})")
+            self._finalize_failed_attempt(
+                task, working_dir,
+                content=partial,
+                error="Interrupted during LLM execution",
+            )
 
             task.last_error = "Interrupted during LLM execution"
             task.reset_to_pending()
@@ -1866,6 +1872,23 @@ class Agent:
             # Discover committed work from previous attempts so retry prompt knows what exists
             if task.retry_count > 0:
                 branch_work = self._git_ops.discover_branch_work(working_dir)
+
+                # Fallback: if discover found nothing, check attempt history for a pushed branch
+                if not branch_work:
+                    try:
+                        from .attempt_tracker import get_last_pushed_branch
+                        from ..utils.subprocess_utils import run_git_command
+                        pushed_branch = get_last_pushed_branch(self.workspace, task.id)
+                        if pushed_branch:
+                            self.logger.info(f"Fetching pushed branch {pushed_branch} from attempt history")
+                            run_git_command(
+                                ["fetch", "origin", pushed_branch],
+                                cwd=working_dir, check=False, timeout=30,
+                            )
+                            branch_work = self._git_ops.discover_branch_work(working_dir)
+                    except Exception as e:
+                        self.logger.debug(f"Attempt history branch recovery failed (non-fatal): {e}")
+
                 if branch_work:
                     task.context["_previous_attempt_branch_work"] = branch_work
                     self.logger.info(
@@ -1919,7 +1942,8 @@ class Agent:
             # Handle response
             if response.success:
                 # Populate shared read cache for downstream chain steps
-                self._populate_read_cache(task, working_dir=working_dir)
+                file_reads = self._populate_read_cache(task, working_dir=working_dir)
+                self._measure_cache_effectiveness(task, file_reads, working_dir=working_dir)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             elif self._can_salvage_verdict(task, response):
                 self.logger.warning(
@@ -1934,7 +1958,8 @@ class Agent:
                 )
                 response.success = True
                 response.finish_reason = "stop"
-                self._populate_read_cache(task, working_dir=working_dir)
+                file_reads = self._populate_read_cache(task, working_dir=working_dir)
+                self._measure_cache_effectiveness(task, file_reads, working_dir=working_dir)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
                 await self._handle_failed_response(task, response, working_dir=working_dir)
@@ -1968,17 +1993,7 @@ class Agent:
                     f"Post-completion error for task {task.id} (already completed): {e}"
                 )
             else:
-                if working_dir and working_dir.exists():
-                    # Safety commit before error recovery — preserve any partial work
-                    self._git_ops.safety_commit(working_dir, f"WIP: auto-save before error recovery ({task.id})")
-
-                    # Capture git state before retry so next attempt knows what was written
-                    try:
-                        git_evidence = self._error_recovery.gather_git_evidence(working_dir)
-                        if git_evidence:
-                            task.context["_previous_attempt_git_diff"] = git_evidence
-                    except Exception:
-                        pass
+                self._finalize_failed_attempt(task, working_dir, error=str(e))
                 await self._handle_failure(task)
 
         finally:
@@ -2336,7 +2351,7 @@ class Agent:
                     added += 1
 
             if added == 0:
-                return
+                return file_reads
 
             cache_data = {
                 "root_task_id": root_task_id,
@@ -2349,8 +2364,49 @@ class Agent:
             github_repo = task.context.get("github_repo")
             if github_repo:
                 self._update_repo_cache(cache_dir, github_repo, entries)
+            return file_reads
         except Exception as e:
             self.logger.warning(f"Failed to populate read cache for {task.id}: {e}")
+            return []
+
+    def _measure_cache_effectiveness(
+        self, task: Task, file_reads: list[str], *, working_dir: Optional[Path] = None,
+    ) -> None:
+        """Log how well the read cache prevented redundant file reads.
+
+        Compares the set of paths injected into the prompt (from previous steps)
+        against the files actually read during this session. Non-fatal.
+        """
+        try:
+            injected = self._prompt_builder._injected_cache_paths
+            if not injected:
+                return
+
+            session_paths = {_to_relative_path(p, working_dir) for p in file_reads}
+
+            cache_hits = injected - session_paths   # cached and NOT re-read
+            cache_misses = injected & session_paths  # cached but re-read anyway
+            new_reads = session_paths - injected     # not cached, first time
+
+            total_cached = len(injected)
+            hit_rate = len(cache_hits) / total_cached if total_cached else 0.0
+
+            self._session_logger.log(
+                "read_cache_effectiveness",
+                total_cached=total_cached,
+                cache_hits=len(cache_hits),
+                cache_misses=len(cache_misses),
+                new_reads=len(new_reads),
+                hit_rate=round(hit_rate, 3),
+                missed_files=sorted(cache_misses)[:20],
+                new_files=sorted(new_reads)[:20],
+            )
+            self.logger.debug(
+                f"Read cache effectiveness: {len(cache_hits)}/{total_cached} hits "
+                f"({hit_rate:.0%}), {len(cache_misses)} re-reads, {len(new_reads)} new"
+            )
+        except Exception as e:
+            self.logger.debug(f"Cache effectiveness measurement failed (non-fatal): {e}")
 
     def _update_repo_cache(self, cache_dir: Path, github_repo: str, entries: dict) -> None:
         """Merge entries into repo-scoped cache for cross-attempt persistence.

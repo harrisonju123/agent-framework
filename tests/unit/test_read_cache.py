@@ -601,3 +601,258 @@ class TestAgentWorkingDirEnv:
         if req.working_dir:
             env["AGENT_WORKING_DIR"] = str(req.working_dir)
         assert "AGENT_WORKING_DIR" not in env
+
+
+class TestMeasureCacheEffectiveness:
+    """Test Agent._measure_cache_effectiveness() metrics."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        return tmp_path
+
+    @pytest.fixture
+    def agent(self, workspace):
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent.workspace = workspace
+        agent.config = MagicMock()
+        agent.config.base_id = "engineer"
+        agent.logger = MagicMock()
+        agent._session_logger = MagicMock()
+        agent._prompt_builder = MagicMock()
+        agent._measure_cache_effectiveness = Agent._measure_cache_effectiveness.__get__(agent)
+        return agent
+
+    @pytest.fixture
+    def task(self):
+        return Task(
+            id="chain-root1-impl-d0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Implement feature",
+            description="Do the thing",
+            context={
+                "_root_task_id": "root1",
+                "workflow_step": "implement",
+            },
+        )
+
+    def test_all_hits(self, agent, task):
+        """All cached files skipped — 100% hit rate."""
+        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py"}
+        file_reads = ["/workspace/src/c.py"]
+
+        agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
+
+        call_kwargs = agent._session_logger.log.call_args_list[-1][1]
+        assert call_kwargs["cache_hits"] == 2
+        assert call_kwargs["cache_misses"] == 0
+        assert call_kwargs["new_reads"] == 1
+        assert call_kwargs["hit_rate"] == 1.0
+
+    def test_all_misses(self, agent, task):
+        """All cached files re-read — 0% hit rate."""
+        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py"}
+        file_reads = ["/workspace/src/a.py", "/workspace/src/b.py"]
+
+        agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
+
+        call_kwargs = agent._session_logger.log.call_args_list[-1][1]
+        assert call_kwargs["cache_hits"] == 0
+        assert call_kwargs["cache_misses"] == 2
+        assert call_kwargs["new_reads"] == 0
+        assert call_kwargs["hit_rate"] == 0.0
+
+    def test_mixed(self, agent, task):
+        """Some hits, some misses, some new reads."""
+        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py", "src/c.py"}
+        # Re-read a.py and b.py, skip c.py, read new d.py
+        file_reads = ["/workspace/src/a.py", "/workspace/src/b.py", "/workspace/src/d.py"]
+
+        agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
+
+        call_kwargs = agent._session_logger.log.call_args_list[-1][1]
+        assert call_kwargs["cache_hits"] == 1     # c.py
+        assert call_kwargs["cache_misses"] == 2   # a.py, b.py
+        assert call_kwargs["new_reads"] == 1      # d.py
+        assert call_kwargs["hit_rate"] == pytest.approx(1 / 3, abs=0.01)
+
+    def test_empty_cache(self, agent, task):
+        """No injected paths — method exits early, no log event."""
+        agent._prompt_builder._injected_cache_paths = set()
+        file_reads = ["/workspace/src/a.py"]
+
+        agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
+
+        # Should not have logged read_cache_effectiveness
+        for call in agent._session_logger.log.call_args_list:
+            assert call[0][0] != "read_cache_effectiveness"
+
+
+class TestInjectReadCacheRoleColumn:
+    """Test role-tagged manifest table in _inject_read_cache."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        cache_dir = tmp_path / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        return tmp_path
+
+    @pytest.fixture
+    def builder(self, workspace):
+        from agent_framework.core.prompt_builder import PromptBuilder
+
+        ctx = MagicMock()
+        ctx.workspace = workspace
+        ctx.mcp_enabled = False
+        ctx.session_logger = MagicMock()
+        builder = PromptBuilder.__new__(PromptBuilder)
+        builder.ctx = ctx
+        builder.config = MagicMock()
+        builder.logger = MagicMock()
+        builder._injected_cache_paths = set()
+        return builder
+
+    def _write_cache(self, workspace, entries):
+        cache_file = workspace / ".agent-communication" / "read-cache" / "root1.json"
+        cache_file.write_text(json.dumps({
+            "root_task_id": "root1",
+            "entries": entries,
+        }))
+
+    def test_role_column_modify(self, builder, workspace):
+        """File in plan.files_to_modify gets MODIFY role."""
+        from agent_framework.core.task import PlanDocument
+
+        self._write_cache(workspace, {
+            "src/target.py": {"summary": "Target file", "read_by": "architect", "workflow_step": "plan"},
+        })
+        task = Task(
+            id="chain-root1-impl-d0", type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS, priority=1, created_by="test",
+            assigned_to="engineer", created_at=datetime.now(timezone.utc),
+            title="Impl", description="Do it",
+            context={"_root_task_id": "root1", "workflow_step": "implement"},
+        )
+        task.plan = PlanDocument(
+            objectives=["obj"], approach=["step1"], success_criteria=["done"],
+            files_to_modify=["src/target.py"],
+        )
+
+        result = builder._inject_read_cache("base prompt", task)
+
+        assert "| MODIFY |" in result
+
+    def test_role_column_ref(self, builder, workspace):
+        """File NOT in plan.files_to_modify gets ref role."""
+        from agent_framework.core.task import PlanDocument
+
+        self._write_cache(workspace, {
+            "src/helper.py": {"summary": "Helper file", "read_by": "architect", "workflow_step": "plan"},
+        })
+        task = Task(
+            id="chain-root1-impl-d0", type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS, priority=1, created_by="test",
+            assigned_to="engineer", created_at=datetime.now(timezone.utc),
+            title="Impl", description="Do it",
+            context={"_root_task_id": "root1", "workflow_step": "implement"},
+        )
+        task.plan = PlanDocument(
+            objectives=["obj"], approach=["step1"], success_criteria=["done"],
+            files_to_modify=["src/other.py"],
+        )
+
+        result = builder._inject_read_cache("base prompt", task)
+
+        assert "| ref |" in result
+        # Table should not have a MODIFY role cell
+        assert "| MODIFY |" not in result
+
+
+class TestInjectReadCacheStepDirective:
+    """Test step-aware directives in _inject_read_cache."""
+
+    @pytest.fixture
+    def workspace(self, tmp_path):
+        cache_dir = tmp_path / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        return tmp_path
+
+    @pytest.fixture
+    def builder(self, workspace):
+        from agent_framework.core.prompt_builder import PromptBuilder
+
+        ctx = MagicMock()
+        ctx.workspace = workspace
+        ctx.mcp_enabled = False
+        ctx.session_logger = MagicMock()
+        builder = PromptBuilder.__new__(PromptBuilder)
+        builder.ctx = ctx
+        builder.config = MagicMock()
+        builder.logger = MagicMock()
+        builder._injected_cache_paths = set()
+        return builder
+
+    def _write_cache(self, workspace):
+        cache_file = workspace / ".agent-communication" / "read-cache" / "root1.json"
+        cache_file.write_text(json.dumps({
+            "root_task_id": "root1",
+            "entries": {
+                "src/file.py": {"summary": "A file", "read_by": "architect", "workflow_step": "plan"},
+            },
+        }))
+
+    def _make_task(self, step):
+        return Task(
+            id="chain-root1-step-d0", type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS, priority=1, created_by="test",
+            assigned_to="engineer", created_at=datetime.now(timezone.utc),
+            title="Step", description="Do it",
+            context={"_root_task_id": "root1", "workflow_step": step},
+        )
+
+    def test_implement_step_directive(self, builder, workspace):
+        """Implement step gets MODIFY/ref guidance."""
+        self._write_cache(workspace)
+        task = self._make_task("implement")
+
+        result = builder._inject_read_cache("base", task)
+
+        assert "MODIFY are your primary targets" in result
+
+    def test_review_step_directive(self, builder, workspace):
+        """Review step gets diff-focused guidance."""
+        self._write_cache(workspace)
+        task = self._make_task("code_review")
+
+        result = builder._inject_read_cache("base", task)
+
+        assert "Focus on the git diff" in result
+
+    def test_qa_review_step_directive(self, builder, workspace):
+        """QA review step also gets diff-focused guidance."""
+        self._write_cache(workspace)
+        task = self._make_task("qa_review")
+
+        result = builder._inject_read_cache("base", task)
+
+        assert "Focus on the git diff" in result
+
+
+class TestEfficiencyDirectiveNoMcpCacheLine:
+    """Verify the MCP get_cached_reads() line is no longer in efficiency_parts."""
+
+    def test_no_get_cached_reads_in_efficiency_directive(self):
+        """The efficiency directive should not contain get_cached_reads() prompt."""
+        import inspect
+        from agent_framework.core.agent import Agent
+
+        source = inspect.getsource(Agent._execute_llm_with_interruption_watch)
+        # The old block appended "Before reading any file, call get_cached_reads()"
+        # to efficiency_parts — verify it's gone
+        assert "get_cached_reads" not in source

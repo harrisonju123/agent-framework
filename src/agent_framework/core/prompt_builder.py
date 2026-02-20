@@ -123,6 +123,9 @@ class PromptBuilder:
         self._current_specialization = None
         self._current_file_count = 0
 
+        # Paths injected via read cache manifest — used by Agent to measure effectiveness
+        self._injected_cache_paths: set[str] = set()
+
     def build(self, task: Task) -> str:
         """Build prompt from task.
 
@@ -1215,8 +1218,11 @@ If a tool call fails:
         """Inject read cache manifest from previous chain steps.
 
         Tells the LLM which files were already analyzed so it can skip
-        redundant reads and use get_cached_reads() for details.
+        redundant reads.
         """
+        # Reset before early-return paths so stale data never leaks across builds
+        self._injected_cache_paths = set()
+
         cache_dir = self.ctx.workspace / ".agent-communication" / "read-cache"
         root_task_id = task.root_id
         cache_file = cache_dir / f"{root_task_id}.json"
@@ -1240,40 +1246,43 @@ If a tool call fails:
         # Migrate legacy absolute-path keys to repo-relative
         entries = self._migrate_legacy_cache_paths(entries)
 
+        # Track injected paths so Agent can measure hit/miss after the session
+        self._injected_cache_paths = set(entries.keys())
+
+        # Build files-to-modify set for role tagging
+        modify_set: set[str] = set()
+        if task.plan and task.plan.files_to_modify:
+            modify_set = set(task.plan.files_to_modify)
+        elif task.context.get("files_to_modify"):
+            modify_set = set(task.context["files_to_modify"])
+
         # Check if any entries have LLM-written summaries
         has_summaries = any(e.get("summary") for e in entries.values())
 
         if has_summaries:
-            lines = ["## FILES ANALYZED BY PREVIOUS AGENTS — check these before reading\n"]
-            lines.append("| File | Summary | Read By |")
-            lines.append("|------|---------|---------|")
+            lines = ["## FILES ANALYZED BY PREVIOUS AGENTS\n"]
+            lines.append("| File | Summary | Role |")
+            lines.append("|------|---------|------|")
             for file_path, entry in entries.items():
                 summary = entry.get("summary", "").replace("|", "/")
-                read_by = entry.get("read_by", "unknown")
-                step = entry.get("workflow_step", "")
-                agent_label = f"{read_by} ({step})" if step else read_by
+                role = "MODIFY" if self._matches_modify_set(file_path, modify_set) else "ref"
                 # Truncate long summaries per-row
                 if len(summary) > 120:
                     summary = summary[:117] + "..."
-                lines.append(f"| {self._display_path(file_path)} | {summary} | {agent_label} |")
+                lines.append(f"| {self._display_path(file_path)} | {summary} | {role} |")
             lines.append("")
-            footer = "Do NOT re-read these files unless you need to verify specific line-level details."
-            if self.ctx.mcp_enabled:
-                footer = "Use get_cached_reads() for full details. " + footer
-            lines.append(footer + "\n")
+            lines.append(self._read_cache_step_directive(task) + "\n")
         else:
             # Framework-populated paths only — no summaries
             paths = [self._display_path(p) for p in entries.keys()]
             paths_str = ", ".join(paths[:30])
             if len(paths) > 30:
                 paths_str += f", ... ({len(paths) - 30} more)"
-            header = "## FILES READ BY PREVIOUS AGENTS"
-            if self.ctx.mcp_enabled:
-                header += " (call get_cached_reads() for details)"
             lines = [
-                header + "\n",
+                "## FILES READ BY PREVIOUS AGENTS\n",
                 paths_str,
                 "",
+                self._read_cache_step_directive(task) + "\n",
             ]
 
         section = "\n".join(lines)
@@ -1291,6 +1300,37 @@ If a tool call fails:
             )
 
         return prompt + "\n\n" + section
+
+    @staticmethod
+    def _matches_modify_set(file_path: str, modify_set: set[str]) -> bool:
+        """Check if a cache entry path matches any path in the modify set.
+
+        Handles both exact matches and suffix matches — plan paths may be
+        relative (e.g. 'src/foo.py') while cache keys could vary in prefix.
+        """
+        if file_path in modify_set:
+            return True
+        for m in modify_set:
+            if file_path.endswith("/" + m) or m.endswith("/" + file_path):
+                return True
+        return False
+
+    @staticmethod
+    def _read_cache_step_directive(task: Task) -> str:
+        """Return a step-appropriate instruction for using the cache manifest."""
+        step = task.context.get("workflow_step", "")
+        if step == "implement":
+            return (
+                "Files marked MODIFY are your primary targets — read them in full when "
+                "ready to edit. Files marked 'ref' were explored for context; prefer "
+                "using the summary and only read if you need specific signatures."
+            )
+        if step in ("code_review", "qa_review"):
+            return (
+                "Focus on the git diff. Only read a file for surrounding context "
+                "the diff doesn't show."
+            )
+        return "Check summaries before re-reading any file."
 
     def _inject_self_eval_context(self, prompt: str, task: Task) -> str:
         """Append self-evaluation critique from a previous attempt.
@@ -1426,6 +1466,17 @@ If a tool call fails:
                 "and `git diff HEAD~1` in your working directory to see what was already done, "
                 "then continue from there."
             )
+
+        # Structured attempt history from disk (supplements branch_work)
+        try:
+            from .attempt_tracker import render_for_retry
+            attempt_context = render_for_retry(self.ctx.workspace, task.id)
+            if attempt_context:
+                sections.append("")
+                sections.append(attempt_context)
+                has_progress = True
+        except Exception:
+            pass
 
         # Disambiguate upstream context if present
         if task.context.get("upstream_summary"):

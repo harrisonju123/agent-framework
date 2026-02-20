@@ -1196,7 +1196,8 @@ class TestReadCacheInjection:
         assert "FILES ANALYZED BY PREVIOUS AGENTS" in result
         assert "src/server.py" in result
         assert "Express server" in result
-        assert "architect (plan)" in result
+        assert "| Role |" in result
+        assert "| ref |" in result
         assert "base prompt" in result
 
     def test_inject_paths_only(self, builder, cache_dir, task_with_root):
@@ -1227,8 +1228,8 @@ class TestReadCacheInjection:
         # MCP is disabled in this builder, so get_cached_reads() hint is omitted
         assert "get_cached_reads()" not in result
 
-    def test_inject_paths_only_with_mcp(self, agent_config, tmp_path, task_with_root):
-        """With MCP enabled, paths-only format includes get_cached_reads() hint."""
+    def test_inject_paths_only_has_step_directive(self, agent_config, tmp_path, task_with_root):
+        """Paths-only format includes step-aware directive."""
         import json
         ctx = PromptContext(
             config=agent_config,
@@ -1249,7 +1250,7 @@ class TestReadCacheInjection:
         (cache_dir / "root123.json").write_text(json.dumps(cache_data))
 
         result = builder._inject_read_cache("base prompt", task_with_root)
-        assert "get_cached_reads()" in result
+        assert "Check summaries before re-reading any file" in result
 
     def test_inject_empty_when_no_cache(self, builder, task_with_root):
         """No cache file → original prompt unchanged."""
@@ -1613,3 +1614,90 @@ class TestChainStateIntegration:
 
         assert "CHECKPOINT REJECTED" in context
         assert "redo the auth approach" in context
+
+
+class TestAttemptHistoryInRetryContext:
+    """_inject_retry_context includes attempt history from disk."""
+
+    def test_attempt_history_rendered_in_retry_prompt(self, agent_config, tmp_path):
+        from agent_framework.core.attempt_tracker import (
+            AttemptHistory,
+            AttemptRecord,
+            save_attempt_history,
+        )
+
+        history = AttemptHistory(task_id="retry-task-1", attempts=[
+            AttemptRecord(
+                attempt_number=1,
+                started_at="2026-01-01T00:00:00+00:00",
+                agent_id="engineer",
+                branch="agent/engineer/retry-task-1",
+                commit_sha="abc1234",
+                pushed=True,
+                files_modified=["src/feature.py"],
+                commit_count=3,
+                insertions=200,
+                deletions=10,
+                error="Circuit breaker tripped",
+                error_type="circuit_breaker",
+            ),
+        ])
+        save_attempt_history(tmp_path, history)
+
+        task = Task(
+            id="retry-task-1",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="test-agent",
+            created_at=datetime.now(timezone.utc),
+            title="Implement feature",
+            description="Add feature",
+            retry_count=1,
+            last_error="Circuit breaker tripped",
+            context={"github_repo": "org/repo"},
+        )
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        prompt = builder._inject_retry_context("base prompt", task)
+
+        assert "Previous Attempt History" in prompt
+        assert "agent/engineer/retry-task-1" in prompt
+        assert "3 commits" in prompt
+        assert "200+/10-" in prompt
+
+    def test_no_attempt_history_gracefully_omitted(self, agent_config, tmp_path):
+        task = Task(
+            id="retry-task-2",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="test",
+            assigned_to="test-agent",
+            created_at=datetime.now(timezone.utc),
+            title="Implement feature",
+            description="Add feature",
+            retry_count=1,
+            last_error="Some error",
+            context={"github_repo": "org/repo"},
+        )
+
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        prompt = builder._inject_retry_context("base prompt", task)
+
+        # Should still have retry context, just no attempt history section
+        assert "RETRY CONTEXT" in prompt
+        assert "Previous Attempt History" not in prompt
