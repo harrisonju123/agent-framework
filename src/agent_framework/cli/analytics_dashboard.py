@@ -23,6 +23,7 @@ from ..analytics.performance_metrics import PerformanceMetrics
 from ..analytics.failure_analyzer import FailureAnalyzer
 from ..analytics.shadow_mode_analyzer import ShadowModeAnalyzer
 from ..analytics.llm_metrics import LlmMetrics
+from ..analytics.chain_metrics import ChainMetrics
 
 
 class AnalyticsDashboard:
@@ -38,10 +39,11 @@ class AnalyticsDashboard:
         self.failure_analyzer = FailureAnalyzer(workspace)
         self.shadow_analyzer = ShadowModeAnalyzer(workspace)
         self.llm_metrics = LlmMetrics(workspace)
+        self.chain_metrics = ChainMetrics(workspace)
 
-        # Current tab (0=Performance, 1=Failures, 2=Optimizations, 3=LLM Costs)
+        # Current tab (0=Performance, 1=Failures, 2=Optimizations, 3=LLM Costs, 4=Workflow)
         self.current_tab = 0
-        self.tab_names = ["Performance", "Failures", "Optimizations", "LLM Costs"]
+        self.tab_names = ["Performance", "Failures", "Optimizations", "LLM Costs", "Workflow"]
 
     def make_layout(self) -> Layout:
         """Create dashboard layout."""
@@ -374,6 +376,95 @@ class AnalyticsDashboard:
 
         return layout
 
+    def render_workflow_tab(self) -> Layout:
+        """Render workflow chain metrics tab."""
+        try:
+            report = self.chain_metrics.generate_report(hours=24)
+        except Exception as e:
+            return Layout(Panel(f"Error generating workflow report: {e}", style="red"))
+
+        layout = Layout()
+        layout.split_column(
+            Layout(name="overview", size=10),
+            Layout(name="step_metrics", ratio=1),
+            Layout(name="recent_chains", size=14),
+        )
+
+        # Overview panel
+        overview_text = Text()
+        overview_text.append(f"Total Chains: ", style="bold")
+        overview_text.append(f"{report.total_chains}\n")
+
+        overview_text.append(f"Completed: ", style="bold")
+        overview_text.append(f"{report.completed_chains}\n")
+
+        overview_text.append(f"Completion Rate: ", style="bold")
+        rate_style = "green" if report.chain_completion_rate >= 80 else "yellow" if report.chain_completion_rate >= 50 else "red"
+        overview_text.append(f"{report.chain_completion_rate:.1f}%\n", style=rate_style)
+
+        overview_text.append(f"Avg Chain Depth: ", style="bold")
+        overview_text.append(f"{report.avg_chain_depth:.1f} steps\n")
+
+        overview_text.append(f"Avg Files Modified: ", style="bold")
+        overview_text.append(f"{report.avg_files_modified:.1f}\n")
+
+        overview_text.append(f"Avg Attempts: ", style="bold")
+        attempt_style = "green" if report.avg_attempts < 1.5 else "yellow" if report.avg_attempts < 3 else "red"
+        overview_text.append(f"{report.avg_attempts:.1f}\n", style=attempt_style)
+
+        overview_text.append(f"Time Range: ", style="bold")
+        overview_text.append(f"Last {report.time_range_hours} hours\n")
+
+        layout["overview"].update(Panel(overview_text, title="Workflow Overview", border_style="blue"))
+
+        # Step metrics table
+        step_table = Table(title="Step Type Metrics", expand=True)
+        step_table.add_column("Step", style="cyan")
+        step_table.add_column("Count", justify="right")
+        step_table.add_column("Success Rate", justify="right")
+        step_table.add_column("Avg Duration", justify="right")
+        step_table.add_column("p50", justify="right")
+        step_table.add_column("p90", justify="right")
+
+        for metric in report.step_type_metrics:
+            success_style = "green" if metric.success_rate >= 90 else "yellow" if metric.success_rate >= 70 else "red"
+            step_table.add_row(
+                metric.step_id,
+                str(metric.total_count),
+                f"[{success_style}]{metric.success_rate:.1f}%[/{success_style}]",
+                f"{metric.avg_duration_seconds:.1f}s",
+                f"{metric.p50_duration_seconds:.1f}s",
+                f"{metric.p90_duration_seconds:.1f}s",
+            )
+
+        layout["step_metrics"].update(step_table)
+
+        # Recent chains panel
+        chain_table = Table(title="Recent Chains", expand=True)
+        chain_table.add_column("Root Task", style="cyan")
+        chain_table.add_column("Workflow")
+        chain_table.add_column("Steps", justify="right")
+        chain_table.add_column("Attempts", justify="right")
+        chain_table.add_column("Files", justify="right")
+        chain_table.add_column("Duration", justify="right")
+        chain_table.add_column("Status")
+
+        for chain in report.recent_chains:
+            status = "[green]Done[/green]" if chain.completed else "[yellow]In Progress[/yellow]"
+            chain_table.add_row(
+                chain.root_task_id[:12],
+                chain.workflow,
+                str(chain.step_count),
+                str(chain.attempt),
+                str(chain.files_modified_count),
+                f"{chain.total_duration_seconds:.0f}s",
+                status,
+            )
+
+        layout["recent_chains"].update(chain_table)
+
+        return layout
+
     def render_footer(self) -> Panel:
         """Render footer with help text."""
         text = Text()
@@ -402,6 +493,8 @@ class AnalyticsDashboard:
             layout["main"].update(self.render_optimizations_tab())
         elif self.current_tab == 3:
             layout["main"].update(self.render_llm_costs_tab())
+        elif self.current_tab == 4:
+            layout["main"].update(self.render_workflow_tab())
         else:
             layout["main"].update(self.render_performance_tab())
 

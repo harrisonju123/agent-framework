@@ -13,6 +13,7 @@ from .shadow_mode_analyzer import ShadowModeAnalyzer
 from .agentic_metrics import AgenticMetrics, AgenticMetricsReport
 from .llm_metrics import LlmMetrics, LlmMetricsReport
 from .decomposition_metrics import DecompositionMetrics, DecompositionReport
+from .chain_metrics import ChainMetrics, ChainMetricsReport
 
 __all__ = [
     'PerformanceMetrics',
@@ -24,4 +25,6 @@ __all__ = [
     'LlmMetricsReport',
     'DecompositionMetrics',
     'DecompositionReport',
+    'ChainMetrics',
+    'ChainMetricsReport',
 ]
