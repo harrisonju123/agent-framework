@@ -67,12 +67,18 @@ class WorkflowExecutor:
     def __init__(
         self, queue: "FileQueue", queue_dir: Path, agent_logger=None,
         workspace=None, activity_manager: Optional["ActivityManager"] = None,
+        session_logger=None,
     ):
         self.queue = queue
         self.queue_dir = queue_dir
         self.logger = agent_logger or logger
         self.workspace = workspace
         self.activity_manager = activity_manager
+        self._session_logger = session_logger
+
+    def set_session_logger(self, session_logger) -> None:
+        """Update the session logger for per-task event emission."""
+        self._session_logger = session_logger
 
     def execute_step(
         self,
@@ -286,8 +292,11 @@ class WorkflowExecutor:
 
         # Cap review→engineer fix cycles to prevent infinite bounce loops.
         # code_review, qa_review, and preview_review share a single counter.
-        review_cycles = task.context.get("_dag_review_cycles", 0)
+        count_before = task.context.get("_dag_review_cycles", 0)
+        review_cycles = count_before
         cap_redirect = False
+        phase_reset = False
+        enforced = False
         is_review_to_engineer = (
             target_step.agent == "engineer"
             and task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
@@ -299,6 +308,7 @@ class WorkflowExecutor:
                 and target_step.id == "implement"):
             is_review_to_engineer = False
             review_cycles = 0
+            phase_reset = True
         elif is_review_to_engineer:
             review_cycles += 1
             if review_cycles >= MAX_DAG_REVIEW_CYCLES:
@@ -306,14 +316,42 @@ class WorkflowExecutor:
                     f"Review→engineer cycle {review_cycles} exceeds max ({MAX_DAG_REVIEW_CYCLES}) "
                     f"for task {task.id} — routing to PR creation instead of another fix cycle"
                 )
-                # Try to route to create_pr step instead of looping back
                 pr_step = workflow.steps.get("create_pr")
                 if pr_step and pr_step != target_step:
                     target_step = pr_step
                     next_agent = pr_step.agent
                     cap_redirect = True
+                    enforced = True
                 else:
+                    # Cap hit but no create_pr step — halt the chain entirely
+                    if self._session_logger:
+                        self._session_logger.log(
+                            "review_cycle_check",
+                            task_id=task.id,
+                            workflow_step=task.context.get("workflow_step"),
+                            target_step=target_step.id,
+                            count_before=count_before,
+                            count_after=review_cycles,
+                            max=MAX_DAG_REVIEW_CYCLES,
+                            enforced=False,
+                            phase_reset=False,
+                            halted=True,
+                        )
                     return
+
+        # Emit event for every review-cycle-relevant transition
+        if self._session_logger and (is_review_to_engineer or phase_reset or enforced):
+            self._session_logger.log(
+                "review_cycle_check",
+                task_id=task.id,
+                workflow_step=task.context.get("workflow_step"),
+                target_step=target_step.id,
+                count_before=count_before,
+                count_after=review_cycles,
+                max=MAX_DAG_REVIEW_CYCLES,
+                enforced=enforced,
+                phase_reset=phase_reset,
+            )
 
         # Cap redirect bypasses the diff check — an infinite review loop is
         # worse than a no-diff PR attempt.
