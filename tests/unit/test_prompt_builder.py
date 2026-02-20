@@ -1701,3 +1701,199 @@ class TestAttemptHistoryInRetryContext:
         # Should still have retry context, just no attempt history section
         assert "RETRY CONTEXT" in prompt
         assert "Previous Attempt History" not in prompt
+
+
+class TestUpstreamContextSourceTracking:
+    """_load_upstream_context tracks which cascade level was selected.
+
+    Cascade result is stored on the builder instance (_last_upstream_source,
+    _last_upstream_chars) and written to task.context by build().
+    """
+
+    def test_rejection_feedback_source(self, prompt_builder, sample_task):
+        """Level 1: rejection_feedback records correct source."""
+        sample_task.context["rejection_feedback"] = "Redo this"
+        prompt_builder._load_upstream_context(sample_task)
+
+        assert prompt_builder._last_upstream_source == "rejection_feedback"
+        assert prompt_builder._last_upstream_chars > 0
+
+    def test_chain_state_source(self, agent_config, tmp_path):
+        """Level 2: chain_state records correct source when state exists."""
+        from agent_framework.core.chain_state import ChainState, StepRecord, save_chain_state
+
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Add auth",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan",
+                    agent_id="architect",
+                    task_id="chain-root-1-plan-d1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="Planned auth feature",
+                    verdict="approved",
+                    plan={
+                        "objectives": ["Add JWT auth"],
+                        "approach": ["Create auth service"],
+                        "files_to_modify": ["src/auth.py"],
+                        "risks": [],
+                        "success_criteria": ["Tests pass"],
+                    },
+                ),
+            ],
+        )
+        save_chain_state(tmp_path, state)
+
+        task = Task(
+            id="chain-root-1-implement-d2",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Implement auth",
+            description="Implement auth",
+            context={
+                "_root_task_id": "root-1",
+                "workflow": "default",
+                "workflow_step": "implement",
+                "chain_step": True,
+            },
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        builder._load_upstream_context(task)
+
+        assert builder._last_upstream_source == "chain_state"
+        assert builder._last_upstream_chars > 0
+
+    def test_structured_findings_source(self, prompt_builder, sample_task):
+        """Level 3: structured_findings records correct source."""
+        sample_task.context["structured_findings"] = {
+            "findings": [
+                {"file": "a.py", "severity": "MAJOR", "description": "bug"}
+            ]
+        }
+        prompt_builder._load_upstream_context(sample_task)
+
+        assert prompt_builder._last_upstream_source == "structured_findings"
+
+    def test_upstream_summary_source(self, prompt_builder, sample_task):
+        """Level 4: upstream_summary records correct source."""
+        sample_task.context["upstream_summary"] = "Architect findings"
+        prompt_builder._load_upstream_context(sample_task)
+
+        assert prompt_builder._last_upstream_source == "upstream_summary"
+
+    def test_disk_file_source(self, agent_config, tmp_path, sample_task):
+        """Level 5: disk_file records correct source."""
+        summaries_dir = tmp_path / ".agent-context" / "summaries"
+        summaries_dir.mkdir(parents=True)
+        context_file = summaries_dir / "upstream.txt"
+        context_file.write_text("Findings from disk")
+
+        sample_task.context["upstream_context_file"] = str(context_file)
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        builder._load_upstream_context(sample_task)
+
+        assert builder._last_upstream_source == "disk_file"
+        assert builder._last_upstream_chars > 0
+
+    def test_none_source_when_no_upstream(self, prompt_builder, sample_task):
+        """No upstream context at all records 'none'."""
+        prompt_builder._load_upstream_context(sample_task)
+
+        assert prompt_builder._last_upstream_source == "none"
+        assert prompt_builder._last_upstream_chars == 0
+
+    def test_chain_state_fallthrough_records_skip_reason(self, agent_config, tmp_path):
+        """Chain state exists but renders empty → falls to upstream_summary."""
+        from agent_framework.core.chain_state import ChainState, save_chain_state
+
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Test",
+            workflow="default",
+            steps=[],  # empty steps → chain state returns empty
+        )
+        save_chain_state(tmp_path, state)
+
+        task = Task(
+            id="chain-root-1-implement-d2",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Implement",
+            description="Implement",
+            context={
+                "_root_task_id": "root-1",
+                "workflow": "default",
+                "workflow_step": "implement",
+                "chain_step": True,
+                "upstream_summary": "Fallback text",
+            },
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._load_upstream_context(task)
+
+        assert builder._last_upstream_source == "upstream_summary"
+        assert "Fallback text" in result
+
+    def test_empty_structured_findings_falls_through(self, prompt_builder, sample_task):
+        """Empty findings list falls through."""
+        sample_task.context["structured_findings"] = {"findings": []}
+        sample_task.context["upstream_summary"] = "Summary text"
+
+        prompt_builder._load_upstream_context(sample_task)
+
+        assert prompt_builder._last_upstream_source == "upstream_summary"
+
+    def test_build_writes_source_to_task_context(self, prompt_builder, sample_task):
+        """build() persists cascade result in task.context for downstream visibility."""
+        sample_task.context["upstream_summary"] = "Some findings"
+        prompt_builder.build(sample_task)
+
+        assert sample_task.context["_upstream_context_source"] == "upstream_summary"
+        assert sample_task.context["_upstream_context_chars"] > 0
+
+    def test_prompt_built_event_includes_source_fields(self, agent_config, tmp_path, sample_task):
+        """build() logs upstream_context_source and chars in prompt_built event."""
+        session_logger = Mock()
+        sample_task.context["upstream_summary"] = "Some findings"
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            session_logger=session_logger,
+        )
+        builder = PromptBuilder(ctx)
+        builder.build(sample_task)
+
+        # Find the prompt_built call
+        log_calls = [c for c in session_logger.log.call_args_list
+                     if c.args and c.args[0] == "prompt_built"]
+        assert len(log_calls) >= 1
+        kwargs = log_calls[0].kwargs
+        assert kwargs["upstream_context_source"] == "upstream_summary"
+        assert kwargs["upstream_context_chars"] > 0
+        assert "workflow_step" in kwargs

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ..indexing.query import IndexQuery
 
 from .task import Task, TaskType
+from ..utils.cascade import CascadeLevel, resolve_cascade
 from ..utils.type_helpers import get_type_str
 
 
@@ -126,6 +127,10 @@ class PromptBuilder:
         # Paths injected via read cache manifest — used by Agent to measure effectiveness
         self._injected_cache_paths: set[str] = set()
 
+        # Upstream context cascade result — written to task.context in build()
+        self._last_upstream_source: str = "unknown"
+        self._last_upstream_chars: int = 0
+
     def build(self, task: Task) -> str:
         """Build prompt from task.
 
@@ -197,6 +202,10 @@ class PromptBuilder:
         # Inject human guidance if provided via `agent guide` command
         prompt = self._inject_human_guidance(prompt, task)
 
+        # Persist cascade observability after prompt is fully built
+        task.context["_upstream_context_source"] = self._last_upstream_source
+        task.context["_upstream_context_chars"] = self._last_upstream_chars
+
         # Session log: capture what was sent to the LLM
         if self.ctx.session_logger:
             prompt_hash = hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]
@@ -209,6 +218,9 @@ class PromptBuilder:
                 replan_injected=has_replan,
                 self_eval_injected=has_self_eval,
                 retry=task.retry_count,
+                upstream_context_source=self._last_upstream_source,
+                upstream_context_chars=self._last_upstream_chars,
+                workflow_step=task.context.get("workflow_step"),
             )
             self.ctx.session_logger.log_prompt(prompt)
 
@@ -705,74 +717,104 @@ If a tool call fails:
     def _load_upstream_context(self, task: Task) -> str:
         """Load upstream agent's findings from chain state, inline context, or disk.
 
-        Priority cascade:
-        1. Rejection feedback (human override)
-        2. Chain state file (structured, step-aware rendering)
-        3. Structured findings (QA checklist)
-        4. Inline upstream_summary (raw text fallback)
-        5. Disk file (last resort)
+        Uses a 5-level priority cascade with full observability — the selected
+        source and skip reasons are persisted in task.context for diagnostics.
         """
-        # Rejection feedback takes top priority — human said "redo this"
-        rejection_feedback = task.context.get("rejection_feedback")
-        if rejection_feedback and rejection_feedback.strip():
+        levels = [
+            CascadeLevel("rejection_feedback", self._resolve_rejection_feedback),
+            CascadeLevel("chain_state", self._resolve_chain_state),
+            CascadeLevel("structured_findings", self._resolve_structured_findings),
+            CascadeLevel("upstream_summary", self._resolve_upstream_summary),
+            CascadeLevel("disk_file", self._resolve_disk_file),
+        ]
+        result = resolve_cascade(levels, default="", task=task)
+
+        # Store on self; build() writes to task.context to avoid mutating
+        # the task before the prompt is serialized (shadow mode compares prompts)
+        self._last_upstream_source = result.source
+        self._last_upstream_chars = len(result.value)
+
+        if result.skip_reasons:
+            self.logger.info(
+                "Upstream context cascade: selected %r (%d chars), skipped: %s",
+                result.source, len(result.value), "; ".join(result.skip_reasons),
+            )
+
+        return result.value
+
+    # --- Cascade resolver functions ---
+    # Each returns (Optional[str], skip_reason). None = fall through.
+
+    def _resolve_rejection_feedback(self, task: Task) -> tuple[Optional[str], str]:
+        """Level 1: Human rejection feedback (highest priority)."""
+        feedback = task.context.get("rejection_feedback")
+        if feedback and feedback.strip():
             return (
                 "\n## HUMAN FEEDBACK — CHECKPOINT REJECTED\n"
                 "Your previous output at this step was reviewed and rejected. "
                 "Address the following feedback:\n\n"
-                f"{rejection_feedback}\n"
-            )
+                f"{feedback}\n"
+            ), ""
+        return None, ""
 
-        # Chain state: structured, step-appropriate context rendering
-        chain_context = self._load_chain_state_context(task)
-        if chain_context:
-            return chain_context
+    def _resolve_chain_state(self, task: Task) -> tuple[Optional[str], str]:
+        """Level 2: Structured chain state file."""
+        context, reason = self._load_chain_state_context_with_reason(task)
+        if context:
+            return context, ""
+        return None, reason
 
-        # Structured findings take priority — they give the engineer precise, actionable items
+    def _resolve_structured_findings(self, task: Task) -> tuple[Optional[str], str]:
+        """Level 3: QA structured findings checklist."""
         structured = task.context.get("structured_findings")
-        if structured:
-            formatted = self._format_structured_findings(structured)
-            if formatted:
-                return formatted
+        if not structured:
+            return None, ""
+        formatted = self._format_structured_findings(structured)
+        if formatted:
+            return formatted, ""
+        return None, "findings list empty"
 
-        # Prefer inline context — works across worktrees where file path may not resolve
+    def _resolve_upstream_summary(self, task: Task) -> tuple[Optional[str], str]:
+        """Level 4: Inline upstream_summary text."""
         inline = task.context.get("upstream_summary")
         if inline:
-            return f"\n## UPSTREAM AGENT FINDINGS\n{inline}\n"
+            return f"\n## UPSTREAM AGENT FINDINGS\n{inline}\n", ""
+        return None, ""
 
+    def _resolve_disk_file(self, task: Task) -> tuple[Optional[str], str]:
+        """Level 5: Upstream context file on disk (last resort)."""
         context_file = task.context.get("upstream_context_file")
         if not context_file:
-            return ""
+            return None, ""
 
         try:
             context_path = Path(context_file).resolve()
             summaries_dir = (self.ctx.workspace / ".agent-context" / "summaries").resolve()
 
-            # Only read files inside our summaries directory
             if not str(context_path).startswith(str(summaries_dir)):
                 self.logger.warning(f"Upstream context path outside summaries dir: {context_file}")
-                return ""
+                return None, "path outside summaries dir"
 
             if not context_path.exists():
-                return ""
+                return None, "file not found"
 
             content = context_path.read_text(encoding="utf-8")
             if not content.strip():
-                return ""
+                return None, "file empty"
 
-            return f"\n## UPSTREAM AGENT FINDINGS\n{content}\n"
+            return f"\n## UPSTREAM AGENT FINDINGS\n{content}\n", ""
         except Exception as e:
             self.logger.debug(f"Failed to load upstream context: {e}")
-            return ""
+            return None, f"read error: {e}"
 
-    def _load_chain_state_context(self, task: Task) -> str:
+    def _load_chain_state_context_with_reason(self, task: Task) -> tuple[str, str]:
         """Load chain state and render step-appropriate context.
 
-        Returns empty string if no chain state exists, letting the cascade
-        fall through to legacy mechanisms.
+        Returns (context_string, skip_reason). Empty context with a reason
+        means the cascade should fall through.
         """
-        # Only applies to workflow chain tasks
         if not (task.context.get("workflow") or task.context.get("chain_step")):
-            return ""
+            return "", "not a workflow task"
 
         try:
             from .chain_state import load_chain_state, render_for_step
@@ -780,7 +822,7 @@ If a tool call fails:
             root_task_id = task.root_id
             state = load_chain_state(self.ctx.workspace, root_task_id)
             if not state or not state.steps:
-                return ""
+                return "", "no chain state file"
 
             consumer_step = task.context.get("workflow_step", "")
             rendered = render_for_step(state, consumer_step)
@@ -790,11 +832,21 @@ If a tool call fails:
                     f"Chain state: rendered {len(rendered)} chars for "
                     f"step {consumer_step!r} ({len(state.steps)} steps in chain)"
                 )
-                return rendered
+                return rendered, ""
+
+            step_ids = [s.step_id for s in state.steps]
+            return "", (
+                f"render returned empty for step {consumer_step!r} "
+                f"(chain has steps: {step_ids})"
+            )
         except Exception as e:
             self.logger.debug(f"Failed to load chain state context: {e}")
+            return "", f"load error: {e}"
 
-        return ""
+    def _load_chain_state_context(self, task: Task) -> str:
+        """Load chain state context — backward-compatible wrapper."""
+        context, _ = self._load_chain_state_context_with_reason(task)
+        return context
 
     def _load_pre_scan_findings(self, task: Task) -> str:
         """Load QA pre-scan findings from disk for injection into prompts.

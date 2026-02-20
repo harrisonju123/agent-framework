@@ -126,6 +126,16 @@ class ContextBudgetMetrics(BaseModel):
     exhaustion_count: int = 0       # context_exhaustion events
 
 
+class UpstreamContextMetrics(BaseModel):
+    """Upstream context cascade source distribution from prompt_built events."""
+    total_observed: int
+    source_distribution: Dict[str, int]   # {"chain_state": 45, "upstream_summary": 30, ...}
+    source_rates: Dict[str, float]        # {"chain_state": 0.45, ...}
+    avg_chars_by_source: Dict[str, float]
+    # Among workflow tasks only: fraction that resolved to a level below chain_state
+    fallthrough_rate: float
+
+
 class TrendBucket(BaseModel):
     """Hourly time-series bucket for trend charts."""
     timestamp: datetime
@@ -153,6 +163,7 @@ class AgenticMetricsReport(BaseModel):
     debate: DebateMetrics
     context_budget: ContextBudgetMetrics
     tool_usage: ToolUsageMetrics
+    upstream_context: UpstreamContextMetrics
     trends: List[TrendBucket] = []
 
 
@@ -193,6 +204,7 @@ class AgenticMetrics:
         context_budget = self._aggregate_context_budget(events_by_task)
         debate = self._aggregate_debates(cutoff)
         tool_usage = self._aggregate_tool_usage(events_by_task)
+        upstream_context = self._aggregate_upstream_context(events_by_task)
         trends = self._aggregate_trends(events_by_task)
 
         return AgenticMetricsReport(
@@ -207,6 +219,7 @@ class AgenticMetrics:
             debate=debate,
             context_budget=context_budget,
             tool_usage=tool_usage,
+            upstream_context=upstream_context,
             trends=trends,
         )
 
@@ -688,4 +701,58 @@ class AgenticMetrics:
             p50_prompt_length=p50,
             p90_prompt_length=p90,
             **util_fields,
+        )
+
+    def _aggregate_upstream_context(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> UpstreamContextMetrics:
+        """Aggregate upstream_context_source from prompt_built events."""
+        source_counts: Dict[str, int] = defaultdict(int)
+        source_chars: Dict[str, List[int]] = defaultdict(list)
+        total_observed = 0
+        # Fallthrough: workflow tasks where chain_state was skipped
+        workflow_tasks = 0
+        workflow_fallthrough = 0
+
+        for events in events_by_task.values():
+            for e in events:
+                if e.get("event") != "prompt_built":
+                    continue
+                source = e.get("upstream_context_source")
+                if source is None:
+                    continue
+
+                total_observed += 1
+                source_counts[source] += 1
+                chars = e.get("upstream_context_chars", 0)
+                if isinstance(chars, int):
+                    source_chars[source].append(chars)
+
+                # Only count fallthrough for workflow tasks — standalone tasks
+                # never have chain_state so counting them inflates the rate
+                if e.get("workflow_step"):
+                    workflow_tasks += 1
+                    if source in ("structured_findings", "upstream_summary", "disk_file"):
+                        workflow_fallthrough += 1
+
+        source_rates = {
+            s: round(c / total_observed, 3)
+            for s, c in source_counts.items()
+        } if total_observed > 0 else {}
+
+        avg_chars = {
+            s: round(sum(chars_list) / len(chars_list), 1)
+            for s, chars_list in source_chars.items()
+            if chars_list
+        }
+
+        fallthrough_rate = (
+            round(workflow_fallthrough / workflow_tasks, 3)
+            if workflow_tasks > 0 else 0.0
+        )
+
+        return UpstreamContextMetrics(
+            total_observed=total_observed,
+            source_distribution=dict(source_counts),
+            source_rates=source_rates,
+            avg_chars_by_source=avg_chars,
+            fallthrough_rate=fallthrough_rate,
         )

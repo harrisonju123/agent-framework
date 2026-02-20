@@ -525,6 +525,126 @@ class TestToolUsageMetrics:
         assert report.trends[0].sessions_exceeding_threshold == 1
 
 
+class TestUpstreamContextMetrics:
+    """Tests for _aggregate_upstream_context."""
+
+    def test_distribution_from_prompt_built_events(self, workspace):
+        """Source distribution computed correctly from mock events."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 5000, "upstream_context_source": "chain_state",
+             "upstream_context_chars": 3000},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t2",
+             "prompt_length": 4000, "upstream_context_source": "chain_state",
+             "upstream_context_chars": 2500},
+        ])
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t3",
+             "prompt_length": 3000, "upstream_context_source": "upstream_summary",
+             "upstream_context_chars": 1000},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        uc = report.upstream_context
+        assert uc.total_observed == 3
+        assert uc.source_distribution == {"chain_state": 2, "upstream_summary": 1}
+        assert uc.source_rates["chain_state"] == pytest.approx(0.667, abs=0.001)
+        assert uc.source_rates["upstream_summary"] == pytest.approx(0.333, abs=0.001)
+
+    def test_avg_chars_by_source(self, workspace):
+        """Average chars computed per source."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 5000, "upstream_context_source": "chain_state",
+             "upstream_context_chars": 3000},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t2",
+             "prompt_length": 4000, "upstream_context_source": "chain_state",
+             "upstream_context_chars": 1000},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.upstream_context.avg_chars_by_source["chain_state"] == 2000.0
+
+    def test_fallthrough_rate(self, workspace):
+        """Fallthrough rate = fraction of workflow tasks where chain_state was skipped."""
+        # 2 workflow tasks with chain_state, 1 workflow task with upstream_summary (= fallthrough)
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 5000, "upstream_context_source": "chain_state",
+             "upstream_context_chars": 3000, "workflow_step": "implement"},
+        ])
+        _write_session(workspace, "t2", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t2",
+             "prompt_length": 4000, "upstream_context_source": "chain_state",
+             "upstream_context_chars": 2500, "workflow_step": "code_review"},
+        ])
+        _write_session(workspace, "t3", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t3",
+             "prompt_length": 3000, "upstream_context_source": "upstream_summary",
+             "upstream_context_chars": 1000, "workflow_step": "implement"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        # 1 out of 3 workflow tasks fell through
+        assert report.upstream_context.fallthrough_rate == pytest.approx(0.333, abs=0.001)
+
+    def test_empty_events_produce_zeros(self, workspace):
+        """No prompt_built events → zero-value metrics."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "task_start", "task_id": "t1"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        uc = report.upstream_context
+        assert uc.total_observed == 0
+        assert uc.source_distribution == {}
+        assert uc.source_rates == {}
+        assert uc.avg_chars_by_source == {}
+        assert uc.fallthrough_rate == 0.0
+
+    def test_none_source_not_counted_as_fallthrough(self, workspace):
+        """Tasks with 'none' source (no upstream context) don't inflate fallthrough rate."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 3000, "upstream_context_source": "none",
+             "upstream_context_chars": 0},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.upstream_context.fallthrough_rate == 0.0
+        assert report.upstream_context.source_distribution == {"none": 1}
+
+    def test_rejection_feedback_not_counted_as_fallthrough(self, workspace):
+        """rejection_feedback is highest priority — not a fallthrough."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 3000, "upstream_context_source": "rejection_feedback",
+             "upstream_context_chars": 500, "workflow_step": "implement"},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.upstream_context.fallthrough_rate == 0.0
+
+    def test_standalone_task_excluded_from_fallthrough(self, workspace):
+        """Standalone tasks (no workflow_step) don't inflate fallthrough rate."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 3000, "upstream_context_source": "upstream_summary",
+             "upstream_context_chars": 500},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        # upstream_summary would be fallthrough for workflow tasks, but this is standalone
+        assert report.upstream_context.fallthrough_rate == 0.0
+        assert report.upstream_context.source_distribution == {"upstream_summary": 1}
+
+    def test_no_upstream_source_field_skipped(self, workspace):
+        """Legacy prompt_built events without upstream_context_source are skipped."""
+        _write_session(workspace, "t1", [
+            {"ts": _now_iso(), "event": "prompt_built", "task_id": "t1",
+             "prompt_length": 5000},
+        ])
+        report = AgenticMetrics(workspace).generate_report(hours=24)
+        assert report.upstream_context.total_observed == 0
+
+
 class TestReportShape:
     def test_report_is_well_formed(self, workspace):
         """Smoke test: report always returns a valid AgenticMetricsReport."""

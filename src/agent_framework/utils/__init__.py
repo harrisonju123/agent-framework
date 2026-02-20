@@ -21,6 +21,7 @@ from .subprocess_utils import (
 from .process_utils import kill_process_tree
 from .file_summarizer import summarize_file
 from .type_helpers import get_type_str
+from .cascade import CascadeLevel, CascadeResult, resolve_cascade
 from .validators import validate_branch_name, validate_identifier, validate_owner_repo
 
 __all__ = [
@@ -50,6 +51,10 @@ __all__ = [
     "summarize_file",
     # Type helpers
     "get_type_str",
+    # Cascade resolver
+    "CascadeLevel",
+    "CascadeResult",
+    "resolve_cascade",
     # Validators
     "validate_branch_name",
     "validate_identifier",
