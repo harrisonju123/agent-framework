@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .config import AgentConfig, AgentDefinition, WorkflowDefinition
     from .context_window_manager import ContextWindowManager
     from ..memory.memory_retriever import MemoryRetriever
+    from ..memory.memory_store import MemoryStore
     from ..memory.tool_pattern_store import ToolPatternStore
     from .session_logger import SessionLogger
     from ..llm.base import LLMBackend
@@ -50,6 +51,7 @@ class PromptContext:
     # Optimization and memory
     optimization_config: Optional[Dict[str, Any]] = None
     memory_retriever: Optional["MemoryRetriever"] = None
+    memory_store: Optional["MemoryStore"] = None
     tool_pattern_store: Optional["ToolPatternStore"] = None
     context_window_manager: Optional["ContextWindowManager"] = None
 
@@ -180,6 +182,9 @@ class PromptBuilder:
 
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
+
+        # Inject QA warnings from recurring findings across tasks
+        prompt = self._inject_qa_warnings(prompt, task)
 
         # Inject tool efficiency tips from session analysis
         prompt = self._inject_tool_tips(prompt, task)
@@ -1079,6 +1084,68 @@ If a tool call fails:
             return prompt + "\n" + memory_section
 
         return prompt
+
+    def _inject_qa_warnings(self, prompt: str, task: Task) -> str:
+        """Append recurring QA findings as warnings to the prompt.
+
+        Reads qa_recurring memories and formats them as a warnings section
+        so engineers are forewarned about commonly flagged patterns.
+        """
+        if not self.ctx.memory_store:
+            return prompt
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return prompt
+
+        # Only inject for engineer agents — QA doesn't need self-warnings
+        if self.ctx.config.base_id not in ("engineer",):
+            return prompt
+
+        try:
+            from ..memory.feedback_bus import MAX_QA_WARNINGS_IN_PROMPT, MAX_QA_WARNINGS_CHARS
+
+            memories = self.ctx.memory_store.recall(
+                repo_slug=repo_slug,
+                agent_type="shared",
+                category="qa_recurring",
+                limit=MAX_QA_WARNINGS_IN_PROMPT,
+            )
+
+            if not memories:
+                return prompt
+
+            # Format warnings, respecting char budget
+            lines = ["## QA WARNINGS (from previous tasks)", ""]
+            total_chars = 0
+            for mem in memories:
+                line = f"- {mem.content}"
+                if total_chars + len(line) > MAX_QA_WARNINGS_CHARS:
+                    break
+                lines.append(line)
+                total_chars += len(line)
+
+            if len(lines) <= 2:  # only header, no actual warnings
+                return prompt
+
+            warnings_section = "\n".join(lines)
+
+            self.logger.debug(
+                "Injected %d QA warnings (%d chars)",
+                len(lines) - 2, len(warnings_section),
+            )
+            if self.ctx.session_logger:
+                self.ctx.session_logger.log(
+                    "qa_warnings_injected",
+                    repo=repo_slug,
+                    count=len(lines) - 2,
+                    chars=len(warnings_section),
+                )
+            return prompt + "\n\n" + warnings_section
+
+        except Exception as e:
+            self.logger.debug("QA warnings injection failed (non-fatal): %s", e)
+            return prompt
 
     def _inject_tool_tips(self, prompt: str, task: Task) -> str:
         """Append tool efficiency tips from previous session analysis."""

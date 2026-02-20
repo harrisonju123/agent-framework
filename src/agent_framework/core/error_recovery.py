@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from ..safeguards.retry_handler import RetryHandler
     from ..safeguards.escalation import EscalationHandler
     from ..memory.memory_store import MemoryStore
+    from ..memory.feedback_bus import FeedbackBus
     from ..utils.rich_logging import ContextLogger
     from .session_logger import SessionLogger
 
@@ -48,6 +49,7 @@ class ErrorRecoveryManager:
         self.workspace = workspace
         self.jira_client = jira_client
         self.memory_store = memory_store
+        self.feedback_bus: Optional["FeedbackBus"] = None
 
         # Self-evaluation configuration
         eval_cfg = self_eval_config or {}
@@ -445,6 +447,20 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
             task.context["_self_eval_count"] = eval_retries + 1
             task.context["_self_eval_critique"] = verdict
             task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:500]}")
+
+            # Persist acceptance gap to memory for future tasks
+            if self.feedback_bus:
+                repo_slug = self._get_repo_slug(task)
+                if repo_slug:
+                    try:
+                        self.feedback_bus.on_self_eval_fail(
+                            task=task,
+                            verdict=verdict,
+                            repo_slug=repo_slug,
+                            agent_type=self.config.base_id,
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Feedback bus self-eval storage failed (non-fatal): {e}")
 
             # Reset without consuming queue retry
             task.status = TaskStatus.PENDING

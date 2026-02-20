@@ -84,6 +84,7 @@ class ReviewCycleManager:
         agent_definition,
         session_logger,
         activity_manager,
+        feedback_bus=None,
     ):
         """Initialize ReviewCycleManager.
 
@@ -94,6 +95,7 @@ class ReviewCycleManager:
             agent_definition: AgentDefinition for agent metadata
             session_logger: SessionLogger for structured logging
             activity_manager: ActivityManager for status tracking
+            feedback_bus: Optional FeedbackBus for cross-feature learning
         """
         self.config = config
         self.queue = queue
@@ -101,6 +103,7 @@ class ReviewCycleManager:
         self.agent_definition = agent_definition
         self.session_logger = session_logger
         self.activity_manager = activity_manager
+        self.feedback_bus = feedback_bus
 
     def extract_pr_info_from_response(self, response_content: str) -> Optional[Dict[str, Any]]:
         """
@@ -361,6 +364,19 @@ class ReviewCycleManager:
                 comment=f"Escalated to architect after {cycle_count} review cycles",
             )
             return
+
+        # Store QA findings in feedback bus for cross-task learning
+        if self.feedback_bus and outcome.structured_findings:
+            repo_slug = task.context.get("github_repo")
+            if repo_slug:
+                try:
+                    self.feedback_bus.on_qa_findings(
+                        task=task,
+                        findings=outcome.structured_findings,
+                        repo_slug=repo_slug,
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Feedback bus QA findings storage failed (non-fatal): {e}")
 
         fix_task = self.build_review_fix_task(task, outcome, cycle_count)
 

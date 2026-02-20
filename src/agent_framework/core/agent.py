@@ -1023,8 +1023,60 @@ class Agent:
             self._git_ops.manage_pr_lifecycle(task)
 
         self._extract_and_store_memories(task, response)
+        self._process_debate_feedback(task)
         tool_call_count = self._analyze_tool_patterns(task)
         self._log_task_completion_metrics(task, response, task_start_time, tool_call_count=tool_call_count)
+
+    def _process_debate_feedback(self, task: Task) -> None:
+        """Scan for debate results and persist decisions via feedback bus.
+
+        Reads debate JSON files from .agent-communication/debates/ that were
+        created during this task. Only processes debates with a valid synthesis.
+        """
+        if not self._feedback_bus:
+            return
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return
+
+        debates_dir = self.workspace / ".agent-communication" / "debates"
+        if not debates_dir.is_dir():
+            return
+
+        # Track which debates we've already processed
+        processed_debates = set(task.context.get("_processed_debates", []))
+
+        for debate_file in debates_dir.glob("*.json"):
+            if debate_file.name in processed_debates:
+                continue
+
+            try:
+                debate_data = json.loads(debate_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+
+            # Only process debates with a valid synthesis
+            synthesis = debate_data.get("synthesis", {})
+            if not isinstance(synthesis, dict) or not synthesis.get("recommendation"):
+                continue
+
+            try:
+                # Get current specialization profile ID if available
+                original_profile_id = task.context.get("_specialization_profile_id")
+
+                self._feedback_bus.on_debate_complete(
+                    debate_result=debate_data,
+                    repo_slug=repo_slug,
+                    task_id=task.id,
+                    original_profile_id=original_profile_id,
+                )
+                processed_debates.add(debate_file.name)
+            except Exception as e:
+                self.logger.debug(f"Feedback bus debate processing failed (non-fatal): {e}")
+
+        if processed_debates:
+            task.context["_processed_debates"] = list(processed_debates)
 
     def _log_task_completion_metrics(self, task: Task, response, task_start_time, *, tool_call_count=None) -> None:
         """Log token usage, cost, and completion events.
@@ -2667,6 +2719,16 @@ class Agent:
         # Store successful recovery pattern so future replans can reference it
         if task.replan_history and task.status == TaskStatus.COMPLETED:
             self._error_recovery.store_replan_outcome(task, repo_slug)
+            # Enriched version: store full approach chain via feedback bus
+            if self._feedback_bus:
+                try:
+                    self._feedback_bus.on_replan_success(
+                        task=task,
+                        repo_slug=repo_slug,
+                        agent_type=self.config.base_id,
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Feedback bus replan storage failed (non-fatal): {e}")
 
     # -- Tool Pattern Analysis --
 
