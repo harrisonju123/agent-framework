@@ -97,7 +97,7 @@ class ActivityEvent(BaseModel):
     type: Literal[
         "start", "retry", "complete", "fail", "interrupted", "phase",
         "test_complete", "test_fail", "context_budget_critical", "token_budget_exceeded",
-        "circuit_breaker",
+        "circuit_breaker", "queued",
     ]
     agent: str
     task_id: str
@@ -122,6 +122,9 @@ class ActivityEvent(BaseModel):
     output_tokens: Optional[int] = None
     cost: Optional[float] = None
     tool_call_count: Optional[int] = None
+    # Correlation fields for handoff latency measurement
+    root_task_id: Optional[str] = None
+    source_task_id: Optional[str] = None
 
 
 class ActivityManager:

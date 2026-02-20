@@ -250,7 +250,9 @@ class Agent:
         )
         from ..workflow.executor import WorkflowExecutor
         self._workflow_executor = WorkflowExecutor(
-            self.queue, self.queue.queue_dir, agent_logger=self.logger, workspace=workspace,
+            self.queue, self.queue.queue_dir, agent_logger=self.logger,
+            workspace=workspace,
+            activity_manager=None,  # wired in _init_state_tracking after ActivityManager exists
         )
 
     def _init_optimization_and_safeguards(self, optimization_config):
@@ -276,6 +278,8 @@ class Agent:
         self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
         self._heartbeat_task: Optional[asyncio.Task] = None
         self.activity_manager = ActivityManager(self.workspace)
+        # Wire activity_manager into executor (created before activity_manager exists)
+        self._workflow_executor.activity_manager = self.activity_manager
         self._paused = False
 
         # Caches for prompt guidance
@@ -785,6 +789,7 @@ class Agent:
             title=task.title,
             timestamp=datetime.now(timezone.utc),
             retry_count=self_eval_count if event_type == "retry" else None,
+            root_task_id=task.root_id,
         ))
 
         # Deterministic JIRA transition on task start
@@ -1005,7 +1010,11 @@ class Agent:
 
         Delegated to BudgetManager.
         """
-        self._budget.log_task_completion_metrics(task, response, task_start_time, tool_call_count=tool_call_count)
+        self._budget.log_task_completion_metrics(
+            task, response, task_start_time,
+            tool_call_count=tool_call_count,
+            root_task_id=task.root_id,
+        )
 
     def _approval_verdict(self, task: Task) -> str:
         """Return the appropriate approval verdict for the current workflow step.
@@ -1214,7 +1223,8 @@ class Agent:
             title=task.title,
             timestamp=datetime.now(timezone.utc),
             retry_count=task.retry_count,
-            error_message=task.last_error
+            error_message=task.last_error,
+            root_task_id=task.root_id,
         ))
 
         # Record failure outcome for intelligent routing
@@ -1982,7 +1992,8 @@ class Agent:
                 title=task.title,
                 timestamp=datetime.now(timezone.utc),
                 retry_count=task.retry_count,
-                error_message=task.last_error
+                error_message=task.last_error,
+                root_task_id=task.root_id,
             ))
 
             # Push whatever was committed before the error — prevents worktree

@@ -61,6 +61,42 @@ class TaskTypeMetrics(BaseModel):
     avg_cost: float
 
 
+class HandoffRecord(BaseModel):
+    """Single handoff between two workflow steps."""
+    root_task_id: str
+    from_agent: str
+    to_agent: str
+    from_task_id: str
+    to_task_id: str
+    completed_at: datetime
+    queued_at: Optional[datetime] = None
+    started_at: Optional[datetime] = None
+    total_handoff_ms: Optional[int] = None
+    queue_wait_ms: Optional[int] = None
+    post_completion_ms: Optional[int] = None
+    status: str  # "completed", "pending", "delayed"
+
+
+class HandoffSummary(BaseModel):
+    """Aggregate handoff metrics for a transition type."""
+    transition: str  # e.g. "architect→engineer"
+    count: int
+    avg_total_ms: float
+    p50_total_ms: int
+    p90_total_ms: int
+    avg_queue_wait_ms: float
+    failed_count: int  # queued but never started
+    delayed_count: int  # > threshold
+
+
+class HandoffReport(BaseModel):
+    """Complete handoff analysis."""
+    generated_at: datetime
+    records: List[HandoffRecord]
+    summaries: List[HandoffSummary]
+    pending_handoffs: List[HandoffRecord]
+
+
 class PerformanceReport(BaseModel):
     """Complete performance report."""
     generated_at: datetime
@@ -71,10 +107,14 @@ class PerformanceReport(BaseModel):
     agent_performance: List[AgentPerformance]
     task_type_metrics: List[TaskTypeMetrics]
     top_failures: List[Dict[str, Any]]  # Top 5 failure patterns
+    handoff_summaries: List[HandoffSummary] = []
 
 
 class PerformanceMetrics:
     """Aggregates and analyzes agent performance metrics."""
+
+    # Handoffs queued longer than this are flagged "delayed"
+    DELAYED_THRESHOLD_MS = 60_000
 
     def __init__(self, workspace: Path):
         self.workspace = Path(workspace)
@@ -82,6 +122,7 @@ class PerformanceMetrics:
         self.metrics_dir = self.workspace / ".agent-communication" / "metrics"
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
         self.output_file = self.metrics_dir / "performance.json"
+        self.handoff_log_file = self.metrics_dir / "handoffs.jsonl"
 
     def generate_report(self, hours: int = 24) -> PerformanceReport:
         """
@@ -116,6 +157,11 @@ class PerformanceMetrics:
         total_cost = sum(t.cost for t in task_metrics.values())
         success_rate = (completed / total_tasks * 100) if total_tasks > 0 else 0.0
 
+        # Compute handoff metrics and persist new records
+        handoff_records = self._compute_handoff_records(events)
+        self._persist_handoff_records(handoff_records)
+        handoff_summaries = self._aggregate_handoff_summaries(handoff_records)
+
         report = PerformanceReport(
             generated_at=datetime.now(timezone.utc),
             time_range_hours=hours,
@@ -125,6 +171,7 @@ class PerformanceMetrics:
             agent_performance=agent_performance,
             task_type_metrics=task_type_metrics,
             top_failures=top_failures,
+            handoff_summaries=handoff_summaries,
         )
 
         # Save report
@@ -322,3 +369,207 @@ class PerformanceMetrics:
             }
             for error_key, tasks in top_errors
         ]
+
+    # -- Handoff metrics --
+
+    def _parse_timestamp(self, ts: str) -> datetime:
+        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+
+    def _compute_handoff_records(self, events: List[Dict[str, Any]]) -> List[HandoffRecord]:
+        """Match complete→queued→start triples to build handoff records.
+
+        Groups events by root_task_id (or falls back to chain-ID parsing)
+        then correlates chronologically within each group.
+        """
+        # Index events by type for correlation
+        complete_events: Dict[str, Dict[str, Any]] = {}  # task_id → event
+        queued_events: Dict[str, Dict[str, Any]] = {}    # task_id → event (keyed by to_task_id)
+        start_events: Dict[str, Dict[str, Any]] = {}     # task_id → event
+
+        for event in events:
+            etype = event.get('type')
+            task_id = event.get('task_id', '')
+            if etype == 'complete':
+                complete_events[task_id] = event
+            elif etype == 'queued':
+                queued_events[task_id] = event
+            elif etype == 'start':
+                start_events[task_id] = event
+
+        records: List[HandoffRecord] = []
+
+        # Queued events are the anchor: each one represents a handoff
+        for to_task_id, q_event in queued_events.items():
+            source_task_id = q_event.get('source_task_id', '')
+            root_task_id = q_event.get('root_task_id', '')
+
+            c_event = complete_events.get(source_task_id)
+            s_event = start_events.get(to_task_id)
+
+            completed_at = self._parse_timestamp(c_event['timestamp']) if c_event else None
+            queued_at = self._parse_timestamp(q_event['timestamp'])
+            started_at = self._parse_timestamp(s_event['timestamp']) if s_event else None
+
+            # Fall back: if no complete event, use queued_at as the anchor
+            if completed_at is None:
+                completed_at = queued_at
+
+            total_handoff_ms = None
+            queue_wait_ms = None
+            post_completion_ms = None
+            status = "pending"
+
+            if started_at is not None:
+                total_handoff_ms = int((started_at - completed_at).total_seconds() * 1000)
+                queue_wait_ms = int((started_at - queued_at).total_seconds() * 1000)
+                status = "completed"
+                if total_handoff_ms > self.DELAYED_THRESHOLD_MS:
+                    status = "delayed"
+
+            post_completion_ms = int((queued_at - completed_at).total_seconds() * 1000)
+
+            from_agent = c_event.get('agent', 'unknown') if c_event else 'unknown'
+            to_agent = q_event.get('agent', 'unknown')
+
+            records.append(HandoffRecord(
+                root_task_id=root_task_id or source_task_id,
+                from_agent=from_agent,
+                to_agent=to_agent,
+                from_task_id=source_task_id,
+                to_task_id=to_task_id,
+                completed_at=completed_at,
+                queued_at=queued_at,
+                started_at=started_at,
+                total_handoff_ms=total_handoff_ms,
+                queue_wait_ms=queue_wait_ms,
+                post_completion_ms=post_completion_ms,
+                status=status,
+            ))
+
+        # Also handle pre-instrumentation data: complete→start without queued
+        for task_id, s_event in start_events.items():
+            if task_id in queued_events:
+                continue  # already handled above
+            root_task_id = s_event.get('root_task_id', '')
+            if not root_task_id:
+                continue
+            # Find a complete event in the same root chain
+            source_complete = None
+            for c_id, c_event in complete_events.items():
+                if c_event.get('root_task_id') == root_task_id and c_id != task_id:
+                    ts = self._parse_timestamp(c_event['timestamp'])
+                    s_ts = self._parse_timestamp(s_event['timestamp'])
+                    if ts <= s_ts:
+                        if source_complete is None or ts > self._parse_timestamp(source_complete['timestamp']):
+                            source_complete = c_event
+            if source_complete is None:
+                continue
+
+            completed_at = self._parse_timestamp(source_complete['timestamp'])
+            started_at = self._parse_timestamp(s_event['timestamp'])
+            total_handoff_ms = int((started_at - completed_at).total_seconds() * 1000)
+            status = "delayed" if total_handoff_ms > self.DELAYED_THRESHOLD_MS else "completed"
+
+            records.append(HandoffRecord(
+                root_task_id=root_task_id,
+                from_agent=source_complete.get('agent', 'unknown'),
+                to_agent=s_event.get('agent', 'unknown'),
+                from_task_id=source_complete.get('task_id', ''),
+                to_task_id=task_id,
+                completed_at=completed_at,
+                queued_at=None,
+                started_at=started_at,
+                total_handoff_ms=total_handoff_ms,
+                queue_wait_ms=None,
+                post_completion_ms=None,
+                status=status,
+            ))
+
+        return records
+
+    def _aggregate_handoff_summaries(
+        self, records: List[HandoffRecord],
+    ) -> List[HandoffSummary]:
+        """Aggregate handoff records by transition type (from_agent→to_agent)."""
+        by_transition: Dict[str, List[HandoffRecord]] = defaultdict(list)
+        for r in records:
+            key = f"{r.from_agent}\u2192{r.to_agent}"
+            by_transition[key].append(r)
+
+        summaries: List[HandoffSummary] = []
+        for transition, group in sorted(by_transition.items()):
+            totals = sorted([
+                r.total_handoff_ms for r in group if r.total_handoff_ms is not None
+            ])
+            waits = [r.queue_wait_ms for r in group if r.queue_wait_ms is not None]
+
+            count = len(group)
+            avg_total = sum(totals) / len(totals) if totals else 0.0
+            p50 = totals[len(totals) // 2] if totals else 0
+            p90 = totals[int(len(totals) * 0.9)] if totals else 0
+            avg_wait = sum(waits) / len(waits) if waits else 0.0
+            failed = sum(1 for r in group if r.status == "pending")
+            delayed = sum(1 for r in group if r.status == "delayed")
+
+            summaries.append(HandoffSummary(
+                transition=transition,
+                count=count,
+                avg_total_ms=avg_total,
+                p50_total_ms=p50,
+                p90_total_ms=p90,
+                avg_queue_wait_ms=avg_wait,
+                failed_count=failed,
+                delayed_count=delayed,
+            ))
+
+        return summaries
+
+    def _persist_handoff_records(self, records: List[HandoffRecord]) -> None:
+        """Append new handoff records to the persistent JSONL log."""
+        if not records:
+            return
+        existing_ids = set()
+        if self.handoff_log_file.exists():
+            for line in self.handoff_log_file.read_text().strip().split('\n'):
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    existing_ids.add((data.get('from_task_id'), data.get('to_task_id')))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+
+        new_lines = []
+        for r in records:
+            if (r.from_task_id, r.to_task_id) not in existing_ids:
+                new_lines.append(r.model_dump_json())
+
+        if new_lines:
+            with open(self.handoff_log_file, 'a') as f:
+                f.write('\n'.join(new_lines) + '\n')
+
+    def read_handoff_log(self) -> List[HandoffRecord]:
+        """Read all records from the persistent handoff log."""
+        if not self.handoff_log_file.exists():
+            return []
+        records = []
+        for line in self.handoff_log_file.read_text().strip().split('\n'):
+            if not line:
+                continue
+            try:
+                records.append(HandoffRecord.model_validate_json(line))
+            except Exception:
+                continue
+        return records
+
+    def generate_handoff_report(self) -> HandoffReport:
+        """Generate a standalone handoff report from the persistent log."""
+        records = self.read_handoff_log()
+        summaries = self._aggregate_handoff_summaries(records)
+        pending = [r for r in records if r.status == "pending"]
+        return HandoffReport(
+            generated_at=datetime.now(timezone.utc),
+            records=records,
+            summaries=summaries,
+            pending_handoffs=pending,
+        )

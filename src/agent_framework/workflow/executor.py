@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from ..core.task import Task
     from ..core.routing import RoutingSignal
     from ..queue.file_queue import FileQueue
+    from ..core.activity import ActivityManager
 
 from .dag import WorkflowDAG, WorkflowStep, WorkflowEdge, EdgeConditionType
 from .conditions import ConditionRegistry
@@ -63,11 +64,15 @@ _PR_URL_PATTERN = re.compile(r'https://github\.com/([^/]+)/([^/]+)/pull/(\d+)')
 class WorkflowExecutor:
     """Executes workflow DAGs and routes tasks between agents."""
 
-    def __init__(self, queue: "FileQueue", queue_dir: Path, agent_logger=None, workspace=None):
+    def __init__(
+        self, queue: "FileQueue", queue_dir: Path, agent_logger=None,
+        workspace=None, activity_manager: Optional["ActivityManager"] = None,
+    ):
         self.queue = queue
         self.queue_dir = queue_dir
         self.logger = agent_logger or logger
         self.workspace = workspace
+        self.activity_manager = activity_manager
 
     def execute_step(
         self,
@@ -340,6 +345,18 @@ class WorkflowExecutor:
         except Exception as e:
             self.logger.error(f"Failed to queue chain task for {next_agent}: {e}")
             return
+
+        if self.activity_manager:
+            from ..core.activity import ActivityEvent
+            self.activity_manager.append_event(ActivityEvent(
+                type="queued",
+                agent=next_agent,
+                task_id=chain_task.id,
+                title=chain_task.title,
+                timestamp=datetime.now(timezone.utc),
+                root_task_id=chain_task.root_id,
+                source_task_id=task.id,
+            ))
 
         # Side-channel: queue QA pre-scan in parallel with code review.
         # Skip for docs-only changes — the workflow edge will route straight to create_pr.

@@ -149,6 +149,7 @@ class BudgetManager:
     def log_task_completion_metrics(
         self, task: Task, response: "LLMResponse", task_start_time: datetime,
         *, tool_call_count: Optional[int] = None,
+        root_task_id: Optional[str] = None,
     ) -> None:
         """Log token usage, cost, and completion events."""
         total_tokens = response.input_tokens + response.output_tokens
@@ -191,6 +192,7 @@ class BudgetManager:
             output_tokens=response.output_tokens,
             cost=cost,
             tool_call_count=tool_call_count,
+            root_task_id=root_task_id,
         ))
 
         self.session_logger.log(
