@@ -12,6 +12,7 @@ context for the consuming agent.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +41,8 @@ class StepRecord:
     files_modified: List[str] = field(default_factory=list)  # git diff --name-only
     commit_shas: List[str] = field(default_factory=list)     # commits made
     findings: Optional[List[Dict[str, Any]]] = None  # structured findings (review steps)
+    lines_added: int = 0                                # git diff insertions
+    lines_removed: int = 0                               # git diff deletions
     tool_stats: Optional[Dict[str, Any]] = None       # quantitative tool usage stats
     error: Optional[str] = None       # if step failed
 
@@ -166,6 +169,7 @@ def append_step(
 
     # Collect git evidence
     files_modified = _collect_files_modified(working_dir)
+    lines_added, lines_removed = _collect_line_counts(working_dir)
     commit_shas = _collect_commit_shas(working_dir)
 
     # Structured findings from QA/review
@@ -183,6 +187,8 @@ def append_step(
         verdict=task.context.get("verdict"),
         plan=plan_dict,
         files_modified=files_modified,
+        lines_added=lines_added,
+        lines_removed=lines_removed,
         commit_shas=commit_shas,
         findings=findings,
         tool_stats=tool_stats,
@@ -267,6 +273,48 @@ def _collect_files_modified(working_dir: Optional[Path]) -> List[str]:
             continue
 
     return []
+
+
+_SHORTSTAT_RE = re.compile(r"(\d+) insertion|(\d+) deletion")
+
+
+def _collect_line_counts(working_dir: Optional[Path]) -> tuple[int, int]:
+    """Run git diff --shortstat to collect insertions/deletions.
+
+    Same 3-strategy pattern as _collect_files_modified(): uncommitted first,
+    then staged-only, then last commit.
+    """
+    if not working_dir or not working_dir.exists():
+        return 0, 0
+
+    strategies = [
+        ["diff", "--shortstat", "HEAD"],
+        ["diff", "--shortstat", "--staged"],
+        ["diff", "--shortstat", "HEAD~1"],
+    ]
+
+    for args in strategies:
+        try:
+            result = run_git_command(args, cwd=working_dir, check=False, timeout=10)
+            output = (result.stdout or "").strip()
+            if output:
+                return _parse_shortstat(output)
+        except Exception:
+            continue
+
+    return 0, 0
+
+
+def _parse_shortstat(line: str) -> tuple[int, int]:
+    """Parse git shortstat output like '3 files changed, 10 insertions(+), 2 deletions(-)'."""
+    added = 0
+    removed = 0
+    for m in _SHORTSTAT_RE.finditer(line):
+        if m.group(1):
+            added = int(m.group(1))
+        if m.group(2):
+            removed = int(m.group(2))
+    return added, removed
 
 
 def _collect_commit_shas(working_dir: Optional[Path]) -> List[str]:

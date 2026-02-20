@@ -93,6 +93,14 @@ class WorkflowRouter:
                 self.logger.info(
                     f"🔀 All subtasks complete - created fan-in task {fan_in_task.id}"
                 )
+                if self._session_logger:
+                    self._session_logger.log(
+                        "fan_in_created",
+                        parent_task_id=parent.id,
+                        fan_in_task_id=fan_in_task.id,
+                        subtask_count=len(parent.subtask_ids),
+                        completed_subtask_count=len(completed_subtasks),
+                    )
         else:
             self.logger.info(
                 f"Subtask {task.id} complete, waiting for siblings"
@@ -115,7 +123,19 @@ class WorkflowRouter:
         estimated_lines = estimate_plan_lines(task.plan)
         requirements_count = len(task.context.get("requirements_checklist", []))
         decomposer = TaskDecomposer()
-        return decomposer.should_decompose(task.plan, estimated_lines, requirements_count)
+        result = decomposer.should_decompose(task.plan, estimated_lines, requirements_count)
+
+        if self._session_logger:
+            self._session_logger.log(
+                "decomposition_evaluated",
+                task_id=task.id,
+                estimated_lines=estimated_lines,
+                file_count=len(task.plan.files_to_modify),
+                requirements_count=requirements_count,
+                should_decompose=result,
+            )
+
+        return result
 
     def decompose_and_queue_subtasks(self, task: Task) -> None:
         """Decompose task into subtasks and queue them to engineer.
@@ -150,6 +170,9 @@ class WorkflowRouter:
         task.subtask_ids = [st.id for st in subtasks]
         task.result_summary = f"Decomposed into {len(subtasks)} subtasks ({queued_count} newly queued)"
 
+        # Track estimated lines on parent for downstream accuracy comparison
+        task.context["_decomposition_estimated_lines"] = estimated_lines
+
         # mark_completed() already moved the task file to completed_dir before
         # enforce_chain runs, so queue.update() would silently fail (file not in
         # queue_dir). Write directly to the completed copy instead.
@@ -159,6 +182,16 @@ class WorkflowRouter:
             atomic_write_model(completed_file, task)
         else:
             self.queue.update(task)
+
+        if self._session_logger:
+            self._session_logger.log(
+                "task_decomposed",
+                task_id=task.id,
+                estimated_lines=estimated_lines,
+                subtask_count=len(subtasks),
+                subtask_ids=[st.id for st in subtasks],
+                file_count=len(task.plan.files_to_modify),
+            )
 
         self.logger.info(
             f"🔀 Task {task.id} decomposed into {len(subtasks)} subtasks ({queued_count} newly queued)"

@@ -16,6 +16,7 @@ from agent_framework.core.chain_state import (
     render_for_step,
     _build_step_summary,
     _find_step,
+    _parse_shortstat,
     _render_tool_stats,
     _chain_state_path,
     CHAIN_STATE_MAX_PROMPT_CHARS,
@@ -606,6 +607,30 @@ class TestToolStats:
         assert "TOOL USAGE" in result
         assert "50 calls" in result
 
+class TestParseShortstat:
+    def test_full_output(self):
+        assert _parse_shortstat("3 files changed, 10 insertions(+), 2 deletions(-)") == (10, 2)
+
+    def test_insertions_only(self):
+        assert _parse_shortstat("1 file changed, 5 insertions(+)") == (5, 0)
+
+    def test_deletions_only(self):
+        assert _parse_shortstat("2 files changed, 7 deletions(-)") == (0, 7)
+
+    def test_singular_forms(self):
+        assert _parse_shortstat("1 file changed, 1 insertion(+), 1 deletion(-)") == (1, 1)
+
+    def test_no_match(self):
+        assert _parse_shortstat("1 file changed") == (0, 0)
+
+    def test_empty_string(self):
+        assert _parse_shortstat("") == (0, 0)
+
+    def test_large_numbers(self):
+        assert _parse_shortstat("15 files changed, 1041 insertions(+), 203 deletions(-)") == (1041, 203)
+
+
+class TestQAToolStats:
     def test_qa_review_renders_tool_stats(self):
         """QA review context includes tool stats from implement step."""
         state = ChainState(

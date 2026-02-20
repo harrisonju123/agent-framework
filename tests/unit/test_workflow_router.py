@@ -503,6 +503,89 @@ class TestRouteToAgent:
         queue.push.assert_not_called()
 
 
+# -- Session log event emission --
+
+class TestEventEmission:
+    def test_should_decompose_emits_decomposition_evaluated(self, router):
+        """should_decompose_task emits decomposition_evaluated with correct fields."""
+        task = _make_task()
+        task.plan = MagicMock()
+        task.plan.files_to_modify = ["a.py", "b.py"]
+        task.plan.approach = ["step1"]
+        task.parent_task_id = None
+
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_dec:
+            mock_dec.return_value.should_decompose.return_value = True
+            with patch("agent_framework.core.workflow_router.estimate_plan_lines", return_value=600):
+                router.should_decompose_task(task)
+
+        router._session_logger.log.assert_called_once_with(
+            "decomposition_evaluated",
+            task_id=task.id,
+            estimated_lines=600,
+            file_count=2,
+            requirements_count=0,
+            should_decompose=True,
+        )
+
+    def test_decompose_and_queue_emits_task_decomposed(self, router, queue):
+        """decompose_and_queue_subtasks emits task_decomposed and sets estimated lines on context."""
+        task = _make_task(task_id="parent-emit")
+        task.plan = MagicMock()
+        task.plan.files_to_modify = ["a.py", "b.py", "c.py"]
+        task.plan.approach = ["step1", "step2"]
+
+        sub1 = _make_task(task_id="parent-emit-sub-0")
+        sub2 = _make_task(task_id="parent-emit-sub-1")
+
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_dec:
+            mock_dec.return_value.decompose.return_value = [sub1, sub2]
+            with patch("agent_framework.core.workflow_router.estimate_plan_lines", return_value=700):
+                router.decompose_and_queue_subtasks(task)
+
+        # Verify event emitted
+        log_calls = router._session_logger.log.call_args_list
+        task_decomposed_calls = [c for c in log_calls if c[0][0] == "task_decomposed"]
+        assert len(task_decomposed_calls) == 1
+        call_kwargs = task_decomposed_calls[0][1]
+        assert call_kwargs["estimated_lines"] == 700
+        assert call_kwargs["subtask_count"] == 2
+        assert call_kwargs["subtask_ids"] == ["parent-emit-sub-0", "parent-emit-sub-1"]
+        assert call_kwargs["file_count"] == 3
+
+        # Verify estimated lines stored on parent context
+        assert task.context["_decomposition_estimated_lines"] == 700
+
+    def test_fan_in_emits_fan_in_created(self, router, queue):
+        """check_and_create_fan_in_task emits fan_in_created after creating fan-in task."""
+        parent = _make_task(task_id="parent-fan")
+        parent.subtask_ids = ["sub-1", "sub-2"]
+
+        subtask = _make_task(task_id="sub-2")
+        subtask.parent_task_id = "parent-fan"
+
+        queue.find_task.return_value = parent
+        queue.check_subtasks_complete.return_value = True
+        queue._fan_in_already_created.return_value = False
+        queue.get_completed.side_effect = [
+            _make_task(task_id="sub-1"),
+            _make_task(task_id="sub-2"),
+        ]
+        fan_in = _make_task(task_id="fan-in-parent-fan")
+        queue.create_fan_in_task.return_value = fan_in
+
+        router.check_and_create_fan_in_task(subtask)
+
+        log_calls = router._session_logger.log.call_args_list
+        fan_in_calls = [c for c in log_calls if c[0][0] == "fan_in_created"]
+        assert len(fan_in_calls) == 1
+        call_kwargs = fan_in_calls[0][1]
+        assert call_kwargs["parent_task_id"] == "parent-fan"
+        assert call_kwargs["fan_in_task_id"] == "fan-in-parent-fan"
+        assert call_kwargs["subtask_count"] == 2
+        assert call_kwargs["completed_subtask_count"] == 2
+
+
 # -- REVIEW/FIX guard for chain tasks --
 
 class TestReviewFixGuard:

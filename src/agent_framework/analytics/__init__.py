@@ -12,6 +12,7 @@ from .failure_analyzer import FailureAnalyzer
 from .shadow_mode_analyzer import ShadowModeAnalyzer
 from .agentic_metrics import AgenticMetrics, AgenticMetricsReport
 from .llm_metrics import LlmMetrics, LlmMetricsReport
+from .decomposition_metrics import DecompositionMetrics, DecompositionReport
 
 __all__ = [
     'PerformanceMetrics',
@@ -21,4 +22,6 @@ __all__ = [
     'AgenticMetricsReport',
     'LlmMetrics',
     'LlmMetricsReport',
+    'DecompositionMetrics',
+    'DecompositionReport',
 ]
