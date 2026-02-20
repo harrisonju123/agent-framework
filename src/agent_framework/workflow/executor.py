@@ -231,7 +231,8 @@ class WorkflowExecutor:
                 target_step = workflow.steps.get(edge.target)
                 if target_step and target_step.agent == routing_signal.target_agent:
                     if ConditionRegistry.evaluate(
-                        edge.condition, task, response, routing_signal, context
+                        edge.condition, task, response, routing_signal, context,
+                        session_logger=self._session_logger,
                     ):
                         self.logger.info(
                             f"Routing signal matched edge to {target_step.agent}: "
@@ -241,7 +242,8 @@ class WorkflowExecutor:
 
         for edge in edges:
             if ConditionRegistry.evaluate(
-                edge.condition, task, response, routing_signal, context
+                edge.condition, task, response, routing_signal, context,
+                session_logger=self._session_logger,
             ):
                 self.logger.debug(
                     f"Edge condition {edge.condition.type} matched for target {edge.target}"

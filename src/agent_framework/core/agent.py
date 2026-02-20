@@ -647,6 +647,74 @@ class Agent:
         # Note: tests don't pass sync_jira_status_callback, so we use a no-op
         return self._review_cycle.queue_review_fix_if_needed(task, response, lambda *args, **kwargs: None)
 
+
+    # --- Hot-reload: restart agent process when source code changes ---
+
+    def _get_source_code_version(self) -> Optional[str]:
+        """Get current source code version (git HEAD of the agent-framework repo).
+
+        Falls back to a hash of *.py mtimes if not in a git repo.
+        """
+        source_dir = Path(__file__).parent.parent  # agent_framework/
+        repo_dir = source_dir.parent  # src/ parent -> project root
+
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+        # Fallback: hash of py file mtimes
+        try:
+            mtimes = []
+            for py_file in source_dir.rglob("*.py"):
+                mtimes.append(f"{py_file}:{py_file.stat().st_mtime}")
+            mtimes.sort()
+            return hashlib.sha256("\n".join(mtimes).encode()).hexdigest()[:16]
+        except OSError:
+            return None
+
+    def _should_hot_restart(self) -> bool:
+        """Check if source code has changed since startup."""
+        if not hasattr(self, "_startup_code_version") or self._startup_code_version is None:
+            return False
+        current = self._get_source_code_version()
+        if current is None:
+            return False
+        return current != self._startup_code_version
+
+    def _hot_restart(self) -> None:
+        """Replace the current process with a fresh one to pick up code changes.
+
+        Safe: only called between tasks (never mid-task). os.execv is atomic.
+        """
+        import sys
+        import os as _os
+
+        new_version = self._get_source_code_version()
+        self.logger.info(
+            f"Source code changed ({self._startup_code_version[:8]}... -> "
+            f"{new_version[:8] if new_version else '?'}...), "
+            f"restarting agent process"
+        )
+
+        # Write IDLE so watchdog doesn't think we crashed
+        self.activity_manager.update_activity(AgentActivity(
+            agent_id=self.config.id,
+            status=AgentStatus.IDLE,
+            last_updated=datetime.now(timezone.utc),
+        ))
+        self._write_heartbeat()
+
+        _os.execv(sys.executable, [sys.executable] + sys.argv)
+
     async def run(self) -> None:
         """
         Main polling loop.

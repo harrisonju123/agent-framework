@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .task import Task, TaskStatus, TaskType
+from .verdict_audit import PatternMatch, VerdictAudit
 from ..utils.type_helpers import strip_chain_prefixes
 
 # Cap review cycles to prevent infinite QA ↔ Engineer loops
@@ -384,53 +385,95 @@ class ReviewCycleManager:
 
     def parse_review_outcome(self, content: str) -> ReviewOutcome:
         """Parse QA response for review verdict using regex patterns."""
+        outcome, _ = self._parse_review_outcome_audited(content)
+        return outcome
+
+    def _parse_review_outcome_audited(self, content: str) -> tuple[ReviewOutcome, VerdictAudit]:
+        """Parse review outcome with full audit trail.
+
+        Returns (ReviewOutcome, VerdictAudit) where the audit captures every
+        pattern match, negation suppression, and override decision. The caller
+        fills in identity fields (agent_id, workflow_step, task_id, method).
+        """
+        empty_audit = VerdictAudit(
+            method="", value=None, agent_id="", workflow_step="", task_id="",
+            content_snippet=content[:200] if content else "",
+        )
+
         if not content:
             return ReviewOutcome(
                 approved=False, has_critical_issues=False,
                 has_test_failures=False, has_change_requests=False,
                 findings_summary="",
-            )
+            ), empty_audit
 
         _NEGATIONS = ('no ', 'zero ', '0 ', 'without ', 'not ')
+        all_matches: list[PatternMatch] = []
+        negation_suppressed: list[PatternMatch] = []
 
-        def _matches(key: str) -> bool:
+        def _matches_with_audit(key: str) -> bool:
+            """Check all patterns for a category, recording matches and suppressions."""
+            found = False
             flags = 0 if key in _CASE_SENSITIVE_KEYS else re.IGNORECASE
             for p in REVIEW_OUTCOME_PATTERNS[key]:
-                m = re.search(p, content, flags)
-                if m:
+                for m in re.finditer(p, content, flags):
+                    matched_text = m.group()[:50]
                     prefix = content[max(0, m.start() - 20):m.start()].lower()
-                    if any(neg in prefix for neg in _NEGATIONS):
-                        continue
-                    return True
-            return False
+                    is_negated = any(neg in prefix for neg in _NEGATIONS)
 
-        approved = _matches("approve")
-        has_critical = _matches("critical_issues")
-        has_major = _matches("major_issues")
-        has_test_fail = _matches("test_failures")
-        has_changes = _matches("request_changes")
+                    pm = PatternMatch(
+                        category=key, pattern=p, matched_text=matched_text,
+                        position=m.start(), suppressed_by_negation=is_negated,
+                    )
 
-        # CRITICAL/MAJOR/HIGH override explicit APPROVE
+                    if is_negated:
+                        negation_suppressed.append(pm)
+                    else:
+                        all_matches.append(pm)
+                        found = True
+            return found
+
+        approved = _matches_with_audit("approve")
+        has_critical = _matches_with_audit("critical_issues")
+        has_major = _matches_with_audit("major_issues")
+        has_test_fail = _matches_with_audit("test_failures")
+        has_changes = _matches_with_audit("request_changes")
+
+        override_applied = False
         if has_critical or has_major or has_test_fail or has_changes:
+            if approved:
+                override_applied = True
             approved = False
 
-        # Default-deny: severity-tagged findings without explicit APPROVE → needs fix.
-        # Only exact APPROVE/LGTM keywords count as approval.
+        severity_tag_default_deny = False
         if not approved and not (has_critical or has_major or has_test_fail or has_changes):
             if _SEVERITY_TAG_RE.search(content):
                 has_major = True
+                severity_tag_default_deny = True
 
         findings_summary, structured_findings = self.extract_review_findings(content)
 
-        return ReviewOutcome(
-            approved=approved,
-            has_critical_issues=has_critical,
-            has_test_failures=has_test_fail,
-            has_change_requests=has_changes,
-            has_major_issues=has_major,
-            findings_summary=findings_summary,
+        outcome = ReviewOutcome(
+            approved=approved, has_critical_issues=has_critical,
+            has_test_failures=has_test_fail, has_change_requests=has_changes,
+            has_major_issues=has_major, findings_summary=findings_summary,
             structured_findings=structured_findings,
         )
+
+        audit = VerdictAudit(
+            method="", value=None, agent_id="", workflow_step="", task_id="",
+            outcome_flags={
+                "approved": approved, "has_critical": has_critical,
+                "has_major": has_major, "has_test_fail": has_test_fail,
+                "has_changes": has_changes,
+            },
+            matched_patterns=all_matches, negation_suppressed=negation_suppressed,
+            override_applied=override_applied,
+            severity_tag_default_deny=severity_tag_default_deny,
+            no_changes_marker_found=False, content_snippet=content[:200],
+        )
+
+        return outcome, audit
 
     def extract_review_findings(self, content: str) -> tuple[str, List[QAFinding]]:
         """Extract findings from QA review output.

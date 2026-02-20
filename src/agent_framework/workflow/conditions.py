@@ -313,6 +313,14 @@ class ConditionRegistry:
 
     _evaluators: Dict[EdgeConditionType, ConditionEvaluator] = _default_evaluators()
 
+    # Verdict-sensitive condition types that warrant audit logging
+    _VERDICT_CONDITIONS: frozenset = frozenset({
+        EdgeConditionType.APPROVED,
+        EdgeConditionType.NEEDS_FIX,
+        EdgeConditionType.NO_CHANGES,
+        EdgeConditionType.PREVIEW_APPROVED,
+    })
+
     @classmethod
     def evaluate(
         cls,
@@ -321,6 +329,7 @@ class ConditionRegistry:
         response: Any,
         routing_signal: Optional["RoutingSignal"] = None,
         context: Optional[Dict[str, Any]] = None,
+        session_logger=None,
     ) -> bool:
         """Evaluate a condition using the appropriate evaluator."""
         evaluator = cls._evaluators.get(condition.type)
@@ -329,10 +338,33 @@ class ConditionRegistry:
             return False
 
         try:
-            return evaluator.evaluate(condition, task, response, routing_signal, context)
+            result = evaluator.evaluate(condition, task, response, routing_signal, context)
         except Exception as e:
             logger.error(f"Error evaluating condition {condition.type}: {e}")
             return False
+
+        if session_logger and condition.type in cls._VERDICT_CONDITIONS:
+            # Determine whether verdict came from structured context or keyword fallback
+            verdict = None
+            if context and "verdict" in context:
+                verdict = context["verdict"]
+            elif task.context and "verdict" in task.context:
+                verdict = task.context["verdict"]
+
+            method = "condition_verdict" if verdict is not None else "keyword_fallback"
+            audit_data = {
+                "condition_type": condition.type.value,
+                "result": result,
+                "method": method,
+                "verdict_value": str(verdict) if verdict is not None else None,
+                "task_id": task.id if hasattr(task, "id") else None,
+            }
+            # Only log content snippet on keyword fallback (the risky path)
+            if method == "keyword_fallback" and hasattr(response, "content") and response.content:
+                audit_data["content_snippet"] = str(response.content)[:200]
+            session_logger.log("condition_eval_audit", **audit_data)
+
+        return result
 
     @classmethod
     def register(cls, condition_type: EdgeConditionType, evaluator: ConditionEvaluator):

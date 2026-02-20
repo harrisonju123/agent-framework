@@ -17,6 +17,7 @@ from .chain_metrics import ChainMetrics, ChainMetricsReport
 from .git_metrics import GitMetrics, GitMetricsReport
 from .waste_metrics import WasteMetrics, WasteMetricsReport
 from .review_cycle_metrics import ReviewCycleAnalyzer, ReviewCycleMetricsReport
+from .verdict_metrics import VerdictMetrics, VerdictMetricsReport
 
 __all__ = [
     'PerformanceMetrics',
@@ -36,4 +37,6 @@ __all__ = [
     'WasteMetricsReport',
     'ReviewCycleAnalyzer',
     'ReviewCycleMetricsReport',
+    'VerdictMetrics',
+    'VerdictMetricsReport',
 ]
