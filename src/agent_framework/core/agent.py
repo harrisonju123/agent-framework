@@ -1241,9 +1241,19 @@ class Agent:
 
         Completes (returns) when an interruption is detected, which causes
         the asyncio.wait race in _handle_task to cancel the LLM call.
+        Also monitors worktree existence — logs CRITICAL when directory vanishes.
         """
+        _worktree_vanished_logged = False
         while self._running and not self._check_pause_signal():
             self._write_heartbeat()
+            # Worktree existence check — early warning when directory is destroyed
+            if not _worktree_vanished_logged:
+                wt = self._git_ops.active_worktree
+                if wt and not wt.exists():
+                    self.logger.critical(
+                        f"WORKTREE VANISHED during LLM execution: {wt}"
+                    )
+                    _worktree_vanished_logged = True
             await asyncio.sleep(2)
 
     @staticmethod
@@ -1494,8 +1504,9 @@ class Agent:
             )
         efficiency_parts.append(
             "COMMIT DISCIPLINE: After completing each major deliverable, immediately "
-            "commit your work (git add + git commit). This preserves progress if you "
-            "run out of context. Prioritize shipping all deliverables over perfecting any single one."
+            "commit AND push your work (git add + git commit + git push origin HEAD). "
+            "This preserves progress if you run out of context or lose your working "
+            "directory. Prioritize shipping all deliverables over perfecting any single one."
         )
         efficiency_parts.append(
             "FAILURE CIRCUIT BREAKER: If 3+ consecutive bash/shell commands fail with errors, "
@@ -1836,6 +1847,10 @@ class Agent:
             self._process_llm_completion(response, task)
             self._log_routing_decision(task, response)
 
+            # Push committed work to remote immediately — protects against
+            # worktree corruption destroying unpushed code
+            self._git_ops.push_if_unpushed()
+
             # Handle response
             if response.success:
                 # Populate shared read cache for downstream chain steps
@@ -1878,6 +1893,10 @@ class Agent:
                 retry_count=task.retry_count,
                 error_message=task.last_error
             ))
+
+            # Push whatever was committed before the error — prevents worktree
+            # corruption from destroying partial work during retry setup
+            self._git_ops.push_if_unpushed()
 
             if task.status == TaskStatus.COMPLETED:
                 self.logger.warning(

@@ -413,7 +413,7 @@ class TestPhantomWorktreeCleanup:
         assert result is True
 
     def test_remove_worktree_directory_path_gone_base_repo_exists(self, tmp_path):
-        """Path removed by another process but base_repo still exists — prune and return True."""
+        """Path removed by another process but base_repo still exists — prune stale entry and return True."""
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
@@ -421,24 +421,23 @@ class TestPhantomWorktreeCleanup:
         base_repo = tmp_path / "base-repo"
         base_repo.mkdir()
 
-        with patch.object(manager, '_run_git') as mock_git:
+        with patch.object(manager, '_prune_stale_entry') as mock_prune:
             result = manager._remove_worktree_directory(nonexistent_path, base_repo)
 
         assert result is True
-        mock_git.assert_called_once_with(["worktree", "prune"], cwd=base_repo, timeout=30)
+        mock_prune.assert_called_once_with(base_repo, nonexistent_path)
 
-    def test_remove_worktree_directory_path_gone_prune_fails(self, tmp_path):
-        """Prune failure is swallowed — still returns True since path is already gone."""
+    def test_remove_worktree_directory_path_gone_no_stale_entry(self, tmp_path):
+        """Path gone, no matching stale entry — still returns True."""
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
         nonexistent_path = tmp_path / "gone-worktree"
         base_repo = tmp_path / "base-repo"
         base_repo.mkdir()
+        # No .git/worktrees/ dir — prune_stale_entry is a no-op
 
-        with patch.object(manager, '_run_git', side_effect=subprocess.CalledProcessError(1, "git")):
-            result = manager._remove_worktree_directory(nonexistent_path, base_repo)
-
+        result = manager._remove_worktree_directory(nonexistent_path, base_repo)
         assert result is True
 
     def test_cleanup_orphaned_purges_phantom_from_registry(self, tmp_path):
@@ -1334,11 +1333,11 @@ class TestTouchWorktree:
         mock_save.assert_not_called()
 
 
-class TestCreateWorktreePrunesBeforeAdd:
-    """Tests that create_worktree prunes stale refs before git worktree add."""
+class TestCreateWorktreeNoBlanketPrune:
+    """Tests that create_worktree does NOT run blanket git worktree prune."""
 
-    def test_create_worktree_prunes_before_add(self, tmp_path):
-        """git worktree prune is called during creation when path doesn't exist."""
+    def test_create_worktree_does_not_prune(self, tmp_path):
+        """Blanket git worktree prune removed to protect sibling worktrees."""
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
@@ -1364,17 +1363,15 @@ class TestCreateWorktreePrunesBeforeAdd:
                 owner_repo="owner/repo",
             )
 
-        # Verify prune happens before worktree add
-        prune_idx = next(i for i, c in enumerate(git_calls) if c == ["worktree", "prune"])
-        add_idx = next(i for i, c in enumerate(git_calls) if c[:2] == ["worktree", "add"])
-        assert prune_idx < add_idx
+        # No blanket prune — only fetch + worktree add
+        assert ["worktree", "prune"] not in git_calls
 
 
-class TestForceRemovalPrunesAfterRmtree:
-    """Tests that force-removal fallback prunes after shutil.rmtree."""
+class TestForceRemovalPrunesStaleEntry:
+    """Tests that force-removal fallback prunes only the specific stale entry."""
 
-    def test_force_removal_prunes_after_rmtree(self, tmp_path):
-        """git worktree prune called after shutil.rmtree fallback."""
+    def test_force_removal_prunes_stale_entry_after_rmtree(self, tmp_path):
+        """_prune_stale_entry called after shutil.rmtree fallback (not blanket prune)."""
         config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
         manager = WorktreeManager(config=config)
 
@@ -1383,21 +1380,18 @@ class TestForceRemovalPrunesAfterRmtree:
         base_repo = tmp_path / "base"
         base_repo.mkdir()
 
-        git_calls = []
-
         def mock_run_git(args, cwd, timeout=30):
-            git_calls.append(args)
             # The initial "git worktree remove" fails, triggering force fallback
             if args[0] == "worktree" and args[1] == "remove":
                 raise subprocess.CalledProcessError(1, "git")
             return MagicMock()
 
-        with patch.object(manager, '_run_git', side_effect=mock_run_git):
+        with patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_prune_stale_entry') as mock_prune:
             result = manager._remove_worktree_directory(wt_path, base_repo, force=True)
 
         assert result is True
-        # Verify prune was called after the failed remove attempt
-        assert ["worktree", "prune"] in git_calls
+        mock_prune.assert_called_once_with(base_repo, wt_path)
 
 
 class TestProtectedAgentIds:
@@ -2009,3 +2003,276 @@ class TestReloadBeforeModify:
             manager.touch_worktree(wt_path)
 
         mock_load.assert_called_once()
+
+
+class TestPruneStaleEntry:
+    """Tests for _prune_stale_entry() — targeted tracking entry removal."""
+
+    def test_removes_matching_entry(self, tmp_path):
+        """Removes the worktree tracking entry whose gitdir points to the target path."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        worktrees_dir = base_repo / ".git" / "worktrees"
+        entry_dir = worktrees_dir / "my-worktree"
+        entry_dir.mkdir(parents=True)
+
+        wt_path = tmp_path / "agent-workspaces" / "my-worktree"
+        (entry_dir / "gitdir").write_text(str(wt_path) + "/.git")
+
+        manager._prune_stale_entry(base_repo, wt_path)
+
+        assert not entry_dir.exists()
+
+    def test_leaves_sibling_entries_intact(self, tmp_path):
+        """Only removes the matching entry — siblings are untouched."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        worktrees_dir = base_repo / ".git" / "worktrees"
+
+        # Target entry
+        target_dir = worktrees_dir / "target-wt"
+        target_dir.mkdir(parents=True)
+        target_path = tmp_path / "target"
+        (target_dir / "gitdir").write_text(str(target_path) + "/.git")
+
+        # Sibling entry — should survive
+        sibling_dir = worktrees_dir / "sibling-wt"
+        sibling_dir.mkdir(parents=True)
+        sibling_path = tmp_path / "sibling"
+        (sibling_dir / "gitdir").write_text(str(sibling_path) + "/.git")
+
+        manager._prune_stale_entry(base_repo, target_path)
+
+        assert not target_dir.exists()
+        assert sibling_dir.exists()
+
+    def test_noop_when_no_match(self, tmp_path):
+        """No crash when target path doesn't match any entry."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        worktrees_dir = base_repo / ".git" / "worktrees"
+        entry_dir = worktrees_dir / "other-wt"
+        entry_dir.mkdir(parents=True)
+        (entry_dir / "gitdir").write_text("/some/other/path/.git")
+
+        manager._prune_stale_entry(base_repo, tmp_path / "nonexistent")
+
+        assert entry_dir.exists()
+
+    def test_noop_when_no_worktrees_dir(self, tmp_path):
+        """No crash when .git/worktrees/ doesn't exist."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        (base_repo / ".git").mkdir(parents=True)
+        # No worktrees dir
+
+        manager._prune_stale_entry(base_repo, tmp_path / "anything")
+        # Just verifying no exception
+
+
+class TestRemoveRegistryEntryByPath:
+    """Tests for remove_registry_entry_by_path() — registry-only cleanup."""
+
+    def test_removes_matching_entry(self, tmp_path):
+        """Removes registry entry whose path matches, saves to disk."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-to-remove"
+        manager._registry["target-key"] = WorktreeInfo(
+            path=str(wt_path), branch="b1", agent_id="eng", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+        manager._registry["other-key"] = WorktreeInfo(
+            path=str(tmp_path / "wt-other"), branch="b2", agent_id="qa", task_id="t2",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, '_save_registry') as mock_save:
+            manager.remove_registry_entry_by_path(wt_path)
+
+        assert "target-key" not in manager._registry
+        assert "other-key" in manager._registry
+        mock_save.assert_called_once()
+
+    def test_noop_for_unknown_path(self, tmp_path):
+        """No crash for unregistered path, no save triggered."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        with patch.object(manager, '_save_registry') as mock_save:
+            manager.remove_registry_entry_by_path(tmp_path / "unknown")
+
+        mock_save.assert_not_called()
+
+
+class TestPushAllUnpushed:
+    """Tests for push_all_unpushed() — pre-deletion safety net."""
+
+    def test_pushes_worktrees_with_unpushed_commits(self, tmp_path):
+        """Worktrees with unpushed commits get pushed."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-unpushed"
+        wt_path.mkdir()
+
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(wt_path), branch="feature/test", agent_id="eng", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, 'has_unpushed_commits', return_value=True), \
+             patch("subprocess.run") as mock_run:
+            # rev-parse returns branch name, push succeeds
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="feature/test\n"),
+                MagicMock(returncode=0),
+            ]
+            result = manager.push_all_unpushed()
+
+        assert result == 1
+
+    def test_skips_worktrees_without_unpushed(self, tmp_path):
+        """Clean worktrees are skipped."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-clean"
+        wt_path.mkdir()
+
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(wt_path), branch="feature/clean", agent_id="eng", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, 'has_unpushed_commits', return_value=False), \
+             patch("subprocess.run") as mock_run:
+            result = manager.push_all_unpushed()
+
+        assert result == 0
+        mock_run.assert_not_called()
+
+    def test_skips_nonexistent_paths(self, tmp_path):
+        """Worktrees whose paths don't exist are skipped."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(tmp_path / "gone"), branch="b1", agent_id="eng", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+
+        result = manager.push_all_unpushed()
+        assert result == 0
+
+    def test_skips_main_branch(self, tmp_path):
+        """Worktrees on main/master are not pushed."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        wt_path = tmp_path / "wt-main"
+        wt_path.mkdir()
+
+        manager._registry["key1"] = WorktreeInfo(
+            path=str(wt_path), branch="main", agent_id="eng", task_id="t1",
+            created_at="2025-01-01T00:00:00", last_accessed="2025-01-01T00:00:00",
+            base_repo=str(tmp_path),
+        )
+
+        with patch.object(manager, 'has_unpushed_commits', return_value=True), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+            result = manager.push_all_unpushed()
+
+        assert result == 0
+
+
+class TestCreateWorktreeStaleEntryRecovery:
+    """Tests for stale tracking entry recovery in create_worktree()."""
+
+    def test_recovers_from_stale_entry_error(self, tmp_path):
+        """Stale entry error triggers _prune_stale_entry and retry."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        call_count = {"n": 0}
+
+        def mock_run_git(args, cwd, timeout=30):
+            if args[0] == "fetch":
+                return MagicMock()
+            if args[:2] == ["worktree", "add"]:
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    # First attempt fails with stale entry error
+                    error = subprocess.CalledProcessError(128, "git")
+                    error.stderr = b"fatal: '/some/path' is a missing linked working tree"
+                    raise error
+                return MagicMock()
+            return MagicMock()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_get_default_branch', return_value="main"), \
+             patch.object(manager, '_prune_stale_entry') as mock_prune:
+            result = manager.create_worktree(
+                base_repo=base_repo,
+                branch_name="agent/engineer/test-stale",
+                agent_id="engineer",
+                task_id="task-stale",
+                owner_repo="owner/repo",
+            )
+
+        mock_prune.assert_called_once()
+        assert call_count["n"] == 2  # Initial attempt + retry
+        assert result is not None
+
+    def test_raises_on_retry_failure_after_stale_entry(self, tmp_path):
+        """If retry also fails after stale entry cleanup, raises RuntimeError."""
+        config = WorktreeConfig(enabled=True, root=tmp_path / "worktrees")
+        manager = WorktreeManager(config=config)
+
+        base_repo = tmp_path / "base"
+        base_repo.mkdir()
+        (base_repo / ".git").mkdir()
+
+        def mock_run_git(args, cwd, timeout=30):
+            if args[0] == "fetch":
+                return MagicMock()
+            if args[:2] == ["worktree", "add"]:
+                error = subprocess.CalledProcessError(128, "git")
+                error.stderr = b"fatal: '/some/path' is a missing linked working tree"
+                raise error
+            return MagicMock()
+
+        with patch.object(manager, '_enforce_capacity_limit'), \
+             patch.object(manager, '_run_git', side_effect=mock_run_git), \
+             patch.object(manager, '_branch_exists', return_value=False), \
+             patch.object(manager, '_get_default_branch', return_value="main"), \
+             patch.object(manager, '_prune_stale_entry'):
+            with pytest.raises(RuntimeError, match="Failed to create worktree after stale entry"):
+                manager.create_worktree(
+                    base_repo=base_repo,
+                    branch_name="agent/engineer/test-stale-fail",
+                    agent_id="engineer",
+                    task_id="task-stale-fail",
+                    owner_repo="owner/repo",
+                )

@@ -189,8 +189,10 @@ class GitOperationsManager:
                         self.logger.info(f"Reusing worktree for branch {branch_name}: {existing}")
                         return existing
                     else:
-                        # Worktree deleted by another process — remove stale entry and recreate
-                        self.worktree_manager.remove_worktree(existing, force=True)
+                        # Worktree deleted by another process — clear registry only.
+                        # Don't call remove_worktree() which runs git worktree prune
+                        # and could damage tracking for other active worktrees.
+                        self.worktree_manager.remove_registry_entry_by_path(existing)
                         self.logger.warning(f"Worktree path missing, will recreate: {existing}")
 
                 try:
@@ -921,6 +923,24 @@ class GitOperationsManager:
         except Exception as e:
             self.logger.debug(f"Best-effort push failed for {worktree_path}: {e}")
             return False
+
+    def push_if_unpushed(self) -> bool:
+        """Push the active worktree's branch if it has unpushed commits.
+
+        Called immediately after LLM returns to ensure committed work
+        reaches the remote before any worktree corruption can destroy it.
+        Returns True if push succeeded, False otherwise (including no-op).
+        """
+        if not self._active_worktree or not self.worktree_manager:
+            return False
+        if not self._active_worktree.exists():
+            return False
+        if not self.worktree_manager.has_unpushed_commits(self._active_worktree):
+            return False
+        pushed = self._try_push_worktree_branch(self._active_worktree)
+        if pushed:
+            self.logger.info("Pushed unpushed commits to remote (post-LLM safety push)")
+        return pushed
 
     @property
     def active_worktree(self) -> Optional[Path]:

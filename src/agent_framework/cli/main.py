@@ -1341,89 +1341,76 @@ def restart(ctx, watchdog, dashboard):
 
 
 @cli.command()
-@click.option("--agent", "-a", help="Clear only specific agent queue (e.g., 'engineer', 'qa')")
-@click.option("--completed", is_flag=True, help="Also clear completed tasks")
-@click.option("--locks", is_flag=True, help="Also clear stale lock files")
-@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
-def clear(ctx, agent, completed, locks, yes):
-    """Clear agent task queues."""
+def clear(ctx, yes):
+    """Clear all runtime state for a fresh run.
+
+    Removes queues, completed tasks, locks, heartbeats, activity, logs, chain
+    state, and all other runtime artifacts. Preserves expensive-to-rebuild
+    assets: agent memory, codebase indexes, and worktrees.
+
+    Examples:
+        agent clear          # show summary and confirm
+        agent clear -y       # clear everything, no confirmation
+    """
     workspace = ctx.obj["workspace"]
     comm_dir = workspace / ".agent-communication"
-    queues_dir = comm_dir / "queues"
-    completed_dir = comm_dir / "completed"
-    locks_dir = comm_dir / "locks"
 
-    if not queues_dir.exists():
-        console.print("[yellow]No queues directory found[/]")
+    if not comm_dir.exists():
+        console.print("[green]Nothing to clear — .agent-communication/ does not exist[/]")
         return
 
-    # Count tasks to clear
-    pending_count = 0
-    completed_count = 0
+    # ── Build inventory (same helpers as purge, minus memory/indexes/worktrees) ──
+    categories = _build_clear_categories(workspace)
 
-    if agent:
-        # Clear specific agent queue
-        agent_dir = queues_dir / agent
-        if agent_dir.exists():
-            pending_count = len(list(agent_dir.glob("*.json")))
-    else:
-        # Count all pending tasks
-        for agent_dir in queues_dir.iterdir():
-            if agent_dir.is_dir():
-                pending_count += len(list(agent_dir.glob("*.json")))
+    # ── Display summary table ────────────────────────────────────────────────
+    table = Table(title="Clear Summary", show_header=True)
+    table.add_column("Category", style="bold")
+    table.add_column("Items", justify="right")
+    table.add_column("Status")
 
-    if completed and completed_dir.exists():
-        completed_count = len(list(completed_dir.glob("*.json")))
+    total_items = 0
+    for cat in categories:
+        count = sum(_count_purge_target(t) for t in cat.targets)
+        if count == 0:
+            status = "[dim]empty[/]"
+        else:
+            status = "[red]REMOVE[/]"
+            total_items += count
+        table.add_row(cat.name, str(count) if count > 0 else "—", status)
 
-    locks_count = 0
-    if locks and locks_dir.exists():
-        locks_count = len(list(locks_dir.glob("*.lock")))
+    console.print(table)
 
-    if pending_count == 0 and completed_count == 0 and locks_count == 0:
-        console.print("[green]Queues are already empty[/]")
+    if total_items == 0:
+        console.print("[green]Nothing to clear[/]")
         return
 
-    # Show what will be cleared
-    console.print(f"[bold]Tasks to clear:[/]")
-    console.print(f"  Pending: {pending_count}")
-    if completed:
-        console.print(f"  Completed: {completed_count}")
-    if locks:
-        console.print(f"  Locks: {locks_count}")
+    # ── Stop running agents ──────────────────────────────────────────────────
+    console.print("[bold yellow]Stopping agents before clearing...[/]")
+    try:
+        orchestrator = Orchestrator(workspace)
+        if orchestrator.get_dashboard_info():
+            orchestrator.stop_dashboard()
+        orchestrator.stop_all_agents(graceful=True)
+        console.print("[green]✓ Agents stopped[/]")
+    except Exception as e:
+        console.print(f"[yellow]Could not stop agents ({e}); continuing with cleanup[/]")
 
+    # ── Confirm and delete ───────────────────────────────────────────────────
+    console.print(f"\n[bold red]This will permanently remove {total_items} items.[/]")
     if not yes:
         if not click.confirm("Continue?"):
             console.print("[yellow]Cancelled[/]")
             return
 
-    # Clear tasks
-    cleared = 0
-    if agent:
-        agent_dir = queues_dir / agent
-        if agent_dir.exists():
-            for f in agent_dir.glob("*.json"):
-                f.unlink()
-                cleared += 1
-    else:
-        for agent_dir in queues_dir.iterdir():
-            if agent_dir.is_dir():
-                for f in agent_dir.glob("*.json"):
-                    f.unlink()
-                    cleared += 1
+    removed_total = 0
+    for cat in categories:
+        for target in cat.targets:
+            removed_total += _delete_purge_target(target)
 
-    if completed and completed_dir.exists():
-        for f in completed_dir.glob("*.json"):
-            f.unlink()
-            cleared += 1
-
-    if locks and locks_dir.exists():
-        for lock_dir in locks_dir.glob("*.lock"):
-            if lock_dir.is_dir():
-                shutil.rmtree(lock_dir)
-                cleared += 1
-
-    console.print(f"[green]✓ Cleared {cleared} items[/]")
+    console.print(f"\n[green]✓ Cleared {removed_total} items[/]")
+    console.print("[cyan]Preserved: memory, indexes, worktrees[/]")
 
 
 # ── purge helpers ─────────────────────────────────────────────────────────────
@@ -1508,6 +1495,78 @@ def _delete_purge_target(target: _PurgeTarget) -> int:
     return removed
 
 
+def _build_clear_categories(workspace: Path) -> list[_PurgeCategory]:
+    """Runtime categories cleared by `agent clear` — everything except memory/indexes/worktrees."""
+    comm_dir = workspace / ".agent-communication"
+    context_dir = workspace / ".agent-context"
+    logs_dir = workspace / "logs"
+
+    return [
+        _PurgeCategory("Task queues", [
+            _PurgeTarget(comm_dir / "queues", glob="**/*.json"),
+        ]),
+        _PurgeCategory("Completed tasks", [
+            _PurgeTarget(comm_dir / "completed", glob="*.json"),
+        ]),
+        _PurgeCategory("Locks", [
+            _PurgeTarget(comm_dir / "locks", glob="*.lock"),
+        ]),
+        _PurgeCategory("Heartbeats", [
+            _PurgeTarget(comm_dir / "heartbeats", glob="*"),
+        ]),
+        _PurgeCategory("Activity", [
+            _PurgeTarget(comm_dir / "activity", glob="*.json"),
+            _PurgeTarget(comm_dir / "activity-stream.jsonl"),
+        ]),
+        _PurgeCategory("Malformed tasks", [
+            _PurgeTarget(comm_dir / "malformed", glob="*.json"),
+        ]),
+        _PurgeCategory("Escalations", [
+            _PurgeTarget(comm_dir / "escalations", glob="*.json"),
+        ]),
+        _PurgeCategory("Teams", [
+            _PurgeTarget(comm_dir / "teams", glob="*.json"),
+        ]),
+        _PurgeCategory("Profile registry", [
+            _PurgeTarget(comm_dir / "profile-registry", whole_dir=True),
+        ]),
+        _PurgeCategory("PID/signal files", [
+            _PurgeTarget(comm_dir / "pids.txt"),
+            _PurgeTarget(comm_dir / "dashboard.pid"),
+            _PurgeTarget(comm_dir / "pause"),
+            _PurgeTarget(comm_dir / "PAUSE_INTAKE"),
+        ]),
+        _PurgeCategory("Chain state", [
+            _PurgeTarget(comm_dir / "chain-state", whole_dir=True),
+        ]),
+        _PurgeCategory("Read cache", [
+            _PurgeTarget(comm_dir / "read-cache", whole_dir=True),
+        ]),
+        _PurgeCategory("Pre-scans", [
+            _PurgeTarget(comm_dir / "pre-scans", whole_dir=True),
+        ]),
+        _PurgeCategory("Metrics", [
+            _PurgeTarget(comm_dir / "metrics", whole_dir=True),
+        ]),
+        _PurgeCategory("Routing signals", [
+            _PurgeTarget(comm_dir / "routing-signals", whole_dir=True),
+        ]),
+        _PurgeCategory("Debates", [
+            _PurgeTarget(comm_dir / "debates", whole_dir=True),
+        ]),
+        _PurgeCategory("Reports", [
+            _PurgeTarget(comm_dir / "reports", whole_dir=True),
+        ]),
+        _PurgeCategory("Context artifacts", [
+            _PurgeTarget(context_dir, whole_dir=True),
+        ]),
+        _PurgeCategory("Logs", [
+            _PurgeTarget(logs_dir, glob="*.log"),
+            _PurgeTarget(logs_dir / "sessions", glob="*.jsonl"),
+        ]),
+    ]
+
+
 @cli.command()
 @click.option("--keep-memory", is_flag=True, help="Preserve agent learned patterns (.agent-communication/memory/)")
 @click.option("--keep-worktrees", is_flag=True, help="Preserve repo clones and worktrees (~/.agent-workspaces/)")
@@ -1588,6 +1647,27 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
             _PurgeTarget(comm_dir / "pause"),
             _PurgeTarget(comm_dir / "PAUSE_INTAKE"),
         ]),
+        _PurgeCategory("Chain state", [
+            _PurgeTarget(comm_dir / "chain-state", whole_dir=True),
+        ]),
+        _PurgeCategory("Read cache", [
+            _PurgeTarget(comm_dir / "read-cache", whole_dir=True),
+        ]),
+        _PurgeCategory("Pre-scans", [
+            _PurgeTarget(comm_dir / "pre-scans", whole_dir=True),
+        ]),
+        _PurgeCategory("Metrics", [
+            _PurgeTarget(comm_dir / "metrics", whole_dir=True),
+        ]),
+        _PurgeCategory("Routing signals", [
+            _PurgeTarget(comm_dir / "routing-signals", whole_dir=True),
+        ]),
+        _PurgeCategory("Debates", [
+            _PurgeTarget(comm_dir / "debates", whole_dir=True),
+        ]),
+        _PurgeCategory("Reports", [
+            _PurgeTarget(comm_dir / "reports", whole_dir=True),
+        ]),
         _PurgeCategory("Agent memory", [
             _PurgeTarget(memory_dir, whole_dir=True),
         ], skip=keep_memory),
@@ -1649,6 +1729,19 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
         console.print("[green]✓ Agents stopped[/]")
     except Exception as e:
         console.print(f"[yellow]Could not stop agents ({e}); continuing with file cleanup[/]")
+
+    # ── Phase 4b: Push unpushed worktree commits before deletion ────────────
+    if not keep_worktrees and workspaces_dir.exists():
+        try:
+            from ..workspace.worktree_manager import WorktreeConfig
+            github_token = os.environ.get("GITHUB_TOKEN")
+            wt_config = WorktreeConfig(enabled=True, root=workspaces_dir / "worktrees")
+            wt_manager = WorktreeManager(config=wt_config, github_token=github_token)
+            pushed = wt_manager.push_all_unpushed()
+            if pushed:
+                console.print(f"[green]✓ Pushed {pushed} worktree(s) with unpushed commits[/]")
+        except Exception as e:
+            console.print(f"[yellow]Could not push worktree commits ({e}); continuing[/]")
 
     # ── Phase 5: Confirm and delete ───────────────────────────────────────────
     console.print(f"\n[bold red]This will permanently remove {total_items} items.[/]")
@@ -1852,6 +1945,11 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
         if not click.confirm("Continue?"):
             console.print("[yellow]Cancelled[/]")
             return
+
+        # Push unpushed commits before removing worktrees
+        pushed = manager.push_all_unpushed()
+        if pushed:
+            console.print(f"[green]✓ Pushed {pushed} worktree(s) with unpushed commits[/]")
 
         # Perform cleanup
         removed = 0

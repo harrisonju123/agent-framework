@@ -296,13 +296,6 @@ class WorktreeManager:
         # Ensure parent directory exists
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Prune stale worktree refs — handles force-removal leftovers where
-        # shutil.rmtree deleted the directory but git still tracks the worktree
-        try:
-            self._run_git(["worktree", "prune"], cwd=base_repo, timeout=30)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
-
         try:
             # Fetch latest from origin
             self._run_git(["fetch", "origin"], cwd=base_repo, timeout=60)
@@ -369,6 +362,53 @@ class WorktreeManager:
         except subprocess.CalledProcessError as e:
             error_msg = e.stderr.decode() if e.stderr else str(e)
 
+            # Stale tracking entry blocks creation — prune just that entry and retry once
+            if "is a missing linked working tree" in error_msg or "already locked" in error_msg:
+                self._prune_stale_entry(base_repo, worktree_path)
+                try:
+                    if branch_exists:
+                        self._run_git(
+                            ["worktree", "add", str(worktree_path), branch_name],
+                            cwd=base_repo, timeout=60,
+                        )
+                    else:
+                        base_ref = None
+                        if start_point and self._remote_branch_exists(base_repo, start_point):
+                            base_ref = f"origin/{start_point}"
+                        if not base_ref:
+                            default_branch = self._get_default_branch(base_repo)
+                            base_ref = f"origin/{default_branch}"
+                        self._run_git(
+                            ["worktree", "add", "-b", branch_name, str(worktree_path), base_ref],
+                            cwd=base_repo, timeout=60,
+                        )
+
+                    logger.info(f"Created worktree after stale entry cleanup: {worktree_path}")
+
+                    # Copy CLAUDE.md (same as happy path)
+                    claude_md_src = base_repo / "CLAUDE.md"
+                    claude_md_dst = worktree_path / "CLAUDE.md"
+                    if claude_md_src.exists() and not claude_md_dst.exists():
+                        import shutil
+                        shutil.copy2(str(claude_md_src), str(claude_md_dst))
+
+                    now = datetime.now(timezone.utc).isoformat()
+                    self._registry[worktree_key] = WorktreeInfo(
+                        path=str(worktree_path),
+                        branch=branch_name,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        created_at=now,
+                        last_accessed=now,
+                        base_repo=str(base_repo),
+                        active=True,
+                    )
+                    self._save_registry()
+                    return worktree_path
+                except subprocess.CalledProcessError as retry_err:
+                    retry_msg = retry_err.stderr.decode() if retry_err.stderr else str(retry_err)
+                    raise RuntimeError(f"Failed to create worktree after stale entry cleanup: {retry_msg}")
+
             # Branch already checked out in another worktree — reuse if same agent or chain
             conflict_path = self._parse_branch_conflict_path(error_msg)
             if conflict_path and conflict_path.exists():
@@ -414,6 +454,48 @@ class WorktreeManager:
             if Path(info.path).resolve() == resolved:
                 return info.agent_id
         return None
+
+    def _prune_stale_entry(self, base_repo: Path, worktree_path: Path) -> None:
+        """Remove a single stale worktree tracking entry without affecting siblings.
+
+        Targets the specific entry in base_repo/.git/worktrees/ whose gitdir
+        points to worktree_path. Does NOT run `git worktree prune` which would
+        nuke tracking entries for all missing worktrees — including active ones
+        that are temporarily unreachable due to race conditions.
+        """
+        import shutil as _shutil
+        worktrees_dir = base_repo / ".git" / "worktrees"
+        if not worktrees_dir.is_dir():
+            return
+        resolved_target = worktree_path.resolve()
+        for entry in worktrees_dir.iterdir():
+            gitdir_file = entry / "gitdir"
+            if gitdir_file.exists():
+                try:
+                    recorded = gitdir_file.read_text().strip()
+                    recorded_p = Path(recorded).resolve()
+                    # gitdir may point to worktree/.git or to the worktree dir itself
+                    if recorded_p == resolved_target or recorded_p.parent == resolved_target:
+                        logger.info(f"Removing stale worktree tracking entry: {entry}")
+                        _shutil.rmtree(entry)
+                        return
+                except OSError:
+                    continue
+
+    def remove_registry_entry_by_path(self, path: Path) -> None:
+        """Remove a worktree from the registry without any git operations.
+
+        Used when a worktree's directory is already gone and we just need
+        to clean up the registry. Does NOT run git worktree prune, which
+        could damage tracking entries for other active worktrees.
+        """
+        path = Path(path).resolve()
+        for key, info in list(self._registry.items()):
+            if Path(info.path).resolve() == path:
+                del self._registry[key]
+                self._save_registry()
+                logger.debug(f"Removed stale registry entry for {path}")
+                return
 
     def _switch_worktree_branch(
         self,
@@ -509,13 +591,10 @@ class WorktreeManager:
     ) -> bool:
         """Remove worktree directory using git worktree remove."""
         try:
-            # Path already gone — just clean up git's stale worktree refs
+            # Path already gone — prune only this entry's tracking, not all siblings
             if not path.exists():
                 if base_repo and base_repo.exists():
-                    try:
-                        self._run_git(["worktree", "prune"], cwd=base_repo, timeout=30)
-                    except subprocess.CalledProcessError:
-                        pass  # Another process may have pruned already
+                    self._prune_stale_entry(base_repo, path)
                 logger.debug(f"Worktree already removed: {path}")
                 return True
 
@@ -540,12 +619,9 @@ class WorktreeManager:
                 try:
                     import shutil
                     shutil.rmtree(path)
-                    # Clean up git's stale worktree tracking left behind by rmtree
+                    # Prune only this entry — not all siblings
                     if base_repo and base_repo.exists():
-                        try:
-                            self._run_git(["worktree", "prune"], cwd=base_repo, timeout=30)
-                        except subprocess.CalledProcessError:
-                            pass
+                        self._prune_stale_entry(base_repo, path)
                     logger.info(f"Force removed worktree: {path}")
                     self._guard_parent_directory(path)
                     return True
@@ -911,6 +987,51 @@ class WorktreeManager:
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
             # If we can't determine, assume there might be changes
             return True
+
+    def push_all_unpushed(self) -> int:
+        """Push all worktrees that have unpushed commits to remote.
+
+        Safety net before any bulk deletion (purge, cleanup). Returns count
+        of worktrees successfully pushed.
+        """
+        pushed = 0
+        for key, info in list(self._registry.items()):
+            path = Path(info.path)
+            if not path.exists():
+                continue
+            if not self.has_unpushed_commits(path):
+                continue
+            try:
+                # Determine branch
+                result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    cwd=path, capture_output=True, text=True, timeout=10,
+                )
+                if result.returncode != 0:
+                    continue
+                branch = result.stdout.strip()
+                if branch in ("main", "master", "HEAD"):
+                    continue
+
+                env = os.environ.copy()
+                if self.token:
+                    env["GIT_ASKPASS"] = "echo"
+                    env["GIT_USERNAME"] = "x-access-token"
+                    env["GIT_PASSWORD"] = self.token
+
+                push_result = subprocess.run(
+                    ["git", "push", "origin", branch],
+                    cwd=path, capture_output=True, text=True,
+                    env=env, timeout=60,
+                )
+                if push_result.returncode == 0:
+                    pushed += 1
+                    logger.info(f"Pre-deletion push: {path} ({branch})")
+                else:
+                    logger.warning(f"Pre-deletion push failed for {path}: {push_result.stderr}")
+            except (subprocess.TimeoutExpired, OSError) as e:
+                logger.warning(f"Pre-deletion push failed for {path}: {e}")
+        return pushed
 
     def list_worktrees(self) -> List[WorktreeInfo]:
         """List all registered worktrees."""

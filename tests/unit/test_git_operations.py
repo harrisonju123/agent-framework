@@ -1041,8 +1041,9 @@ class TestPreflightWorktreeExistence:
 
         result = git_ops.get_working_directory(task)
 
-        # Should have removed the stale entry and created a new worktree
-        mock_worktree_manager.remove_worktree.assert_called_once_with(ghost_path, force=True)
+        # Should have cleared the registry entry (not called remove_worktree which runs prune)
+        mock_worktree_manager.remove_registry_entry_by_path.assert_called_once_with(ghost_path)
+        mock_worktree_manager.remove_worktree.assert_not_called()
         mock_worktree_manager.create_worktree.assert_called_once()
         assert result == tmp_path / "new-worktree"
 
@@ -1317,3 +1318,86 @@ class TestDiscoverBranchWork:
 
         assert result is not None
         assert len(result["file_list"]) == 50
+
+
+class TestPushIfUnpushed:
+    """Tests for push_if_unpushed() — post-LLM safety push."""
+
+    def test_pushes_when_unpushed_commits_exist(self, git_ops_with_worktree, tmp_path):
+        """Pushes to remote when worktree has unpushed commits."""
+        wt_path = tmp_path / "worktree"
+        wt_path.mkdir()
+        git_ops_with_worktree._active_worktree = wt_path
+        git_ops_with_worktree.worktree_manager.has_unpushed_commits.return_value = True
+
+        with patch.object(git_ops_with_worktree, '_try_push_worktree_branch', return_value=True) as mock_push:
+            result = git_ops_with_worktree.push_if_unpushed()
+
+        assert result is True
+        mock_push.assert_called_once_with(wt_path)
+
+    def test_noop_when_no_active_worktree(self, git_ops):
+        """Returns False when no active worktree."""
+        assert git_ops.push_if_unpushed() is False
+
+    def test_noop_when_no_worktree_manager(self, git_ops, tmp_path):
+        """Returns False when worktree manager is None."""
+        git_ops._active_worktree = tmp_path
+        assert git_ops.push_if_unpushed() is False
+
+    def test_noop_when_worktree_path_missing(self, git_ops_with_worktree, tmp_path):
+        """Returns False when worktree directory doesn't exist."""
+        git_ops_with_worktree._active_worktree = tmp_path / "nonexistent"
+        assert git_ops_with_worktree.push_if_unpushed() is False
+
+    def test_noop_when_nothing_to_push(self, git_ops_with_worktree, tmp_path):
+        """Returns False when no unpushed commits."""
+        wt_path = tmp_path / "worktree"
+        wt_path.mkdir()
+        git_ops_with_worktree._active_worktree = wt_path
+        git_ops_with_worktree.worktree_manager.has_unpushed_commits.return_value = False
+
+        result = git_ops_with_worktree.push_if_unpushed()
+        assert result is False
+
+
+class TestStaleEntryRecoveryInGetWorkingDirectory:
+    """Tests that get_working_directory uses registry-only cleanup for missing worktrees."""
+
+    def test_uses_remove_registry_entry_for_missing_worktree(
+        self, mock_config, mock_logger, mock_queue, mock_worktree_manager, tmp_path
+    ):
+        """When existing worktree path is missing, calls remove_registry_entry_by_path."""
+        git_ops = GitOperationsManager(
+            config=mock_config,
+            workspace=tmp_path,
+            queue=mock_queue,
+            logger=mock_logger,
+            worktree_manager=mock_worktree_manager,
+        )
+        git_ops.multi_repo_manager = MagicMock()
+        git_ops.multi_repo_manager.ensure_repo.return_value = tmp_path / "base"
+
+        # find_worktree_by_branch returns a path that doesn't exist
+        missing_path = tmp_path / "missing-worktree"
+        mock_worktree_manager.find_worktree_by_branch.return_value = missing_path
+        mock_worktree_manager.create_worktree.return_value = tmp_path / "new-worktree"
+
+        task = Task(
+            id="task-stale",
+            title="Test",
+            description="Test",
+            type="implementation",
+            status="pending",
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={"github_repo": "owner/repo", "worktree_branch": "feature/test"},
+        )
+
+        git_ops.get_working_directory(task)
+
+        # Verify it called remove_registry_entry_by_path instead of remove_worktree
+        mock_worktree_manager.remove_registry_entry_by_path.assert_called_once_with(missing_path)
+        mock_worktree_manager.remove_worktree.assert_not_called()
