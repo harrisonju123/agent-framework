@@ -12,6 +12,7 @@ from agent_framework.core.config import WorkflowDefinition
 from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
+from agent_framework.utils.type_helpers import get_type_str
 
 
 # -- Fixtures --
@@ -3350,3 +3351,269 @@ class TestUpstreamContextFiltering:
         ctx_agent._save_upstream_context(task, response)
 
         assert "[Tool Call:" not in task.context["upstream_summary"]
+
+
+# -- Routing signal verdict override --
+
+class TestRoutingSignalVerdictOverride:
+    """Tests for verdict reconciliation when architect uses mark_workflow_complete
+    MCP tool instead of the [NO_CHANGES_NEEDED] text marker."""
+
+    @pytest.fixture
+    def architect_agent(self, queue, tmp_path):
+        """Architect agent with minimal setup for verdict override tests."""
+        config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        a = Agent.__new__(Agent)
+        a.config = config
+        a.queue = queue
+        a.workspace = tmp_path
+        a._workflows_config = {"default": DEFAULT_WORKFLOW, "analysis": ANALYSIS_WORKFLOW}
+        a._agents_config = [
+            SimpleNamespace(id="architect"),
+            SimpleNamespace(id="engineer"),
+            SimpleNamespace(id="qa"),
+        ]
+        a._team_mode_enabled = False
+        a.logger = MagicMock()
+        a._session_logger = MagicMock()
+
+        from agent_framework.workflow.executor import WorkflowExecutor
+        a._workflow_executor = WorkflowExecutor(queue, queue.queue_dir)
+
+        from agent_framework.core.review_cycle import ReviewCycleManager
+        a._review_cycle = ReviewCycleManager(
+            config=config,
+            queue=queue,
+            logger=a.logger,
+            agent_definition=None,
+            session_logger=a._session_logger,
+            activity_manager=MagicMock(),
+        )
+
+        from agent_framework.core.git_operations import GitOperationsManager
+        a._git_ops = GitOperationsManager(
+            config=a.config,
+            workspace=a.workspace,
+            queue=a.queue,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            workflows_config=a._workflows_config,
+        )
+
+        prompt_ctx = PromptContext(
+            config=config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        a._prompt_builder = PromptBuilder(prompt_ctx)
+
+        from agent_framework.core.workflow_router import WorkflowRouter
+        a._workflow_router = WorkflowRouter(
+            config=config,
+            queue=queue,
+            workspace=tmp_path,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            workflows_config=a._workflows_config,
+            workflow_executor=a._workflow_executor,
+            agents_config=a._agents_config,
+            multi_repo_manager=None,
+        )
+
+        from types import MappingProxyType
+        a._optimization_config = MappingProxyType({"enable_effort_budget_ceilings": False})
+        a._budget = MagicMock()
+        a._budget.estimate_cost.return_value = 0.0
+
+        return a
+
+    def _apply_override(self, agent, task, routing_signal):
+        """Simulate the verdict override block from _handle_successful_response."""
+        if (routing_signal
+                and routing_signal.target_agent == WORKFLOW_COMPLETE
+                and agent.config.base_id == "architect"
+                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")
+                and task.context.get("verdict") != "no_changes"):
+            prev_verdict = task.context.get("verdict")
+            task.context["verdict"] = "no_changes"
+            audit = task.context.get("verdict_audit")
+            if isinstance(audit, dict):
+                audit["method"] = "routing_signal_complete"
+                audit["value"] = "no_changes"
+            agent.logger.info(
+                f"Verdict overridden: {prev_verdict!r} → 'no_changes' "
+                f"(routing signal WORKFLOW_COMPLETE at plan step)"
+            )
+            agent._session_logger.log(
+                "verdict_override", task_id=task.id,
+                prev_verdict=prev_verdict, new_verdict="no_changes",
+                method="routing_signal_complete",
+                routing_signal_reason=routing_signal.reason,
+            )
+            agent._patch_chain_state_verdict(task)
+
+    def test_override_fires_at_plan_step(self, architect_agent):
+        """Verdict changes from 'approved' → 'no_changes', audit updated, session log emitted."""
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+            verdict_audit={"method": "ambiguous_default", "value": "approved"},
+        )
+        signal = _make_signal(target=WORKFLOW_COMPLETE, reason="No code changes needed")
+
+        self._apply_override(architect_agent, task, signal)
+
+        assert task.context["verdict"] == "no_changes"
+        assert task.context["verdict_audit"]["method"] == "routing_signal_complete"
+        assert task.context["verdict_audit"]["value"] == "no_changes"
+        architect_agent._session_logger.log.assert_called_once_with(
+            "verdict_override",
+            task_id=task.id,
+            prev_verdict="approved",
+            new_verdict="no_changes",
+            method="routing_signal_complete",
+            routing_signal_reason="No code changes needed",
+        )
+
+    def test_no_override_when_already_no_changes(self, architect_agent):
+        """Idempotent — no double-override when text marker also present."""
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="no_changes",
+            verdict_audit={"method": "no_changes_marker", "value": "no_changes"},
+        )
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        self._apply_override(architect_agent, task, signal)
+
+        # Verdict unchanged, no session log emitted
+        assert task.context["verdict"] == "no_changes"
+        assert task.context["verdict_audit"]["method"] == "no_changes_marker"
+        architect_agent._session_logger.log.assert_not_called()
+
+    def test_ignored_at_non_plan_step(self, architect_agent):
+        """No override at code_review/qa_review steps."""
+        for step in ("code_review", "qa_review", "implement"):
+            architect_agent._session_logger.reset_mock()
+            task = _make_task(
+                workflow="default",
+                workflow_step=step,
+                verdict="approved",
+                verdict_audit={"method": "review_outcome", "value": "approved"},
+            )
+            signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+            self._apply_override(architect_agent, task, signal)
+
+            assert task.context["verdict"] == "approved", f"Override should not fire at {step}"
+            architect_agent._session_logger.log.assert_not_called()
+
+    def test_ignored_for_non_architect(self, agent):
+        """Engineer with WORKFLOW_COMPLETE doesn't get verdict override."""
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+        )
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        # Reuse the same conditions as production code — engineer base_id
+        # means the guard rejects the override
+        self._apply_override(agent, task, signal)
+
+        assert task.context["verdict"] == "approved"
+
+    def test_chain_state_patched(self, architect_agent, tmp_path):
+        """Chain state file's last step gets corrected verdict."""
+        from agent_framework.core.chain_state import save_chain_state, load_chain_state, ChainState, StepRecord
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+            verdict_audit={"method": "ambiguous_default", "value": "approved"},
+        )
+
+        # Write chain state with "approved" verdict for the plan step
+        state = ChainState(
+            root_task_id=task.id,
+            user_goal="Test goal",
+            workflow="default",
+            steps=[StepRecord(
+                step_id="plan",
+                agent_id="architect",
+                task_id=task.id,
+                completed_at="2026-02-20T10:00:00+00:00",
+                summary="Plan completed",
+                verdict="approved",
+                verdict_audit={"method": "ambiguous_default", "value": "approved"},
+            )],
+        )
+        save_chain_state(tmp_path, state)
+
+        signal = _make_signal(target=WORKFLOW_COMPLETE, reason="No changes needed")
+        self._apply_override(architect_agent, task, signal)
+
+        # Verify chain state was patched
+        patched = load_chain_state(tmp_path, task.id)
+        assert patched.steps[-1].verdict == "no_changes"
+        assert patched.steps[-1].verdict_audit["method"] == "routing_signal_complete"
+
+    def test_chain_state_wrong_task_id(self, architect_agent, tmp_path):
+        """Defensive: skips patch if last step belongs to different task."""
+        from agent_framework.core.chain_state import save_chain_state, load_chain_state, ChainState, StepRecord
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+            verdict_audit={"method": "ambiguous_default", "value": "approved"},
+        )
+
+        # Chain state has a step from a DIFFERENT task
+        state = ChainState(
+            root_task_id=task.id,
+            user_goal="Test goal",
+            workflow="default",
+            steps=[StepRecord(
+                step_id="plan",
+                agent_id="architect",
+                task_id="different-task-id",
+                completed_at="2026-02-20T10:00:00+00:00",
+                summary="Plan completed",
+                verdict="approved",
+            )],
+        )
+        save_chain_state(tmp_path, state)
+
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+        self._apply_override(architect_agent, task, signal)
+
+        # Verdict on task context is overridden, but chain state is NOT patched
+        assert task.context["verdict"] == "no_changes"
+        patched = load_chain_state(tmp_path, task.id)
+        assert patched.steps[-1].verdict == "approved"
+
+    def test_skip_chain_fires_with_corrected_verdict(self, architect_agent, queue):
+        """With corrected no_changes verdict, _enforce_workflow_chain is NOT called."""
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="no_changes",
+        )
+        response = _make_response()
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        # Stub downstream methods called after chain routing in _run_post_completion_flow
+        architect_agent._extract_and_store_memories = MagicMock()
+        architect_agent._analyze_tool_patterns = MagicMock(return_value=0)
+        architect_agent._log_task_completion_metrics = MagicMock()
+        architect_agent._emit_workflow_summary = MagicMock()
+
+        architect_agent._run_post_completion_flow(task, response, signal, datetime.now(timezone.utc))
+
+        # No chain task should be queued — the no_changes verdict terminates the workflow
+        queue.push.assert_not_called()
