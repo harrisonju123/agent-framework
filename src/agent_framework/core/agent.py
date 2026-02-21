@@ -2210,6 +2210,16 @@ class Agent:
             # Update prompt builder with per-task context
             self._prompt_builder.ctx.session_logger = self._session_logger
             self._prompt_builder.ctx.context_window_manager = self._context_window_manager
+
+            # Set up QA pattern aggregator for this task's repo
+            repo_slug = task.context.get("github_repo")
+            if repo_slug and self._memory_enabled and self._memory_store:
+                self._prompt_builder.ctx.qa_pattern_aggregator = QAPatternAggregator(
+                    memory_store=self._memory_store, repo_slug=repo_slug,
+                )
+            else:
+                self._prompt_builder.ctx.qa_pattern_aggregator = None
+
             prompt = self._prompt_builder.build(task)
             # Get specialization data from prompt builder (set during build)
             self._current_specialization = self._prompt_builder.get_current_specialization()
