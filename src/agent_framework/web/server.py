@@ -15,6 +15,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
 from ..analytics.llm_metrics import LlmMetricsReport
+from ..analytics.chain_metrics import ChainMetricsReport
+from ..analytics.decomposition_metrics import DecompositionReport
+from ..analytics.git_metrics import GitMetricsReport
+from ..analytics.performance_metrics import PerformanceReport
+from ..analytics.waste_metrics import WasteMetricsReport
+from ..analytics.review_cycle_metrics import ReviewCycleMetricsReport
+from ..analytics.verdict_metrics import VerdictMetricsReport
+from ..analytics.failure_analyzer import FailureAnalysisReport
 from ..core.orchestrator import Orchestrator
 from ..queue.file_queue import FileQueue
 from .data_provider import DashboardDataProvider
@@ -335,6 +343,62 @@ def register_routes(app: FastAPI):
         from ..analytics.llm_metrics import LlmMetrics
         collector = LlmMetrics(app.state.workspace)
         return collector.generate_report(hours=hours)
+
+    @app.get("/api/chain-metrics", response_model=ChainMetricsReport)
+    async def get_chain_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Workflow chain completion rates, step durations, and retry patterns."""
+        from ..analytics.chain_metrics import ChainMetrics
+        collector = ChainMetrics(app.state.workspace)
+        return collector.generate_report(hours=hours)
+
+    @app.get("/api/decomposition-metrics", response_model=DecompositionReport)
+    async def get_decomposition_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Task decomposition rates, subtask distribution, and estimation accuracy."""
+        from ..analytics.decomposition_metrics import DecompositionMetrics
+        collector = DecompositionMetrics(app.state.workspace)
+        return collector.generate_report(hours=hours)
+
+    @app.get("/api/git-metrics", response_model=GitMetricsReport)
+    async def get_git_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Git commit rates, push success, and edit-to-commit latency."""
+        from ..analytics.git_metrics import GitMetrics
+        collector = GitMetrics(app.state.workspace)
+        return collector.generate_report(hours=hours)
+
+    @app.get("/api/performance-metrics", response_model=PerformanceReport)
+    async def get_performance_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Agent success rates, task durations, and handoff latency."""
+        from ..analytics.performance_metrics import PerformanceMetrics
+        collector = PerformanceMetrics(app.state.workspace)
+        return collector.generate_report(hours=hours)
+
+    @app.get("/api/waste-metrics", response_model=WasteMetricsReport)
+    async def get_waste_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Cost waste ratios per root task and zero-delivery identification."""
+        from ..analytics.waste_metrics import WasteMetrics
+        collector = WasteMetrics(app.state.workspace)
+        return collector.generate_report(hours=hours)
+
+    @app.get("/api/review-cycle-metrics", response_model=ReviewCycleMetricsReport)
+    async def get_review_cycle_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Review cycle enforcement rates, cap violations, and step breakdowns."""
+        from ..analytics.review_cycle_metrics import ReviewCycleAnalyzer
+        collector = ReviewCycleAnalyzer(app.state.workspace)
+        return collector.generate_report(hours=hours)
+
+    @app.get("/api/verdict-metrics", response_model=VerdictMetricsReport)
+    async def get_verdict_metrics(hours: int = Query(default=24, ge=1, le=168)):
+        """Verdict method distribution, fallback rates, and pattern frequencies."""
+        from ..analytics.verdict_metrics import VerdictMetrics
+        collector = VerdictMetrics(app.state.workspace)
+        return collector.generate_report(hours=hours)
+
+    @app.get("/api/failure-analysis", response_model=FailureAnalysisReport)
+    async def get_failure_analysis(hours: int = Query(default=168, ge=1, le=720)):
+        """Failure categorization, trends, and recommendations."""
+        from ..analytics.failure_analyzer import FailureAnalyzer
+        collector = FailureAnalyzer(app.state.workspace)
+        return collector.analyze(hours=hours)
 
     @app.post("/api/system/pause", response_model=SuccessResponse)
     async def pause_system():

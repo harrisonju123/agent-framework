@@ -10,6 +10,9 @@ import { initChartJs } from '../composables/useInsightsCharts'
 import AgentPerformanceTab from '../components/insights/AgentPerformanceTab.vue'
 import SystemHealthTab from '../components/insights/SystemHealthTab.vue'
 import DecisionsTab from '../components/insights/DecisionsTab.vue'
+import CostEfficiencyTab from '../components/insights/CostEfficiencyTab.vue'
+import WorkflowHealthTab from '../components/insights/WorkflowHealthTab.vue'
+import DeliveryTab from '../components/insights/DeliveryTab.vue'
 
 initChartJs()
 
@@ -73,36 +76,53 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Error banner -->
-    <div v-if="error" class="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
+    <!-- Error banner (only for agentic-metrics, new tabs handle their own errors) -->
+    <div v-if="error && ['performance', 'health', 'decisions'].includes(activeTab)" class="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
       {{ error }}
     </div>
 
-    <!-- Skeleton while first load -->
-    <div v-else-if="!report" class="text-center py-16 text-slate-400">
-      <span class="pi pi-spin pi-spinner mr-2"></span> Loading insights...
-    </div>
+    <Tabs v-model:value="activeTab">
+      <TabList>
+        <Tab value="performance">Agent Performance</Tab>
+        <Tab value="health">System Health</Tab>
+        <Tab value="decisions">Decisions</Tab>
+        <Tab value="cost">Cost & Efficiency</Tab>
+        <Tab value="workflow">Workflow Health</Tab>
+        <Tab value="delivery">Delivery</Tab>
+      </TabList>
 
-    <template v-else>
-      <Tabs v-model:value="activeTab">
-        <TabList>
-          <Tab value="performance">Agent Performance</Tab>
-          <Tab value="health">System Health</Tab>
-          <Tab value="decisions">Decisions</Tab>
-        </TabList>
+      <TabPanels>
+        <!-- Existing tabs: gated on report loading -->
+        <TabPanel value="performance">
+          <div v-if="!report && activeTab === 'performance'" class="text-center py-16 text-slate-400">
+            <span class="pi pi-spin pi-spinner mr-2"></span> Loading insights...
+          </div>
+          <AgentPerformanceTab v-else-if="report && activeTab === 'performance'" :report="report" />
+        </TabPanel>
+        <TabPanel value="health">
+          <div v-if="!report && activeTab === 'health'" class="text-center py-16 text-slate-400">
+            <span class="pi pi-spin pi-spinner mr-2"></span> Loading insights...
+          </div>
+          <SystemHealthTab v-else-if="report && activeTab === 'health'" :report="report" />
+        </TabPanel>
+        <TabPanel value="decisions">
+          <div v-if="!report && activeTab === 'decisions'" class="text-center py-16 text-slate-400">
+            <span class="pi pi-spin pi-spinner mr-2"></span> Loading insights...
+          </div>
+          <DecisionsTab v-else-if="report && activeTab === 'decisions'" :report="report" />
+        </TabPanel>
 
-        <TabPanels>
-          <TabPanel value="performance">
-            <AgentPerformanceTab v-if="activeTab === 'performance'" :report="report" />
-          </TabPanel>
-          <TabPanel value="health">
-            <SystemHealthTab v-if="activeTab === 'health'" :report="report" />
-          </TabPanel>
-          <TabPanel value="decisions">
-            <DecisionsTab v-if="activeTab === 'decisions'" :report="report" />
-          </TabPanel>
-        </TabPanels>
-      </Tabs>
-    </template>
+        <!-- New self-fetching tabs: pass hours so they refetch on lookback change -->
+        <TabPanel value="cost">
+          <CostEfficiencyTab v-if="activeTab === 'cost'" :hours="hours" />
+        </TabPanel>
+        <TabPanel value="workflow">
+          <WorkflowHealthTab v-if="activeTab === 'workflow'" :hours="hours" />
+        </TabPanel>
+        <TabPanel value="delivery">
+          <DeliveryTab v-if="activeTab === 'delivery'" :hours="hours" />
+        </TabPanel>
+      </TabPanels>
+    </Tabs>
   </div>
 </template>
