@@ -125,6 +125,34 @@ class SessionLogger:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(self._path, "a")
 
+    def log_feedback_emitted(self, source: str, category: str, content: str) -> None:
+        """Log a feedback bus event emission."""
+        self.log(
+            "feedback_emitted",
+            source=source,
+            category=category,
+            content_preview=content[:200],
+        )
+
+    def log_qa_pattern_injected(self, pattern_count: int, top_patterns: list[str]) -> None:
+        """Log injection of recurring QA pattern warnings into a prompt."""
+        self.log(
+            "qa_pattern_injected",
+            pattern_count=pattern_count,
+            top_patterns=top_patterns[:5],
+        )
+
+    def log_specialization_adjusted(
+        self, original_profile: str, adjusted_profile: str, debate_id: str = "",
+    ) -> None:
+        """Log a specialization profile adjustment triggered by debate."""
+        self.log(
+            "specialization_adjusted",
+            original_profile=original_profile,
+            adjusted_profile=adjusted_profile,
+            debate_id=debate_id,
+        )
+
     def extract_file_reads(self) -> list[str]:
         """Extract unique file paths from Read tool calls in session log.
 
