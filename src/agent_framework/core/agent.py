@@ -652,27 +652,13 @@ class Agent:
     # --- Hot-reload: restart agent process when source code changes ---
 
     def _get_source_code_version(self) -> Optional[str]:
-        """Get current source code version (git HEAD of the agent-framework repo).
+        """Hash of *.py file mtimes under agent_framework/.
 
-        Falls back to a hash of *.py mtimes if not in a git repo.
+        Detects actual source file edits on disk without depending on git state.
+        Previously used git rev-parse HEAD, but that false-triggered on agent
+        commits to the feature branch (HEAD changes, source files don't).
         """
         source_dir = Path(__file__).parent.parent  # agent_framework/
-        repo_dir = source_dir.parent  # src/ parent -> project root
-
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except (subprocess.TimeoutExpired, OSError):
-            pass
-
-        # Fallback: hash of py file mtimes
         try:
             mtimes = []
             for py_file in source_dir.rglob("*.py"):
@@ -685,7 +671,7 @@ class Agent:
     def _should_hot_restart(self) -> bool:
         """Check if source code has changed since startup.
 
-        Rate-limited to once per 60s to avoid spawning git subprocesses every poll cycle.
+        Rate-limited to once per 60s to avoid stat-scanning every poll cycle.
         """
         if not hasattr(self, "_startup_code_version") or self._startup_code_version is None:
             return False
@@ -725,7 +711,11 @@ class Agent:
         ))
         self._write_heartbeat()
 
-        _os.execv(sys.executable, [sys.executable] + sys.argv)
+        # Always use -m invocation — sys.argv[0] is the resolved file path
+        # which breaks relative imports when replayed as a script.
+        _os.execv(sys.executable, [
+            sys.executable, "-m", "agent_framework.run_agent",
+        ] + sys.argv[1:])
 
     async def run(self) -> None:
         """

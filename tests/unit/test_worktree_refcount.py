@@ -367,13 +367,14 @@ class TestSubtaskIntermediateDetection:
 class TestHotReloadVersionDetection:
     """Tests for _get_source_code_version and _should_hot_restart."""
 
-    def test_get_source_code_version_returns_string(self):
+    def test_get_source_code_version_returns_mtime_hash(self):
         from agent_framework.core.agent import Agent
         agent = MagicMock()
         agent._get_source_code_version = Agent._get_source_code_version.__get__(agent)
         version = agent._get_source_code_version()
         assert version is not None
-        assert len(version) > 0
+        assert len(version) == 16
+        assert all(c in "0123456789abcdef" for c in version)
 
     def test_should_hot_restart_false_when_same_version(self):
         from agent_framework.core.agent import Agent
@@ -411,7 +412,7 @@ class TestHotReloadVersionDetection:
         assert agent._should_hot_restart() is False
 
     def test_rate_limits_version_check(self):
-        """Calls within 60s window return False without checking git."""
+        """Calls within 60s window return False without checking version."""
         import time
         from agent_framework.core.agent import Agent
         agent = MagicMock()
@@ -420,8 +421,78 @@ class TestHotReloadVersionDetection:
         agent._last_version_check = time.time()  # just checked
         agent._get_source_code_version = MagicMock(return_value="new_hash")
         assert agent._should_hot_restart() is False
-        # git was never called because rate limiter short-circuited
+        # version check was never called because rate limiter short-circuited
         agent._get_source_code_version.assert_not_called()
+
+    @staticmethod
+    def _make_hot_restart_agent(agent_id="engineer"):
+        from agent_framework.core.agent import Agent
+        agent = MagicMock()
+        agent._hot_restart = Agent._hot_restart.__get__(agent)
+        agent.config.id = agent_id
+        agent._startup_code_version = "abcd1234"
+        return agent
+
+    def test_hot_restart_always_uses_module_invocation(self):
+        """_hot_restart always passes -m agent_framework.run_agent to execv."""
+        import sys
+
+        agent = self._make_hot_restart_agent()
+
+        with patch("sys.argv", ["/path/to/run_agent.py", "engineer"]), \
+             patch("os.execv") as mock_execv:
+            agent._hot_restart()
+            expected = [sys.executable, "-m", "agent_framework.run_agent", "engineer"]
+            mock_execv.assert_called_once_with(sys.executable, expected)
+
+    def test_hot_restart_preserves_argv_tail(self):
+        """_hot_restart passes through all args after argv[0]."""
+        import sys
+
+        agent = self._make_hot_restart_agent("architect")
+
+        with patch("sys.argv", ["/path/to/run_agent.py", "architect", "--verbose"]), \
+             patch("os.execv") as mock_execv:
+            agent._hot_restart()
+            expected = [sys.executable, "-m", "agent_framework.run_agent", "architect", "--verbose"]
+            mock_execv.assert_called_once_with(sys.executable, expected)
+
+    def test_mtime_hash_stable_without_file_changes(self):
+        """Calling _get_source_code_version twice without changes returns the same hash."""
+        from agent_framework.core.agent import Agent
+
+        agent = MagicMock()
+        agent._get_source_code_version = Agent._get_source_code_version.__get__(agent)
+        v1 = agent._get_source_code_version()
+        v2 = agent._get_source_code_version()
+        assert v1 == v2
+
+    def test_mtime_hash_changes_when_file_touched(self, tmp_path):
+        """Touching a .py file changes the mtime hash."""
+        import hashlib
+        from pathlib import Path
+
+        # Create a minimal package structure
+        pkg = tmp_path / "agent_framework"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "foo.py").write_text("x = 1")
+
+        def version_from(source_dir):
+            mtimes = []
+            for py_file in source_dir.rglob("*.py"):
+                mtimes.append(f"{py_file}:{py_file.stat().st_mtime}")
+            mtimes.sort()
+            return hashlib.sha256("\n".join(mtimes).encode()).hexdigest()[:16]
+
+        v1 = version_from(pkg)
+
+        import time
+        time.sleep(1.1)  # ensure mtime resolution on 1s-granularity filesystems
+        (pkg / "foo.py").write_text("x = 2")
+
+        v2 = version_from(pkg)
+        assert v1 != v2
 
 
 class TestCheckpointIntervalConditional:
