@@ -1945,3 +1945,241 @@ class TestUpstreamContextSourceTracking:
         assert kwargs["upstream_context_source"] == "upstream_summary"
         assert kwargs["upstream_context_chars"] > 0
         assert "workflow_step" in kwargs
+
+
+class TestQAWarningsInjection:
+    """Tests for _inject_qa_warnings — recurring QA findings in engineer prompts."""
+
+    def test_injects_warnings_for_matching_files(self, agent_config, sample_task, tmp_path):
+        """Warnings whose file tags overlap with task deliverables are injected."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        from agent_framework.core.feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+        store.remember(
+            repo_slug="company/api",
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            content="QA finding: Missing error handling in API endpoints",
+            tags=["qa_recurring", "AuthService"],
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert "RECURRING QA WARNINGS" in result
+        assert "Missing error handling" in result
+
+    def test_no_injection_when_no_matching_files(self, agent_config, sample_task, tmp_path):
+        """Warnings for unrelated files are not injected."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        from agent_framework.core.feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+        store.remember(
+            repo_slug="company/api",
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            content="QA finding: Unrelated issue",
+            tags=["qa_recurring", "totally_unrelated_file.py"],
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert result == "Base prompt"
+
+    def test_no_injection_when_store_disabled(self, agent_config, sample_task, tmp_path):
+        """Disabled memory store produces no warnings."""
+        store = MemoryStore(workspace=tmp_path, enabled=False)
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert result == "Base prompt"
+
+    def test_no_injection_when_no_warnings_exist(self, agent_config, sample_task, tmp_path):
+        """Empty memory store produces no warnings."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert result == "Base prompt"
+
+    def test_general_warnings_included(self, agent_config, sample_task, tmp_path):
+        """Warnings without file tags (general) are always included."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        from agent_framework.core.feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+        store.remember(
+            repo_slug="company/api",
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            content="QA finding: Always run linting before commit",
+            tags=["qa_recurring"],
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert "RECURRING QA WARNINGS" in result
+        assert "Always run linting" in result
+
+    def test_budget_cap_respected(self, agent_config, sample_task, tmp_path):
+        """Warnings exceeding 1500-char budget are truncated."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        from agent_framework.core.feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+        # Create many long warnings to exceed budget
+        for i in range(50):
+            store.remember(
+                repo_slug="company/api",
+                agent_type=SHARED_AGENT_TYPE,
+                category=CATEGORY_QA_RECURRING,
+                content=f"QA finding #{i}: {'X' * 100} detailed warning text here",
+                tags=["qa_recurring"],  # General, so always included
+            )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        warnings_section = result.replace("Base prompt\n\n", "")
+        assert len(warnings_section) <= 1600  # Allow small margin for header
+
+    def test_qa_warnings_in_full_build(self, agent_config, sample_task, tmp_path):
+        """QA warnings section appears in the full build() pipeline output."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        from agent_framework.core.feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+        store.remember(
+            repo_slug="company/api",
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            content="QA finding: Always validate inputs before processing",
+            tags=["qa_recurring"],  # General warning, always included
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        prompt = builder.build(sample_task)
+
+        assert "RECURRING QA WARNINGS" in prompt
+        assert "Always validate inputs" in prompt
+
+    def test_multiple_matching_warnings(self, agent_config, sample_task, tmp_path):
+        """Multiple relevant warnings all appear in the section."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        from agent_framework.core.feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+        store.remember(
+            repo_slug="company/api",
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            content="QA finding: Missing error handling in endpoints",
+            tags=["qa_recurring", "AuthService"],
+        )
+        store.remember(
+            repo_slug="company/api",
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            content="QA finding: Always add input validation",
+            tags=["qa_recurring"],  # General
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert "Missing error handling" in result
+        assert "Always add input validation" in result
+
+    def test_context_budget_exhausted_skips_warnings(self, agent_config, sample_task, tmp_path):
+        """When context window manager says budget=0, warnings are skipped."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        from agent_framework.core.feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+        store.remember(
+            repo_slug="company/api",
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            content="QA finding: Should not appear",
+            tags=["qa_recurring"],
+        )
+
+        cwm = Mock()
+        cwm.compute_memory_budget = Mock(return_value=0)
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+            context_window_manager=cwm,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert result == "Base prompt"
+
+    def test_no_repo_slug_skips_warnings(self, agent_config, tmp_path):
+        """Task without github_repo context skips QA warnings entirely."""
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+
+        task = Task(
+            id="test-no-repo",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="No repo task",
+            description="Task without repo context",
+            context={},
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", task)
+
+        assert result == "Base prompt"

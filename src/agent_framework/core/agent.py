@@ -42,6 +42,7 @@ from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
 from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
+from .feedback_bus import FeedbackBus
 from ..workflow.executor import PREVIEW_REVIEW_STEPS
 
 
@@ -336,6 +337,13 @@ class Agent:
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
         self._replan_model = replan_cfg.get("model", "haiku")
 
+        # Cross-feature learning loop — single coordinator for all post-task learnings
+        self._feedback_bus = FeedbackBus(
+            memory_store=self._memory_store,
+            session_logger=self._session_logger,
+            error_recovery=self._error_recovery,
+        )
+
     def _init_session_logging(self, session_logging_config):
         """Initialize session logging configuration."""
         sl_cfg = session_logging_config or {}
@@ -490,11 +498,11 @@ class Agent:
         # State tracking: heartbeat, activity, caches
         self._init_state_tracking()
 
+        # Session logging (must precede agentic features — FeedbackBus needs _session_logger)
+        self._init_session_logging(session_logging_config)
+
         # Agentic features: memory, tool patterns, self-eval, replanning
         self._init_agentic_features(memory_config, self_eval_config, replan_config)
-
-        # Session logging
-        self._init_session_logging(session_logging_config)
 
         # Context window manager (initialized per task)
         self._init_context_window_manager()
@@ -541,6 +549,7 @@ class Agent:
             agent_definition=agent_definition,
             optimization_config=self._optimization_config,
             memory_retriever=self._memory_retriever,
+            memory_store=self._memory_store,
             tool_pattern_store=self._tool_pattern_store,
             context_window_manager=None,  # Set per-task
             session_logger=None,  # Set per-task
@@ -3068,9 +3077,12 @@ class Agent:
                 count=count,
             )
 
-        # Store successful recovery pattern so future replans can reference it
-        if task.replan_history and task.status == TaskStatus.COMPLETED:
-            self._error_recovery.store_replan_outcome(task, repo_slug)
+        # Cross-feature learning: route all post-task learnings through FeedbackBus
+        # (includes replan success persistence, self-eval gaps, QA recurrence, debate hints)
+        try:
+            self._feedback_bus.process(task, repo_slug)
+        except Exception as e:
+            self.logger.debug(f"Feedback bus error (non-fatal): {e}")
 
     # -- Tool Pattern Analysis --
 
