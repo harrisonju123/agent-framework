@@ -319,6 +319,10 @@ class Agent:
         self._memory_store = MemoryStore(self.workspace, enabled=self._memory_enabled)
         self._memory_retriever = MemoryRetriever(self._memory_store)
 
+        # Feedback bus for cross-feature learning (self-eval → memory, QA → memory)
+        from .feedback_bus import FeedbackBus
+        self._feedback_bus = FeedbackBus(self._memory_store)
+
         # Tool pattern analysis
         tool_tips_enabled = self._optimization_config.get("enable_tool_pattern_tips", False)
         self._tool_pattern_store = ToolPatternStore(self.workspace, enabled=tool_tips_enabled)
@@ -584,6 +588,7 @@ class Agent:
             memory_store=self._memory_store,
             replan_config=replan_config,
             self_eval_config=self_eval_config,
+            feedback_bus=self._feedback_bus,
         )
 
         self._budget = BudgetManager(
@@ -3013,6 +3018,25 @@ class Agent:
         # Store successful recovery pattern so future replans can reference it
         if task.replan_history and task.status == TaskStatus.COMPLETED:
             self._error_recovery.store_replan_outcome(task, repo_slug)
+
+        # Store recurring QA finding patterns via feedback bus
+        structured_findings = task.context.get("structured_findings")
+        if structured_findings and isinstance(structured_findings, dict):
+            try:
+                qa_count = self._feedback_bus.store_qa_pattern(
+                    repo_slug=repo_slug,
+                    agent_type=self.config.base_id,
+                    task_id=task.id,
+                    structured_findings=structured_findings,
+                )
+                if qa_count > 0:
+                    self._session_logger.log(
+                        "feedback_bus_qa_pattern",
+                        repo=repo_slug,
+                        memories_stored=qa_count,
+                    )
+            except Exception as e:
+                self.logger.debug(f"Feedback bus QA pattern store failed (non-fatal): {e}")
 
     # -- Tool Pattern Analysis --
 

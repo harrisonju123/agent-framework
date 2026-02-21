@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..memory.memory_store import MemoryStore
     from ..utils.rich_logging import ContextLogger
     from .session_logger import SessionLogger
+    from .feedback_bus import FeedbackBus
 
 from .task import Task, TaskStatus
 from ..llm.base import LLMRequest
@@ -37,6 +38,7 @@ class ErrorRecoveryManager:
         memory_store: Optional["MemoryStore"] = None,
         replan_config: Optional[dict] = None,
         self_eval_config: Optional[dict] = None,
+        feedback_bus: Optional["FeedbackBus"] = None,
     ):
         self.config = config
         self.queue = queue
@@ -48,6 +50,7 @@ class ErrorRecoveryManager:
         self.workspace = workspace
         self.jira_client = jira_client
         self.memory_store = memory_store
+        self.feedback_bus = feedback_bus
 
         # Self-evaluation configuration
         eval_cfg = self_eval_config or {}
@@ -445,6 +448,27 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
             task.context["_self_eval_count"] = eval_retries + 1
             task.context["_self_eval_critique"] = verdict
             task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:500]}")
+
+            # Store missed criteria patterns via feedback bus
+            if self.feedback_bus and self.feedback_bus.enabled:
+                repo_slug = self._get_repo_slug(task)
+                if repo_slug:
+                    try:
+                        stored = self.feedback_bus.store_self_eval_failure(
+                            repo_slug=repo_slug,
+                            agent_type=self.config.base_id,
+                            task_id=task.id,
+                            critique=verdict,
+                            acceptance_criteria=criteria,
+                        )
+                        if stored:
+                            self.session_logger.log(
+                                "feedback_bus_self_eval",
+                                task_id=task.id,
+                                memories_stored=stored,
+                            )
+                    except Exception as e:
+                        self.logger.debug(f"Feedback bus self-eval store failed (non-fatal): {e}")
 
             # Reset without consuming queue retry
             task.status = TaskStatus.PENDING
