@@ -26,6 +26,19 @@ const DEBATE_COST = 2;
 const MAX_TOPIC_LENGTH = 1500;
 const MAX_DEBATE_CONTEXT_LENGTH = 3000;
 
+// Domain keyword map for specialization hint detection.
+// Each key is a specialization domain; values are keywords that signal
+// the debate topic belongs to that domain.
+const DOMAIN_KEYWORDS: Record<string, string[]> = {
+  database: ["database", "sql", "postgres", "mysql", "mongodb", "redis", "migration", "schema", "orm", "query", "index"],
+  frontend: ["frontend", "react", "vue", "angular", "css", "ui", "ux", "component", "dom", "browser", "responsive"],
+  backend: ["backend", "api", "rest", "graphql", "server", "endpoint", "middleware", "authentication", "authorization"],
+  infrastructure: ["infrastructure", "docker", "kubernetes", "ci", "cd", "deploy", "aws", "gcp", "azure", "terraform", "helm"],
+  security: ["security", "encryption", "vulnerability", "auth", "oauth", "jwt", "xss", "csrf", "injection", "credential"],
+  testing: ["testing", "test", "coverage", "e2e", "integration", "unit test", "mock", "fixture", "assertion"],
+  performance: ["performance", "optimization", "cache", "latency", "throughput", "scaling", "bottleneck", "profiling"],
+};
+
 function sanitizeDebateId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").substring(0, 100);
 }
@@ -353,6 +366,89 @@ function storeDebateMemory(
 }
 
 /**
+ * Detect which specialization domains a debate topic touches.
+ * Returns matched domain names sorted by keyword hit count (highest first).
+ */
+function detectDomains(topic: string): string[] {
+  const lower = topic.toLowerCase();
+  const hits: { domain: string; count: number }[] = [];
+
+  for (const [domain, keywords] of Object.entries(DOMAIN_KEYWORDS)) {
+    const count = keywords.filter(kw => lower.includes(kw)).length;
+    if (count > 0) {
+      hits.push({ domain, count });
+    }
+  }
+
+  hits.sort((a, b) => b.count - a.count);
+  return hits.map(h => h.domain);
+}
+
+/**
+ * Store debate-derived specialization hints when a high-confidence debate
+ * reveals domain-specific recommendations. These hints feed into the
+ * cross-feature learning loop — the Python-side specialization system
+ * can query them to adjust agent profiles for future tasks.
+ *
+ * Only fires for high-confidence debates with detectable domain keywords,
+ * to avoid polluting memory with low-signal hints.
+ */
+function storeDebateInsight(
+  workspace: string,
+  debateId: string,
+  topic: string,
+  synthesis: {
+    recommendation: string;
+    confidence: "high" | "medium" | "low";
+    trade_offs: string[];
+    reasoning: string;
+  },
+): void {
+  if (synthesis.confidence !== "high") return;
+
+  const domains = detectDomains(topic);
+  if (domains.length === 0) return;
+
+  try {
+    const repoSlug = process.env.GITHUB_REPOSITORY || "unknown";
+    const originAgent = process.env.AGENT_ID || process.env.AGENT_TYPE || "unknown";
+    const primaryDomain = domains[0];
+
+    const content = [
+      `Domain: ${primaryDomain}`,
+      `Topic: ${topic}`,
+      `Recommendation: ${synthesis.recommendation}`,
+      `Reasoning: ${synthesis.reasoning}`,
+    ].join("\n");
+
+    const tags = [
+      "debate_insight",
+      debateId,
+      `origin:${originAgent}`,
+      `domain:${primaryDomain}`,
+      ...domains.slice(1).map(d => `domain:${d}`),
+    ];
+
+    const result = agentRemember(workspace, {
+      repo_slug: repoSlug,
+      agent_type: "shared",
+      category: "debate_specialization_hints",
+      content,
+      tags,
+    });
+
+    if (result.success) {
+      logger.info(`Debate specialization hint stored: ${primaryDomain}`, { debate_id: debateId });
+    } else {
+      logger.warn(`Failed to store debate insight: ${result.message}`, { debate_id: debateId });
+    }
+  } catch (error: unknown) {
+    const err = error as Error;
+    logger.warn(`Error storing debate insight: ${err.message}`, { debate_id: debateId });
+  }
+}
+
+/**
  * Main debate function - coordinates advocate, critic, and arbiter.
  * Runs advocate and critic in parallel, then arbiter synthesis sequentially.
  */
@@ -494,6 +590,9 @@ export async function debateTopic(
 
   // Store debate synthesis as a persistent memory
   storeDebateMemory(workspace, debateId, topic, synthesis);
+
+  // Feed high-confidence domain-specific debates into specialization hints
+  storeDebateInsight(workspace, debateId, topic, synthesis);
 
   return {
     success: true,
