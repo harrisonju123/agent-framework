@@ -346,9 +346,86 @@ function storeDebateMemory(
     } else {
       logger.warn(`Failed to store debate memory: ${result.message}`, { debate_id: debateId });
     }
+
+    // Store specialization hint when debate reveals domain mismatch
+    storeSpecializationHint(workspace, repoSlug, debateId, topic, synthesis.recommendation);
   } catch (error: unknown) {
     const err = error as Error;
     logger.warn(`Error storing debate memory: ${err.message}`, { debate_id: debateId });
+  }
+}
+
+/**
+ * Specialization keywords grouped by domain.
+ * When a debate topic/recommendation mentions keywords from a domain
+ * with 2+ matches, it's a signal the task may need that specialization.
+ */
+const SPECIALIZATION_KEYWORDS: Record<string, string[]> = {
+  frontend: ["frontend", "ui", "ux", "react", "vue", "css", "component", "browser", "dom", "svelte", "angular"],
+  backend: ["backend", "api", "database", "server", "endpoint", "query", "sql", "grpc", "rest", "microservice"],
+  infrastructure: ["infrastructure", "devops", "ci/cd", "docker", "kubernetes", "terraform", "deploy", "helm", "k8s", "pipeline"],
+};
+
+/**
+ * Detect which specialization domains are mentioned in text.
+ * Returns domains with 2+ keyword matches (avoids false positives from single-word mentions).
+ */
+function detectDomains(text: string): string[] {
+  const lower = text.toLowerCase();
+  const found: string[] = [];
+  for (const [domain, keywords] of Object.entries(SPECIALIZATION_KEYWORDS)) {
+    const matches = keywords.filter(k => lower.includes(k)).length;
+    if (matches >= 2) {
+      found.push(domain);
+    }
+  }
+  return found;
+}
+
+/**
+ * Store a specialization hint when a debate's topic or recommendation
+ * mentions domain-specific keywords. Stored under shared namespace
+ * so engineer_specialization.py can use it as a soft signal.
+ */
+function storeSpecializationHint(
+  workspace: string,
+  repoSlug: string,
+  debateId: string,
+  topic: string,
+  recommendation: string,
+): void {
+  try {
+    const topicDomains = detectDomains(topic);
+    const recDomains = detectDomains(recommendation);
+    const allDomains = [...new Set([...topicDomains, ...recDomains])];
+
+    if (allDomains.length === 0) {
+      return;
+    }
+
+    // Pick the domain with the strongest signal (prefer recommendation domains)
+    const bestDomain = recDomains.length > 0 ? recDomains[0] : allDomains[0];
+
+    const content = [
+      `Debate suggested '${bestDomain}' specialization.`,
+      `Topic: ${topic.substring(0, 100)}.`,
+      `Recommendation: ${recommendation.substring(0, 150)}`,
+    ].join(" ");
+
+    const result = agentRemember(workspace, {
+      repo_slug: repoSlug,
+      agent_type: "shared",
+      category: "specialization_hints",
+      content,
+      tags: ["debate", bestDomain, debateId],
+    });
+
+    if (result.success) {
+      logger.info(`Specialization hint stored: ${bestDomain}`, { debate_id: debateId });
+    }
+  } catch (error: unknown) {
+    const err = error as Error;
+    logger.warn(`Error storing specialization hint: ${err.message}`, { debate_id: debateId });
   }
 }
 
