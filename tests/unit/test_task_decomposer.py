@@ -1,5 +1,6 @@
 """Unit tests for TaskDecomposer."""
 
+import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -789,3 +790,179 @@ class TestSubtaskAssignedTo:
                 f"Subtask {subtask.id} should be assigned to engineer, "
                 f"got {subtask.assigned_to}"
             )
+
+
+class TestScopedRequirementsChecklist:
+    """Tests for scoping requirements_checklist to subtask file boundaries."""
+
+    def _make_checklist(self) -> list[dict]:
+        return [
+            {"id": 1, "description": "Add auth handler", "files": ["src/core/auth.py"], "status": "pending"},
+            {"id": 2, "description": "Create user model", "files": ["src/models/user.py"], "status": "pending"},
+            {"id": 3, "description": "Update API routes", "files": ["src/api/routes.py"], "status": "pending"},
+            {"id": 4, "description": "Add auth tests", "files": ["tests/test_auth.py"], "status": "pending"},
+        ]
+
+    def test_subtask_gets_scoped_checklist(self):
+        """Parent has 4 items across 4 files. Subtask boundary covers 2 → gets 2 items."""
+        decomposer = TaskDecomposer()
+        checklist = self._make_checklist()
+        parent = _make_task(
+            id="parent-scope",
+            context={"requirements_checklist": checklist},
+        )
+        plan = _make_plan(
+            files_to_modify=[
+                "src/core/auth.py",
+                "src/models/user.py",
+                "src/api/routes.py",
+                "tests/test_auth.py",
+            ]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        # Find the subtask that covers src/core (auth.py)
+        for subtask in subtasks:
+            scoped = subtask.context.get("requirements_checklist", [])
+            scoped_files = {f for item in scoped for f in item["files"]}
+            subtask_files = set(subtask.plan.files_to_modify)
+            # Every file in the scoped checklist should have basename overlap with boundary
+            boundary_names = {Path(f).name.lower() for f in subtask_files}
+            for f in scoped_files:
+                assert Path(f).name.lower() in boundary_names
+
+            # Original IDs preserved
+            for item in scoped:
+                assert item["id"] in [1, 2, 3, 4]
+
+    def test_subtask_checklist_empty_when_no_overlap(self):
+        """No file overlap → requirements_checklist key absent from subtask context."""
+        decomposer = TaskDecomposer()
+        # Checklist references files NOT in the boundary
+        checklist = [
+            {"id": 1, "description": "Update config", "files": ["config/settings.py"], "status": "pending"},
+        ]
+        parent = _make_task(
+            id="parent-noscope",
+            context={"requirements_checklist": checklist},
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/auth.py", "tests/test_auth.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            assert "requirements_checklist" not in subtask.context
+
+    def test_items_with_no_files_dropped(self):
+        """Items with files: [] don't appear in any subtask."""
+        decomposer = TaskDecomposer()
+        checklist = [
+            {"id": 1, "description": "Add auth handler", "files": ["src/core/auth.py"], "status": "pending"},
+            {"id": 2, "description": "General cleanup", "files": [], "status": "pending"},
+        ]
+        parent = _make_task(
+            id="parent-nofiles",
+            context={"requirements_checklist": checklist},
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/auth.py", "tests/test_auth.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            scoped = subtask.context.get("requirements_checklist", [])
+            for item in scoped:
+                assert item["id"] != 2, "Item with empty files should be dropped"
+
+    def test_parent_checklist_not_mutated(self):
+        """Parent's original checklist unchanged after decomposition."""
+        decomposer = TaskDecomposer()
+        checklist = self._make_checklist()
+        original = copy.deepcopy(checklist)
+        parent = _make_task(
+            id="parent-immutable",
+            context={"requirements_checklist": checklist},
+        )
+        plan = _make_plan(
+            files_to_modify=[
+                "src/core/auth.py",
+                "src/models/user.py",
+                "src/api/routes.py",
+                "tests/test_auth.py",
+            ]
+        )
+
+        decomposer.decompose(parent, plan, estimated_lines=600)
+
+        assert parent.context["requirements_checklist"] == original
+
+    def test_scope_checklist_static_method_empty_inputs(self):
+        """Empty parent_checklist or boundary_files → empty result."""
+        assert TaskDecomposer._scope_checklist_to_boundary([], ["a.py"]) == []
+        assert TaskDecomposer._scope_checklist_to_boundary(
+            [{"id": 1, "files": ["a.py"]}], []
+        ) == []
+        assert TaskDecomposer._scope_checklist_to_boundary([], []) == []
+
+    def test_scope_checklist_static_method_case_insensitive(self):
+        """Basename matching is case-insensitive."""
+        checklist = [{"id": 1, "files": ["src/Auth.PY"], "status": "pending"}]
+        result = TaskDecomposer._scope_checklist_to_boundary(checklist, ["lib/auth.py"])
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+
+    def test_scope_checklist_multi_file_item_partial_overlap(self):
+        """Item with multiple files matches if ANY file overlaps the boundary."""
+        checklist = [
+            {"id": 1, "files": ["src/core/auth.py", "tests/test_auth.py"], "status": "pending"},
+            {"id": 2, "files": ["src/api/routes.py"], "status": "pending"},
+        ]
+        # Boundary only covers src/core/auth.py, not tests/test_auth.py
+        result = TaskDecomposer._scope_checklist_to_boundary(
+            checklist, ["src/core/auth.py"]
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+
+    def test_scope_checklist_static_method_basename_matching(self):
+        """Different directory prefixes still match by basename."""
+        checklist = [
+            {"id": 1, "files": ["src/core/handler.py"], "status": "pending"},
+            {"id": 2, "files": ["src/api/routes.py"], "status": "pending"},
+        ]
+        result = TaskDecomposer._scope_checklist_to_boundary(
+            checklist, ["lib/handler.py"]
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+
+    def test_full_checklist_preserved_on_parent(self):
+        """Parent task context untouched after subtask creation."""
+        decomposer = TaskDecomposer()
+        checklist = self._make_checklist()
+        parent = _make_task(
+            id="parent-preserved",
+            context={
+                "requirements_checklist": checklist,
+                "github_repo": "test/repo",
+            },
+        )
+        plan = _make_plan(
+            files_to_modify=[
+                "src/core/auth.py",
+                "src/models/user.py",
+                "src/api/routes.py",
+                "tests/test_auth.py",
+            ]
+        )
+
+        decomposer.decompose(parent, plan, estimated_lines=600)
+
+        # Parent still has all 4 items
+        assert len(parent.context["requirements_checklist"]) == 4
+        # Other context fields untouched
+        assert parent.context["github_repo"] == "test/repo"

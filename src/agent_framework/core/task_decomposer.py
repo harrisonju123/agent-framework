@@ -342,6 +342,29 @@ class TaskDecomposer:
                     return 0
         return _DEFAULT_TIER
 
+    @staticmethod
+    def _scope_checklist_to_boundary(
+        parent_checklist: list[dict], boundary_files: list[str]
+    ) -> list[dict]:
+        """Filter requirements checklist to items whose files overlap this boundary.
+
+        Preserves original item IDs for cross-reference traceability.
+        Items with no file associations are dropped — cross-cutting concerns
+        are better evaluated at the fan-in level.
+        """
+        if not parent_checklist or not boundary_files:
+            return []
+
+        boundary_names = {Path(f).name.lower() for f in boundary_files}
+
+        return [
+            item for item in parent_checklist
+            if any(
+                Path(f).name.lower() in boundary_names
+                for f in item.get("files", [])
+            )
+        ]
+
     def _infer_boundary_dependencies(
         self, boundaries: list[SubtaskBoundary]
     ) -> None:
@@ -469,5 +492,15 @@ class TaskDecomposer:
             },
             plan=subtask_plan,
         )
+
+        # Scope checklist to this subtask's file boundaries so self-eval
+        # and prompt injection only reference in-scope deliverables
+        parent_checklist = parent.context.get("requirements_checklist", [])
+        if parent_checklist:
+            scoped = self._scope_checklist_to_boundary(parent_checklist, boundary.files)
+            if scoped:
+                subtask.context["requirements_checklist"] = scoped
+            else:
+                subtask.context.pop("requirements_checklist", None)
 
         return subtask
