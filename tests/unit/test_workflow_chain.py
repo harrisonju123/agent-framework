@@ -3429,29 +3429,46 @@ class TestRoutingSignalVerdictOverride:
         return a
 
     def _apply_override(self, agent, task, routing_signal):
-        """Simulate the verdict override block from _handle_successful_response."""
+        """Simulate the verdict override block from _handle_successful_response.
+
+        Returns the (possibly cleared) routing_signal so callers can verify
+        that the plan-extracted branch nullifies it.
+        """
         if (routing_signal
                 and routing_signal.target_agent == WORKFLOW_COMPLETE
                 and agent.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")
-                and task.context.get("verdict") != "no_changes"):
-            prev_verdict = task.context.get("verdict")
-            task.context["verdict"] = "no_changes"
-            audit = task.context.get("verdict_audit")
-            if isinstance(audit, dict):
-                audit["method"] = "routing_signal_complete"
-                audit["value"] = "no_changes"
-            agent.logger.info(
-                f"Verdict overridden: {prev_verdict!r} → 'no_changes' "
-                f"(routing signal WORKFLOW_COMPLETE at plan step)"
-            )
-            agent._session_logger.log(
-                "verdict_override", task_id=task.id,
-                prev_verdict=prev_verdict, new_verdict="no_changes",
-                method="routing_signal_complete",
-                routing_signal_reason=routing_signal.reason,
-            )
-            agent._patch_chain_state_verdict(task)
+                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
+            if task.plan is not None:
+                agent.logger.info(
+                    f"Clearing __complete__ routing signal at plan step — "
+                    f"plan was extracted ({len(task.plan.files_to_modify)} files), "
+                    f"proceeding to implement"
+                )
+                agent._session_logger.log(
+                    "routing_signal_cleared", task_id=task.id,
+                    reason="plan_extracted_at_plan_step",
+                    plan_files=len(task.plan.files_to_modify),
+                )
+                routing_signal = None
+            elif task.context.get("verdict") != "no_changes":
+                prev_verdict = task.context.get("verdict")
+                task.context["verdict"] = "no_changes"
+                audit = task.context.get("verdict_audit")
+                if isinstance(audit, dict):
+                    audit["method"] = "routing_signal_complete"
+                    audit["value"] = "no_changes"
+                agent.logger.info(
+                    f"Verdict overridden: {prev_verdict!r} → 'no_changes' "
+                    f"(routing signal WORKFLOW_COMPLETE at plan step, no plan extracted)"
+                )
+                agent._session_logger.log(
+                    "verdict_override", task_id=task.id,
+                    prev_verdict=prev_verdict, new_verdict="no_changes",
+                    method="routing_signal_complete",
+                    routing_signal_reason=routing_signal.reason,
+                )
+                agent._patch_chain_state_verdict(task)
+        return routing_signal
 
     def test_override_fires_at_plan_step(self, architect_agent):
         """Verdict changes from 'approved' → 'no_changes', audit updated, session log emitted."""
@@ -3616,4 +3633,96 @@ class TestRoutingSignalVerdictOverride:
         architect_agent._run_post_completion_flow(task, response, signal, datetime.now(timezone.utc))
 
         # No chain task should be queued — the no_changes verdict terminates the workflow
+        queue.push.assert_not_called()
+
+    def test_plan_extracted_clears_complete_signal(self, architect_agent):
+        """__complete__ at plan step with extracted plan clears the signal, verdict stays."""
+        from agent_framework.core.task import PlanDocument
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+            verdict_audit={"method": "ambiguous_default", "value": "approved"},
+        )
+        task.plan = PlanDocument(
+            objectives=["Implement feature"],
+            approach=["Step 1", "Step 2"],
+            success_criteria=["Tests pass"],
+            files_to_modify=["src/foo.py", "src/bar.py"],
+        )
+        signal = _make_signal(target=WORKFLOW_COMPLETE, reason="Architecture plan produced")
+
+        result = self._apply_override(architect_agent, task, signal)
+
+        # Signal cleared, verdict NOT overridden
+        assert result is None
+        assert task.context["verdict"] == "approved"
+        assert task.context["verdict_audit"]["method"] == "ambiguous_default"
+        architect_agent._session_logger.log.assert_called_once_with(
+            "routing_signal_cleared",
+            task_id=task.id,
+            reason="plan_extracted_at_plan_step",
+            plan_files=2,
+        )
+
+    def test_plan_extracted_chain_continues(self, architect_agent, queue):
+        """End-to-end: plan extracted + __complete__ → override clears signal → chain routes to implement."""
+        from agent_framework.core.task import PlanDocument
+
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+        )
+        task.plan = PlanDocument(
+            objectives=["Implement feature"],
+            approach=["Step 1"],
+            success_criteria=["Tests pass"],
+            files_to_modify=["src/foo.py"],
+        )
+        response = _make_response()
+        signal = _make_signal(target=WORKFLOW_COMPLETE, reason="Architecture plan produced")
+
+        # Simulate _handle_successful_response: override clears signal before
+        # passing to _run_post_completion_flow
+        cleared_signal = self._apply_override(architect_agent, task, signal)
+        assert cleared_signal is None
+
+        architect_agent._session_logger.reset_mock()
+        architect_agent._extract_and_store_memories = MagicMock()
+        architect_agent._analyze_tool_patterns = MagicMock(return_value=0)
+        architect_agent._log_task_completion_metrics = MagicMock()
+        architect_agent._emit_workflow_summary = MagicMock()
+
+        architect_agent._run_post_completion_flow(task, response, cleared_signal, datetime.now(timezone.utc))
+
+        # Chain task should be queued for implement step
+        assert queue.push.called, "Expected chain task to be queued for implement step"
+
+    def test_no_plan_complete_signal_still_terminates(self, architect_agent, queue):
+        """__complete__ at plan step WITHOUT plan → terminates (existing behavior)."""
+        task = _make_task(
+            workflow="default",
+            workflow_step="plan",
+            verdict="approved",
+        )
+        assert task.plan is None  # no plan extracted
+        response = _make_response()
+        signal = _make_signal(target=WORKFLOW_COMPLETE, reason="No code changes needed")
+
+        result = self._apply_override(architect_agent, task, signal)
+
+        # Signal NOT cleared, verdict overridden
+        assert result is signal
+        assert task.context["verdict"] == "no_changes"
+
+        architect_agent._extract_and_store_memories = MagicMock()
+        architect_agent._analyze_tool_patterns = MagicMock(return_value=0)
+        architect_agent._log_task_completion_metrics = MagicMock()
+        architect_agent._emit_workflow_summary = MagicMock()
+
+        architect_agent._run_post_completion_flow(task, response, signal, datetime.now(timezone.utc))
+
+        # No chain task queued — workflow terminated
         queue.push.assert_not_called()

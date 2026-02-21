@@ -1016,30 +1016,45 @@ class Agent:
                 f"reason={routing_signal.reason}"
             )
 
-        # Reconcile verdict when architect signals completion via MCP tool
-        # rather than text marker — routing signal is read after verdict is set
+        # __complete__ at plan step: distinguish "done planning" from "no work needed"
         if (routing_signal
                 and routing_signal.target_agent == WORKFLOW_COMPLETE
                 and self.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")
-                and task.context.get("verdict") != "no_changes"):
-            prev_verdict = task.context.get("verdict")
-            task.context["verdict"] = "no_changes"
-            audit = task.context.get("verdict_audit")
-            if isinstance(audit, dict):
-                audit["method"] = "routing_signal_complete"
-                audit["value"] = "no_changes"
-            self.logger.info(
-                f"Verdict overridden: {prev_verdict!r} → 'no_changes' "
-                f"(routing signal WORKFLOW_COMPLETE at plan step)"
-            )
-            self._session_logger.log(
-                "verdict_override", task_id=task.id,
-                prev_verdict=prev_verdict, new_verdict="no_changes",
-                method="routing_signal_complete",
-                routing_signal_reason=routing_signal.reason,
-            )
-            self._patch_chain_state_verdict(task)
+                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
+            if task.plan is not None:
+                # Plan was extracted — __complete__ means "I finished planning",
+                # not "the whole workflow is done." Clear the signal so the
+                # unconditional plan→implement edge fires normally.
+                self.logger.info(
+                    f"Clearing __complete__ routing signal at plan step — "
+                    f"plan was extracted ({len(task.plan.files_to_modify)} files), "
+                    f"proceeding to implement"
+                )
+                self._session_logger.log(
+                    "routing_signal_cleared", task_id=task.id,
+                    reason="plan_extracted_at_plan_step",
+                    plan_files=len(task.plan.files_to_modify),
+                )
+                routing_signal = None
+            elif task.context.get("verdict") != "no_changes":
+                # No plan extracted + __complete__ → genuinely nothing to implement
+                prev_verdict = task.context.get("verdict")
+                task.context["verdict"] = "no_changes"
+                audit = task.context.get("verdict_audit")
+                if isinstance(audit, dict):
+                    audit["method"] = "routing_signal_complete"
+                    audit["value"] = "no_changes"
+                self.logger.info(
+                    f"Verdict overridden: {prev_verdict!r} → 'no_changes' "
+                    f"(routing signal WORKFLOW_COMPLETE at plan step, no plan extracted)"
+                )
+                self._session_logger.log(
+                    "verdict_override", task_id=task.id,
+                    prev_verdict=prev_verdict, new_verdict="no_changes",
+                    method="routing_signal_complete",
+                    routing_signal_reason=routing_signal.reason,
+                )
+                self._patch_chain_state_verdict(task)
 
         self._run_post_completion_flow(task, response, routing_signal, task_start_time)
 
