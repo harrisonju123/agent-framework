@@ -1,9 +1,10 @@
 """Error recovery and replanning manager."""
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from .config import AgentConfig
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
     from ..memory.memory_store import MemoryStore
     from ..utils.rich_logging import ContextLogger
     from .session_logger import SessionLogger
+    from .feedback_bus import FeedbackBus
 
 from .task import Task, TaskStatus
 from ..llm.base import LLMRequest
