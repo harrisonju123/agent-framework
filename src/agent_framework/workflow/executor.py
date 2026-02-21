@@ -18,6 +18,7 @@ from .conditions import ConditionRegistry
 from ..core.task import TaskStatus, TaskType
 from ..core.routing import WORKFLOW_COMPLETE
 from ..utils.type_helpers import strip_chain_prefixes
+from ..core.task_manifest import load_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -523,6 +524,14 @@ class WorkflowExecutor:
         # the wrong instructions when user_goal wasn't set by the root task creator
         if "user_goal" not in context:
             context["user_goal"] = task.description
+
+        # Stamp manifest branch so chain tasks always carry the canonical branch,
+        # even if some code path accidentally overwrites task.context
+        if self.workspace:
+            manifest = load_manifest(Path(self.workspace), root_task_id)
+            if manifest and manifest.branch:
+                context["implementation_branch"] = manifest.branch
+                context["worktree_branch"] = manifest.branch
 
         # Prepend review findings so the fix-cycle engineer sees what to address
         description = task.description

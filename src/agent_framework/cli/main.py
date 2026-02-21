@@ -1539,6 +1539,9 @@ def _build_clear_categories(workspace: Path) -> list[_PurgeCategory]:
         _PurgeCategory("Chain state", [
             _PurgeTarget(comm_dir / "chain-state", whole_dir=True),
         ]),
+        _PurgeCategory("Task manifests", [
+            _PurgeTarget(comm_dir / "manifests", whole_dir=True),
+        ]),
         _PurgeCategory("Read cache", [
             _PurgeTarget(comm_dir / "read-cache", whole_dir=True),
         ]),
@@ -1649,6 +1652,9 @@ def purge(ctx, keep_memory, keep_worktrees, keep_indexes, dry_run, yes):
         ]),
         _PurgeCategory("Chain state", [
             _PurgeTarget(comm_dir / "chain-state", whole_dir=True),
+        ]),
+        _PurgeCategory("Task manifests", [
+            _PurgeTarget(comm_dir / "manifests", whole_dir=True),
         ]),
         _PurgeCategory("Read cache", [
             _PurgeTarget(comm_dir / "read-cache", whole_dir=True),

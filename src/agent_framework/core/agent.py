@@ -25,6 +25,7 @@ from .team_composer import compose_default_team, compose_team
 from .context_window_manager import ContextWindowManager
 from .review_cycle import ReviewCycleManager, QAFinding, ReviewOutcome, MAX_REVIEW_CYCLES
 from .git_operations import GitOperationsManager
+from .task_manifest import load_manifest
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
@@ -1426,6 +1427,14 @@ class Agent:
 
     def _get_validated_working_directory(self, task: Task) -> Path:
         """Get working directory with one retry if the path vanishes between creation and use."""
+        # On retries, restore the manifest branch so get_working_directory()
+        # checks out the same branch the original attempt used
+        if task.retry_count and task.retry_count > 0:
+            manifest = load_manifest(self.workspace, task.root_id)
+            if manifest:
+                task.context.setdefault("implementation_branch", manifest.branch)
+                task.context.setdefault("worktree_branch", manifest.branch)
+
         working_dir = self._git_ops.get_working_directory(task)
         branch = task.context.get("worktree_branch") or task.context.get("implementation_branch")
         if not working_dir.exists():

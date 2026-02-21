@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .pr_lifecycle import PRLifecycleManager
 
 from .task import Task
+from .task_manifest import load_manifest, get_or_create_manifest
 from ..utils.type_helpers import strip_chain_prefixes
 
 
@@ -69,6 +70,7 @@ class GitOperationsManager:
         # Track active worktree for cleanup (mutable state)
         self._active_worktree: Optional[Path] = None
         self._worktree_env_vars: Optional[Dict[str, str]] = None
+        self._active_root_task_id: Optional[str] = None
 
     def safety_commit(self, working_dir: Path, reason: str) -> bool:
         """Best-effort commit of uncommitted changes. Returns True if committed.
@@ -88,6 +90,8 @@ class GitOperationsManager:
             )
             if status.returncode != 0 or not status.stdout.strip():
                 return False
+
+            self._verify_manifest_branch(working_dir)
 
             add_result = run_git_command(
                 ["add", "-A"],
@@ -127,6 +131,79 @@ class GitOperationsManager:
         except Exception as e:
             self.logger.warning(f"Venv setup skipped: {e}")
             self._worktree_env_vars = None
+
+    def _write_manifest_if_needed(self, task: Task, branch_name: str, working_dir: Path) -> None:
+        """Write a task manifest if one doesn't exist yet for this root task.
+
+        Called after branch checkout to record the canonical branch. The manifest
+        is write-once: if another agent already created one, this is a no-op.
+        """
+        try:
+            root_task_id = task.root_id
+            self._active_root_task_id = root_task_id
+            get_or_create_manifest(
+                self.workspace,
+                root_task_id=root_task_id,
+                branch=branch_name,
+                github_repo=task.context.get("github_repo"),
+                user_goal=task.context.get("user_goal", task.description),
+                workflow=task.context.get("workflow", "default"),
+                working_directory=str(working_dir),
+                created_by=self.config.id,
+            )
+        except Exception as e:
+            self.logger.debug("Failed to write task manifest (non-fatal): %s", e)
+
+    def _verify_manifest_branch(self, working_dir: Path) -> None:
+        """Verify HEAD matches the manifest branch; correct if mismatched.
+
+        Called from safety_commit() to prevent committing to the wrong branch
+        when an external checkout changed HEAD. Never raises.
+        """
+        from ..utils.subprocess_utils import run_git_command
+
+        if not self._active_root_task_id:
+            return
+
+        try:
+            manifest = load_manifest(self.workspace, self._active_root_task_id)
+            if not manifest or not manifest.branch:
+                return
+
+            result = run_git_command(
+                ["branch", "--show-current"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if result.returncode != 0:
+                return
+
+            current = result.stdout.strip()
+            if current == manifest.branch:
+                return
+
+            self.logger.warning(
+                "Branch mismatch: HEAD=%s, manifest=%s — correcting",
+                current, manifest.branch,
+            )
+            checkout = run_git_command(
+                ["checkout", manifest.branch],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if checkout.returncode != 0:
+                self.logger.warning(
+                    "Failed to checkout manifest branch %s: %s",
+                    manifest.branch, checkout.stderr,
+                )
+                return
+            if self.session_logger:
+                self.session_logger.log(
+                    "manifest_branch_correction",
+                    expected=manifest.branch,
+                    actual=current,
+                    root_task_id=self._active_root_task_id,
+                )
+        except Exception as e:
+            self.logger.debug("Manifest branch verification failed (non-fatal): %s", e)
 
     def get_working_directory(self, task: Task) -> Path:
         """Get working directory for task (worktree, target repo, or framework workspace).
@@ -185,6 +262,7 @@ class GitOperationsManager:
                         self.worktree_manager.acquire_worktree(existing, self.config.id)
                         self._setup_worktree_venv(existing)
                         task.context["worktree_branch"] = branch_name
+                        self._write_manifest_if_needed(task, branch_name, existing)
                         self.logger.info(f"Reusing worktree for branch {branch_name}: {existing}")
                         return existing
                     else:
@@ -216,6 +294,7 @@ class GitOperationsManager:
                         self.worktree_manager.acquire_worktree(worktree_path, self.config.id)
                     self._setup_worktree_venv(worktree_path)
                     task.context["worktree_branch"] = branch_name
+                    self._write_manifest_if_needed(task, branch_name, worktree_path)
                     self.logger.info(f"Using worktree: {github_repo} at {worktree_path}")
                     return worktree_path
                 except Exception as e:
@@ -239,6 +318,7 @@ class GitOperationsManager:
             self._checkout_or_create_branch(self.workspace, branch_name)
             task.context["worktree_branch"] = branch_name
             self._active_worktree = self.workspace
+            self._write_manifest_if_needed(task, branch_name, self.workspace)
             self.logger.info(f"Working directly in {self.workspace} on branch {branch_name}")
             return self.workspace
 
@@ -248,10 +328,17 @@ class GitOperationsManager:
     def detect_implementation_branch(self, task: Task) -> None:
         """Snapshot the current worktree branch into task context.
 
+        Prefers the manifest branch (immutable) over git HEAD (mutable).
         Downstream chain steps use `implementation_branch` to check out the
         upstream branch instead of creating a fresh worktree from main.
         Skips if no active worktree or HEAD is main/master.
         """
+        # Manifest takes precedence — immune to external git checkouts
+        manifest = load_manifest(self.workspace, task.root_id)
+        if manifest and manifest.branch and manifest.branch not in ("main", "master"):
+            task.context["implementation_branch"] = manifest.branch
+            return
+
         old_branch = task.context.get("implementation_branch")
 
         if not self._active_worktree:

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from ..indexing.query import IndexQuery
 
 from .task import Task, TaskType
+from .task_manifest import load_manifest
 from ..utils.cascade import CascadeLevel, resolve_cascade
 from ..utils.type_helpers import get_type_str
 
@@ -321,6 +322,9 @@ Focus on reviewing the code changes.
         elif workflow_step in self._PREVIEW_REVIEW_STEPS:
             mcp_guidance += self._build_preview_review_guidance()
 
+        # Inject manifest so agents know the canonical branch
+        manifest_context = self._load_manifest_context(task)
+
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
@@ -338,7 +342,7 @@ Focus on reviewing the code changes.
 TASK DETAILS:
 {task_json}
 
-{mcp_guidance}{upstream_context}{prescan_context}{plan_section}{step_instructions}
+{mcp_guidance}{manifest_context}{upstream_context}{prescan_context}{plan_section}{step_instructions}
 YOUR RESPONSIBILITIES:
 {agent_prompt}
 
@@ -407,6 +411,9 @@ IMPORTANT:
         elif workflow_step in self._PREVIEW_REVIEW_STEPS:
             chain_note += "\n" + self._build_preview_review_guidance()
 
+        # Inject manifest so agents know the canonical branch
+        manifest_context = self._load_manifest_context(task)
+
         # Load upstream context from previous agent if available
         upstream_context = self._load_upstream_context(task)
 
@@ -426,7 +433,7 @@ IMPORTANT:
 TASK:
 {task_json}
 
-{context_note}{dep_context}{chain_note}{upstream_context}{prescan_context}{plan_section}{step_instructions}
+{context_note}{dep_context}{chain_note}{manifest_context}{upstream_context}{prescan_context}{plan_section}{step_instructions}
 {agent_prompt}
 
 IMPORTANT:
@@ -847,6 +854,21 @@ If a tool call fails:
         """Load chain state context — backward-compatible wrapper."""
         context, _ = self._load_chain_state_context_with_reason(task)
         return context
+
+    def _load_manifest_context(self, task: Task) -> str:
+        """Render task manifest as a prompt section telling agents the canonical branch."""
+        manifest = load_manifest(self.ctx.workspace, task.root_id)
+        if not manifest or not manifest.branch:
+            return ""
+
+        lines = ["\n## TASK MANIFEST"]
+        lines.append(f"- Branch: `{manifest.branch}`")
+        if manifest.github_repo:
+            lines.append(f"- Repository: {manifest.github_repo}")
+        lines.append("")
+        lines.append("Use the branch above for ALL git operations. Do not create a different branch.")
+        lines.append("")
+        return "\n".join(lines)
 
     def _load_pre_scan_findings(self, task: Task) -> str:
         """Load QA pre-scan findings from disk for injection into prompts.
