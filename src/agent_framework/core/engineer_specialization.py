@@ -453,15 +453,21 @@ def match_patterns(files: List[str], patterns: List[str]) -> int:
 def detect_specialization(
     task: Task,
     files: Optional[List[str]] = None,
+    feedback_bus=None,
+    repo_slug: Optional[str] = None,
 ) -> Optional[SpecializationProfile]:
     """Detect the appropriate engineer specialization based on task file patterns.
 
     Checks for a specialization_hint override first (for monorepo tasks), then
-    falls back to file-pattern scoring across all loaded profiles.
+    falls back to file-pattern scoring across all loaded profiles. When a
+    feedback_bus is provided, recent specialization_hints from debates are
+    applied as a soft boost (0.3x weight) to the scoring.
 
     Args:
         task: Task to analyze
         files: Pre-extracted file list. Extracted from task if not provided.
+        feedback_bus: Optional FeedbackBus for memory-based specialization hints.
+        repo_slug: Optional repo slug for memory lookups.
 
     Returns:
         SpecializationProfile if a clear match is found, None for generic engineer
@@ -493,44 +499,65 @@ def detect_specialization(
         logger.debug("No files detected in task, skipping specialization")
         return None
 
+    # Collect memory-based specialization hints (soft boost, not override)
+    memory_hint_domains: Dict[str, int] = {}
+    if feedback_bus and repo_slug:
+        try:
+            hints = feedback_bus.get_specialization_hints(repo_slug, limit=3)
+            for mem in hints:
+                # Extract domain from tags (e.g. ["debate", "backend", "debate-xxx"])
+                for tag in mem.tags:
+                    if tag in ("frontend", "backend", "infrastructure"):
+                        memory_hint_domains[tag] = memory_hint_domains.get(tag, 0) + 1
+            if memory_hint_domains:
+                logger.debug(
+                    "Memory-based specialization hints: %s", memory_hint_domains,
+                )
+        except Exception as e:
+            logger.debug("Failed to load specialization hints (non-fatal): %s", e)
+
     # Score each specialization profile
-    scores = []
+    scores: List[tuple] = []
     for profile in profiles:
         match_count = match_patterns(files, profile.file_patterns)
-        if match_count > 0:
-            scores.append((match_count, profile))
+        # Apply memory hint as a soft boost (0.3 per matching hint)
+        hint_boost = memory_hint_domains.get(profile.id, 0) * 0.3
+        effective_score = match_count + hint_boost
+        if effective_score > 0:
+            scores.append((effective_score, match_count, profile))
 
     if not scores:
         logger.debug("No profile matched any files")
         return None
 
-    # Sort by match count (descending)
+    # Sort by effective score (descending)
     scores.sort(reverse=True, key=lambda x: x[0])
 
     total_files = len(files)
-    for score, profile in scores:
-        pct = (score / total_files * 100) if total_files else 0
+    for effective_score, match_count, profile in scores:
+        pct = (match_count / total_files * 100) if total_files else 0
+        hint_str = f", hint_boost={effective_score - match_count:.1f}" if effective_score != match_count else ""
         logger.debug(
-            "Profile '%s': %d/%d files matched (%.0f%%)",
-            profile.id, score, total_files, pct,
+            "Profile '%s': %d/%d files matched (%.0f%%)%s, effective=%.1f",
+            profile.id, match_count, total_files, pct, hint_str, effective_score,
         )
 
-    top_score, top_profile = scores[0]
+    top_effective, top_match, top_profile = scores[0]
 
     # Require clear signal: >50% of files match, with a floor of 2 — except for
     # single-file tasks where one matching file is treated as a sufficient signal
     # (the 50% rule is meaningless when there's nothing to compare against).
     threshold = 1 if total_files == 1 else max(2, total_files * 0.5)
-    if top_score >= threshold:
+    if top_effective >= threshold:
         logger.info(
-            "Selected specialization '%s' (score=%d, threshold=%.0f, total_files=%d)",
-            top_profile.name, top_score, threshold, total_files,
+            "Selected specialization '%s' (score=%.1f, file_match=%d, threshold=%.0f, total_files=%d)",
+            top_profile.name, top_effective, top_match, threshold, total_files,
         )
         return top_profile
 
     logger.debug(
-        "Top profile '%s' score=%d below threshold=%.0f, no specialization selected",
-        top_profile.id, top_score, threshold,
+        "Top profile '%s' effective_score=%.1f below threshold=%.0f, no specialization selected",
+        top_profile.id, top_effective, threshold,
     )
     return None
 

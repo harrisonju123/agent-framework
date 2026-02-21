@@ -1771,7 +1771,12 @@ Fix the failing tests and ensure all tests pass.
         # Extract files once — reused for both static detection and auto-profile fallback
         files = detect_file_patterns(task)
 
-        profile = detect_specialization(task, files=files)
+        repo_slug = task.context.get("github_repo") if task.context else None
+        profile = detect_specialization(
+            task, files=files,
+            feedback_bus=self.ctx.feedback_bus,
+            repo_slug=repo_slug,
+        )
         if profile:
             return profile, files
 
