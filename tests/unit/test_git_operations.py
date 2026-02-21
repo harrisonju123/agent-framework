@@ -103,18 +103,14 @@ class TestGetWorkingDirectory:
         result = git_ops.get_working_directory(sample_task)
         assert result == git_ops.workspace
 
-    def test_uses_shared_clone_for_pr_creation_task(self, git_ops, sample_task):
-        """Test that PR creation tasks use shared clone without worktree."""
-        git_ops.multi_repo_manager = MagicMock()
-        git_ops.multi_repo_manager.ensure_repo.return_value = Path("/shared/clone")
-
+    def test_uses_workspace_for_pr_creation_task(self, git_ops, sample_task):
+        """Test that PR creation tasks use workspace directly."""
         sample_task.context["pr_creation_step"] = True
         sample_task.context["implementation_branch"] = "feature/test"
 
         result = git_ops.get_working_directory(sample_task)
 
-        assert result == Path("/shared/clone")
-        git_ops.multi_repo_manager.ensure_repo.assert_called_once_with("owner/repo")
+        assert result == git_ops.workspace
 
     def test_creates_worktree_when_enabled(self, git_ops_with_worktree, sample_task):
         """Test worktree creation when worktree mode is enabled."""
@@ -146,8 +142,9 @@ class TestGetWorkingDirectory:
         assert git_ops_with_worktree._active_worktree == existing_wt
         git_ops_with_worktree.worktree_manager.create_worktree.assert_not_called()
 
-    def test_falls_back_to_shared_clone_on_worktree_failure(self, git_ops_with_worktree, sample_task):
-        """Test fallback to shared clone when worktree creation fails."""
+    @patch("agent_framework.core.git_operations.GitOperationsManager._checkout_or_create_branch")
+    def test_falls_back_to_direct_repo_on_worktree_failure(self, mock_checkout, git_ops_with_worktree, sample_task):
+        """Test fallback to direct-repo mode when worktree creation fails."""
         git_ops_with_worktree.multi_repo_manager = MagicMock()
         git_ops_with_worktree.multi_repo_manager.ensure_repo.return_value = Path("/base/repo")
         git_ops_with_worktree.worktree_manager.find_worktree_by_branch.return_value = None
@@ -155,8 +152,48 @@ class TestGetWorkingDirectory:
 
         result = git_ops_with_worktree.get_working_directory(sample_task)
 
-        assert result == Path("/base/repo")
-        assert git_ops_with_worktree._active_worktree is None
+        # Falls through to direct-repo mode (works in workspace)
+        assert result == git_ops_with_worktree.workspace
+        assert git_ops_with_worktree._active_worktree == git_ops_with_worktree.workspace
+        mock_checkout.assert_called_once()
+
+
+class TestDirectRepoMode:
+    """Tests for direct-repo mode (worktrees disabled, work in main workspace)."""
+
+    @patch("agent_framework.core.git_operations.GitOperationsManager._checkout_or_create_branch")
+    def test_uses_workspace_with_feature_branch(self, mock_checkout, git_ops, sample_task):
+        """Direct-repo mode checks out a feature branch and sets _active_worktree."""
+        result = git_ops.get_working_directory(sample_task)
+
+        assert result == git_ops.workspace
+        assert git_ops._active_worktree == git_ops.workspace
+        assert "worktree_branch" in sample_task.context
+        # Branch name should follow agent/<id>/<jira_key>-<hash> pattern
+        branch = sample_task.context["worktree_branch"]
+        assert branch.startswith("agent/engineer/task-")
+        mock_checkout.assert_called_once_with(git_ops.workspace, branch)
+
+    @patch("agent_framework.core.git_operations.GitOperationsManager._checkout_or_create_branch")
+    def test_reuses_existing_worktree_branch(self, mock_checkout, git_ops, sample_task):
+        """Direct-repo mode reuses worktree_branch from task context."""
+        sample_task.context["worktree_branch"] = "agent/engineer/PROJ-42-abc"
+
+        result = git_ops.get_working_directory(sample_task)
+
+        assert result == git_ops.workspace
+        mock_checkout.assert_called_once_with(git_ops.workspace, "agent/engineer/PROJ-42-abc")
+
+    @patch("agent_framework.core.git_operations.GitOperationsManager._checkout_or_create_branch")
+    def test_chain_step_reuses_implementation_branch(self, mock_checkout, git_ops, sample_task):
+        """Chain steps reuse the upstream implementation_branch."""
+        sample_task.context["implementation_branch"] = "agent/architect/PROJ-42-def"
+        sample_task.context["chain_step"] = True
+
+        result = git_ops.get_working_directory(sample_task)
+
+        assert result == git_ops.workspace
+        mock_checkout.assert_called_once_with(git_ops.workspace, "agent/architect/PROJ-42-def")
 
 
 class TestShouldUseWorktree:
@@ -1328,15 +1365,15 @@ class TestDiscoverBranchWork:
 class TestPushIfUnpushed:
     """Tests for push_if_unpushed() — post-LLM safety push."""
 
-    def test_pushes_when_unpushed_commits_exist(self, git_ops_with_worktree, tmp_path):
-        """Pushes to remote when worktree has unpushed commits."""
+    def test_pushes_when_unpushed_commits_exist(self, git_ops, tmp_path):
+        """Pushes to remote when working directory has unpushed commits."""
         wt_path = tmp_path / "worktree"
         wt_path.mkdir()
-        git_ops_with_worktree._active_worktree = wt_path
-        git_ops_with_worktree.worktree_manager.has_unpushed_commits.return_value = True
+        git_ops._active_worktree = wt_path
 
-        with patch.object(git_ops_with_worktree, '_try_push_worktree_branch', return_value=True) as mock_push:
-            result = git_ops_with_worktree.push_if_unpushed()
+        with patch.object(git_ops, '_has_unpushed_commits', return_value=True), \
+             patch.object(git_ops, '_try_push_worktree_branch', return_value=True) as mock_push:
+            result = git_ops.push_if_unpushed()
 
         assert result is True
         mock_push.assert_called_once_with(wt_path)
@@ -1345,24 +1382,19 @@ class TestPushIfUnpushed:
         """Returns False when no active worktree."""
         assert git_ops.push_if_unpushed() is False
 
-    def test_noop_when_no_worktree_manager(self, git_ops, tmp_path):
-        """Returns False when worktree manager is None."""
-        git_ops._active_worktree = tmp_path
+    def test_noop_when_worktree_path_missing(self, git_ops, tmp_path):
+        """Returns False when working directory doesn't exist."""
+        git_ops._active_worktree = tmp_path / "nonexistent"
         assert git_ops.push_if_unpushed() is False
 
-    def test_noop_when_worktree_path_missing(self, git_ops_with_worktree, tmp_path):
-        """Returns False when worktree directory doesn't exist."""
-        git_ops_with_worktree._active_worktree = tmp_path / "nonexistent"
-        assert git_ops_with_worktree.push_if_unpushed() is False
-
-    def test_noop_when_nothing_to_push(self, git_ops_with_worktree, tmp_path):
+    def test_noop_when_nothing_to_push(self, git_ops, tmp_path):
         """Returns False when no unpushed commits."""
         wt_path = tmp_path / "worktree"
         wt_path.mkdir()
-        git_ops_with_worktree._active_worktree = wt_path
-        git_ops_with_worktree.worktree_manager.has_unpushed_commits.return_value = False
+        git_ops._active_worktree = wt_path
 
-        result = git_ops_with_worktree.push_if_unpushed()
+        with patch.object(git_ops, '_has_unpushed_commits', return_value=False):
+            result = git_ops.push_if_unpushed()
         assert result is False
 
 

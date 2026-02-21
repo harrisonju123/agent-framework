@@ -143,12 +143,10 @@ class GitOperationsManager:
         github_repo = task.context.get("github_repo")
 
         # PR creation tasks that reference an upstream implementation branch
-        # don't need their own worktree — `gh pr create` works from the shared clone
+        # work directly from the workspace — no worktree or clone needed
         if task.context.get("pr_creation_step") and task.context.get("implementation_branch"):
-            if github_repo and self.multi_repo_manager:
-                repo_path = self.multi_repo_manager.ensure_repo(github_repo)
-                self.logger.info("PR creation task — using shared clone (no worktree needed)")
-                return repo_path
+            self.logger.info("PR creation task — using workspace (no worktree needed)")
+            return self.workspace
 
         # Check if worktree mode should be used
         use_worktree = self._should_use_worktree(task)
@@ -224,14 +222,28 @@ class GitOperationsManager:
                     self.logger.warning(f"Failed to create worktree, falling back to shared clone: {e}")
                     # Fall through to shared clone
 
-        if github_repo and self.multi_repo_manager:
-            # Ensure repo is cloned/updated
-            repo_path = self.multi_repo_manager.ensure_repo(github_repo)
-            self.logger.info(f"Using repository: {github_repo} at {repo_path}")
-            return repo_path
-        else:
-            # No repo context, use framework workspace
+        # Direct repo mode: work in the main workspace on a feature branch.
+        # Avoids worktree creation entirely — the P0 worktree-vanishing issue
+        # has blocked delivery in 8 consecutive observations.
+        if github_repo:
+            branch_name = task.context.get("worktree_branch") or task.context.get("implementation_branch")
+            if not branch_name:
+                impl_branch = task.context.get("implementation_branch")
+                if impl_branch and (self._is_own_branch(impl_branch) or task.context.get("chain_step")):
+                    branch_name = impl_branch
+                else:
+                    jira_key = task.context.get("jira_key", "task")
+                    task_hash = hashlib.sha256(task.id.encode()).hexdigest()[:8]
+                    branch_name = f"agent/{self.config.id}/{jira_key}-{task_hash}"
+
+            self._checkout_or_create_branch(self.workspace, branch_name)
+            task.context["worktree_branch"] = branch_name
+            self._active_worktree = self.workspace
+            self.logger.info(f"Working directly in {self.workspace} on branch {branch_name}")
             return self.workspace
+
+        # No repo context, use framework workspace
+        return self.workspace
 
     def detect_implementation_branch(self, task: Task) -> None:
         """Snapshot the current worktree branch into task context.
@@ -554,12 +566,12 @@ class GitOperationsManager:
             self._create_pr_from_branch(task, impl_branch)
             return
 
-        # Only act if we have an active worktree with changes
-        if not self._active_worktree or not self.worktree_manager:
-            self.logger.debug(f"No active worktree for {task.id}, skipping PR creation")
+        # Only act if we have an active working directory with changes
+        if not self._active_worktree:
+            self.logger.debug(f"No active working directory for {task.id}, skipping PR creation")
             return
 
-        has_unpushed = self.worktree_manager.has_unpushed_commits(self._active_worktree)
+        has_unpushed = self._has_unpushed_commits(self._active_worktree)
         branch_already_pushed = False
         if not has_unpushed:
             # LLM may have pushed the branch itself — check if it exists on the remote
@@ -829,6 +841,112 @@ class GitOperationsManager:
             self.logger.debug(f"Failed to get changed files: {e}")
             return []
 
+    def _checkout_or_create_branch(self, repo_dir: Path, branch: str) -> None:
+        """Switch to branch, creating it if it doesn't exist.
+
+        Handles dirty working tree by stashing before switch and popping after.
+        """
+        from ..utils.subprocess_utils import run_git_command
+
+        # Check if already on the target branch
+        head_result = run_git_command(
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=repo_dir, check=False, timeout=10,
+        )
+        if head_result.returncode == 0 and head_result.stdout.strip() == branch:
+            return
+
+        # Stash dirty state before switching
+        status = run_git_command(
+            ["status", "--porcelain"],
+            cwd=repo_dir, check=False, timeout=10,
+        )
+        stashed = False
+        if status.returncode == 0 and status.stdout.strip():
+            stash_result = run_git_command(
+                ["stash", "push", "-m", f"auto-stash before switching to {branch}"],
+                cwd=repo_dir, check=False, timeout=10,
+            )
+            stashed = stash_result.returncode == 0
+
+        # Try checkout (existing branch), else create
+        checkout = run_git_command(
+            ["checkout", branch],
+            cwd=repo_dir, check=False, timeout=10,
+        )
+        if checkout.returncode != 0:
+            create = run_git_command(
+                ["checkout", "-b", branch],
+                cwd=repo_dir, check=False, timeout=10,
+            )
+            if create.returncode != 0:
+                self.logger.error(f"Failed to create branch {branch}: {create.stderr}")
+                # Pop stash even on failure so we don't lose work
+                if stashed:
+                    run_git_command(
+                        ["stash", "pop"], cwd=repo_dir, check=False, timeout=10,
+                    )
+                return
+
+        # Restore stashed changes
+        if stashed:
+            run_git_command(
+                ["stash", "pop"], cwd=repo_dir, check=False, timeout=10,
+            )
+
+    def _has_unpushed_commits(self, working_dir: Path) -> bool:
+        """Check if current branch has commits not pushed to origin."""
+        from ..utils.subprocess_utils import run_git_command
+
+        try:
+            # Fast path: tracking branch exists → compare directly
+            result = run_git_command(
+                ["rev-list", "--count", "@{u}..HEAD"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            if result.returncode == 0:
+                count = int(result.stdout.strip() or "0")
+                return count > 0
+        except (ValueError, Exception):
+            pass
+
+        # Fallback: no tracking branch or parse error
+        branch_result = run_git_command(
+            ["rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=working_dir, check=False, timeout=10,
+        )
+        if branch_result.returncode != 0:
+            return False
+        branch = branch_result.stdout.strip()
+        if branch in ("main", "master", "HEAD"):
+            return False
+
+        # Check if branch exists on remote
+        remote_check = run_git_command(
+            ["ls-remote", "--heads", "origin", branch],
+            cwd=working_dir, check=False, timeout=10,
+        )
+        if not remote_check.stdout.strip():
+            # Branch not on remote — any local commits count as unpushed
+            log_result = run_git_command(
+                ["log", "--oneline", "-1"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            return log_result.returncode == 0 and bool(log_result.stdout.strip())
+
+        # Branch exists on remote but no tracking — compare local vs remote HEAD
+        local_rev = run_git_command(
+            ["rev-parse", "HEAD"],
+            cwd=working_dir, check=False, timeout=10,
+        )
+        remote_rev = run_git_command(
+            ["rev-parse", f"origin/{branch}"],
+            cwd=working_dir, check=False, timeout=10,
+        )
+        if local_rev.returncode != 0 or remote_rev.returncode != 0:
+            return True  # Assume unpushed if we can't determine
+        return local_rev.stdout.strip() != remote_rev.stdout.strip()
+
     def _is_own_branch(self, branch_name: str) -> bool:
         """Check if a branch was created by this agent (or a replica of the same role).
 
@@ -934,17 +1052,17 @@ class GitOperationsManager:
             return False
 
     def push_if_unpushed(self) -> bool:
-        """Push the active worktree's branch if it has unpushed commits.
+        """Push the active working directory's branch if it has unpushed commits.
 
         Called immediately after LLM returns to ensure committed work
-        reaches the remote before any worktree corruption can destroy it.
+        reaches the remote before any corruption can destroy it.
         Returns True if push succeeded, False otherwise (including no-op).
         """
-        if not self._active_worktree or not self.worktree_manager:
+        if not self._active_worktree:
             return False
         if not self._active_worktree.exists():
             return False
-        if not self.worktree_manager.has_unpushed_commits(self._active_worktree):
+        if not self._has_unpushed_commits(self._active_worktree):
             return False
         pushed = self._try_push_worktree_branch(self._active_worktree)
         if pushed:

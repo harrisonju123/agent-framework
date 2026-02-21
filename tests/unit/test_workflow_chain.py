@@ -667,26 +667,21 @@ class TestIntermediateStepPRSuppression:
         """Engineer (intermediate) pushes branch but doesn't create a PR."""
         task = _make_task(workflow="default", github_repo="org/repo")
 
-        # Set up a mock worktree with a feature branch
         worktree_dir = tmp_path / "worktree"
         worktree_dir.mkdir()
         agent._git_ops._active_worktree = worktree_dir
-        agent._git_ops.worktree_manager = MagicMock()
-        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         from unittest.mock import patch
 
-        # Mock git rev-parse to return a feature branch name
         mock_rev_parse = MagicMock(returncode=0, stdout="agent/engineer/PROJ-123-abc12345\n")
         mock_push = MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_run:
+        with patch.object(agent._git_ops, '_has_unpushed_commits', return_value=True), \
+             patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_run:
             mock_run.side_effect = [mock_rev_parse, mock_push]
             agent._git_ops.push_and_create_pr_if_needed(task)
 
-        # Branch should be stored for downstream agents
         assert task.context["implementation_branch"] == "agent/engineer/PROJ-123-abc12345"
-        # Should NOT have called gh pr create (only git rev-parse + git push = 2 calls)
         assert mock_run.call_count == 2
         assert "pr_url" not in task.context
 
@@ -700,8 +695,6 @@ class TestIntermediateStepPRSuppression:
         worktree_dir = tmp_path / "worktree"
         worktree_dir.mkdir()
         agent._git_ops._active_worktree = worktree_dir
-        agent._git_ops.worktree_manager = MagicMock()
-        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         from unittest.mock import patch
 
@@ -709,7 +702,8 @@ class TestIntermediateStepPRSuppression:
         mock_push = MagicMock(returncode=0)
         mock_pr_create = MagicMock(returncode=0, stdout="https://github.com/org/repo/pull/10\n")
 
-        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git, \
+        with patch.object(agent._git_ops, '_has_unpushed_commits', return_value=True), \
+             patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git, \
              patch("agent_framework.utils.subprocess_utils.run_command") as mock_cmd:
             mock_git.side_effect = [mock_rev_parse, mock_push]
             mock_cmd.return_value = mock_pr_create
@@ -759,25 +753,18 @@ class TestIntermediateStepPRSuppression:
 class TestWorktreeSkipForPRCreation:
     """Tests for _get_working_directory skipping worktree on PR creation tasks."""
 
-    def test_pr_creation_with_impl_branch_uses_shared_clone(self, agent, tmp_path):
-        """PR creation task with implementation_branch uses shared clone, not worktree."""
+    def test_pr_creation_with_impl_branch_uses_workspace(self, agent, tmp_path):
+        """PR creation task with implementation_branch uses workspace directly."""
         task = _make_task(
             workflow="default",
             github_repo="org/repo",
             pr_creation_step=True,
             implementation_branch="agent/engineer/PROJ-123-abc12345",
         )
-        repo_path = tmp_path / "repos" / "org" / "repo"
-        repo_path.mkdir(parents=True)
-
-        agent.multi_repo_manager = MagicMock()
-        agent._git_ops.multi_repo_manager = agent.multi_repo_manager
-        agent.multi_repo_manager.ensure_repo.return_value = repo_path
 
         result = agent._git_ops.get_working_directory(task)
 
-        assert result == repo_path
-        agent.multi_repo_manager.ensure_repo.assert_called_once_with("org/repo")
+        assert result == agent._git_ops.workspace
 
     def test_normal_task_still_creates_worktree(self, agent, tmp_path):
         """Non-PR-creation tasks still go through the normal worktree flow."""

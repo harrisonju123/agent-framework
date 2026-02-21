@@ -9,6 +9,7 @@ import pytest
 
 from agent_framework.core.agent import Agent, AgentConfig
 from agent_framework.core.config import WorkflowDefinition
+from agent_framework.core.git_operations import GitOperationsManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
 
@@ -120,24 +121,22 @@ class TestPushAndCreatePrIfNeeded:
             f"PR already exists for {task.id}: https://github.com/org/repo/pull/1"
         )
 
-    def test_skips_without_worktree(self, agent):
-        """No worktree + no implementation branch = nothing to do."""
+    def test_skips_without_active_working_dir(self, agent):
+        """No active working directory + no implementation branch = nothing to do."""
         task = _make_task()
         agent._git_ops._active_worktree = None
-        agent._git_ops.worktree_manager = None
         agent._git_ops.push_and_create_pr_if_needed(task)
         agent.logger.debug.assert_any_call(
-            f"No active worktree for {task.id}, skipping PR creation"
+            f"No active working directory for {task.id}, skipping PR creation"
         )
 
-    def test_skips_without_github_repo(self, agent, tmp_path):
-        """Has worktree + unpushed commits but no github_repo in context."""
+    @patch.object(GitOperationsManager, '_has_unpushed_commits', return_value=True)
+    def test_skips_without_github_repo(self, mock_has_unpushed, agent, tmp_path):
+        """Has active working dir + unpushed commits but no github_repo in context."""
         task = _make_task()
         del task.context["github_repo"]
 
         agent._git_ops._active_worktree = tmp_path
-        agent._git_ops.worktree_manager = MagicMock()
-        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         agent._git_ops.push_and_create_pr_if_needed(task)
         agent.logger.debug.assert_any_call(
@@ -155,12 +154,11 @@ class TestPushAndCreatePrIfNeeded:
         agent._git_ops._create_pr_from_branch.assert_called_once_with(task, "feat/my-branch")
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
-    def test_skips_pr_on_intermediate_step(self, mock_git, agent, tmp_path):
+    @patch.object(GitOperationsManager, '_has_unpushed_commits', return_value=True)
+    def test_skips_pr_on_intermediate_step(self, mock_has_unpushed, mock_git, agent, tmp_path):
         """Intermediate workflow steps push but don't create a PR."""
         task = _make_task(workflow="chain")
         agent._git_ops._active_worktree = tmp_path
-        agent._git_ops.worktree_manager = MagicMock()
-        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         # git rev-parse returns a feature branch
         branch_result = MagicMock(returncode=0, stdout="feat/my-branch\n")
@@ -176,12 +174,11 @@ class TestPushAndCreatePrIfNeeded:
 
     @patch("agent_framework.utils.subprocess_utils.run_command")
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
-    def test_creates_pr_on_terminal_step(self, mock_git, mock_cmd, agent, tmp_path):
+    @patch.object(GitOperationsManager, '_has_unpushed_commits', return_value=True)
+    def test_creates_pr_on_terminal_step(self, mock_has_unpushed, mock_git, mock_cmd, agent, tmp_path):
         """Terminal workflow step pushes and creates PR."""
         task = _make_task(workflow="default")
         agent._git_ops._active_worktree = tmp_path
-        agent._git_ops.worktree_manager = MagicMock()
-        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         # git rev-parse returns feature branch, push succeeds
         branch_result = MagicMock(returncode=0, stdout="feat/my-branch\n")
@@ -200,12 +197,11 @@ class TestPushAndCreatePrIfNeeded:
         assert task.context["pr_url"] == "https://github.com/org/repo/pull/42"
 
     @patch("agent_framework.utils.subprocess_utils.run_git_command")
-    def test_skips_pr_from_main_branch(self, mock_git, agent, tmp_path):
+    @patch.object(GitOperationsManager, '_has_unpushed_commits', return_value=True)
+    def test_skips_pr_from_main_branch(self, mock_has_unpushed, mock_git, agent, tmp_path):
         """Never create PRs when on main/master."""
         task = _make_task()
         agent._git_ops._active_worktree = tmp_path
-        agent._git_ops.worktree_manager = MagicMock()
-        agent._git_ops.worktree_manager.has_unpushed_commits.return_value = True
 
         mock_git.return_value = MagicMock(returncode=0, stdout="main\n")
 
