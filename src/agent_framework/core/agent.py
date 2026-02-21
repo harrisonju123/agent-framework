@@ -439,6 +439,7 @@ class Agent:
         self._feedback_bus = FeedbackBus(
             memory_store=self._memory_store if self._memory_enabled else None,
             agent_type=self.config.base_id,
+            session_logger=self._session_logger,
         )
 
     def __init__(

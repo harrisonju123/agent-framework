@@ -35,12 +35,13 @@ class FeedbackBus:
     to MemoryStore for cross-session survival.
     """
 
-    def __init__(self, memory_store=None, repo_slug: Optional[str] = None, agent_type: str = "shared"):
+    def __init__(self, memory_store=None, repo_slug: Optional[str] = None, agent_type: str = "shared", session_logger=None):
         self._consumers: Dict[str, List[ConsumerCallback]] = {}
         self._memory_store = memory_store
         self._repo_slug = repo_slug
         self._agent_type = agent_type
         self._event_log: List[FeedbackEvent] = []
+        self._session_logger = session_logger
 
     def register_consumer(self, category: str, callback: ConsumerCallback) -> None:
         """Subscribe a consumer to events of a given category."""
@@ -54,6 +55,17 @@ class FeedbackBus:
             persist: If True and memory_store is configured, persist to memory.
         """
         self._event_log.append(event)
+
+        # Log the emission for session audit trail
+        if self._session_logger:
+            try:
+                self._session_logger.log_feedback_emitted(
+                    source=event.source,
+                    category=event.category,
+                    content=event.content,
+                )
+            except Exception:
+                pass  # Session logging is best-effort
 
         # Dispatch to category-specific consumers
         for callback in self._consumers.get(event.category, []):
