@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from ..memory.memory_store import MemoryStore
     from ..utils.rich_logging import ContextLogger
     from .session_logger import SessionLogger
+    from .feedback_loop import FeedbackBus
 
 from .task import Task, TaskStatus
 from ..llm.base import LLMRequest
@@ -37,6 +38,7 @@ class ErrorRecoveryManager:
         memory_store: Optional["MemoryStore"] = None,
         replan_config: Optional[dict] = None,
         self_eval_config: Optional[dict] = None,
+        feedback_bus: Optional["FeedbackBus"] = None,
     ):
         self.config = config
         self.queue = queue
@@ -48,6 +50,7 @@ class ErrorRecoveryManager:
         self.workspace = workspace
         self.jira_client = jira_client
         self.memory_store = memory_store
+        self.feedback_bus = feedback_bus
 
         # Self-evaluation configuration
         eval_cfg = self_eval_config or {}
@@ -442,6 +445,22 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
                 f"{verdict[:500]}"
             )
 
+            # Feed missed criteria into cross-feature learning loop
+            if self.feedback_bus:
+                repo_slug = self._get_repo_slug(task)
+                if repo_slug:
+                    criteria_missed = self._extract_missed_criteria(criteria, verdict)
+                    try:
+                        self.feedback_bus.store_self_eval_failure(
+                            repo_slug=repo_slug,
+                            agent_type=self.config.base_id,
+                            criteria_missed=criteria_missed,
+                            task_id=task.id,
+                            critique=verdict[:500],
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Failed to store self-eval feedback: {e}")
+
             task.context["_self_eval_count"] = eval_retries + 1
             task.context["_self_eval_critique"] = verdict
             task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:500]}")
@@ -696,11 +715,30 @@ breaking the task into smaller steps, or working around the root cause."""
         """Extract github_repo from task context."""
         return task.context.get("github_repo")
 
+    @staticmethod
+    def _extract_missed_criteria(criteria: list[str], verdict: str) -> list[str]:
+        """Cross-reference acceptance criteria with the critique text.
+
+        Returns criteria whose keywords appear in the FAIL verdict,
+        indicating the evaluator flagged them as unmet.
+        """
+        verdict_lower = verdict.lower()
+        missed = []
+        for criterion in criteria:
+            # Check if distinctive words (>4 chars) from the criterion
+            # appear in the verdict text
+            words = [w.lower() for w in criterion.split() if len(w) > 4]
+            matching = sum(1 for w in words if w in verdict_lower)
+            if matching >= 2 or (len(words) <= 2 and matching >= 1):
+                missed.append(criterion)
+        return missed
+
     def store_replan_outcome(self, task: Task, repo_slug: str) -> None:
         """Persist successful recovery pattern as a past_failures memory.
 
         Called after a task that went through replanning completes successfully.
         Stores the error→resolution pair so future replans can reference it.
+        Also feeds the richer replan_success memory via the feedback bus.
         """
         if not self.memory_store or not self.memory_store.enabled:
             return
@@ -729,6 +767,20 @@ breaking the task into smaller steps, or working around the root cause."""
             source_task_id=task.id,
             tags=[error_type],
         )
+
+        # Feed richer context into cross-feature learning loop
+        if self.feedback_bus:
+            try:
+                self.feedback_bus.store_replan_success(
+                    repo_slug=repo_slug,
+                    agent_type=self.config.base_id,
+                    error_type=error_type,
+                    files_involved=files,
+                    revised_plan=revised_plan,
+                    task_id=task.id,
+                )
+            except Exception as e:
+                self.logger.debug(f"Failed to store replan feedback: {e}")
 
     def store_failure_antipattern(self, task: Task, repo_slug: str, error_type: str) -> None:
         """Persist an unresolved failure pattern as a past_failures memory.

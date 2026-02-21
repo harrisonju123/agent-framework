@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .config import AgentConfig, AgentDefinition, WorkflowDefinition
     from .context_window_manager import ContextWindowManager
     from ..memory.memory_retriever import MemoryRetriever
+    from ..memory.memory_store import MemoryStore
     from ..memory.tool_pattern_store import ToolPatternStore
     from .session_logger import SessionLogger
     from ..llm.base import LLMBackend
@@ -51,6 +52,7 @@ class PromptContext:
     # Optimization and memory
     optimization_config: Optional[Dict[str, Any]] = None
     memory_retriever: Optional["MemoryRetriever"] = None
+    memory_store: Optional["MemoryStore"] = None
     tool_pattern_store: Optional["ToolPatternStore"] = None
     context_window_manager: Optional["ContextWindowManager"] = None
 
@@ -181,6 +183,9 @@ class PromptBuilder:
 
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
+
+        # Inject QA warnings from past review cycles (engineer only)
+        prompt = self._inject_qa_warnings(prompt, task)
 
         # Inject tool efficiency tips from session analysis
         prompt = self._inject_tool_tips(prompt, task)
@@ -1101,6 +1106,83 @@ If a tool call fails:
             return prompt + "\n" + memory_section
 
         return prompt
+
+    # Cap for QA warnings section to prevent prompt bloat
+    _QA_WARNINGS_MAX_CHARS = 1000
+
+    def _inject_qa_warnings(self, prompt: str, task: Task) -> str:
+        """Inject recurring QA findings as warnings for engineer prompts.
+
+        Queries memory for ``qa_recurring_findings`` on the current repo,
+        groups by category, and injects a ``## QA Warnings`` section.
+        Only fires for engineer agents to avoid polluting reviewer prompts.
+        """
+        if self.ctx.config.base_id != "engineer":
+            return prompt
+
+        if not self.ctx.memory_store or not self.ctx.memory_store.enabled:
+            return prompt
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return prompt
+
+        # Query both agent-specific and shared QA findings
+        findings = self.ctx.memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type=self.ctx.config.base_id,
+            category="qa_recurring_findings",
+            limit=15,
+        )
+        shared_findings = self.ctx.memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="qa_recurring_findings",
+            limit=10,
+        )
+
+        # Merge and deduplicate by content
+        seen_content: set[str] = set()
+        all_findings = []
+        for f in findings + shared_findings:
+            if f.content not in seen_content:
+                seen_content.add(f.content)
+                all_findings.append(f)
+
+        if not all_findings:
+            return prompt
+
+        # Group by category tag
+        by_category: dict[str, list[str]] = {}
+        for f in all_findings:
+            cat = "general"
+            for tag in f.tags:
+                if tag.startswith("category:"):
+                    cat = tag[len("category:"):]
+                    break
+            by_category.setdefault(cat, []).append(f.content)
+
+        lines = ["## QA Warnings (from past reviews)\n"]
+        for cat, items in by_category.items():
+            lines.append(f"**{cat}:**")
+            for item in items[:5]:
+                lines.append(f"- {item}")
+
+        section = "\n".join(lines)
+
+        # Respect char budget
+        if len(section) > self._QA_WARNINGS_MAX_CHARS:
+            section = section[:self._QA_WARNINGS_MAX_CHARS] + "\n[truncated]\n"
+
+        if self.ctx.session_logger:
+            self.ctx.session_logger.log(
+                "qa_warnings_injected",
+                repo=repo_slug,
+                finding_count=len(all_findings),
+                chars=len(section),
+            )
+
+        return prompt + "\n\n" + section
 
     def _inject_tool_tips(self, prompt: str, task: Task) -> str:
         """Append tool efficiency tips from previous session analysis."""

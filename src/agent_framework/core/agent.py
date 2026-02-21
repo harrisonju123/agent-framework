@@ -41,6 +41,7 @@ from .session_logger import SessionLogger, noop_logger
 from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
 from .error_recovery import ErrorRecoveryManager
+from .feedback_loop import FeedbackBus
 from .budget_manager import BudgetManager
 from ..workflow.executor import PREVIEW_REVIEW_STEPS
 
@@ -318,6 +319,7 @@ class Agent:
         self._memory_enabled = mem_cfg.get("enabled", False)
         self._memory_store = MemoryStore(self.workspace, enabled=self._memory_enabled)
         self._memory_retriever = MemoryRetriever(self._memory_store)
+        self._feedback_bus = FeedbackBus(self._memory_store)
 
         # Tool pattern analysis
         tool_tips_enabled = self._optimization_config.get("enable_tool_pattern_tips", False)
@@ -541,6 +543,7 @@ class Agent:
             agent_definition=agent_definition,
             optimization_config=self._optimization_config,
             memory_retriever=self._memory_retriever,
+            memory_store=self._memory_store,
             tool_pattern_store=self._tool_pattern_store,
             context_window_manager=None,  # Set per-task
             session_logger=None,  # Set per-task
@@ -584,6 +587,7 @@ class Agent:
             memory_store=self._memory_store,
             replan_config=replan_config,
             self_eval_config=self_eval_config,
+            feedback_bus=self._feedback_bus,
         )
 
         self._budget = BudgetManager(
@@ -1519,6 +1523,7 @@ class Agent:
             log_tool_inputs=self._session_log_tool_inputs,
         )
         # Update workflow router and executor session loggers for this task
+        self._feedback_bus._session_logger = self._session_logger
         self._workflow_router.set_session_logger(self._session_logger)
         self._workflow_executor.set_session_logger(self._session_logger)
         self._session_logger.log(
@@ -3013,6 +3018,25 @@ class Agent:
         # Store successful recovery pattern so future replans can reference it
         if task.replan_history and task.status == TaskStatus.COMPLETED:
             self._error_recovery.store_replan_outcome(task, repo_slug)
+
+        # Store QA structured findings as cross-task memories
+        structured_findings = task.context.get("structured_findings")
+        if structured_findings and isinstance(structured_findings, dict):
+            findings_list = structured_findings.get("findings", [])
+            if findings_list:
+                try:
+                    stored = self._feedback_bus.store_qa_findings(
+                        repo_slug=repo_slug,
+                        agent_type=self.config.base_id,
+                        findings=findings_list,
+                        task_id=task.id,
+                    )
+                    if stored > 0:
+                        self.logger.info(
+                            f"Stored {stored} QA findings as cross-task memories for {task.id}"
+                        )
+                except Exception as e:
+                    self.logger.debug(f"Failed to store QA findings feedback: {e}")
 
     # -- Tool Pattern Analysis --
 
