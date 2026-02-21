@@ -535,6 +535,99 @@ def detect_specialization(
     return None
 
 
+def adjust_specialization_from_debate(
+    profile: Optional[SpecializationProfile],
+    memory_store,
+    repo_slug: str,
+    session_logger=None,
+) -> Optional[SpecializationProfile]:
+    """Post-detection adjustment: override profile if debate revealed domain mismatch.
+
+    Queries shared memories with category='architectural_decisions' for debate
+    outcomes that recommend a different specialization. Logs the adjustment
+    rather than silently overriding.
+
+    Args:
+        profile: Currently detected profile (may be None).
+        memory_store: MemoryStore instance.
+        repo_slug: Repository slug for memory lookup.
+        session_logger: Optional SessionLogger for structured logging.
+
+    Returns:
+        Adjusted profile, or original profile if no adjustment needed.
+    """
+    if not memory_store or not memory_store.enabled:
+        return profile
+
+    try:
+        debate_memories = memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="architectural_decisions",
+            tags=["debate"],
+            limit=5,
+        )
+    except Exception as e:
+        logger.debug("Failed to query debate memories for specialization: %s", e)
+        return profile
+
+    if not debate_memories:
+        return profile
+
+    # Domain keywords that signal a specific specialization
+    domain_signals = {
+        "frontend": {"frontend", "react", "vue", "angular", "css", "component", "ui", "ux", "dom", "browser"},
+        "backend": {"backend", "api", "database", "server", "endpoint", "query", "migration", "service"},
+        "infrastructure": {"infrastructure", "docker", "kubernetes", "ci/cd", "terraform", "deploy", "helm", "pipeline"},
+    }
+
+    profiles = _load_profiles()
+    profile_map = {p.id: p for p in profiles}
+
+    for mem in debate_memories:
+        content_lower = mem.content.lower()
+
+        # Look for explicit recommendations like "use frontend approach"
+        for domain_id, keywords in domain_signals.items():
+            recommend_patterns = [
+                f"use {domain_id}",
+                f"recommend {domain_id}",
+                f"{domain_id} approach",
+                f"switch to {domain_id}",
+            ]
+            matched_recommend = any(p in content_lower for p in recommend_patterns)
+            keyword_hits = sum(1 for kw in keywords if kw in content_lower)
+
+            if matched_recommend or keyword_hits >= 3:
+                target_profile = profile_map.get(domain_id)
+                if not target_profile:
+                    continue
+
+                # Only adjust if current profile differs
+                current_id = profile.id if profile else "none"
+                if current_id == domain_id:
+                    continue
+
+                logger.info(
+                    "Debate-based specialization adjustment: %s → %s "
+                    "(debate memory: %s)",
+                    current_id, domain_id, mem.content[:100],
+                )
+
+                if session_logger:
+                    session_logger.log(
+                        "specialization_adjusted",
+                        original_profile=current_id,
+                        adjusted_profile=domain_id,
+                        debate_memory=mem.content[:200],
+                        source_task_id=mem.source_task_id,
+                    )
+
+                return target_profile
+
+    return profile
+
+
 def apply_specialization_to_prompt(
     base_prompt: str,
     profile: Optional[SpecializationProfile]

@@ -73,6 +73,9 @@ class PromptContext:
     code_index_query: Optional["IndexQuery"] = None
     code_indexing_config: Optional[Dict[str, Any]] = None
 
+    # QA pattern aggregator for recurring finding warnings
+    qa_pattern_aggregator: Optional[Any] = None
+
     def __post_init__(self):
         """Initialize default values."""
         if self.optimization_config is None:
@@ -1076,7 +1079,47 @@ If a tool call fails:
                     chars_injected=len(memory_section),
                     categories=task_tags,
                 )
-            return prompt + "\n" + memory_section
+            prompt = prompt + "\n" + memory_section
+
+        # Inject recurring QA warnings for engineer agents
+        prompt = self._inject_qa_warnings(prompt, task)
+
+        return prompt
+
+    def _inject_qa_warnings(self, prompt: str, task: Task) -> str:
+        """Inject recurring QA pattern warnings for engineer agents only."""
+        if self.ctx.config.base_id != "engineer":
+            return prompt
+
+        if not self.ctx.qa_pattern_aggregator:
+            return prompt
+
+        try:
+            from .engineer_specialization import detect_file_patterns
+            target_files = detect_file_patterns(task)
+            if target_files:
+                patterns = self.ctx.qa_pattern_aggregator.get_warnings_for_files(target_files)
+            else:
+                patterns = self.ctx.qa_pattern_aggregator.get_recurring_patterns()
+
+            if not patterns:
+                return prompt
+
+            warnings_section = self.ctx.qa_pattern_aggregator.format_warnings_section(patterns)
+            if warnings_section:
+                self.logger.debug(
+                    "Injected %d recurring QA warnings (%d chars)",
+                    len(patterns), len(warnings_section),
+                )
+                if self.ctx.session_logger:
+                    self.ctx.session_logger.log(
+                        "qa_pattern_injected",
+                        pattern_count=len(patterns),
+                        top_patterns=[p.description[:80] for p in patterns[:3]],
+                    )
+                return prompt + "\n\n" + warnings_section
+        except Exception as e:
+            self.logger.debug("QA warning injection failed (non-fatal): %s", e)
 
         return prompt
 

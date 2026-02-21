@@ -39,6 +39,7 @@ class ErrorRecoveryManager:
         memory_store: Optional["MemoryStore"] = None,
         replan_config: Optional[dict] = None,
         self_eval_config: Optional[dict] = None,
+        feedback_bus: Optional["FeedbackBus"] = None,
     ):
         self.config = config
         self.queue = queue
@@ -50,6 +51,7 @@ class ErrorRecoveryManager:
         self.workspace = workspace
         self.jira_client = jira_client
         self.memory_store = memory_store
+        self.feedback_bus = feedback_bus
 
         # Self-evaluation configuration
         eval_cfg = self_eval_config or {}
@@ -448,6 +450,9 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
             task.context["_self_eval_critique"] = verdict
             task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:500]}")
 
+            # Persist missed criteria to memory for cross-task learning
+            self._store_self_eval_failure(task, verdict, criteria)
+
             # Reset without consuming queue retry
             task.status = TaskStatus.PENDING
             task.started_at = None
@@ -813,3 +818,78 @@ Previous attempts failed. Use this revised approach:
                 )
 
         return prompt + replan_section
+
+    def _store_self_eval_failure(
+        self, task: Task, verdict: str, criteria: List[str],
+    ) -> None:
+        """Persist self-eval failure to memory so commonly missed criteria are tracked.
+
+        Stores the full critique with tags derived from acceptance criteria keywords,
+        and emits a FeedbackEvent if a feedback bus is configured.
+        """
+        if not self.memory_store or not self.memory_store.enabled:
+            return
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return
+
+        missed = self._extract_missed_criteria(verdict, criteria)
+        content = f"Self-eval FAIL: {verdict[:500]}"
+        if missed:
+            content = f"Missed criteria: {'; '.join(missed[:5])}"
+
+        # Derive tags from criteria keywords for future tag-filtered recall
+        tags = ["self_eval_failure"]
+        for criterion in missed[:3]:
+            words = [w.lower() for w in criterion.split() if len(w) > 4]
+            tags.extend(words[:2])
+
+        try:
+            self.memory_store.remember(
+                repo_slug=repo_slug,
+                agent_type=self.config.base_id,
+                category="self_eval_failures",
+                content=content,
+                source_task_id=task.id,
+                tags=tags,
+            )
+            self.logger.info(
+                "Stored self-eval failure memory for task %s (%d missed criteria)",
+                task.id, len(missed),
+            )
+        except Exception as e:
+            self.logger.warning("Failed to store self-eval failure memory: %s", e)
+
+        # Emit feedback event for cross-feature learning
+        if self.feedback_bus:
+            from .feedback_bus import FeedbackEvent
+            self.feedback_bus.emit(FeedbackEvent(
+                source="self_eval",
+                category="self_eval_failures",
+                content=content,
+                tags=tags,
+                metadata={"task_id": task.id, "missed_count": len(missed)},
+            ))
+
+    @staticmethod
+    def _extract_missed_criteria(verdict: str, criteria: List[str]) -> List[str]:
+        """Extract which acceptance criteria were missed from the verdict text.
+
+        Matches criteria keywords against the FAIL verdict to identify which
+        specific criteria weren't met.
+        """
+        missed = []
+        verdict_lower = verdict.lower()
+        for criterion in criteria:
+            # Check if the criterion or distinctive keywords appear in the verdict
+            criterion_lower = criterion.lower()
+            keywords = [w for w in criterion_lower.split() if len(w) > 4]
+            matching = sum(1 for kw in keywords if kw in verdict_lower)
+            # If more than half the distinctive keywords appear, it's likely mentioned
+            if keywords and matching >= max(1, len(keywords) * 0.4):
+                missed.append(criterion)
+        # If heuristic found nothing, treat all criteria as potentially missed
+        if not missed and "fail" in verdict_lower:
+            missed = list(criteria)
+        return missed

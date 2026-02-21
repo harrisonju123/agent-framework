@@ -8,14 +8,21 @@ Manages the QA → Engineer review feedback loop, including:
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from ..memory.memory_store import MemoryStore
+    from .feedback_bus import FeedbackBus
 
 from .task import Task, TaskStatus, TaskType
 from .verdict_audit import PatternMatch, VerdictAudit
 from ..utils.type_helpers import strip_chain_prefixes
+
+logger = logging.getLogger(__name__)
 
 # Cap review cycles to prevent infinite QA ↔ Engineer loops
 MAX_REVIEW_CYCLES = 3
@@ -85,6 +92,8 @@ class ReviewCycleManager:
         agent_definition,
         session_logger,
         activity_manager,
+        memory_store: Optional["MemoryStore"] = None,
+        feedback_bus: Optional["FeedbackBus"] = None,
     ):
         """Initialize ReviewCycleManager.
 
@@ -95,6 +104,8 @@ class ReviewCycleManager:
             agent_definition: AgentDefinition for agent metadata
             session_logger: SessionLogger for structured logging
             activity_manager: ActivityManager for status tracking
+            memory_store: MemoryStore for persisting QA findings to memory
+            feedback_bus: FeedbackBus for cross-feature learning events
         """
         self.config = config
         self.queue = queue
@@ -102,6 +113,8 @@ class ReviewCycleManager:
         self.agent_definition = agent_definition
         self.session_logger = session_logger
         self.activity_manager = activity_manager
+        self.memory_store = memory_store
+        self.feedback_bus = feedback_bus
 
     def extract_pr_info_from_response(self, response_content: str) -> Optional[Dict[str, Any]]:
         """
@@ -341,6 +354,13 @@ class ReviewCycleManager:
             return
 
         outcome = self.parse_review_outcome(response.content)
+
+        # Persist structured findings to memory for cross-task pattern detection
+        if outcome.structured_findings:
+            repo_slug = task.context.get("github_repo")
+            if repo_slug:
+                self.persist_findings_to_memory(outcome.structured_findings, repo_slug, task.id)
+
         if outcome.approved and not outcome.needs_fix:
             sync_jira_status_callback(task, "Approved", comment=f"QA approved by {self.config.id}")
             return
@@ -803,3 +823,70 @@ class ReviewCycleManager:
             )
         except Exception as e:
             self.logger.error(f"Failed to escalate review to architect: {e}")
+
+    def persist_findings_to_memory(
+        self,
+        findings: List[QAFinding],
+        repo_slug: str,
+        task_id: str,
+    ) -> int:
+        """Persist QA findings to memory for cross-task pattern aggregation.
+
+        Each finding is stored with tags for severity, category, and file path
+        so QAPatternAggregator can detect recurring patterns.
+
+        Returns count of findings stored.
+        """
+        if not self.memory_store or not self.memory_store.enabled:
+            return 0
+
+        stored = 0
+        for finding in findings:
+            content = f"[{finding.severity}] {finding.category}: {finding.description}"
+            if finding.file:
+                content = f"{finding.file}: {content}"
+
+            tags = [
+                f"severity:{finding.severity}",
+                f"category:{finding.category}",
+            ]
+            if finding.file:
+                tags.append(f"file:{finding.file}")
+
+            try:
+                self.memory_store.remember(
+                    repo_slug=repo_slug,
+                    agent_type="shared",
+                    category="qa_findings",
+                    content=content,
+                    source_task_id=task_id,
+                    tags=tags,
+                )
+                stored += 1
+            except Exception as e:
+                logger.warning("Failed to persist QA finding to memory: %s", e)
+
+        if stored > 0:
+            self.logger.info(
+                "Persisted %d QA findings to memory for repo %s",
+                stored, repo_slug,
+            )
+            self.session_logger.log(
+                "qa_findings_persisted",
+                repo=repo_slug,
+                count=stored,
+                task_id=task_id,
+            )
+
+        # Emit feedback events for cross-feature learning
+        if self.feedback_bus and stored > 0:
+            from .feedback_bus import FeedbackEvent
+            self.feedback_bus.emit(FeedbackEvent(
+                source="qa_findings",
+                category="qa_findings",
+                content=f"{stored} QA findings persisted from task {task_id}",
+                tags=[f"count:{stored}"],
+                metadata={"task_id": task_id, "finding_count": stored},
+            ), persist=False)  # Already persisted individually above
+
+        return stored

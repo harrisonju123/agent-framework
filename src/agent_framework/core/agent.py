@@ -41,6 +41,8 @@ from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
 from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
+from .feedback_bus import FeedbackBus
+from .qa_pattern_aggregator import QAPatternAggregator
 from ..workflow.executor import PREVIEW_REVIEW_STEPS
 
 
@@ -432,6 +434,13 @@ class Agent:
         except Exception:
             self.logger.debug("Codebase indexing failed, continuing without index", exc_info=True)
 
+    def _init_feedback_bus(self):
+        """Initialize the cross-feature learning feedback bus."""
+        self._feedback_bus = FeedbackBus(
+            memory_store=self._memory_store if self._memory_enabled else None,
+            agent_type=self.config.base_id,
+        )
+
     def __init__(
         self,
         config: AgentConfig,
@@ -507,6 +516,9 @@ class Agent:
         # Codebase indexing for structural code context in prompts
         self._init_code_indexing(code_indexing_config)
 
+        # Cross-feature learning feedback bus
+        self._init_feedback_bus()
+
         # Workflow routing: chain enforcement, task decomposition, agent handoffs
         self._workflow_router = WorkflowRouter(
             config=config,
@@ -528,6 +540,8 @@ class Agent:
             agent_definition=agent_definition,
             session_logger=self._session_logger,
             activity_manager=self.activity_manager,
+            memory_store=self._memory_store if self._memory_enabled else None,
+            feedback_bus=self._feedback_bus,
         )
 
         # Prompt builder: extracted prompt construction logic
@@ -550,6 +564,7 @@ class Agent:
             workflows_config=workflows_config,
             code_index_query=self._code_index_query,
             code_indexing_config=code_indexing_config,
+            # QA pattern aggregator is set per-task since it needs repo_slug
         )
         self._prompt_builder = PromptBuilder(prompt_ctx)
 
@@ -583,6 +598,7 @@ class Agent:
             memory_store=self._memory_store,
             replan_config=replan_config,
             self_eval_config=self_eval_config,
+            feedback_bus=self._feedback_bus,
         )
 
         self._budget = BudgetManager(
