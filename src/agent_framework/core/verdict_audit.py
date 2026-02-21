@@ -32,7 +32,7 @@ class VerdictAudit:
     from session logs without reproducing the exact LLM output.
     """
 
-    method: str             # "review_outcome" | "no_changes_marker" | "ambiguous_halt" | "ambiguous_default"
+    method: str             # "review_outcome" | "no_changes_marker" | "routing_signal_complete" | "ambiguous_halt" | "ambiguous_default"
     value: Optional[str]    # final verdict string or None if not set
     agent_id: str
     workflow_step: str

@@ -285,7 +285,11 @@ class WorkflowRouter:
             )
 
             if not routed:
-                if self.is_at_terminal_workflow_step(task):
+                workflow_complete_signal = (
+                    routing_signal
+                    and routing_signal.target_agent == WORKFLOW_COMPLETE
+                )
+                if self.is_at_terminal_workflow_step(task) or workflow_complete_signal:
                     self.queue_pr_creation_if_needed(task, workflow_def)
                 else:
                     self.logger.warning(

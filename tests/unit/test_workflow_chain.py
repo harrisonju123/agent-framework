@@ -414,6 +414,8 @@ class TestRoutingSignalChain:
         assert target_queue == "qa"
 
     def test_workflow_complete_skips_chain(self, agent, queue):
+        # DEFAULT_WORKFLOW has no pr_creator, so queue_pr_creation_if_needed
+        # bails early even though __complete__ now triggers the PR path.
         task = _make_task(workflow="default")
         response = _make_response()
         signal = _make_signal(target=WORKFLOW_COMPLETE)
@@ -424,6 +426,8 @@ class TestRoutingSignalChain:
 
     def test_workflow_complete_signal_stops_chain_even_with_pr(self, agent, queue):
         """WORKFLOW_COMPLETE signal terminates chain regardless of pr_url."""
+        # pr_url is in the response — executor now saves it to task.context,
+        # so queue_pr_creation_if_needed detects it and returns early.
         task = _make_task(workflow="default")
         response = _make_response(pr_url="https://github.com/org/repo/pull/99")
         signal = _make_signal(target=WORKFLOW_COMPLETE)
@@ -587,6 +591,24 @@ class TestPRCreation:
         pr_agent._enforce_workflow_chain(task, response)
 
         queue.push.assert_not_called()
+
+    def test_workflow_complete_signal_queues_pr_creation(self, pr_agent, queue):
+        """__complete__ signal at non-terminal step + implementation_branch → PR queued."""
+        task = _make_task(
+            workflow="pr_workflow",
+            implementation_branch="agent/engineer/PROJ-123-abc12345",
+        )
+        response = _make_response()
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        pr_agent._enforce_workflow_chain(task, response, routing_signal=signal)
+
+        queue.push.assert_called_once()
+        pr_task = queue.push.call_args[0][0]
+        target_queue = queue.push.call_args[0][1]
+        assert target_queue == "architect"
+        assert pr_task.type == TaskType.PR_REQUEST
+        assert pr_task.context["pr_creation_step"] is True
 
     def test_pr_creation_task_carries_implementation_branch(self, pr_agent, queue):
         """PR creation task inherits implementation_branch from upstream context."""
@@ -949,6 +971,55 @@ class TestExecutorCompletedCheck:
 
         # Should NOT find it — the bug was checking the wrong path
         assert executor._is_chain_task_already_queued("engineer", "task-abc", chain_id=chain_id) is False
+
+
+class TestExecutorWorkflowCompleteSignal:
+    """Tests for __complete__ routing signal PR info capture in executor."""
+
+    def test_complete_signal_saves_pr_info_to_task_context(self, queue):
+        """__complete__ signal with PR in response → pr_url/pr_number saved to task.context."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+        dag = DEFAULT_WORKFLOW.to_dag("default")
+
+        task = _make_task(workflow="default", workflow_step="plan")
+        response = _make_response(pr_url="https://github.com/org/repo/pull/77")
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        routed = executor.execute_step(
+            workflow=dag,
+            task=task,
+            response=response,
+            current_agent_id="architect",
+            routing_signal=signal,
+        )
+
+        assert routed is False
+        assert task.context["pr_url"] == "https://github.com/org/repo/pull/77"
+        assert task.context["pr_number"] == 77
+
+    def test_complete_signal_without_pr_does_not_add_pr_context(self, queue):
+        """__complete__ signal without PR → no pr_url in task.context."""
+        from agent_framework.workflow.executor import WorkflowExecutor
+
+        executor = WorkflowExecutor(queue, queue.queue_dir)
+        dag = DEFAULT_WORKFLOW.to_dag("default")
+
+        task = _make_task(workflow="default", workflow_step="plan")
+        response = _make_response()
+        signal = _make_signal(target=WORKFLOW_COMPLETE)
+
+        routed = executor.execute_step(
+            workflow=dag,
+            task=task,
+            response=response,
+            current_agent_id="architect",
+            routing_signal=signal,
+        )
+
+        assert routed is False
+        assert "pr_url" not in task.context
 
 
 # -- Bounce loop prevention --

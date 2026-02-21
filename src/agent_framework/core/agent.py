@@ -947,7 +947,7 @@ class Agent:
         # Extract structured plan from architect's planning response
         if (task.plan is None
                 and self.config.base_id == "architect"
-                and task.context.get("workflow_step", task.type) in ("plan", "planning")):
+                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
             content = getattr(response, "content", "") or ""
             extracted = self._extract_plan_from_response(content)
             if extracted:
@@ -1015,6 +1015,31 @@ class Agent:
                 f"Routing signal: target={routing_signal.target_agent}, "
                 f"reason={routing_signal.reason}"
             )
+
+        # Reconcile verdict when architect signals completion via MCP tool
+        # rather than text marker — routing signal is read after verdict is set
+        if (routing_signal
+                and routing_signal.target_agent == WORKFLOW_COMPLETE
+                and self.config.base_id == "architect"
+                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")
+                and task.context.get("verdict") != "no_changes"):
+            prev_verdict = task.context.get("verdict")
+            task.context["verdict"] = "no_changes"
+            audit = task.context.get("verdict_audit")
+            if isinstance(audit, dict):
+                audit["method"] = "routing_signal_complete"
+                audit["value"] = "no_changes"
+            self.logger.info(
+                f"Verdict overridden: {prev_verdict!r} → 'no_changes' "
+                f"(routing signal WORKFLOW_COMPLETE at plan step)"
+            )
+            self._session_logger.log(
+                "verdict_override", task_id=task.id,
+                prev_verdict=prev_verdict, new_verdict="no_changes",
+                method="routing_signal_complete",
+                routing_signal_reason=routing_signal.reason,
+            )
+            self._patch_chain_state_verdict(task)
 
         self._run_post_completion_flow(task, response, routing_signal, task_start_time)
 
@@ -1172,7 +1197,7 @@ class Agent:
 
         # no_changes marker overrides any previous verdict at plan step
         if (self.config.base_id == "architect"
-                and task.context.get("workflow_step", task.type) in ("plan", "planning")):
+                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
             if self._is_no_changes_response(content):
                 task.context["verdict"] = "no_changes"
                 audit.method = "no_changes_marker"
@@ -2591,6 +2616,34 @@ class Agent:
             )
         except Exception as e:
             self.logger.warning(f"Failed to save chain state for {task.id}: {e}")
+
+    def _patch_chain_state_verdict(self, task: Task) -> None:
+        """Patch the last step's verdict in chain state to match a post-hoc override.
+
+        Called when the routing signal (MCP tool) corrects the verdict after
+        chain state was already written by _save_step_to_chain_state.
+        """
+        try:
+            from .chain_state import load_chain_state, save_chain_state
+
+            state = load_chain_state(self.workspace, task.root_id)
+            if state is None or not state.steps:
+                return
+
+            last_step = state.steps[-1]
+            if last_step.task_id != task.id:
+                self.logger.debug(
+                    f"Chain state last step ({last_step.task_id}) != current task "
+                    f"({task.id}) — skipping verdict patch"
+                )
+                return
+
+            last_step.verdict = task.context.get("verdict")
+            last_step.verdict_audit = task.context.get("verdict_audit")
+            save_chain_state(self.workspace, state)
+            self.logger.debug(f"Chain state patched: verdict → {last_step.verdict!r}")
+        except Exception as e:
+            self.logger.warning(f"Failed to patch chain state verdict for {task.id}: {e}")
 
     def _emit_workflow_summary(self, task: Task) -> None:
         """Emit a waterfall summary event capturing the full workflow timeline.

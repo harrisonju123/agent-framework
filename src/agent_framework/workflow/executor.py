@@ -120,6 +120,9 @@ class WorkflowExecutor:
             return False
 
         if routing_signal and routing_signal.target_agent == WORKFLOW_COMPLETE:
+            if pr_info:
+                task.context["pr_url"] = pr_info["pr_url"]
+                task.context["pr_number"] = pr_info["pr_number"]
             self.logger.info(
                 f"Workflow marked complete by routing signal: {routing_signal.reason}"
             )
