@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMBackend
     from ..queue.file_queue import FileQueue
     from ..indexing.query import IndexQuery
+    from .feedback_bus import FeedbackBus
 
 from .task import Task, TaskType
 from .task_manifest import load_manifest
@@ -73,6 +74,9 @@ class PromptContext:
     # Codebase indexing (structural code context injection)
     code_index_query: Optional["IndexQuery"] = None
     code_indexing_config: Optional[Dict[str, Any]] = None
+
+    # Feedback bus for cross-feature learning (QA warnings injection)
+    feedback_bus: Optional["FeedbackBus"] = None
 
     def __post_init__(self):
         """Initialize default values."""
@@ -181,6 +185,9 @@ class PromptBuilder:
 
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
+
+        # Inject QA pattern warnings for engineer agents
+        prompt = self._inject_qa_warnings(prompt, task)
 
         # Inject tool efficiency tips from session analysis
         prompt = self._inject_tool_tips(prompt, task)
@@ -1099,6 +1106,50 @@ If a tool call fails:
                     categories=task_tags,
                 )
             return prompt + "\n" + memory_section
+
+        return prompt
+
+    def _inject_qa_warnings(self, prompt: str, task: Task) -> str:
+        """Append recurring QA pattern warnings for engineer agents.
+
+        Separate from general memory injection — these are formatted as
+        explicit warnings to draw attention to commonly missed patterns.
+        Only injected for engineer agents to avoid noise in other roles.
+        """
+        if not self.ctx.feedback_bus:
+            return prompt
+
+        # Only inject for engineer agents — they're the ones writing code
+        if self.ctx.config.base_id != "engineer":
+            return prompt
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return prompt
+
+        # Respect context window budget
+        max_chars = 500
+        if self.ctx.context_window_manager:
+            budget = self.ctx.context_window_manager.compute_memory_budget()
+            if budget == 0:
+                return prompt
+            max_chars = min(max_chars, budget)
+
+        warnings_section = self.ctx.feedback_bus.get_qa_warnings(
+            repo_slug=repo_slug,
+            agent_type=self.ctx.config.base_id,
+            max_chars=max_chars,
+        )
+
+        if warnings_section:
+            self.logger.debug(f"Injected {len(warnings_section)} chars of QA warnings")
+            if self.ctx.session_logger:
+                self.ctx.session_logger.log(
+                    "qa_warnings_injected",
+                    repo=repo_slug,
+                    chars=len(warnings_section),
+                )
+            return prompt + "\n" + warnings_section
 
         return prompt
 

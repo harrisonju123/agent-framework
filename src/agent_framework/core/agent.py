@@ -555,6 +555,7 @@ class Agent:
             workflows_config=workflows_config,
             code_index_query=self._code_index_query,
             code_indexing_config=code_indexing_config,
+            feedback_bus=self._feedback_bus,
         )
         self._prompt_builder = PromptBuilder(prompt_ctx)
 
