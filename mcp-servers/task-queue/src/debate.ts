@@ -288,6 +288,34 @@ async function synthesizeArguments(
   });
 }
 
+// Domain keywords grouped by specialization area.
+// Used to detect domain signals in debate synthesis for specialization hints.
+const DOMAIN_KEYWORDS: Record<string, string[]> = {
+  frontend: ["frontend", "ui", "ux", "react", "vue", "css", "component", "browser", "dom", "accessibility"],
+  backend: ["backend", "api", "server", "endpoint", "rest", "graphql", "middleware", "authentication", "authorization"],
+  infrastructure: ["infrastructure", "deploy", "ci", "cd", "docker", "kubernetes", "terraform", "aws", "monitoring", "scaling"],
+  data: ["database", "sql", "migration", "schema", "index", "query", "cache", "redis", "postgres", "mongo"],
+  testing: ["testing", "test", "coverage", "e2e", "integration", "unit test", "fixture", "mock"],
+};
+
+/**
+ * Detect which domain areas appear in the debate synthesis text.
+ * Returns domain names that have 2+ keyword matches (to reduce false positives
+ * from incidental mentions).
+ */
+function detectDomainSignals(text: string): string[] {
+  const lower = text.toLowerCase();
+  const matches: string[] = [];
+
+  for (const [domain, keywords] of Object.entries(DOMAIN_KEYWORDS)) {
+    const hitCount = keywords.filter(kw => lower.includes(kw)).length;
+    if (hitCount >= 2) {
+      matches.push(domain);
+    }
+  }
+  return matches;
+}
+
 /**
  * Store debate synthesis as a persistent memory with category "architectural_decisions".
  * Memory failures are logged but don't break the debate flow.
@@ -346,9 +374,80 @@ function storeDebateMemory(
     } else {
       logger.warn(`Failed to store debate memory: ${result.message}`, { debate_id: debateId });
     }
+
+    // Store specialization hint when debate reveals domain-specific signals.
+    // Only for high/medium confidence — low confidence debates are too uncertain
+    // to influence future agent routing.
+    storeDebateSpecializationHint(workspace, repoSlug, debateId, topic, synthesis);
   } catch (error: unknown) {
     const err = error as Error;
     logger.warn(`Error storing debate memory: ${err.message}`, { debate_id: debateId });
+  }
+}
+
+/**
+ * Detect domain signals in debate synthesis and store as specialization hints.
+ *
+ * When a debate's recommendation and reasoning mention domain-specific terms
+ * (e.g., "frontend", "react", "component" → frontend domain), this stores a
+ * hint so detect_specialization() can route future tasks to better-matched profiles.
+ *
+ * Only acts on high/medium confidence debates to avoid noise from uncertain outcomes.
+ */
+function storeDebateSpecializationHint(
+  workspace: string,
+  repoSlug: string,
+  debateId: string,
+  topic: string,
+  synthesis: {
+    recommendation: string;
+    confidence: "high" | "medium" | "low";
+    trade_offs: string[];
+    reasoning: string;
+  },
+): void {
+  if (synthesis.confidence === "low") {
+    return;
+  }
+
+  const fullText = [topic, synthesis.recommendation, synthesis.reasoning].join(" ");
+  const domains = detectDomainSignals(fullText);
+
+  if (domains.length === 0) {
+    return;
+  }
+
+  try {
+    const hintContent = [
+      `Domains: ${domains.join(", ")}`,
+      `Source debate: ${topic}`,
+      `Recommendation: ${synthesis.recommendation}`,
+      `Confidence: ${synthesis.confidence}`,
+    ].join("\n");
+
+    const tags = [
+      "debate_hint",
+      debateId,
+      `confidence:${synthesis.confidence}`,
+      ...domains.map(d => `domain:${d}`),
+    ];
+
+    const result = agentRemember(workspace, {
+      repo_slug: repoSlug,
+      agent_type: "shared",
+      category: "specialization_hints",
+      content: hintContent,
+      tags,
+    });
+
+    if (result.success) {
+      logger.info(`Specialization hint stored: domains=[${domains.join(", ")}]`, { debate_id: debateId });
+    } else {
+      logger.warn(`Failed to store specialization hint: ${result.message}`, { debate_id: debateId });
+    }
+  } catch (error: unknown) {
+    const err = error as Error;
+    logger.warn(`Error storing specialization hint: ${err.message}`, { debate_id: debateId });
   }
 }
 

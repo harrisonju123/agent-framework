@@ -3000,6 +3000,21 @@ class Agent:
                 count=count,
             )
 
+        # Aggregate QA findings for cross-task recurring pattern detection
+        structured_findings = task.context.get("structured_findings")
+        if structured_findings:
+            try:
+                from .feedback_bus import aggregate_qa_findings
+                aggregate_qa_findings(
+                    self._memory_store,
+                    self._session_logger,
+                    task_id=task.id,
+                    repo_slug=repo_slug,
+                    structured_findings=structured_findings,
+                )
+            except Exception as e:
+                self.logger.debug(f"Feedback bus QA aggregation failed (non-fatal): {e}")
+
         # Store successful recovery pattern so future replans can reference it
         if task.replan_history and task.status == TaskStatus.COMPLETED:
             self._error_recovery.store_replan_outcome(task, repo_slug)

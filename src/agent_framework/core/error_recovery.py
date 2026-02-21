@@ -446,6 +446,23 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
             task.context["_self_eval_critique"] = verdict
             task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): {verdict[:500]}")
 
+            # Store missed criteria patterns for cross-task learning
+            repo_slug = self._get_repo_slug(task)
+            if repo_slug and criteria:
+                try:
+                    from .feedback_bus import store_self_eval_failure
+                    store_self_eval_failure(
+                        self.memory_store,
+                        self.session_logger,
+                        task_id=task.id,
+                        repo_slug=repo_slug,
+                        agent_type=self.config.base_id,
+                        acceptance_criteria=criteria,
+                        critique=verdict,
+                    )
+                except Exception as e:
+                    self.logger.debug(f"Feedback bus self-eval storage failed (non-fatal): {e}")
+
             # Reset without consuming queue retry
             task.status = TaskStatus.PENDING
             task.started_at = None

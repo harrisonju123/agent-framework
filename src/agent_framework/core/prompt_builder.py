@@ -182,6 +182,9 @@ class PromptBuilder:
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
 
+        # Inject recurring QA warnings and missed criteria from cross-task learning
+        prompt = self._inject_recurring_qa_warnings(prompt, task)
+
         # Inject tool efficiency tips from session analysis
         prompt = self._inject_tool_tips(prompt, task)
 
@@ -1099,6 +1102,60 @@ If a tool call fails:
                     categories=task_tags,
                 )
             return prompt + "\n" + memory_section
+
+        return prompt
+
+    def _inject_recurring_qa_warnings(self, prompt: str, task: Task) -> str:
+        """Inject known pitfalls from cross-task feedback loop.
+
+        Queries recurring_qa_findings and missed_criteria from memory,
+        formats as a Known Pitfalls section for engineer agents.
+        Budget-aware: skipped when context window is tight.
+        """
+        # Only inject for engineer agents — architects and QA have their own context
+        if self.ctx.config.base_id != "engineer":
+            return prompt
+
+        if not self.ctx.memory_retriever:
+            return prompt
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return prompt
+
+        # Respect context window budget
+        max_chars = 1000
+        if self.ctx.context_window_manager:
+            budget = self.ctx.context_window_manager.compute_memory_budget()
+            if budget == 0:
+                return prompt
+            max_chars = min(max_chars, budget)
+
+        try:
+            from .feedback_bus import format_known_pitfalls
+            # Access memory store through the retriever
+            memory_store = self.ctx.memory_retriever._store
+            pitfalls_section = format_known_pitfalls(
+                memory_store,
+                repo_slug=repo_slug,
+                agent_type=self.ctx.config.base_id,
+                max_chars=max_chars,
+            )
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Feedback bus pitfalls injection failed (non-fatal): {e}")
+            return prompt
+
+        if pitfalls_section:
+            if self.logger:
+                self.logger.debug(f"Injected {len(pitfalls_section)} chars of known pitfalls")
+            if self.ctx.session_logger:
+                self.ctx.session_logger.log(
+                    "feedback_bus_warnings_injected",
+                    repo=repo_slug,
+                    chars=len(pitfalls_section),
+                )
+            return prompt + "\n\n" + pitfalls_section
 
         return prompt
 
