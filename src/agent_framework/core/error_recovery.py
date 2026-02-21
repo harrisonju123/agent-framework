@@ -329,6 +329,47 @@ class ErrorRecoveryManager:
         except Exception:
             return ""
 
+    def store_self_eval_failure(self, task: Task, critique: str) -> None:
+        """Persist self-eval failure to memory for cross-task learning.
+
+        Stores the critique text with tags derived from the acceptance criteria
+        so the memory system knows which criteria are commonly missed.
+        """
+        if not self.memory_store or not self.memory_store.enabled:
+            return
+
+        repo_slug = self._get_repo_slug(task)
+        if not repo_slug:
+            return
+
+        # Build tags from acceptance criteria keywords
+        tags = []
+        for criterion in (task.acceptance_criteria or []):
+            # Extract distinctive words (>4 chars) as tags
+            words = [w.lower() for w in criterion.split() if len(w) > 4]
+            tags.extend(words[:3])
+        tags = list(set(tags))[:10]  # Dedupe, cap at 10
+
+        content = f"Self-eval FAIL: {critique[:500]}"
+
+        try:
+            self.memory_store.remember(
+                repo_slug=repo_slug,
+                agent_type=self.config.base_id,
+                category="self_eval_failures",
+                content=content,
+                source_task_id=task.id,
+                tags=tags,
+            )
+            self.session_logger.log(
+                "self_eval_failure_stored",
+                task_id=task.id,
+                tag_count=len(tags),
+                content_preview=content[:100],
+            )
+        except Exception as e:
+            self.logger.debug(f"Failed to store self-eval failure memory: {e}")
+
     async def self_evaluate(
         self, task: Task, response, *, test_passed: Optional[bool] = None, working_dir: Optional[Path] = None
     ) -> bool:
@@ -441,6 +482,9 @@ Reply with PASS if all criteria are met, or FAIL followed by specific gaps.
                 f"(attempt {eval_retries + 1}/{self._self_eval_max_retries}): "
                 f"{verdict[:500]}"
             )
+
+            # Persist failure to memory for cross-task learning
+            self.store_self_eval_failure(task, verdict)
 
             task.context["_self_eval_count"] = eval_retries + 1
             task.context["_self_eval_critique"] = verdict

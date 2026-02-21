@@ -1,135 +1,218 @@
 # Agent Framework
 
-Multi-agent system for autonomous software development. Agents plan, implement, test, review, and ship code — with zero human intervention. Works with or without JIRA.
+Autonomous software engineering team powered by Claude. Three agents — Architect, Engineer, QA — plan, implement, review, and ship code with zero human intervention.
 
-![Agent Dashboard](img.png)
+![Dashboard](img_1.png)
 
 ## How It Works
 
 ```
 You describe what to build
-  |
-  v
-Architect plans, routes, and breaks down work
-  |
-  v
-Engineer implements --> QA verifies + reviews --> PRs created
+  │
+  ▼
+Architect plans and breaks down work
+  │
+  ▼
+Engineer implements ──► QA reviews ──► PR created
+       ▲                    │
+       └── needs fix ───────┘
 ```
 
-Three self-sufficient agents form a complete autonomous engineering team. Fewer agents = fewer queue hops = faster execution = more autonomy.
+Tasks flow through a configurable workflow DAG. The default chain:
 
-With **Team Mode** enabled, each ticket runs as a single Claude Agent Teams session — the full architect/engineer/QA workflow happens in one pass instead of bouncing between queues.
+**plan → implement → QA review → create PR**
+
+A `preview` workflow adds extra gates: **plan → preview → preview review → implement → code review → QA review → create PR**.
+
+Each step is a separate Claude Code session with structured context passed between steps via an append-only chain state file. When QA finds issues, the task loops back to the engineer automatically. After `MAX_DAG_REVIEW_CYCLES` bounces, it escalates to the Architect for replanning.
 
 ## Quick Start
 
 ```bash
 pip install -e .
 
-# Set up your config
 cp config/agent-framework.yaml.example config/agent-framework.yaml
+# Edit to add your repositories (see Configuration below)
 ```
 
-Edit `config/agent-framework.yaml` and add your repositories (see [Configuration](#configuration) below), then:
+Build MCP servers for real-time JIRA/GitHub access during agent execution:
 
 ```bash
-# Build MCP servers (JIRA + GitHub access during execution)
 cd mcp-servers/jira && npm install && npm run build && cd ../..
 cd mcp-servers/github && npm install && npm run build && cd ../..
 
-# Configure credentials (optional — only needed for JIRA/GitHub MCP tools)
-cp .env.example .env   # Edit with JIRA_SERVER, JIRA_EMAIL, JIRA_API_TOKEN, GITHUB_TOKEN
+# Optional: JIRA + GitHub credentials
+cp .env.example .env  # Edit with your tokens
 
 # Validate setup
 agent doctor
 ```
 
-### Describe What to Build
+### Start Working
 
 ```bash
-agent up            # starts agents + dashboard, opens browser, returns terminal
+agent up              # Start agents + dashboard, open browser
 agent work
 # > What would you like to work on? Add retry logic to the payment webhook handler
 # > Which repository? your-org/your-repo
 
-agent down          # tears everything down when you're done
+agent down            # Tear down when done
 ```
 
-The framework queues a planning task to the Architect, who breaks it down, chains to Engineer for implementation, then QA for review — all locally via file queues.
+The framework queues a planning task to the Architect, who chains through Engineer and QA — all locally via file-based queues.
 
-### Process a JIRA Epic (optional)
-
-If your repo has a `jira_project` configured:
+### JIRA Integration (Optional)
 
 ```bash
-agent work --epic PROJ-100 --parallel
-agent summary --epic PROJ-100
+agent work --epic PROJ-100 --parallel   # Process all tickets in an epic
+agent run PROJ-123                      # Work a single ticket
+agent run PROJ-123 --agent engineer     # Skip planning, go straight to implementation
+agent summary --epic PROJ-100           # Progress report with PR links
 ```
 
-### Work a Single Ticket
-
-```bash
-agent run PROJ-123
-agent run PROJ-123 --agent engineer
-```
+Repos without a `jira_project` configured use local-only task tracking — same workflow pipeline, just no JIRA sync.
 
 ## Team Mode
 
-Team mode uses [Claude Agent Teams](https://docs.anthropic.com/en/docs/claude-code) to run multi-agent workflows in a single session. Instead of serial queue hops (engineer finishes → QA picks up → architect reviews), a team session handles the full workflow atomically.
+Team mode uses Claude Agent Teams to run multi-agent workflows in a single session instead of serial queue hops.
 
-### Autonomous Teams (Pipeline)
+### Autonomous Teams
 
-Enable in `config/agent-framework.yaml`:
+Enable in config:
 
 ```yaml
 team_mode:
   enabled: true
-  min_workflow: standard   # standard and above trigger teams
 ```
 
-| Workflow | Lead | Teammates | Behavior |
-|----------|------|-----------|----------|
-| `simple` | engineer | none | Single-agent, no team |
-| `standard` | engineer | QA | Engineer implements, QA validates in same session |
-| `full` | architect | engineer, QA | Architect plans, engineer implements, QA validates |
-
-Teammate prompts come from `config/agents.yaml` — no duplication.
+| Workflow | Lead | Teammates |
+|----------|------|-----------|
+| `simple` | engineer | — |
+| `standard` | engineer | QA |
+| `full` | architect | engineer, QA |
 
 ### Interactive Teams
 
-For hands-on work where you want to steer the team:
-
 ```bash
-# Full team on a repo
-agent team start --template full --repo justworkshr/pto
-
-# Full team with epic context loaded
-agent team start --template full --repo justworkshr/pto --epic ME-443
-
-# Code review team (2 specialized reviewers)
-agent team start --template review --repo justworkshr/pto
-
-# Debug a failed task
-agent team escalate task-impl-1234
+agent team start --template full --repo owner/repo
+agent team start --template full --repo owner/repo --epic ME-443
+agent team start --template review --repo owner/repo
+agent team escalate TASK-ID
 ```
 
 Templates: `full` (Architect + Engineer + QA), `review` (QA + Security + Performance), `debug` (2 investigators).
 
-## Workflow Modes
-
-| Mode | Flow | Best For |
-|------|------|----------|
-| **simple** | Architect → Engineer | Bug fixes, small changes |
-| **standard** | Architect → Engineer → QA | Features needing verification |
-| **full** | Architect → Engineer → QA → Architect | Complex features |
-
-### Failure Loop
-
-When QA finds issues, tasks loop back to Engineer automatically:
+## Architecture
 
 ```
-QA finds issues → Engineer fixes → QA re-verifies
-After 5 retries → escalate to Architect for replanning
+src/agent_framework/
+├── core/           Agent loop, prompt builder, workflow router, chain state,
+│                   error recovery, review cycles, budget manager, orchestrator
+├── workflow/       DAG executor, conditions, step routing
+├── cli/            CLI commands, TUI dashboard, team commands
+├── analytics/      Per-task metrics: agentic, chain, git, LLM, decomposition,
+│                   performance, waste, review cycles, verdicts
+├── llm/            Claude CLI backend, LiteLLM backend, model routing
+├── memory/         Cross-task learning: memory store, tool pattern analysis
+├── queue/          File-based task queues with atomic locking
+├── integrations/   JIRA and GitHub clients
+├── safeguards/     Circuit breaker, watchdog, escalation
+├── sandbox/        Test runners (pytest, jest, rspec), static analysis, Docker
+├── indexing/       Codebase indexing and semantic search
+├── workspace/      Multi-repo workspace management
+├── web/            Dashboard (FastAPI + Vue.js)
+└── utils/          Subprocess, error handling, validation, atomic IO, cascades
 ```
+
+### Agents
+
+| Agent | Role | Permissions |
+|-------|------|-------------|
+| **Architect** | Plans work, breaks down large tasks, reviews architecture, creates PRs | JIRA create, commit, PR |
+| **Engineer** | Implements code, writes tests, fixes review feedback | commit, PR |
+| **QA** | Linting, testing, security scanning, code review | PR |
+
+### Workflow DAG
+
+Workflows are defined as directed acyclic graphs with conditional edges in `config/agent-framework.yaml`:
+
+```yaml
+workflows:
+  default:
+    start_step: plan
+    steps:
+      plan:
+        agent: architect
+        next: [{ target: implement }]
+      implement:
+        agent: engineer
+        next: [{ target: qa_review }]
+      qa_review:
+        agent: qa
+        next:
+          - { target: create_pr, condition: approved, priority: 10 }
+          - { target: implement, condition: needs_fix, priority: 5 }
+      create_pr:
+        agent: architect
+        task_type: pr_request
+```
+
+A `preview` workflow is also included — engineer produces a read-only execution plan that the architect approves before any code is written.
+
+### Task Decomposition
+
+Tasks estimated at >350 lines are automatically decomposed into subtasks (or 6+ discrete deliverables at >=200 lines). Each subtask runs independently; a fan-in task collects results and flows through the review chain. The fan-in creates a single PR for the entire decomposed task.
+
+### Chain State
+
+Each workflow chain maintains an append-only state file at `.agent-communication/chain-state/{root_task_id}.json`. Step records capture the plan, files modified, verdict, and findings — giving downstream agents structured context about what happened upstream.
+
+Upstream context is resolved via a priority cascade:
+1. Rejection feedback (direct fix instructions)
+2. Chain state (structured step records)
+3. Structured findings (file-grouped QA checklist)
+4. Upstream summary (legacy inline context)
+
+### Safeguards
+
+Three ceilings prevent runaway loops:
+- **MAX_CHAIN_DEPTH = 10** — per-chain step limit
+- **MAX_DAG_REVIEW_CYCLES = 2** — QA ↔ engineer bounce cap
+- **MAX_GLOBAL_CYCLES = 15** — absolute ceiling across escalations
+
+Additional safety:
+- Circuit breaker with configurable health thresholds
+- Task-type-specific timeouts (1h for implementation, 30m for testing, 15m for docs)
+- Watchdog auto-restart for dead agents
+- Stale lock recovery
+- Queue size and task age limits
+
+### Observability
+
+Every task produces a structured session log at `logs/sessions/{task_id}.jsonl` with prompt builds, tool calls, LLM completions, cost tracking, and context budget events.
+
+Analytics collectors aggregate session logs into Pydantic reports:
+
+| Collector | Measures |
+|-----------|----------|
+| `agentic_metrics` | Memory recall, tool usage patterns, context budget, upstream cascade |
+| `chain_metrics` | Step success rates, duration p50/p90, retry patterns |
+| `git_metrics` | Commits, lines changed, push rates, edit-to-commit latency |
+| `llm_metrics` | Cost per task/model, token efficiency, latency percentiles |
+| `decomposition_metrics` | Decomposition rate, estimation accuracy, fan-in reliability |
+| `performance_metrics` | Agent success/retry rates, completion times |
+| `waste_metrics` | Duplicate reads, exploration waste, tool call efficiency |
+
+The web dashboard surfaces these via an Insights page.
+
+### MCP Integration
+
+Agents access JIRA and GitHub in real-time during execution via Model Context Protocol servers:
+
+- **JIRA** — search, create, transition, and comment on tickets
+- **GitHub** — create branches, commit, push, create/comment on PRs
+
+A read-cache MCP server deduplicates file reads across workflow steps.
 
 ## CLI Reference
 
@@ -137,26 +220,20 @@ After 5 retries → escalate to Architect for replanning
 
 | Command | Description |
 |---------|-------------|
-| `agent work` | Interactive: describe goal, pick repo, choose workflow |
-| `agent work --epic PROJ-100` | Process all tickets in a JIRA epic |
-| `agent work --epic PROJ-100 --parallel` | Process epic tickets in parallel worktrees |
-| `agent run PROJ-123` | Work on a single JIRA ticket |
+| `agent work` | Interactive: describe goal, pick repo |
+| `agent work --epic PROJ-100 --parallel` | Process all tickets in an epic |
+| `agent run PROJ-123` | Work a single JIRA ticket |
 | `agent pull --project PROJ` | Pull unassigned tickets from JIRA backlog |
 
 ### Operations
 
 | Command | Description |
 |---------|-------------|
-| `agent up` | Start agents + web dashboard in background, open browser, return terminal |
-| `agent up --no-browser` | Same but skip opening browser |
-| `agent down` | Stop agents + dashboard |
-| `agent down --force` | Force-kill everything |
-| `agent start` | Start agents only (blocks terminal, no dashboard) |
-| `agent start --replicas 4` | Start N replicas per agent type (parallel processing) |
-| `agent stop` | Stop agents + dashboard gracefully |
-| `agent pause` / `agent resume` | Pause/resume task processing |
+| `agent up` | Start agents + dashboard, open browser |
+| `agent down` | Stop everything |
+| `agent start --replicas 4` | Start N replicas per agent type |
+| `agent pause` / `agent resume` | Pause/resume processing |
 | `agent status --watch` | Live terminal dashboard |
-| `agent summary --epic PROJ-100` | Epic progress with PR links and errors |
 | `agent retry PROJ-104` | Retry a failed task |
 | `agent retry --all` | Retry all failed tasks |
 
@@ -164,76 +241,61 @@ After 5 retries → escalate to Architect for replanning
 
 | Command | Description |
 |---------|-------------|
-| `agent team start -t full -r owner/repo` | Launch interactive team session |
-| `agent team start -t full -r owner/repo -e PROJ-100` | Team session with epic context |
-| `agent team escalate TASK-ID` | Debug a failed task with a team |
-| `agent team status` | List active team sessions |
-| `agent team handoff TEAM-NAME` | Push team output to autonomous pipeline |
+| `agent team start -t full -r owner/repo` | Launch interactive team |
+| `agent team start -t full -r owner/repo -e PROJ-100` | Team with epic context |
+| `agent team escalate TASK-ID` | Debug a failed task |
+| `agent team status` | List active sessions |
 
-### Analysis & Health
+### Analysis
 
 | Command | Description |
 |---------|-------------|
-| `agent doctor` | Validate configuration and connectivity |
-| `agent analyze --repo owner/repo` | Scan repo for issues, create JIRA epic |
-| `agent analyze --repo R --focus "auth flow"` | Focused analysis on specific areas |
-| `agent check --fix` | Run circuit breaker checks, auto-fix |
+| `agent doctor` | Validate config and connectivity |
+| `agent analyze --repo owner/repo` | Scan repo for issues |
 | `agent dashboard` | Web dashboard with setup wizard |
-| `agent cleanup-worktrees` | Remove stale git worktrees |
+| `agent check --fix` | Circuit breaker checks, auto-fix |
 
 ## Configuration
 
 ### `config/agent-framework.yaml`
 
-This file is **not tracked by git** — it contains your repo list and local settings. Copy the example to get started:
+Not tracked by git. Copy the example to start:
 
 ```bash
 cp config/agent-framework.yaml.example config/agent-framework.yaml
 ```
 
-The key section is `repositories` — add the repos you want agents to work on:
+Key sections:
 
 ```yaml
+# Add repos you want agents to work on
 repositories:
-  # Local-only repo (no JIRA)
   - github_repo: your-org/your-app
     display_name: Your App
-
-  # Repo with JIRA integration
   - github_repo: your-org/another-repo
-    jira_project: PROJ
+    jira_project: PROJ           # optional
     display_name: Another Repo
-```
 
-`jira_project` is optional. Repos without it use local-only task tracking — tasks flow through the same architect → engineer → QA pipeline, just without JIRA ticket creation or status sync.
-
-Other settings you may want to adjust:
-
-```yaml
+# LLM backend
 llm:
-  mode: claude_cli                          # or "litellm" for API calls
+  mode: claude_cli               # or "litellm" for API calls
   claude_cli_default_model: claude-sonnet-4-5-20250929
-  use_mcp: true                             # JIRA/GitHub access during execution
-  mcp_config_path: config/mcp-config.json
+  use_mcp: true
 
+# Team mode
 team_mode:
-  enabled: true       # Multi-agent Claude Teams sessions
-
-multi_repo:
-  workspace_root: ~/.agent-workspaces
-  worktree:
-    enabled: true     # Isolated git worktrees per task
+  enabled: true
 ```
 
-See `config/agent-framework.yaml.example` for all available options.
+See the example file for all options including timeouts, safeguards, analytics, memory, and self-evaluation settings.
 
 ### `config/agents.yaml`
 
-Defines agent roles, prompts, and permissions. Each agent has a queue, prompt, and JIRA/GitHub permissions. See `config/agents.yaml` for the full definitions.
+Defines agent roles, prompts, and permissions. Prompts reference documentation in `config/docs/` rather than duplicating it inline.
 
-### `.env` (optional)
+### `.env` (Optional)
 
-Only needed if you're using JIRA or GitHub MCP integrations:
+Only needed for JIRA/GitHub MCP:
 
 ```
 JIRA_SERVER=https://your-org.atlassian.net
@@ -242,66 +304,20 @@ JIRA_API_TOKEN=your-token
 GITHUB_TOKEN=your-github-token
 ```
 
-## Architecture
-
-```
-src/agent_framework/
-├── cli/           CLI commands, TUI dashboard, team commands
-├── core/          Agent loop, orchestrator, task model, team composer
-├── llm/           Claude CLI backend, LiteLLM backend, model selection
-├── queue/         File-based task queues with locking
-├── integrations/  JIRA and GitHub clients
-├── safeguards/    Circuit breaker, watchdog, retry/escalation
-├── workspace/     Multi-repo manager, git worktrees
-├── web/           Web dashboard (FastAPI + Vue.js)
-└── utils/         Logging, validation, subprocess, error handling
-```
-
-### Agent Types
-
-| Agent | Role |
-|-------|------|
-| **Architect** | Plans, routes, analyzes repos, breaks down work, creates tickets, reviews architecture, creates PRs (full workflow) |
-| **Engineer** | Implements code, writes tests, creates PRs (simple workflow), self-heals via test-runner teammate |
-| **QA** | Single quality gate — linting, testing, security scanning, code review, PR creation (standard workflow) |
-
-### MCP Integration
-
-Agents access JIRA and GitHub in real-time during execution via MCP servers:
-
-- **JIRA**: Search, create, transition, comment on issues and epics
-- **GitHub**: Create branches, commit, push, create PRs, add comments
-
-### Safeguards
-
-1. Retry limits (max 5 per task)
-2. Escalation loop prevention
-3. Circuit breaker (8 health checks)
-4. Task timeouts (per task type)
-5. Watchdog auto-restart
-6. Graceful shutdown (SIGTERM then SIGKILL)
-7. Stale lock recovery
-8. Queue size limits
-9. Task age limits
-10. Worktree safety (won't delete unpushed work)
-
 ## Troubleshooting
 
 ```bash
 agent doctor              # Check config, credentials, connectivity
-agent check --fix         # Run safety checks and auto-fix
-agent cleanup-worktrees   # Remove stale worktrees
+agent check --fix         # Safety checks with auto-fix
 ```
 
 | Problem | Fix |
 |---------|-----|
-| Missing config | `cp config/agent-framework.yaml.example config/agent-framework.yaml` |
-| Tasks stuck as in_progress | Agent auto-recovers orphaned tasks on next poll cycle |
+| Tasks stuck | Agents auto-recover orphaned tasks on next poll cycle |
 | Stale locks | Watchdog auto-cleans, or `rm -rf .agent-communication/locks/*.lock` |
-| Agents not responding | `agent down && agent up` or `agent restart` |
+| Agents not responding | `agent down && agent up` |
 | JIRA auth failed | New token at https://id.atlassian.com/manage-profile/security/api-tokens |
 | GitHub auth failed | New token at https://github.com/settings/tokens (needs `repo` scope) |
-| MCP tool name conflict | Framework uses `--strict-mcp-config` to avoid global config collisions |
 
 See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for more.
 
@@ -311,3 +327,5 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for more.
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+
+Python 3.10+ required. Uses `setuptools` for builds, `ruff` for linting, `mypy` for type checking.

@@ -75,6 +75,7 @@ class ReviewCycleManager:
     - Extracting structured findings
     - Building fix tasks with checklists
     - Escalating to architect after too many cycles
+    - Persisting QA findings to memory for cross-task pattern detection
     """
 
     def __init__(
@@ -85,6 +86,7 @@ class ReviewCycleManager:
         agent_definition,
         session_logger,
         activity_manager,
+        memory_store=None,
     ):
         """Initialize ReviewCycleManager.
 
@@ -95,6 +97,7 @@ class ReviewCycleManager:
             agent_definition: AgentDefinition for agent metadata
             session_logger: SessionLogger for structured logging
             activity_manager: ActivityManager for status tracking
+            memory_store: Optional MemoryStore for persisting QA findings
         """
         self.config = config
         self.queue = queue
@@ -102,6 +105,7 @@ class ReviewCycleManager:
         self.agent_definition = agent_definition
         self.session_logger = session_logger
         self.activity_manager = activity_manager
+        self._memory_store = memory_store
 
     def extract_pr_info_from_response(self, response_content: str) -> Optional[Dict[str, Any]]:
         """
@@ -341,6 +345,11 @@ class ReviewCycleManager:
             return
 
         outcome = self.parse_review_outcome(response.content)
+
+        # Persist structured findings to memory for cross-task pattern detection
+        if outcome.structured_findings:
+            self.persist_findings_to_memory(outcome.structured_findings, task)
+
         if outcome.approved and not outcome.needs_fix:
             sync_jira_status_callback(task, "Approved", comment=f"QA approved by {self.config.id}")
             return
@@ -513,6 +522,56 @@ class ReviewCycleManager:
             findings_summary = content[:500]
 
         return findings_summary, structured_findings
+
+    def persist_findings_to_memory(
+        self, findings: List[QAFinding], task: Task,
+    ) -> int:
+        """Persist QA findings to memory for cross-task pattern detection.
+
+        Each finding becomes a memory entry with category='qa_findings' so the
+        QAPatternAggregator can detect recurring patterns across tasks.
+
+        Returns count of findings persisted.
+        """
+        if not self._memory_store or not self._memory_store.enabled:
+            return 0
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug or not findings:
+            return 0
+
+        count = 0
+        for finding in findings:
+            content = f"QA finding: {finding.severity} {finding.category} in {finding.file}: {finding.description}"
+            tags = [
+                finding.severity.lower(),
+                finding.category,
+            ]
+            if finding.file:
+                tags.append(f"file:{finding.file}")
+
+            try:
+                self._memory_store.remember(
+                    repo_slug=repo_slug,
+                    agent_type=self.config.base_id,
+                    category="qa_findings",
+                    content=content[:500],
+                    source_task_id=task.id,
+                    tags=tags,
+                )
+                count += 1
+            except Exception as e:
+                self.logger.debug(f"Failed to persist QA finding to memory: {e}")
+
+        if count > 0:
+            self.session_logger.log(
+                "qa_findings_persisted",
+                task_id=task.id,
+                findings_count=count,
+                repo=repo_slug,
+            )
+
+        return count
 
     def parse_structured_findings(self, content: str) -> Optional[List[QAFinding]]:
         """Extract structured JSON findings from QA response.

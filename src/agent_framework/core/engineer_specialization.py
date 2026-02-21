@@ -535,6 +535,82 @@ def detect_specialization(
     return None
 
 
+def adjust_specialization_from_debate(
+    profile: Optional[SpecializationProfile],
+    memory_store,
+    repo_slug: str,
+    session_logger=None,
+) -> Optional[SpecializationProfile]:
+    """Adjust specialization profile based on debate decisions stored in memory.
+
+    Queries shared memories with category='architectural_decisions' for debate
+    conclusions that suggest a different specialization. If a debate recommendation
+    contradicts the current profile, log a warning and override.
+
+    Returns the adjusted profile (may be the same as input).
+    """
+    if not memory_store or not memory_store.enabled or not repo_slug:
+        return profile
+
+    try:
+        debate_memories = memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="architectural_decisions",
+            limit=10,
+        )
+
+        if not debate_memories:
+            return profile
+
+        # Domain keywords that signal a specialization mismatch
+        domain_signals = {
+            "frontend": {"frontend", "react", "vue", "angular", "css", "ui", "component", "tsx", "jsx"},
+            "backend": {"backend", "api", "database", "server", "endpoint", "migration", "sql", "handler"},
+            "infrastructure": {"infrastructure", "docker", "kubernetes", "terraform", "ci/cd", "deploy", "helm"},
+        }
+
+        # Scan debate memories for domain signals
+        signal_counts: dict[str, int] = {}
+        for mem in debate_memories:
+            content_lower = mem.content.lower()
+            for domain, keywords in domain_signals.items():
+                hits = sum(1 for kw in keywords if kw in content_lower)
+                if hits >= 2:  # Need at least 2 keyword hits to be meaningful
+                    signal_counts[domain] = signal_counts.get(domain, 0) + hits
+
+        if not signal_counts:
+            return profile
+
+        # Find the strongest signal
+        top_domain = max(signal_counts, key=signal_counts.get)
+        current_domain = profile.id if profile else "none"
+
+        # Only adjust if the debate signal contradicts the current profile
+        if top_domain != current_domain:
+            profiles = _load_profiles()
+            new_profile = _get_profile_by_id(top_domain, profiles)
+            if new_profile:
+                logger.info(
+                    "Debate-driven specialization adjustment: %s -> %s (signal_strength=%d)",
+                    current_domain, top_domain, signal_counts[top_domain],
+                )
+                if session_logger:
+                    session_logger.log(
+                        "specialization_adjusted",
+                        original_profile=current_domain,
+                        adjusted_profile=top_domain,
+                        signal_strength=signal_counts[top_domain],
+                        debate_memory_count=len(debate_memories),
+                    )
+                return new_profile
+
+    except Exception as e:
+        logger.debug(f"Debate-specialization adjustment failed (non-fatal): {e}")
+
+    return profile
+
+
 def apply_specialization_to_prompt(
     base_prompt: str,
     profile: Optional[SpecializationProfile]

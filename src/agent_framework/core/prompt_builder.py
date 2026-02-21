@@ -1076,7 +1076,59 @@ If a tool call fails:
                     chars_injected=len(memory_section),
                     categories=task_tags,
                 )
-            return prompt + "\n" + memory_section
+            prompt = prompt + "\n" + memory_section
+
+        # Inject recurring QA warnings for engineer agents
+        prompt = self._inject_qa_warnings(prompt, task, repo_slug)
+
+        return prompt
+
+    def _inject_qa_warnings(self, prompt: str, task: Task, repo_slug: str) -> str:
+        """Inject recurring QA pattern warnings for engineer agents.
+
+        Queries the QAPatternAggregator for findings that recur 3+ times
+        and appends them as a warning section. Only for engineer agents.
+        """
+        if self.ctx.config.base_id != "engineer":
+            return prompt
+
+        try:
+            from .qa_pattern_aggregator import QAPatternAggregator
+
+            memory_store = None
+            if self.ctx.memory_retriever:
+                memory_store = self.ctx.memory_retriever._store
+
+            aggregator = QAPatternAggregator(memory_store=memory_store)
+
+            # Build relevant files set from task context
+            relevant_files = set()
+            if task.plan and task.plan.files_to_modify:
+                relevant_files.update(task.plan.files_to_modify)
+            if task.context.get("files_to_modify"):
+                relevant_files.update(task.context["files_to_modify"])
+
+            patterns = aggregator.get_recurring_patterns(
+                repo_slug=repo_slug,
+                agent_type="qa",
+                relevant_files=relevant_files or None,
+            )
+
+            if not patterns:
+                return prompt
+
+            warnings_section = aggregator.format_warnings(patterns)
+            if warnings_section:
+                if self.ctx.session_logger:
+                    self.ctx.session_logger.log(
+                        "qa_pattern_injected",
+                        pattern_count=len(patterns),
+                        top_patterns=[p.description[:80] for p in patterns[:3]],
+                    )
+                return prompt + "\n\n" + warnings_section
+
+        except Exception as e:
+            self.logger.debug(f"QA pattern injection failed (non-fatal): {e}")
 
         return prompt
 
@@ -1688,6 +1740,7 @@ Fix the failing tests and ensure all tests pass.
             get_specialization_enabled,
             get_auto_profile_config,
             detect_file_patterns,
+            adjust_specialization_from_debate,
             _load_profiles,
         )
 
@@ -1700,6 +1753,15 @@ Fix the failing tests and ensure all tests pass.
 
         profile = detect_specialization(task, files=files)
         if profile:
+            # Post-detection: check if debate memories suggest a different specialization
+            repo_slug = task.context.get("github_repo")
+            if repo_slug and self.ctx.memory_retriever:
+                profile = adjust_specialization_from_debate(
+                    profile,
+                    self.ctx.memory_retriever._store,
+                    repo_slug,
+                    session_logger=self.ctx.session_logger,
+                )
             return profile, files
 
         # Auto-profile fallback: check registry, then generate

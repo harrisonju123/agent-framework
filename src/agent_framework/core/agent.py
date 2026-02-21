@@ -41,6 +41,7 @@ from .prompt_builder import PromptBuilder, PromptContext
 from .workflow_router import WorkflowRouter
 from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
+from .feedback_bus import FeedbackBus
 from ..workflow.executor import PREVIEW_REVIEW_STEPS
 
 
@@ -418,6 +419,18 @@ class Agent:
             n_semantic_results=emb_cfg.get("n_results", 15),
         )
 
+    def _init_feedback_bus(self):
+        """Initialize cross-feature feedback bus.
+
+        The bus connects feature outputs (self-eval, QA, replan, debate) to
+        feature inputs (memory, prompts, specialization). Context (repo_slug,
+        agent_type) is updated per-task via update_context().
+        """
+        self._feedback_bus = FeedbackBus(
+            memory_store=self._memory_store,
+            session_logger=self._session_logger,
+        )
+
     def _try_index_codebase(self, task: Task, repo_path: Path) -> None:
         """Trigger indexing after repo checkout, before prompt building."""
         if not self._code_indexer:
@@ -507,6 +520,9 @@ class Agent:
         # Codebase indexing for structural code context in prompts
         self._init_code_indexing(code_indexing_config)
 
+        # Cross-feature feedback bus
+        self._init_feedback_bus()
+
         # Workflow routing: chain enforcement, task decomposition, agent handoffs
         self._workflow_router = WorkflowRouter(
             config=config,
@@ -528,6 +544,7 @@ class Agent:
             agent_definition=agent_definition,
             session_logger=self._session_logger,
             activity_manager=self.activity_manager,
+            memory_store=self._memory_store,
         )
 
         # Prompt builder: extracted prompt construction logic
