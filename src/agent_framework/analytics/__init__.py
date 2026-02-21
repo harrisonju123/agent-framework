@@ -18,6 +18,7 @@ from .git_metrics import GitMetrics, GitMetricsReport
 from .waste_metrics import WasteMetrics, WasteMetricsReport
 from .review_cycle_metrics import ReviewCycleAnalyzer, ReviewCycleMetricsReport
 from .verdict_metrics import VerdictMetrics, VerdictMetricsReport
+from .feedback_loop_metrics import FeedbackLoopAnalyzer, FeedbackLoopReport
 
 __all__ = [
     'PerformanceMetrics',
@@ -39,4 +40,6 @@ __all__ = [
     'ReviewCycleMetricsReport',
     'VerdictMetrics',
     'VerdictMetricsReport',
+    'FeedbackLoopAnalyzer',
+    'FeedbackLoopReport',
 ]
