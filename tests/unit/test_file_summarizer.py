@@ -2,7 +2,6 @@
 
 import os
 
-import pytest
 
 from agent_framework.utils.file_summarizer import summarize_file
 

@@ -1,11 +1,10 @@
 """Unit tests for GitOperationsManager."""
 
-import hashlib
 import json
 import pytest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch, call
+from unittest.mock import MagicMock, Mock, patch
 
 from agent_framework.core.git_operations import GitOperationsManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
@@ -1512,8 +1511,6 @@ class TestManagePrLifecycleTriggersCleanup:
         )
         git_ops.cleanup_merged_branches = MagicMock(return_value=[])
         git_ops._sync_jira_status = MagicMock()
-        # Ensure cooldown is expired so cleanup fires
-        git_ops._last_cleanup_time = 0.0
 
         task = Task(
             id="test-1", title="Test", description="d", priority=1,

@@ -7,12 +7,10 @@ Covers the full task lifecycle through _handle_task:
 4. Subtask guard skipping the workflow chain
 """
 
-import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

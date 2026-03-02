@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from pathlib import Path
 
-import pytest
 
 from agent_framework.core.budget_manager import BudgetManager, MODEL_PRICING
 from agent_framework.core.task import Task, TaskType, TaskStatus

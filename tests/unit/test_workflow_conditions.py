@@ -16,7 +16,6 @@ from agent_framework.workflow.conditions import (
     ApprovedCondition,
     NeedsFixCondition,
     TestPassedCondition,
-    TestFailedCondition,
     FilesMatchCondition,
     AllFilesMatchCondition,
     PRSizeUnderCondition,

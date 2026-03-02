@@ -13,7 +13,6 @@ import json
 import os
 import pytest
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent_framework.workspace.worktree_manager import (
@@ -470,7 +469,6 @@ class TestHotReloadVersionDetection:
     def test_mtime_hash_changes_when_file_touched(self, tmp_path):
         """Touching a .py file changes the mtime hash."""
         import hashlib
-        from pathlib import Path
 
         # Create a minimal package structure
         pkg = tmp_path / "agent_framework"

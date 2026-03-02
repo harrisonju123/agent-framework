@@ -1,6 +1,5 @@
 """Tests for FeedbackBus — cross-feature learning loop."""
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,13 +8,12 @@ from agent_framework.core.feedback_bus import (
     CATEGORY_QA_RECURRING,
     CATEGORY_SELF_EVAL_GAPS,
     CATEGORY_SPECIALIZATION_HINT,
-    QA_RECURRENCE_THRESHOLD,
     SHARED_AGENT_TYPE,
     FeedbackBus,
     _extract_missed_criteria,
 )
 from agent_framework.core.task import Task, TaskStatus, TaskType
-from agent_framework.memory.memory_store import MemoryEntry, MemoryStore
+from agent_framework.memory.memory_store import MemoryStore
 
 
 @pytest.fixture

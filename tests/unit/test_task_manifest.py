@@ -2,7 +2,6 @@
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -565,7 +564,7 @@ class TestWriteManifestIfNeeded:
         )
 
         with patch("agent_framework.core.git_operations.GitOperationsManager._checkout_or_create_branch"):
-            working_dir = git_ops.get_working_directory(task)
+            git_ops.get_working_directory(task)
 
         manifest = load_manifest(tmp_path, "root-wd")
         assert manifest is not None

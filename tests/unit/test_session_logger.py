@@ -113,7 +113,7 @@ class TestLogToolInputs:
         sl.log_tool_call("Bash", {"command": "pytest"})
         sl.close()
         lines = session_log_path.read_text().strip().splitlines()
-        sequences = [json.loads(l)["sequence"] for l in lines]
+        sequences = [json.loads(line)["sequence"] for line in lines]
         assert sequences == [1, 2, 3]
 
 

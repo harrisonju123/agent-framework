@@ -124,7 +124,6 @@ class TestBudgetErrorLifecycle:
     def test_non_budget_error_retries_normally(self):
         """Verify non-budget errors still follow normal retry logic."""
         escalation_handler = EscalationHandler()
-        retry_handler = RetryHandler(max_retries=5)
 
         error_message = "network timeout"
         error_category = escalation_handler.categorize_error(error_message)

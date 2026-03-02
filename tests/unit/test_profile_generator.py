@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from agent_framework.core.profile_generator import ProfileGenerator, GenerationResult
-from agent_framework.core.engineer_specialization import SpecializationProfile
 from agent_framework.core.task import Task, TaskType, TaskStatus
 from datetime import datetime, UTC
 

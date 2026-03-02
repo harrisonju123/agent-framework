@@ -1,7 +1,6 @@
 """Tests for PromptBuilder module."""
 
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -11,7 +10,6 @@ from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.memory.memory_retriever import MemoryRetriever
 from agent_framework.memory.memory_store import MemoryStore
-from agent_framework.memory.tool_pattern_store import ToolPatternStore
 
 
 @pytest.fixture
@@ -1542,7 +1540,6 @@ class TestChainStateIntegration:
 
     def test_chain_state_takes_priority_over_upstream_summary(self, agent_config, tmp_path):
         """Chain state context should override raw upstream_summary."""
-        import json
         from agent_framework.core.chain_state import ChainState, StepRecord, save_chain_state
 
         # Write chain state with plan step

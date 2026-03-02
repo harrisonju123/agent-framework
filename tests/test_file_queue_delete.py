@@ -1,7 +1,6 @@
 """Tests for FileQueue.delete_task() — permanent file removal."""
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 

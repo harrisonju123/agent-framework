@@ -8,15 +8,12 @@ Covers:
 5. Design Rationale — extraction, chain state rendering
 """
 
-import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
-from agent_framework.core.task import Task, TaskStatus, TaskType, PlanDocument
+from agent_framework.core.task import Task, TaskStatus, TaskType
 
 
 def _make_task(**overrides):

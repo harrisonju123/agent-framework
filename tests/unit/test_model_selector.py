@@ -1,7 +1,7 @@
 """Tests for ModelSelector — model selection and timeout tiers."""
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from agent_framework.core.task import TaskType
 from agent_framework.llm.model_selector import ModelSelector

@@ -15,8 +15,6 @@ from agent_framework.core.config import (
     AgentDefinition,
     TeammateDefinition,
     SpecializationConfig,
-    SpecializationProfileConfig,
-    SpecializationTeammateConfig,
     load_specializations,
     clear_config_cache,
 )
@@ -24,10 +22,8 @@ from agent_framework.core.engineer_specialization import (
     detect_specialization,
     apply_specialization_to_prompt,
     get_specialization_enabled,
-    _load_profiles,
     BACKEND_PROFILE,
     FRONTEND_PROFILE,
-    INFRASTRUCTURE_PROFILE,
 )
 from agent_framework.core.task import Task, TaskType, TaskStatus, PlanDocument
 from agent_framework.core.team_composer import compose_default_team

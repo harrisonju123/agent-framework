@@ -20,7 +20,6 @@ from agent_framework.core.engineer_specialization import (
     FRONTEND_PROFILE,
     INFRASTRUCTURE_PROFILE,
     SPECIALIZATION_PROFILES,
-    KNOWN_SOURCE_EXTENSIONS,
 )
 from agent_framework.core.config import (
     AutoProfileConfig,

@@ -3,11 +3,9 @@
 import json
 from pathlib import Path
 
-import pytest
 
 from agent_framework.memory.tool_pattern_analyzer import (
     ToolPatternAnalyzer,
-    ToolPatternRecommendation,
 )
 
 

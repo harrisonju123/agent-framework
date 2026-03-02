@@ -1,19 +1,18 @@
 """Tests for VectorStore — rebuild, query, is_stale, incremental update."""
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 
+np = pytest.importorskip("numpy", reason="numpy not installed")
 lancedb = pytest.importorskip("lancedb", reason="lancedb not installed")
 
-from agent_framework.indexing.embeddings.vector_store import (
+from agent_framework.indexing.embeddings.vector_store import (  # noqa: E402
     VectorStore,
     _symbol_doc_text,
     _module_doc_text,
 )
-from agent_framework.indexing.models import (
+from agent_framework.indexing.models import (  # noqa: E402
     CodebaseIndex,
     ModuleEntry,
     SymbolEntry,

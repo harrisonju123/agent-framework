@@ -1,11 +1,10 @@
 """Tests for memory retrieval and prompt formatting."""
 
 import pytest
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 from agent_framework.memory.memory_retriever import (
     MemoryRetriever,
-    MAX_MEMORY_PROMPT_CHARS,
 )
 from agent_framework.memory.memory_store import MemoryEntry
 

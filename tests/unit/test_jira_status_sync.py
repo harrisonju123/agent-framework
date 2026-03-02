@@ -1,7 +1,7 @@
 """Tests for framework-level JIRA status sync in Agent."""
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 

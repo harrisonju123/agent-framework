@@ -1,12 +1,10 @@
 """Tests for embedding integration in CodebaseIndexer."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from agent_framework.indexing.indexer import CodebaseIndexer
-from agent_framework.indexing.models import CodebaseIndex, SymbolEntry, SymbolKind
+from agent_framework.indexing.models import CodebaseIndex
 from agent_framework.indexing.store import IndexStore
 
 

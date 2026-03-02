@@ -2,8 +2,7 @@
 
 import pytest
 from datetime import datetime, UTC
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, MagicMock
 
 from agent_framework.core.task import Task, PlanDocument, TaskStatus, TaskType
 from agent_framework.core.task_decomposer import TaskDecomposer
@@ -95,7 +94,7 @@ def test_architect_skips_decomposition_small_task(task_decomposer):
         dependencies=[],
     )
 
-    task = Task(
+    Task(
         id="test-task-small",
         type=TaskType.IMPLEMENTATION,
         status=TaskStatus.PENDING,
@@ -174,7 +173,7 @@ def test_fan_in_not_triggered_on_partial_completion(file_queue):
     subtask_ids = ["parent-task-456-sub1", "parent-task-456-sub2", "parent-task-456-sub3"]
 
     # Create parent task
-    parent_task = Task(
+    Task(
         id=parent_id,
         type=TaskType.IMPLEMENTATION,
         status=TaskStatus.PENDING,
@@ -209,7 +208,7 @@ def test_fan_in_not_triggered_on_partial_completion(file_queue):
 
 def test_fan_in_task_routes_to_qa():
     """Test that fan-in task is assigned to QA agent."""
-    parent_task = Task(
+    Task(
         id="parent-789",
         type=TaskType.IMPLEMENTATION,
         status=TaskStatus.PENDING,
@@ -222,7 +221,7 @@ def test_fan_in_task_routes_to_qa():
         context={},
     )
 
-    subtasks = [
+    [
         Task(
             id=f"parent-789-sub{i}",
             type=TaskType.IMPLEMENTATION,

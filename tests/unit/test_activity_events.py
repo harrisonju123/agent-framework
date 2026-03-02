@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-import pytest
 
 from agent_framework.core.activity import ActivityEvent, ActivityManager
 from agent_framework.core.agent import Agent

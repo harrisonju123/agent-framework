@@ -5,9 +5,8 @@ These guard two crash paths confirmed by QA agent PID 7169:
   2. _handle_task raises despite the finally guard → run() loop dies
 """
 
-import asyncio
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

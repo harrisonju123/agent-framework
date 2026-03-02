@@ -1,7 +1,6 @@
 """Tests for team template loading and prompt building."""
 
 import pytest
-from pathlib import Path
 
 from agent_framework.core.team_templates import (
     TeamTemplate,

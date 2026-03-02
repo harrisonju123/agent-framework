@@ -1,8 +1,6 @@
 """Tests for SummaryGenerator."""
 
-import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -68,7 +66,7 @@ class TestSummaryGeneratorSetup:
     def test_creates_output_directories(self, file_queue, temp_workspace):
         """Test that SummaryGenerator creates required directories."""
         context_dir = temp_workspace / ".agent-context"
-        generator = SummaryGenerator(queue=file_queue, output_dir=context_dir)
+        SummaryGenerator(queue=file_queue, output_dir=context_dir)
 
         assert (context_dir / "plans").exists()
         assert (context_dir / "summaries").exists()

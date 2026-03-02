@@ -3,7 +3,6 @@
 import json
 from types import SimpleNamespace
 
-import pytest
 
 from agent_framework.core.routing import (
     RoutingSignal,

@@ -1,8 +1,6 @@
 """Tests for optimization strategies."""
 
-import asyncio
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import Mock, AsyncMock
 
 import pytest

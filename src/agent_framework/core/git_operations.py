@@ -77,7 +77,9 @@ class GitOperationsManager:
         self._workflows_config = workflows_config or {}
 
         # Track active worktree for cleanup (mutable state)
-        self._last_cleanup_time: float = 0.0
+        # Initialize far in the past so the first post-merge cleanup always fires
+        import time
+        self._last_cleanup_time: float = time.monotonic() - _CLEANUP_COOLDOWN_SECONDS - 1
         self._active_worktree: Optional[Path] = None
         self._worktree_env_vars: Optional[Dict[str, str]] = None
         self._active_root_task_id: Optional[str] = None

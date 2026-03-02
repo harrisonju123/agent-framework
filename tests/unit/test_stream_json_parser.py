@@ -1,6 +1,5 @@
 """Tests for stream-json parser used by ClaudeCLIBackend."""
 
-import asyncio
 import json
 from io import StringIO
 

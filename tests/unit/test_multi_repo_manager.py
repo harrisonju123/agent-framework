@@ -1,8 +1,6 @@
 """Unit tests for MultiRepoManager."""
 
-import os
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest

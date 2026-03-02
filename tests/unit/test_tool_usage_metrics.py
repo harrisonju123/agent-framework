@@ -1,14 +1,13 @@
 """Tests for ToolUsageMetrics aggregation in AgenticMetrics."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from agent_framework.analytics.agentic_metrics import (
     AgenticMetrics,
-    ToolUsageMetrics,
 )
 
 

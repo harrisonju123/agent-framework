@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_framework.core.agent import Agent
-from agent_framework.core.prompt_builder import PromptBuilder
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
 

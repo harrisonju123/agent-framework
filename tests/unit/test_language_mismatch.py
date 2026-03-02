@@ -1,7 +1,6 @@
 """Tests for detect_language_mismatches() — path confusion detection."""
 
 from agent_framework.memory.tool_pattern_analyzer import (
-    LanguageMismatch,
     detect_language_mismatches,
 )
 

@@ -1,7 +1,6 @@
 """Tests for compute_tool_usage_stats() — quantitative tool call metrics."""
 
 from agent_framework.memory.tool_pattern_analyzer import (
-    ToolUsageStats,
     compute_tool_usage_stats,
 )
 

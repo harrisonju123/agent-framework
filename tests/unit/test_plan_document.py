@@ -3,7 +3,6 @@
 import json
 from datetime import datetime, timezone
 
-import pytest
 
 from agent_framework.core.task import PlanDocument, Task, TaskStatus, TaskType
 
