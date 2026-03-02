@@ -40,7 +40,7 @@ class RetryHandler:
 
         Formula: initial * multiplier^(retry_count-1), capped at max_backoff
         """
-        backoff = self.initial_backoff * (self.multiplier ** (retry_count - 1))
+        backoff = self.initial_backoff * (self.multiplier ** max(0, retry_count - 1))
         return min(backoff, self.max_backoff)
 
     def should_retry(self, task: Task) -> bool:

@@ -211,6 +211,12 @@ def append_step(
         duration_seconds=duration,
     )
 
+    # Dedup: skip if a record with the same task_id already exists (e.g. retried
+    # completion path calling append_step twice for the same chain hop)
+    if any(s.task_id == record.task_id for s in state.steps):
+        logger.debug(f"Skipping duplicate step record for task_id={record.task_id}")
+        return state
+
     state.steps.append(record)
     state.current_step = None
     save_chain_state(workspace, state)

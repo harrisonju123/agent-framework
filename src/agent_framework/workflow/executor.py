@@ -328,6 +328,9 @@ class WorkflowExecutor:
                     next_agent = pr_step.agent
                     cap_redirect = True
                     enforced = True
+                    # Target is now create_pr, not engineer — clear the flag so
+                    # the PR task doesn't get "FINDINGS TO ADDRESS" headers
+                    is_review_to_engineer = False
                 else:
                     # Cap hit but no create_pr step — halt the chain entirely
                     if self._session_logger:

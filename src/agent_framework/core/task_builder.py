@@ -220,7 +220,7 @@ def build_decomposed_subtask(
 ) -> Task:
     """Build a subtask from a decomposed parent.
 
-    ID pattern: {parent_task.id}-sub-{index}
+    ID pattern: {parent_task.id}-sub{index+1} (1-based, matches task_decomposer.py)
     Inherits parent's context, priority, and workflow info.
 
     Args:
@@ -235,7 +235,7 @@ def build_decomposed_subtask(
     Returns:
         Task configured as a subtask of parent_task
     """
-    subtask_id = f"{parent_task.id}-sub-{index}"
+    subtask_id = f"{parent_task.id}-sub{index + 1}"
 
     # Build context inheriting from parent
     subtask_context = {

@@ -281,9 +281,28 @@ class TestCreateFanInTask:
         assert fan_in.title.startswith("[fan-in]")
         assert "Parent task for decomposition" in fan_in.title
 
-    def test_fan_in_assigned_to_qa(self, queue, parent_task, completed_subtasks):
-        """Fan-in task is assigned to QA for next workflow step."""
+    def test_fan_in_assigned_to_architect_with_workflow(self, queue, parent_task, completed_subtasks):
+        """Fan-in task routes to architect (code_review) when parent has a workflow."""
         fan_in = queue.create_fan_in_task(parent_task, completed_subtasks)
+
+        assert fan_in.assigned_to == "architect"
+
+    def test_fan_in_assigned_to_qa_without_workflow(self, queue, completed_subtasks):
+        """Fan-in task falls back to QA when parent has no workflow."""
+        parent_no_workflow = Task(
+            id="parent-123",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.IN_PROGRESS,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Parent task for decomposition",
+            description="This is a parent task that will be decomposed",
+            context={"github_repo": "test/repo"},
+            subtask_ids=["parent-123-sub-0", "parent-123-sub-1", "parent-123-sub-2"],
+        )
+        fan_in = queue.create_fan_in_task(parent_no_workflow, completed_subtasks)
 
         assert fan_in.assigned_to == "qa"
 
@@ -452,7 +471,7 @@ class TestBuildDecomposedSubtask:
     """Tests for build_decomposed_subtask helper."""
 
     def test_subtask_id_pattern(self, parent_task):
-        """IDs follow {parent_id}-sub-{index} pattern."""
+        """IDs follow {parent_id}-sub{index+1} pattern (1-based)."""
         subtask = build_decomposed_subtask(
             parent_task=parent_task,
             name="Implement feature X",
@@ -462,7 +481,7 @@ class TestBuildDecomposedSubtask:
             index=0,
         )
 
-        assert subtask.id == "parent-123-sub-0"
+        assert subtask.id == "parent-123-sub1"
 
     def test_subtask_has_parent_id(self, parent_task):
         """Subtask has parent_task_id set."""

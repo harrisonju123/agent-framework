@@ -124,6 +124,7 @@ class TestHandleFailure:
         task = _make_task(retry_count=1)
 
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = True
 
         await manager.handle_failure(task)
 
@@ -137,6 +138,7 @@ class TestHandleFailure:
         task = _make_task(retry_count=3)
 
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = False
         manager.escalation_handler.categorize_error.return_value = "api_error"
         manager.retry_handler.can_create_escalation.return_value = False
 
@@ -153,6 +155,7 @@ class TestHandleFailure:
         escalation_task = _make_task(id="escalation-001", type=TaskType.ESCALATION)
 
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = False
         manager.escalation_handler.categorize_error.return_value = "api_error"
         manager.retry_handler.can_create_escalation.return_value = True
         manager.escalation_handler.create_escalation.return_value = escalation_task
@@ -169,6 +172,7 @@ class TestHandleFailure:
         task = _make_task(retry_count=2)
 
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = True
         manager.llm.complete = AsyncMock(
             return_value=_llm_response("Try approach B")
         )
@@ -235,6 +239,7 @@ class TestHandleFailure:
         )
 
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = True
 
         await manager.handle_failure(task)
 
@@ -779,6 +784,7 @@ class TestReplanMemory:
             ],
         )
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = False
         manager.escalation_handler.categorize_error.return_value = "logic_error"
         manager.retry_handler.can_create_escalation.return_value = False
 
@@ -816,6 +822,7 @@ class TestReplanMemory:
             ],
         )
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = False
         manager.escalation_handler.categorize_error.return_value = "logic_error"
         manager.retry_handler.can_create_escalation.return_value = True
         manager.escalation_handler.create_escalation.return_value = escalation_task
@@ -841,6 +848,7 @@ class TestReplanMemory:
             replan_history=[{"attempt": 2, "approach_tried": "fix", "revised_plan": "plan"}],
         )
         manager.queue.find_task.return_value = task
+        manager.retry_handler.should_retry.return_value = False
         manager.escalation_handler.categorize_error.return_value = "logic_error"
         # No escalation path — antipattern storage runs, then throws
         manager.retry_handler.can_create_escalation.return_value = False

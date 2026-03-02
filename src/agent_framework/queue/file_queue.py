@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import shutil
 import time
 from datetime import UTC, datetime, timedelta, timezone
@@ -13,6 +14,9 @@ from .locks import FileLock
 from ..utils.atomic_io import atomic_write_model
 
 logger = logging.getLogger(__name__)
+
+# tz-aware epoch for safe sorting when failed_at is None
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
 
 
 class FileQueue:
@@ -48,6 +52,7 @@ class FileQueue:
         # Cache of task files confirmed non-pending (avoids re-deserializing)
         self._non_pending_files: dict[str, set[str]] = {}
         self._queue_dir_mtime: dict[str, float] = {}
+        self._queue_file_count: dict[str, int] = {}
 
         # Cache of completed dependency lookups with 60s TTL
         self._completed_cache: dict[str, tuple[bool, float]] = {}
@@ -106,19 +111,23 @@ class FileQueue:
         if not queue_path.exists():
             return None
 
-        # Invalidate non-pending cache when directory changes (new file added/removed)
+        # Invalidate non-pending cache when directory changes (new file added/removed).
+        # Track both mtime and file count — mtime alone can miss same-second mutations.
         try:
             current_mtime = queue_path.stat().st_mtime
         except OSError:
             return None
-        if current_mtime != self._queue_dir_mtime.get(queue_id, 0):
+        task_files = sorted(queue_path.glob("*.json"))
+        current_count = len(task_files)
+        if (
+            current_mtime != self._queue_dir_mtime.get(queue_id, 0)
+            or current_count != self._queue_file_count.get(queue_id, -1)
+        ):
             self._non_pending_files.pop(queue_id, None)
             self._queue_dir_mtime[queue_id] = current_mtime
+            self._queue_file_count[queue_id] = current_count
 
         non_pending = self._non_pending_files.setdefault(queue_id, set())
-
-        # Sort by filename (chronological order)
-        task_files = sorted(queue_path.glob("*.json"))
 
         for task_file in task_files:
             if not task_file.exists():
@@ -228,17 +237,23 @@ class FileQueue:
         if not queue_path.exists():
             return None
 
-        # Invalidate non-pending cache when directory changes
+        # Invalidate non-pending cache when directory changes.
+        # Track both mtime and file count — mtime alone can miss same-second mutations.
         try:
             current_mtime = queue_path.stat().st_mtime
         except OSError:
             return None
-        if current_mtime != self._queue_dir_mtime.get(queue_id, 0):
+        task_files = sorted(queue_path.glob("*.json"))
+        current_count = len(task_files)
+        if (
+            current_mtime != self._queue_dir_mtime.get(queue_id, 0)
+            or current_count != self._queue_file_count.get(queue_id, -1)
+        ):
             self._non_pending_files.pop(queue_id, None)
             self._queue_dir_mtime[queue_id] = current_mtime
+            self._queue_file_count[queue_id] = current_count
 
         non_pending = self._non_pending_files.setdefault(queue_id, set())
-        task_files = sorted(queue_path.glob("*.json"))
 
         for task_file in task_files:
             if not task_file.exists():
@@ -564,7 +579,7 @@ class FileQueue:
 
         # Sort by failed_at time (most recent first)
         failed_tasks.sort(
-            key=lambda t: t.failed_at or datetime.min,
+            key=lambda t: t.failed_at or _EPOCH,
             reverse=True
         )
 
@@ -580,6 +595,9 @@ class FileQueue:
         completed_file = self.completed_dir / f"{task.id}.json"
         if completed_file.exists():
             completed_file.unlink()
+
+        # Invalidate completed cache so dependency checks see the reset state
+        self._completed_cache.pop(task.id, None)
 
         # Also remove from queue directories if present (prevent duplicates)
         if self.queue_dir.exists():
@@ -673,16 +691,32 @@ class FileQueue:
 
         return self.find_task(task.parent_task_id)
 
-    def create_fan_in_task(self, parent_task: Task, completed_subtasks: List[Task]) -> Task:
+    def create_fan_in_task(self, parent_task: Task, completed_subtasks: List[Task]) -> Optional[Task]:
         """Create a continuation task that aggregates subtask results.
+
+        Uses atomic exclusive-create to prevent duplicate fan-in tasks when
+        multiple subtask completions race. Returns None if another process
+        already created the fan-in.
 
         The fan-in task:
         - ID: f"fan-in-{parent_task.id}"
         - Type: matches parent's original type
         - Inherits parent's context with added fan_in=True
         - Aggregates result_summary from all completed subtasks
-        - Assigned to the next agent in workflow (typically QA)
+        - Assigned to the next agent in workflow (code_review/architect)
         """
+        fan_in_id = f"fan-in-{parent_task.id}"
+
+        # Atomic exclusive-create: only one process wins
+        sentinel = self.comm_dir / "fan-in-locks" / f"{fan_in_id}.lock"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(str(sentinel), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            logger.info(f"Fan-in task {fan_in_id} already claimed by another process")
+            return None
+
         # Aggregate results and collect implementation branches
         aggregated_results = []
         subtask_branches = []
@@ -721,13 +755,22 @@ class FileQueue:
         )
         context["_cumulative_cost"] = parent_baseline + subtask_own_costs
 
+        # Route fan-in to the correct next agent based on parent's workflow.
+        # Default workflow: plan -> implement -> code_review (architect) -> qa_review -> create_pr
+        # Subtasks are the "implement" step, so next is "code_review" assigned to "architect".
+        workflow = parent_task.context.get("workflow")
+        if workflow:
+            assigned_to = "architect"
+        else:
+            assigned_to = "qa"
+
         fan_in_task = Task(
-            id=f"fan-in-{parent_task.id}",
+            id=fan_in_id,
             type=parent_task.type,
             status=TaskStatus.PENDING,
             priority=parent_task.priority,
             created_by="system",
-            assigned_to="qa",  # Next step after engineer in default workflow
+            assigned_to=assigned_to,
             created_at=datetime.now(UTC),
             title=f"[fan-in] {parent_task.title}",
             description=parent_task.description,
@@ -762,8 +805,9 @@ class FileQueue:
         if non_pending:
             non_pending.discard(f"{task_id}.json")
         self._completed_cache.pop(task_id, None)
-        # Force directory mtime re-check on next pop/claim
+        # Force directory mtime/count re-check on next pop/claim
         self._queue_dir_mtime.pop(queue_name, None)
+        self._queue_file_count.pop(queue_name, None)
 
         return True
 

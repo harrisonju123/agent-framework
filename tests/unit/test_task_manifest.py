@@ -180,16 +180,21 @@ class TestSafetyCommitBranchVerification:
             # Simulate: status says dirty, branch --show-current says wrong branch
             status_result = MagicMock(returncode=0, stdout=" M file.py\n")
             branch_result = MagicMock(returncode=0, stdout="main\n")
+            stash_result = MagicMock(returncode=0)
             checkout_result = MagicMock(returncode=0)
+            stash_pop_result = MagicMock(returncode=0)
             add_result = MagicMock(returncode=0)
             commit_result = MagicMock(returncode=0, stderr="")
 
             mock_git.side_effect = [
-                status_result,    # status --porcelain
-                branch_result,    # branch --show-current
-                checkout_result,  # checkout feature/correct
-                add_result,       # add -A
-                commit_result,    # commit
+                status_result,      # status --porcelain (safety_commit)
+                branch_result,      # branch --show-current
+                status_result,      # status --porcelain (verify_manifest stash check)
+                stash_result,       # stash push
+                checkout_result,    # checkout feature/correct
+                stash_pop_result,   # stash pop
+                add_result,         # add -A
+                commit_result,      # commit
             ]
 
             working_dir = tmp_path / "repo"
@@ -198,8 +203,9 @@ class TestSafetyCommitBranchVerification:
             git_ops.safety_commit(working_dir, "test commit")
 
             # Verify checkout was called with the manifest branch
-            checkout_call = mock_git.call_args_list[2]
-            assert checkout_call[0][0] == ["checkout", "feature/correct"]
+            checkout_calls = [c for c in mock_git.call_args_list if c[0][0][0] == "checkout"]
+            assert len(checkout_calls) == 1
+            assert checkout_calls[0][0][0] == ["checkout", "feature/correct"]
 
             # Verify session event was logged
             session_logger.log.assert_called_once_with(

@@ -32,25 +32,30 @@ class FileLock:
         Attempt to acquire the lock.
 
         Returns True if lock acquired, False otherwise.
+
+        Uses mkdir-first strategy to avoid TOCTOU race: try the atomic mkdir
+        before inspecting any existing lock. Only on failure do we check
+        staleness, remove, and retry once.
         """
-        # Check if lock exists and is stale
-        if self.lock_path.exists():
+        try:
+            self.lock_path.mkdir(parents=True, exist_ok=False)
+            self._write_pid()
+            self._acquired = True
+            return True
+        except FileExistsError:
             if self._is_stale_lock():
                 logger.info(f"Removing stale lock for {self.task_id}")
                 self._remove_lock()
-            else:
-                logger.debug(f"Lock for {self.task_id} is held by another process")
-                return False
-
-        # Try to acquire lock (mkdir is atomic)
-        try:
-            self.lock_path.mkdir(parents=True, exist_ok=False)
-            self.pid_file.write_text(str(os.getpid()))
-            self._acquired = True
-            logger.debug(f"Acquired lock for {self.task_id} (PID: {os.getpid()})")
-            return True
-        except FileExistsError:
-            logger.debug(f"Lock for {self.task_id} already exists (race condition)")
+                try:
+                    self.lock_path.mkdir(parents=True, exist_ok=False)
+                    self._write_pid()
+                    self._acquired = True
+                    return True
+                except FileExistsError:
+                    # Another agent won the retry race
+                    logger.debug(f"Lock for {self.task_id} acquired by another process during stale recovery")
+                    return False
+            logger.debug(f"Lock for {self.task_id} is held by another process")
             return False
 
     def release(self) -> None:
@@ -58,6 +63,11 @@ class FileLock:
         if self._acquired and self.lock_path.exists():
             self._remove_lock()
             self._acquired = False
+
+    def _write_pid(self) -> None:
+        """Write current PID into the lock directory."""
+        self.pid_file.write_text(str(os.getpid()))
+        logger.debug(f"Acquired lock for {self.task_id} (PID: {os.getpid()})")
 
     def _is_stale_lock(self) -> bool:
         """Check if lock is stale (process no longer exists)."""

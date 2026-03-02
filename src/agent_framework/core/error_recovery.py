@@ -82,8 +82,8 @@ class ErrorRecoveryManager:
             )
             return
 
-        if task.retry_count >= self.retry_handler.max_retries:
-            # Max retries exceeded - mark as failed
+        if not self.retry_handler.should_retry(task):
+            # Non-retriable error, max retries exceeded, or backoff not elapsed
             self.logger.error(
                 f"Task {task.id} has failed {task.retry_count} times "
                 f"(max: {self.retry_handler.max_retries})"
@@ -141,6 +141,10 @@ class ErrorRecoveryManager:
             task.context.pop("upstream_context_file", None)
             task.context.pop("upstream_source_agent", None)
             task.context.pop("upstream_source_step", None)
+
+            # Reset self-eval state so the next attempt gets fresh budget
+            task.context.pop("_self_eval_count", None)
+            task.context.pop("_self_eval_critique", None)
 
             # Increment chain state attempt counter so retries have full history
             self._increment_chain_state_attempt(task)

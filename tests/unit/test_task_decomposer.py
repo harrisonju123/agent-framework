@@ -63,32 +63,32 @@ class TestEstimatePlanLines:
             files_to_modify=["a.py", "b.py"],
             approach=["s1", "s2", "s3"],
         )
-        assert estimate_plan_lines(plan) == 175  # 2*50 + 3*25
+        assert estimate_plan_lines(plan) == 100  # max(2*50, 3*25)
 
     def test_empty_plan(self):
         plan = _make_plan(files_to_modify=[], approach=[])
         assert estimate_plan_lines(plan) == 0
 
     def test_threshold_integration(self):
-        """7 files + 6 steps = 500, exactly at threshold."""
+        """7 files + 6 steps -> max(350, 150) = 350, exactly at threshold."""
         decomposer = TaskDecomposer()
         plan = _make_plan(
             files_to_modify=[f"f{i}.py" for i in range(7)],
             approach=[f"step {i}" for i in range(6)],
         )
         estimated = estimate_plan_lines(plan)
-        assert estimated == 500  # 7*50 + 6*25
-        # Threshold is >= 500, need at least 2 files
+        assert estimated == 350  # max(7*50, 6*25)
+        # Threshold is >= 350, need at least 2 files
         assert decomposer.should_decompose(plan, estimated) is True
 
     def test_at_threshold(self):
-        """5 files + 4 steps = 350, exactly at threshold."""
+        """7 files + 0 steps = 350, exactly at threshold."""
         plan = _make_plan(
-            files_to_modify=[f"f{i}.py" for i in range(5)],
-            approach=[f"step {i}" for i in range(4)],
+            files_to_modify=[f"f{i}.py" for i in range(7)],
+            approach=[],
         )
         estimated = estimate_plan_lines(plan)
-        assert estimated == 350  # 5*50 + 4*25
+        assert estimated == 350  # max(7*50, 0)
         decomposer = TaskDecomposer()
         assert decomposer.should_decompose(plan, estimated) is True
 
@@ -730,11 +730,11 @@ class TestDecomposeThresholdChange:
         """350 lines was below old threshold (500) but is at new threshold (350)."""
         decomposer = TaskDecomposer()
         plan = _make_plan(
-            files_to_modify=[f"f{i}.py" for i in range(5)],
+            files_to_modify=[f"f{i}.py" for i in range(7)],
             approach=[f"step {i}" for i in range(4)],
         )
         estimated = estimate_plan_lines(plan)
-        assert estimated == 350
+        assert estimated == 350  # max(7*50, 4*25)
         assert decomposer.should_decompose(plan, estimated) is True
 
     def test_requirements_count_trigger(self):
@@ -745,7 +745,7 @@ class TestDecomposeThresholdChange:
             approach=["s1"],
         )
         estimated = estimate_plan_lines(plan)
-        assert estimated == 175  # below 350
+        assert estimated == 150  # max(3*50, 1*25) — below 350
 
         # Without requirements count: no decomposition
         assert decomposer.should_decompose(plan, estimated) is False

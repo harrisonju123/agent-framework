@@ -87,3 +87,6 @@ config/github.yaml
 
 CLAUDE.md
 */AGENTIC_ROADMAP.md
+
+# Internal documentation (not for commit)
+docs/FULL_FLOW.md

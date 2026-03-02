@@ -7,6 +7,7 @@ we achieve better separation of concerns and make the Agent class more focused.
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, TYPE_CHECKING
 
@@ -185,6 +186,20 @@ class GitOperationsManager:
                 "Branch mismatch: HEAD=%s, manifest=%s — correcting",
                 current, manifest.branch,
             )
+
+            # Stash dirty state before switching to avoid checkout failures
+            dirty = run_git_command(
+                ["status", "--porcelain"],
+                cwd=working_dir, check=False, timeout=10,
+            )
+            stashed = False
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                stash_result = run_git_command(
+                    ["stash", "push", "-m", f"auto-stash before manifest branch correction to {manifest.branch}"],
+                    cwd=working_dir, check=False, timeout=10,
+                )
+                stashed = stash_result.returncode == 0
+
             checkout = run_git_command(
                 ["checkout", manifest.branch],
                 cwd=working_dir, check=False, timeout=10,
@@ -194,7 +209,24 @@ class GitOperationsManager:
                     "Failed to checkout manifest branch %s: %s",
                     manifest.branch, checkout.stderr,
                 )
+                if stashed:
+                    run_git_command(
+                        ["stash", "pop"], cwd=working_dir, check=False, timeout=10,
+                    )
                 return
+
+            if stashed:
+                pop = run_git_command(
+                    ["stash", "pop"], cwd=working_dir, check=False, timeout=10,
+                )
+                if pop.returncode != 0:
+                    self.logger.warning(
+                        "Stash pop failed after manifest branch correction: %s; dropping stash",
+                        pop.stderr,
+                    )
+                    run_git_command(
+                        ["stash", "drop"], cwd=working_dir, check=False, timeout=10,
+                    )
             if self.session_logger:
                 self.session_logger.log(
                     "manifest_branch_correction",
@@ -305,6 +337,21 @@ class GitOperationsManager:
         # Avoids worktree creation entirely — the P0 worktree-vanishing issue
         # has blocked delivery in 8 consecutive observations.
         if github_repo:
+            # Guard: if another task already claimed self.workspace as its
+            # working directory, skip checkout to avoid stomping its branch
+            if self._active_worktree == self.workspace:
+                self.logger.warning(
+                    "Direct repo mode: workspace already claimed by active task, "
+                    "skipping branch checkout to avoid conflicts"
+                )
+                return self.workspace
+
+            self.logger.warning(
+                "Direct repo mode: working in shared workspace %s — "
+                "concurrent agents on the same repo risk branch conflicts",
+                self.workspace,
+            )
+
             branch_name = task.context.get("worktree_branch") or task.context.get("implementation_branch")
             if not branch_name:
                 impl_branch = task.context.get("implementation_branch")
@@ -444,7 +491,6 @@ class GitOperationsManager:
             deletions = 0
             if diffstat:
                 summary_line = diffstat.split("\n")[-1]
-                import re
                 ins_match = re.search(r"(\d+) insertion", summary_line)
                 del_match = re.search(r"(\d+) deletion", summary_line)
                 if ins_match:
@@ -826,7 +872,11 @@ class GitOperationsManager:
             if not pr_url:
                 continue
             # Extract PR number from URL (e.g. .../pull/18 → 18)
-            pr_number = pr_url.rstrip("/").split("/")[-1]
+            match = re.search(r'/pull/(\d+)', pr_url)
+            if not match:
+                self.logger.warning(f"Could not extract PR number from URL: {pr_url}")
+                continue
+            pr_number = match.group(1)
             self.logger.info(f"Closing orphaned subtask PR #{pr_number}")
             run_command(
                 ["gh", "pr", "close", pr_number,
@@ -910,10 +960,11 @@ class GitOperationsManager:
         """Get list of changed files from git diff (staged and unstaged)."""
         from ..utils.subprocess_utils import run_git_command, SubprocessError
 
+        cwd = self._active_worktree or self.workspace
         try:
             result = run_git_command(
                 ["diff", "--name-only", "HEAD"],
-                cwd=self.workspace,
+                cwd=cwd,
                 check=False,
                 timeout=10,
             )
@@ -970,16 +1021,32 @@ class GitOperationsManager:
                 self.logger.error(f"Failed to create branch {branch}: {create.stderr}")
                 # Pop stash even on failure so we don't lose work
                 if stashed:
-                    run_git_command(
+                    pop = run_git_command(
                         ["stash", "pop"], cwd=repo_dir, check=False, timeout=10,
                     )
+                    if pop.returncode != 0:
+                        # Conflicts from stash pop leave conflict markers — drop the
+                        # stash entry to avoid silent working tree corruption
+                        self.logger.warning(
+                            f"Stash pop failed (conflicts likely): {pop.stderr}; dropping stash"
+                        )
+                        run_git_command(
+                            ["stash", "drop"], cwd=repo_dir, check=False, timeout=10,
+                        )
                 return
 
         # Restore stashed changes
         if stashed:
-            run_git_command(
+            pop = run_git_command(
                 ["stash", "pop"], cwd=repo_dir, check=False, timeout=10,
             )
+            if pop.returncode != 0:
+                self.logger.warning(
+                    f"Stash pop failed (conflicts likely): {pop.stderr}; dropping stash"
+                )
+                run_git_command(
+                    ["stash", "drop"], cwd=repo_dir, check=False, timeout=10,
+                )
 
     def _has_unpushed_commits(self, working_dir: Path) -> bool:
         """Check if current branch has commits not pushed to origin."""

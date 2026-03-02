@@ -279,6 +279,7 @@ class TestLifecycleIntegration:
         agent.config.max_retries = 3
         agent.retry_handler = MagicMock()
         agent.retry_handler.max_retries = 3
+        agent.retry_handler.should_retry.return_value = False
         agent.retry_handler.can_create_escalation.return_value = False
         agent.escalation_handler = MagicMock()
         agent.escalation_handler.categorize_error.return_value = "unknown"
@@ -302,6 +303,7 @@ class TestLifecycleIntegration:
         agent.config.max_retries = 3
         agent.retry_handler = MagicMock()
         agent.retry_handler.max_retries = 3
+        agent.retry_handler.should_retry.return_value = False
         agent.retry_handler.can_create_escalation.return_value = False
         agent.escalation_handler = MagicMock()
         agent.escalation_handler.categorize_error.return_value = "unknown"

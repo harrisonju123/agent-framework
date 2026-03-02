@@ -1,6 +1,7 @@
 """Claude CLI subprocess backend implementation."""
 
 import asyncio
+import atexit
 import hashlib
 import json
 import logging
@@ -109,10 +110,12 @@ def _process_stream_line(
 
         # Accumulate per-turn usage as fallback when result event never arrives
         # (known CLI bug: github.com/anthropics/claude-code/issues/1920)
+        # Input tokens = full context re-sent each turn, so take max (not sum).
+        # Output tokens are new content each turn, so sum them.
         msg_usage = message.get("usage", {})
         if msg_usage:
-            usage_result["input_tokens"] = (
-                usage_result.get("input_tokens", 0) + msg_usage.get("input_tokens", 0)
+            usage_result["input_tokens"] = max(
+                usage_result.get("input_tokens", 0), msg_usage.get("input_tokens", 0)
             )
             usage_result["output_tokens"] = (
                 usage_result.get("output_tokens", 0) + msg_usage.get("output_tokens", 0)
@@ -556,8 +559,15 @@ class ClaudeCLIBackend(LLMBackend):
                     log_file.write(f"TIMEOUT after {timeout} seconds\n")
                     log_file.write(f"Process killed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     log_file.flush()
-                logger.warning(f"Claude CLI timed out after {timeout}s, killing process")
-                process.kill()
+                logger.warning(f"Claude CLI timed out after {timeout}s, terminating process")
+                try:
+                    process.terminate()  # SIGTERM
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5)
+                    except asyncio.TimeoutError:
+                        process.kill()  # SIGKILL fallback
+                except ProcessLookupError:
+                    pass  # Already dead
                 await process.wait()
 
             latency_ms = (time.time() - start_time) * 1000
@@ -740,6 +750,14 @@ class ClaudeCLIBackend(LLMBackend):
         with open(temp_path, 'w') as f:
             json.dump(expanded, f, indent=2)
         temp_path.chmod(0o600)
+
+        # Clean up expanded config on normal exit to avoid credential leakage
+        def _remove_expanded_config():
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        atexit.register(_remove_expanded_config)
 
         logger.debug(f"Expanded MCP config to process-specific file: {temp_path}")
         return temp_path

@@ -82,13 +82,13 @@ class WorkflowRouter:
             return
 
         if self.queue.check_subtasks_complete(parent.id, parent.subtask_ids):
-            # All subtasks done - create fan-in task
-            if not self.queue._fan_in_already_created(parent.id):
-                completed_subtasks = [
-                    self.queue.get_completed(sid) for sid in parent.subtask_ids
-                ]
-                completed_subtasks = [s for s in completed_subtasks if s is not None]
-                fan_in_task = self.queue.create_fan_in_task(parent, completed_subtasks)
+            # All subtasks done - create fan-in task (atomic guard inside create_fan_in_task)
+            completed_subtasks = [
+                self.queue.get_completed(sid) for sid in parent.subtask_ids
+            ]
+            completed_subtasks = [s for s in completed_subtasks if s is not None]
+            fan_in_task = self.queue.create_fan_in_task(parent, completed_subtasks)
+            if fan_in_task is not None:
                 self.queue.push(fan_in_task, fan_in_task.assigned_to)
                 self.logger.info(
                     f"🔀 All subtasks complete - created fan-in task {fan_in_task.id}"
@@ -197,16 +197,17 @@ class WorkflowRouter:
             f"🔀 Task {task.id} decomposed into {len(subtasks)} subtasks ({queued_count} newly queued)"
         )
 
-    def enforce_chain(self, task: Task, response, routing_signal=None) -> None:
+    def enforce_chain(self, task: Task, response, routing_signal=None) -> bool:
         """Queue next agent in workflow using DAG executor.
 
         Supports both legacy linear workflows and new DAG workflows with conditions.
+        Returns True if a downstream task was successfully routed.
         """
         # Task decomposition: architect auto-decomposes large tasks before routing to engineer
         if self.config.base_id == "architect" and task.plan:
             if self.should_decompose_task(task):
                 self.decompose_and_queue_subtasks(task)
-                return
+                return True
 
         # If subtasks were already created (by a prior run), skip chain routing —
         # subtasks handle the work individually, fan-in aggregates at completion
@@ -215,7 +216,7 @@ class WorkflowRouter:
                 f"Task {task.id} already decomposed into {len(task.subtask_ids)} subtasks, "
                 f"skipping chain routing"
             )
-            return
+            return True
 
         # Legacy REVIEW/FIX tasks are routed by _queue_code_review_if_needed
         # and _queue_review_fix_if_needed — letting them also route through
@@ -227,7 +228,7 @@ class WorkflowRouter:
                 f"Skipping workflow chain for {task.id}: "
                 f"task type {task.type} handled by dedicated review routing"
             )
-            return
+            return False
 
         # PREVIEW tasks always route through a DAG workflow. Without a workflow
         # in context, the task is orphaned (e.g. stale retry) and would fall
@@ -238,7 +239,7 @@ class WorkflowRouter:
                 f"Skipping workflow chain for {task.id}: "
                 f"PREVIEW task without workflow context, dropping to avoid duplicate routing"
             )
-            return
+            return False
 
         workflow_name = task.context.get("workflow")
         if not workflow_name or workflow_name not in self._workflows_config:
@@ -257,7 +258,7 @@ class WorkflowRouter:
                     self.workspace, task.id, self.config.id,
                     routing_signal, validated, used_fallback=False,
                 )
-            return
+            return False
 
         # Get workflow definition and convert to DAG
         workflow_def = self._workflows_config[workflow_name]
@@ -265,13 +266,13 @@ class WorkflowRouter:
             workflow_dag = workflow_def.to_dag(workflow_name)
         except Exception as e:
             self.logger.error(f"Failed to build workflow DAG for {workflow_name}: {e}")
-            return
+            return False
 
         # Single-agent workflows don't need routing
         if len(workflow_dag.get_all_agents()) <= 1:
             if routing_signal:
                 self.logger.debug("Routing signal discarded: single-agent workflow")
-            return
+            return False
 
         # Execute workflow step using DAG executor
         try:
@@ -313,8 +314,10 @@ class WorkflowRouter:
                     workflow=workflow_name,
                     signal=routing_signal.target_agent if routing_signal else None,
                 )
+            return routed
         except Exception as e:
             self.logger.error(f"Workflow execution failed for task {task.id}: {e}")
+            return False
 
     def is_at_terminal_workflow_step(self, task: Task) -> bool:
         """Check if the current agent is at the last step in the workflow DAG.

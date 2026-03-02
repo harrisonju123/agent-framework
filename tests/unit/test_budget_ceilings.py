@@ -147,8 +147,8 @@ class TestDeriveEffortFromPlan:
     def test_xl_boundary(self):
         """≥ 1000 lines → XL."""
         bm = _make_budget_manager()
-        # 18 files + 5 steps = 1025
-        assert bm.derive_effort_from_plan(_make_plan(18, step_count=5)) == "XL"
+        # 21 files → max(21*50, 5*25) = 1050
+        assert bm.derive_effort_from_plan(_make_plan(21, step_count=5)) == "XL"
 
 
 # ---------------------------------------------------------------------------
@@ -576,11 +576,12 @@ class TestBudgetHalt:
 # ---------------------------------------------------------------------------
 
 class TestFanInCostAggregation:
-    def test_subtask_costs_aggregated(self):
+    def test_subtask_costs_aggregated(self, tmp_path):
         """Subtask own costs (cumulative - parent baseline) summed correctly."""
         from agent_framework.queue.file_queue import FileQueue
 
         queue = FileQueue.__new__(FileQueue)
+        queue.comm_dir = tmp_path / ".agent-communication"
         queue.create_fan_in_task = FileQueue.create_fan_in_task.__get__(queue)
 
         parent = _make_task(task_id="parent-1", context={
@@ -601,10 +602,11 @@ class TestFanInCostAggregation:
         # Ceiling propagated from parent
         assert fan_in.context["_budget_ceiling"] == 30.0
 
-    def test_subtask_costs_default_to_zero(self):
+    def test_subtask_costs_default_to_zero(self, tmp_path):
         from agent_framework.queue.file_queue import FileQueue
 
         queue = FileQueue.__new__(FileQueue)
+        queue.comm_dir = tmp_path / ".agent-communication"
         queue.create_fan_in_task = FileQueue.create_fan_in_task.__get__(queue)
 
         parent = _make_task(task_id="parent-1", context={})
@@ -615,11 +617,12 @@ class TestFanInCostAggregation:
 
         assert fan_in.context["_cumulative_cost"] == 0.0
 
-    def test_subtask_with_no_own_cost(self):
+    def test_subtask_with_no_own_cost(self, tmp_path):
         """Subtask that only inherited parent cost contributes 0 own cost."""
         from agent_framework.queue.file_queue import FileQueue
 
         queue = FileQueue.__new__(FileQueue)
+        queue.comm_dir = tmp_path / ".agent-communication"
         queue.create_fan_in_task = FileQueue.create_fan_in_task.__get__(queue)
 
         parent = _make_task(task_id="parent-1", context={"_cumulative_cost": 2.0})

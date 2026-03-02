@@ -524,6 +524,8 @@ class TestSubtaskWorkflowChainGuard:
         agent.workspace = tmp_workspace
         # Mock the review cycle manager
         agent._review_cycle = MagicMock()
+        # enforce_chain returns bool — False means no downstream routing occurred
+        agent._enforce_workflow_chain = MagicMock(return_value=False)
         # Bind the real method under test to the mock
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         return agent

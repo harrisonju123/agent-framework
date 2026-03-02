@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .config import load_agents, AgentDefinition
+from ..queue.locks import FileLock
 from ..safeguards.circuit_breaker import CircuitBreaker
 from ..utils.process_utils import kill_process_tree
 
@@ -426,24 +428,21 @@ class Orchestrator:
                 kill_process_tree(pid, signal.SIGTERM)
                 logger.info(f"Sent SIGTERM to {agent_id} (PID {pid})")
 
-            # Wait for graceful shutdown
-            time.sleep(min(timeout, 2))
+            # Poll until all processes exit or timeout expires
+            pids_to_stop = {aid: pid for aid, pid in pids_to_kill.items()}
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if all(not self._is_running(pid) for pid in pids_to_stop.values()):
+                    break
+                time.sleep(0.5)
 
-            # Force kill any still running
-            still_running = {}
-            for aid, pid in pids_to_kill.items():
-                if self._is_running(pid):
-                    still_running[aid] = pid
+            # Force kill any still running after the full timeout
+            for agent_id, pid in pids_to_stop.items():
+                if not self._is_running(pid):
+                    logger.info(f"Agent {agent_id} stopped gracefully")
                 else:
-                    logger.info(f"Agent {aid} stopped gracefully")
-            if still_running:
-                remaining = max(0, timeout - 2)
-                if remaining:
-                    time.sleep(remaining)
-                for agent_id, pid in still_running.items():
-                    if self._is_running(pid):
-                        logger.warning(f"Force killing {agent_id} (PID {pid})")
-                        kill_process_tree(pid, signal.SIGKILL)
+                    logger.warning(f"Force killing {agent_id} (PID {pid})")
+                    kill_process_tree(pid, signal.SIGKILL)
         else:
             for agent_id, pid in pids_to_kill.items():
                 kill_process_tree(pid, signal.SIGKILL)
@@ -487,8 +486,11 @@ class Orchestrator:
         try:
             os.kill(pid, 0)  # Signal 0 = check existence
             return True
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
             return False
+        except PermissionError:
+            # Process exists but is owned by a different user
+            return True
 
     def _is_agent_process(self, pid: int) -> bool:
         """Check if PID belongs to an agent framework process (not a recycled PID)."""
@@ -557,16 +559,13 @@ class Orchestrator:
         Args:
             remove_pid_file: Whether to remove the PID file (skip during pre-start cleanup)
         """
-        # Remove lock files (each lock is a directory with a pid file inside)
+        # Remove only stale locks (owner PID is dead) — live locks belong to
+        # agents that are still running and must not be yanked out from under them
         if self.lock_dir.exists():
-            for lock_dir in self.lock_dir.glob("*.lock"):
-                try:
-                    if lock_dir.is_dir():
-                        for f in lock_dir.iterdir():
-                            f.unlink()
-                        lock_dir.rmdir()
-                except OSError as e:
-                    logger.warning(f"Failed to remove lock {lock_dir.name}: {e}")
+            for lock_path in self.lock_dir.glob("*.lock"):
+                lock = FileLock(self.lock_dir, lock_path.stem)
+                if lock._is_stale_lock():
+                    lock._remove_lock()
 
         # Remove PID file
         if remove_pid_file and self.pid_file.exists():
@@ -651,6 +650,8 @@ class Orchestrator:
             # Keep at least one replica of each agent type
             if "-" in agent_id:  # Replica (e.g., "engineer-2")
                 base_id, replica_num = agent_id.rsplit("-", 1)
+                if not replica_num.isdigit():
+                    continue
                 if int(replica_num) > 1:
                     agents_to_stop.append(agent_id)
 
@@ -706,7 +707,10 @@ class Orchestrator:
             logger.info(f"Spawning additional agents to reach target: {current_count} -> {target_count}")
             # Spawn additional replicas
             for agent_def in enabled_agents:
-                current_replicas = len([p for p in self.processes.keys() if p.startswith(agent_def.id)])
+                # Exact match on agent ID or agent ID followed by -\d+ replica suffix,
+                # avoids prefix over-matching (e.g. "qa" matching "qa-lead-1")
+                replica_pattern = re.compile(rf'^{re.escape(agent_def.id)}(-\d+)?$')
+                current_replicas = len([p for p in self.processes.keys() if replica_pattern.match(p)])
                 needed_replicas = replicas - current_replicas
 
                 for i in range(needed_replicas):

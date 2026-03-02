@@ -272,9 +272,20 @@ class PromptBuilder:
             task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
             return (task_hash % 100) < canary_pct
 
+    # Context keys filtered from legacy prompt serialization to save tokens.
+    # Underscore-prefixed keys are always stripped (internal bookkeeping).
+    # These named keys are injected as dedicated prompt sections elsewhere.
+    _LEGACY_CONTEXT_EXCLUDE_KEYS = frozenset({"upstream_summary", "structured_findings"})
+
     def _build_prompt_legacy(self, task: Task, prompt_override: str = None) -> str:
         """Build prompt using legacy format (original implementation)."""
-        task_json = task.model_dump_json(indent=2)
+        task_dict = task.model_dump()
+        if "context" in task_dict and isinstance(task_dict["context"], dict):
+            task_dict["context"] = {
+                k: v for k, v in task_dict["context"].items()
+                if not k.startswith("_") and k not in self._LEGACY_CONTEXT_EXCLUDE_KEYS
+            }
+        task_json = json.dumps(task_dict, indent=2, default=str)
         agent_prompt = prompt_override or self.ctx.config.prompt
 
         # Extract integration context
@@ -602,7 +613,11 @@ Current context:
         if cache_key in self._guidance_cache:
             return self._guidance_cache[cache_key]
 
-        owner, repo = github_repo.split("/")
+        parts = github_repo.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            self.logger.warning(f"Malformed github_repo '{github_repo}', expected 'owner/repo'")
+            return ""
+        owner, repo = parts
 
         # Get formatting patterns from config
         branch_pattern = "{type}/{ticket_id}-{slug}"
@@ -1277,8 +1292,10 @@ If a tool call fails:
         # Structured findings have precise file paths
         findings = task.context.get("structured_findings")
         if findings and isinstance(findings, dict):
-            for file_path in findings.keys():
-                parts.append(file_path)
+            for f in findings.get("findings", []):
+                fp = f.get("file", "") if isinstance(f, dict) else ""
+                if fp:
+                    parts.append(fp)
         return " ".join(parts)
 
     # Budget for read cache section — keeps prompt size under control

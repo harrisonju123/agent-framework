@@ -80,12 +80,12 @@ def extract_requirements_checklist(plan: PlanDocument) -> list[dict]:
 def estimate_plan_lines(plan: "PlanDocument") -> int:
     """Estimate total implementation lines from plan signals.
 
-    Combines file count (50 lines/file) and approach step count (25 lines/step).
-    Used by both task decomposition and budget sizing.
+    Takes the higher of file count (50 lines/file) vs approach step count
+    (25 lines/step) to avoid double-counting overlapping signals.
     """
     file_estimate = len(plan.files_to_modify) * 50 if plan.files_to_modify else 0
     step_estimate = len(plan.approach) * 25 if plan.approach else 0
-    return file_estimate + step_estimate
+    return max(file_estimate, step_estimate)
 
 
 @dataclass
@@ -234,6 +234,13 @@ class TaskDecomposer:
                 sub_boundaries = self._split_by_subdirectory(
                     group_files, lines_per_file, dir_name
                 )
+                # _split_by_subdirectory leaves approach_steps empty;
+                # backfill so each sub-boundary carries relevant context
+                for sb in sub_boundaries:
+                    if not sb.approach_steps:
+                        sb.approach_steps = self._extract_relevant_steps(
+                            plan.approach, sb.files
+                        )
                 boundaries.extend(sub_boundaries)
             else:
                 # Create single boundary for this directory group

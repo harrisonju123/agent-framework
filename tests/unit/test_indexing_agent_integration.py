@@ -45,8 +45,10 @@ def impl_task():
             "user_goal": "Reduce database round trips in UserService",
             "upstream_summary": "QA found slow response on GET /users with 50+ rows in handler.go",
             "structured_findings": {
-                "handler.go": [{"severity": "HIGH", "description": "N+1 in ListUsers"}],
-                "service.go": [{"severity": "MEDIUM", "description": "Missing index"}],
+                "findings": [
+                    {"file": "handler.go", "severity": "HIGH", "description": "N+1 in ListUsers"},
+                    {"file": "service.go", "severity": "MEDIUM", "description": "Missing index"},
+                ],
             },
         },
     )

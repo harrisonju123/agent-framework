@@ -210,7 +210,8 @@ class TestProcessStreamLine:
         assert usage_result == {}
 
     def test_per_turn_usage_accumulates(self):
-        """Per-turn message.usage accumulates as fallback for missing result event."""
+        """Per-turn usage: input_tokens takes max (full context re-sent each turn),
+        output_tokens sums (new content each turn)."""
         events = [
             {
                 "type": "assistant",
@@ -233,8 +234,8 @@ class TestProcessStreamLine:
         for event in events:
             _process_stream_line(json.dumps(event), text_chunks, usage_result)
 
-        assert usage_result["input_tokens"] == 300
-        assert usage_result["output_tokens"] == 130
+        assert usage_result["input_tokens"] == 200  # max(100, 200)
+        assert usage_result["output_tokens"] == 130  # 50 + 80
 
     def test_result_event_uses_larger_of_accumulated_or_reported(self):
         """When result event has larger totals, those win."""
@@ -292,9 +293,11 @@ class TestProcessStreamLine:
         for event in events:
             _process_stream_line(json.dumps(event), text_chunks, usage_result)
 
-        # Accumulated per-turn totals (13000 in, 2000 out) should be preserved
-        # over the result event's final-turn-only values (3 in, 77 out)
-        assert usage_result["input_tokens"] == 13000
+        # input_tokens: max(5000, 8000) = 8000 from assistant events,
+        # then max(8000, 3) = 8000 from result event
+        # output_tokens: 1200 + 800 = 2000 from assistant events,
+        # then max(2000, 77) = 2000 from result event
+        assert usage_result["input_tokens"] == 8000
         assert usage_result["output_tokens"] == 2000
         assert usage_result["total_cost_usd"] == 3.38
 

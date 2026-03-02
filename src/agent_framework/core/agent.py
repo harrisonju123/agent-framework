@@ -469,7 +469,7 @@ class Agent:
         code_indexing_config: Optional[dict] = None,
         heartbeat_interval: int = 15,
         max_consecutive_tool_calls: int = 15,
-        max_consecutive_diagnostic_calls: int = 5,
+        max_consecutive_diagnostic_calls: int = 10,
         exploration_alert_threshold: int = 50,
         exploration_alert_thresholds: Optional[Dict[str, int]] = None,
     ):
@@ -1139,18 +1139,20 @@ class Agent:
 
             self._git_ops.detect_implementation_branch(task)
 
+            chain_routed = False
             if not skip_chain:
-                self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
+                chain_routed = self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
 
             # Emit waterfall summary when the chain terminates (either at
             # terminal step or via no_changes early exit)
             if skip_chain or self._is_at_terminal_workflow_step(task):
                 self._emit_workflow_summary(task)
 
-            # Push + PR lifecycle after chain routing. Downstream agents pick up
-            # from queue asynchronously, so push completes before they fetch the branch.
-            self._git_ops.push_and_create_pr_if_needed(task)
-            self._git_ops.manage_pr_lifecycle(task)
+            # Push + PR lifecycle after chain routing. Skip if the chain
+            # successfully routed a downstream task — that agent will handle PR.
+            if not chain_routed:
+                self._git_ops.push_and_create_pr_if_needed(task)
+                self._git_ops.manage_pr_lifecycle(task)
 
         self._extract_and_store_memories(task, response)
         tool_call_count = self._analyze_tool_patterns(task)
@@ -1678,6 +1680,18 @@ class Agent:
         # Tighter interval for implementation steps to reduce max work loss
         _COMMIT_CHECKPOINT_INTERVAL = 15 if self._is_implementation_step(task) else 25
 
+        def _has_uncommitted_work() -> bool:
+            """Check if working directory has uncommitted changes worth preserving."""
+            try:
+                result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=str(working_dir),
+                    capture_output=True, text=True, timeout=5,
+                )
+                return bool(result.stdout.strip())
+            except Exception:
+                return False
+
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
             try:
                 _tool_call_count[0] += 1
@@ -1724,12 +1738,18 @@ class Agent:
                                 # Productive workflow — use higher threshold before tripping
                                 effective = threshold * _PRODUCTIVE_THRESHOLD_MULTIPLIER
                                 if count >= effective:
-                                    self.logger.warning(
-                                        f"Circuit breaker: {count} consecutive Bash calls, "
-                                        f"low diversity={diversity:.2f} (unique_commands={unique}), "
-                                        f"productive_ratio={productive_ratio:.2f} exceeded hard ceiling={effective}"
-                                    )
-                                    _circuit_breaker_event.set()
+                                    if _has_uncommitted_work():
+                                        self.logger.warning(
+                                            f"Circuit breaker suppressed: {count} consecutive Bash calls "
+                                            f"exceeded hard ceiling={effective}, but uncommitted work exists"
+                                        )
+                                    else:
+                                        self.logger.warning(
+                                            f"Circuit breaker: {count} consecutive Bash calls, "
+                                            f"low diversity={diversity:.2f} (unique_commands={unique}), "
+                                            f"productive_ratio={productive_ratio:.2f} exceeded hard ceiling={effective}"
+                                        )
+                                        _circuit_breaker_event.set()
                                 elif not _soft_threshold_logged[0]:
                                     self.logger.info(
                                         f"Circuit breaker deferred: {count} consecutive Bash calls, "
@@ -1737,12 +1757,19 @@ class Agent:
                                     )
                                     _soft_threshold_logged[0] = True
                             else:
-                                self.logger.warning(
-                                    f"Circuit breaker: {count} consecutive Bash calls, "
-                                    f"low diversity={diversity:.2f} (unique_commands={unique}), "
-                                    f"productive_ratio={productive_ratio:.2f}"
-                                )
-                                _circuit_breaker_event.set()
+                                if _has_uncommitted_work():
+                                    self.logger.warning(
+                                        f"Circuit breaker suppressed: {count} consecutive Bash calls, "
+                                        f"low diversity={diversity:.2f}, "
+                                        f"productive_ratio={productive_ratio:.2f}, but uncommitted work exists"
+                                    )
+                                else:
+                                    self.logger.warning(
+                                        f"Circuit breaker: {count} consecutive Bash calls, "
+                                        f"low diversity={diversity:.2f} (unique_commands={unique}), "
+                                        f"productive_ratio={productive_ratio:.2f}"
+                                    )
+                                    _circuit_breaker_event.set()
                         elif not _soft_threshold_logged[0]:
                             # Diverse commands — log once and let them continue
                             self.logger.info(
@@ -2259,6 +2286,14 @@ class Agent:
                     f"Likely deleted by sibling agent cleanup during prompt build."
                 )
 
+            # Hard budget check — fail fast before spending on another LLM call
+            _ceiling = task.context.get("_budget_ceiling")
+            if _ceiling is not None and task.context.get("_cumulative_cost", 0.0) >= _ceiling:
+                raise RuntimeError(
+                    f"Budget ceiling exceeded: cumulative cost "
+                    f"${task.context['_cumulative_cost']:.2f} >= ceiling ${_ceiling:.2f}"
+                )
+
             # Execute LLM with interruption watching
             response = await self._execute_llm_with_interruption_watch(task, prompt, working_dir, team_agents)
             if response is None:
@@ -2309,7 +2344,7 @@ class Agent:
             _fail_cost = None
             _fail_in = 0
             _fail_out = 0
-            _already_accumulated = task.context.get("_cumulative_cost", 0.0) > _cost_before_try
+            _already_accumulated = task.context.get("_cumulative_cost", 0.0) != _cost_before_try
             if not _already_accumulated and 'response' in locals() and response is not None:
                 _fail_cost = self._budget.estimate_cost(response)
                 _fail_in = response.input_tokens
@@ -2360,8 +2395,6 @@ class Agent:
 
         finally:
             self._context_window_manager = None
-            self._session_logger.close()
-            self._session_logger = noop_logger()
             try:
                 self._cleanup_task_execution(task, lock)
             except Exception as e:
@@ -2383,6 +2416,10 @@ class Agent:
                     except Exception as lock_err:
                         self.logger.debug(f"Also failed to release lock for {task.id}: {lock_err}")
                 self._current_task_id = None
+            finally:
+                # Close session logger AFTER cleanup so cleanup operations are logged
+                self._session_logger.close()
+                self._session_logger = noop_logger()
 
     async def _handle_failure(self, task: Task) -> None:
         """
@@ -3686,7 +3723,7 @@ class Agent:
         """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.decompose_and_queue_subtasks(task)
 
-    def _enforce_workflow_chain(self, task: Task, response, routing_signal=None) -> None:
+    def _enforce_workflow_chain(self, task: Task, response, routing_signal=None) -> bool:
         """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.enforce_chain(task, response, routing_signal)
 
