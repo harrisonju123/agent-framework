@@ -51,6 +51,7 @@ class PromptContext:
     # Optimization and memory
     optimization_config: Optional[Dict[str, Any]] = None
     memory_retriever: Optional["MemoryRetriever"] = None
+    memory_store: Optional[Any] = None  # MemoryStore for direct recall (QA warnings)
     tool_pattern_store: Optional["ToolPatternStore"] = None
     context_window_manager: Optional["ContextWindowManager"] = None
 
@@ -181,6 +182,9 @@ class PromptBuilder:
 
         # Inject relevant memories from previous tasks
         prompt = self._inject_memories(prompt, task)
+
+        # Inject recurring QA warnings for files in this task
+        prompt = self._inject_qa_warnings(prompt, task)
 
         # Inject tool efficiency tips from session analysis
         prompt = self._inject_tool_tips(prompt, task)
@@ -1101,6 +1105,82 @@ If a tool call fails:
             return prompt + "\n" + memory_section
 
         return prompt
+
+    def _inject_qa_warnings(self, prompt: str, task: Task) -> str:
+        """Append recurring QA warnings for files relevant to this task.
+
+        Queries the shared memory namespace for qa_recurring_warnings entries
+        whose file tags overlap with the task's deliverables or file context.
+        Budget-capped at 1500 chars to avoid prompt bloat.
+        """
+        if not self.ctx.memory_store or not getattr(self.ctx.memory_store, "enabled", False):
+            return prompt
+
+        repo_slug = task.context.get("github_repo")
+        if not repo_slug:
+            return prompt
+
+        # Context budget check
+        if self.ctx.context_window_manager:
+            budget = self.ctx.context_window_manager.compute_memory_budget()
+            if budget == 0:
+                return prompt
+
+        from .feedback_bus import CATEGORY_QA_RECURRING, SHARED_AGENT_TYPE
+
+        warnings = self.ctx.memory_store.recall(
+            repo_slug=repo_slug,
+            agent_type=SHARED_AGENT_TYPE,
+            category=CATEGORY_QA_RECURRING,
+            limit=20,
+        )
+        if not warnings:
+            return prompt
+
+        # Build set of files relevant to this task for tag matching
+        task_files = set(task.deliverables or [])
+        structured = task.context.get("structured_findings")
+        if structured and isinstance(structured, dict):
+            for finding in structured.get("findings", []):
+                fp = finding.get("file", "") if isinstance(finding, dict) else ""
+                if fp:
+                    task_files.add(fp)
+
+        relevant = []
+        for w in warnings:
+            # Include if any tag matches a task file, or if no file tags (general warning)
+            file_tags = [t for t in w.tags if t != "qa_recurring"]
+            if not file_tags or any(ft in task_files for ft in file_tags):
+                relevant.append(w)
+
+        if not relevant:
+            return prompt
+
+        max_chars = 1500
+        lines = ["## RECURRING QA WARNINGS", ""]
+        current_chars = sum(len(l) for l in lines)
+
+        for w in relevant:
+            line = f"- {w.content}"
+            if current_chars + len(line) + 1 > max_chars:
+                break
+            lines.append(line)
+            current_chars += len(line) + 1
+
+        if len(lines) <= 2:
+            return prompt
+
+        section = "\n".join(lines)
+
+        self.logger.debug(f"Injected {len(relevant)} QA warnings ({len(section)} chars)")
+        if self.ctx.session_logger:
+            self.ctx.session_logger.log(
+                "qa_warnings_injected",
+                repo=repo_slug,
+                count=len(relevant),
+                chars=len(section),
+            )
+        return prompt + "\n\n" + section
 
     def _inject_tool_tips(self, prompt: str, task: Task) -> str:
         """Append tool efficiency tips from previous session analysis."""
