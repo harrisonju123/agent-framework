@@ -54,7 +54,4 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: >-
-          pytest tests/ -q --tb=short
-          --ignore=tests/test_optimization.py
-          --ignore=tests/unit/test_review_fix.py
+        run: pytest tests/ -q --tb=short

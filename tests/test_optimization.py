@@ -385,8 +385,8 @@ class TestCostEstimation:
             success=True,
         )
 
-        haiku_cost = agent._estimate_cost(haiku_response)
-        sonnet_cost = agent._estimate_cost(sonnet_response)
+        haiku_cost = agent._budget.estimate_cost(haiku_response)
+        sonnet_cost = agent._budget.estimate_cost(sonnet_response)
 
         # Sonnet should cost more than Haiku
         assert sonnet_cost > haiku_cost
@@ -404,7 +404,7 @@ class TestCostEstimation:
             reported_cost_usd=0.0042,
         )
 
-        cost = agent._estimate_cost(response)
+        cost = agent._budget.estimate_cost(response)
         assert cost == 0.0042
 
     def test_fallback_to_calculation_when_no_reported_cost(self, agent):
@@ -420,7 +420,7 @@ class TestCostEstimation:
             reported_cost_usd=None,
         )
 
-        cost = agent._estimate_cost(response)
+        cost = agent._budget.estimate_cost(response)
         # Should use MODEL_PRICING calculation: (1000/1M * 3.0) + (500/1M * 15.0)
         expected = 1000 / 1_000_000 * 3.0 + 500 / 1_000_000 * 15.0
         assert cost == pytest.approx(expected)

@@ -312,13 +312,6 @@ class Agent:
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
         self._replan_model = replan_cfg.get("model", "haiku")
 
-        # Cross-feature learning loop — single coordinator for all post-task learnings
-        self._feedback_bus = FeedbackBus(
-            memory_store=self._memory_store,
-            session_logger=self._session_logger,
-            error_recovery=self._error_recovery,
-        )
-
     def _init_session_logging(self, session_logging_config):
         """Initialize session logging configuration."""
         sl_cfg = session_logging_config or {}
@@ -578,6 +571,13 @@ class Agent:
             memory_store=self._memory_store,
             replan_config=replan_config,
             self_eval_config=self_eval_config,
+        )
+
+        # Cross-feature learning loop — depends on _error_recovery + _memory_store
+        self._feedback_bus = FeedbackBus(
+            memory_store=self._memory_store,
+            session_logger=self._session_logger,
+            error_recovery=self._error_recovery,
         )
 
         self._budget = BudgetManager(
