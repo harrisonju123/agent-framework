@@ -4,7 +4,6 @@ import json
 import os
 import re
 import subprocess
-import time
 from pathlib import Path
 
 import logging
@@ -376,6 +375,8 @@ def escalate(ctx, task_id, template):
     except (FileNotFoundError, ValueError, yaml.YAMLError) as e:
         logger.debug(f"Could not load framework config: {e}")
 
+    from ..utils.type_helpers import unique_id_suffix
+
     # Resolve repo if available, then create isolated worktree
     repo_info = None
     repo_path = None
@@ -543,4 +544,4 @@ def handoff(ctx, team_name):
     for task_id in queued_ids:
         console.print(f"  [dim]{task_id}[/]")
 
-    console.print(f"\n[dim]Monitor with: agent status --watch[/]")
+    console.print("\n[dim]Monitor with: agent status --watch[/]")

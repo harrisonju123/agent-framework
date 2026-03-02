@@ -519,7 +519,7 @@ class ClaudeCLIBackend(LLMBackend):
                         if log_file:
                             if not stderr_header_written[0] and decoded.strip():
                                 log_file.write(f"\n{'='*50}\n")
-                                log_file.write(f"STDERR:\n")
+                                log_file.write("STDERR:\n")
                                 log_file.write(f"{'='*50}\n")
                                 stderr_header_written[0] = True
                             log_file.write(decoded)
@@ -582,7 +582,7 @@ class ClaudeCLIBackend(LLMBackend):
 
             if log_file:
                 log_file.write(f"\n\n{'=' * 50}\n")
-                log_file.write(f"SUMMARY\n")
+                log_file.write("SUMMARY\n")
                 log_file.write(f"{'=' * 50}\n")
                 log_file.write(f"Completed: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                 log_file.write(f"Duration: {latency_ms/1000:.1f}s\n")
@@ -594,7 +594,7 @@ class ClaudeCLIBackend(LLMBackend):
                 if stderr_text:
                     log_file.write(f"\nSTDERR Summary:\n{stderr_text[:1000]}\n")
                 if process.returncode != 0:
-                    log_file.write(f"\nFAILED - See stderr above for details\n")
+                    log_file.write("\nFAILED - See stderr above for details\n")
 
             if timed_out:
                 return LLMResponse(

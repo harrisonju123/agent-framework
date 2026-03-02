@@ -24,7 +24,6 @@ from .models import (
     HealthCheck,
     HealthReport,
     CurrentTaskData,
-    LogEntry,
     TeamSessionData,
     ToolActivityData,
 )

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from ..llm.base import LLMBackend
     from ..queue.file_queue import FileQueue
     from ..indexing.query import IndexQuery
+    from .engineer_specialization import SpecializationProfile
 
 from .task import Task, TaskType
 from .task_manifest import load_manifest
@@ -1183,7 +1184,7 @@ If a tool call fails:
 
         max_chars = 1500
         lines = ["## RECURRING QA WARNINGS", ""]
-        current_chars = sum(len(l) for l in lines)
+        current_chars = sum(len(ln) for ln in lines)
 
         for w in relevant:
             line = f"- {w.content}"

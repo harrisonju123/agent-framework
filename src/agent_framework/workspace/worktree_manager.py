@@ -436,7 +436,7 @@ class WorktreeManager:
             if claude_md_src.exists() and not claude_md_dst.exists():
                 import shutil
                 shutil.copy2(str(claude_md_src), str(claude_md_dst))
-                logger.info(f"Copied CLAUDE.md from base repo to worktree")
+                logger.info("Copied CLAUDE.md from base repo to worktree")
 
             # Register worktree
             now = datetime.now(timezone.utc).isoformat()

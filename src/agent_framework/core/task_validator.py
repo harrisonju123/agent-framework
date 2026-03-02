@@ -6,7 +6,6 @@ JIRA tickets are skipped since they come from an external system with their own 
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional
 
 from .task import Task, TaskType
 

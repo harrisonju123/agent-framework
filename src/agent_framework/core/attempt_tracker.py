@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 from ..utils.atomic_io import atomic_write_text
 from ..utils.subprocess_utils import run_git_command
+from .task import Task
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,7 @@ def save_attempt_history(workspace: Path, history: AttemptHistory) -> None:
 
 def record_attempt(
     workspace: Path,
-    task: "Task",
+    task: Task,
     agent_id: str,
     working_dir: Optional[Path],
     *,
@@ -143,7 +144,7 @@ def record_attempt(
             return None
 
         # Commit uncommitted work (idempotent with safety_commit)
-        had_uncommitted = _commit_wip(working_dir, task.id, _log)
+        _commit_wip(working_dir, task.id, _log)
 
         # Push to origin so code survives worktree deletion
         pushed = _try_push_branch(working_dir, _log)

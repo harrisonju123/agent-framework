@@ -1,7 +1,6 @@
 """Process management utilities for killing process trees."""
 
 import os
-import signal
 
 
 def kill_process_tree(pid: int, sig: int) -> None:

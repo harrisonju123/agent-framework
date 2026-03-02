@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .config import load_agents, AgentDefinition
+from .config import load_agents
 from ..queue.locks import FileLock
 from ..safeguards.circuit_breaker import CircuitBreaker
 from ..utils.process_utils import kill_process_tree

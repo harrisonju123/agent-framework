@@ -20,6 +20,14 @@ from .task import Task
 from .task_manifest import load_manifest, get_or_create_manifest
 from ..utils.type_helpers import strip_chain_prefixes
 
+# Branch naming prefixes used by the agent framework. Referenced by
+# cleanup_merged_branches() and the cleanup-branches CLI command.
+AGENT_BRANCH_PREFIXES = ("agent-", "chain-", "engineer-", "architect-", "qa-")
+
+# Minimum seconds between automatic post-merge branch cleanups to avoid
+# running expensive fetch+scan on every merged PR.
+_CLEANUP_COOLDOWN_SECONDS = 600  # 10 minutes
+
 
 class GitOperationsManager:
     """Manages git operations, worktree lifecycle, and PR creation."""
@@ -69,6 +77,7 @@ class GitOperationsManager:
         self._workflows_config = workflows_config or {}
 
         # Track active worktree for cleanup (mutable state)
+        self._last_cleanup_time: float = 0.0
         self._active_worktree: Optional[Path] = None
         self._worktree_env_vars: Optional[Dict[str, str]] = None
         self._active_root_task_id: Optional[str] = None
@@ -789,6 +798,16 @@ class GitOperationsManager:
                     task, "Done",
                     comment=f"PR merged automatically: {task.context.get('pr_url')}",
                 )
+                # Clean up stale agent branches (throttled to avoid fetch storm)
+                import time
+                github_repo = task.context.get("github_repo")
+                elapsed = time.monotonic() - self._last_cleanup_time
+                if github_repo and elapsed >= _CLEANUP_COOLDOWN_SECONDS:
+                    try:
+                        self.cleanup_merged_branches(github_repo)
+                        self._last_cleanup_time = time.monotonic()
+                    except Exception as e:
+                        self.logger.debug(f"Post-merge branch cleanup failed (non-fatal): {e}")
         except Exception as e:
             self.logger.error(f"PR lifecycle error for {task.id}: {e}")
 
@@ -1245,6 +1264,77 @@ class GitOperationsManager:
         if error:
             data["error"] = error[:500]
         self.session_logger.log("git_push", **data)
+
+    def cleanup_merged_branches(
+        self, github_repo: str, *, dry_run: bool = False, cwd: Optional[Path] = None,
+    ) -> list[str]:
+        """Delete remote branches matching agent-framework patterns that are merged into main.
+
+        Returns list of deleted (or would-be-deleted in dry_run) branch names.
+        """
+        from ..utils.subprocess_utils import run_git_command
+
+        work_dir = cwd or self.workspace
+        if self.multi_repo_manager and not cwd:
+            try:
+                work_dir = self.multi_repo_manager.ensure_repo(github_repo)
+            except Exception:
+                pass
+
+        # Fetch latest remote state
+        run_git_command(["fetch", "--prune", "origin"], cwd=work_dir, check=False, timeout=60)
+
+        # Find remote branches merged into origin/main
+        result = run_git_command(
+            ["branch", "-r", "--merged", "origin/main"],
+            cwd=work_dir, check=False, timeout=30,
+        )
+        if result.returncode != 0:
+            self.logger.warning(f"Failed to list merged branches: {result.stderr}")
+            return []
+
+        candidates = []
+        for line in result.stdout.strip().splitlines():
+            branch = line.strip()
+            if not branch.startswith("origin/"):
+                continue
+            short_name = branch[len("origin/"):]
+            if short_name in ("main", "master", "HEAD"):
+                continue
+            if any(short_name.startswith(p) for p in AGENT_BRANCH_PREFIXES):
+                candidates.append(short_name)
+
+        if not candidates:
+            return []
+
+        if dry_run:
+            for name in candidates:
+                self.logger.info(f"[dry-run] Would delete: {name}")
+            return candidates
+
+        # Batch delete in a single push to avoid N network round-trips
+        del_result = run_git_command(
+            ["push", "origin", "--delete"] + candidates,
+            cwd=work_dir, check=False, timeout=60,
+        )
+        if del_result.returncode == 0:
+            for name in candidates:
+                self.logger.info(f"Deleted merged branch: {name}")
+            return candidates
+
+        # Batch failed — fall back to individual deletes for partial success
+        deleted = []
+        for name in candidates:
+            ind_result = run_git_command(
+                ["push", "origin", "--delete", name],
+                cwd=work_dir, check=False, timeout=30,
+            )
+            if ind_result.returncode == 0:
+                self.logger.info(f"Deleted merged branch: {name}")
+                deleted.append(name)
+            else:
+                self.logger.warning(f"Failed to delete {name}: {ind_result.stderr}")
+        return deleted
 
     @property
     def active_worktree(self) -> Optional[Path]:

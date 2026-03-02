@@ -1,7 +1,6 @@
 """Escalation handler for failed tasks (ported from Bash system)."""
 
 import re
-import time
 from datetime import UTC, datetime
 from typing import List, Optional
 
@@ -336,7 +335,7 @@ class EscalationHandler:
         )
 
         # Add root cause analysis
-        desc += f"## Root Cause Analysis\n"
+        desc += "## Root Cause Analysis\n"
         desc += f"**Failure Pattern**: {report.failure_pattern}\n\n"
         desc += f"**Hypothesis**: {report.root_cause_hypothesis}\n\n"
 
@@ -350,12 +349,12 @@ class EscalationHandler:
                 desc += f"  Error: {error_preview}\n\n"
 
         # Add suggested interventions
-        desc += f"## Suggested Interventions\n"
+        desc += "## Suggested Interventions\n"
         for i, intervention in enumerate(report.suggested_interventions, 1):
             desc += f"{i}. {intervention}\n"
 
-        desc += f"\n## Next Steps\n"
+        desc += "\n## Next Steps\n"
         desc += f"Use `agent guide {failed_task.id} --hint \"<your guidance>\"` to inject human guidance and retry.\n"
-        desc += f"Or review the failed task manually and decide next steps.\n"
+        desc += "Or review the failed task manually and decide next steps.\n"
 
         return desc

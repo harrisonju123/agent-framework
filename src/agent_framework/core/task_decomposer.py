@@ -4,10 +4,9 @@ import copy
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Optional
 from pathlib import Path
 
-from agent_framework.core.task import Task, PlanDocument, TaskType, TaskStatus
+from agent_framework.core.task import Task, PlanDocument, TaskStatus
 
 # Action verbs that signal a discrete deliverable in approach steps
 _ACTION_VERBS = re.compile(

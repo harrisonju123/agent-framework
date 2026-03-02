@@ -2,10 +2,8 @@
 
 import logging
 import os
-import re
 import stat as stat_mod
 import subprocess
-import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -530,10 +528,10 @@ class MultiRepoManager:
                 timeout=300,
             )
             logger.info(f"Successfully cloned {owner_repo}")
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
             logger.error(f"Clone timed out for {owner_repo}")
             raise
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError:
             # Don't log stderr as it might contain sensitive info
             logger.error(f"Failed to clone {owner_repo}")
             raise
@@ -573,8 +571,8 @@ class MultiRepoManager:
             )
         except subprocess.TimeoutExpired as e:
             logger.warning(f"Pull timed out: {e}")
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to pull (non-fatal)")
+        except subprocess.CalledProcessError:
+            logger.warning("Failed to pull (non-fatal)")
 
     def get_current_branch(self, owner_repo: str) -> Optional[str]:
         """

@@ -28,12 +28,10 @@ from ..core.config import (
     load_config,
     load_agents,
     load_jira_config,
-    load_github_config,
 )
 from ..core.orchestrator import Orchestrator
 from ..core.task import Task, TaskStatus, TaskType
 from ..integrations.jira.client import JIRAClient
-from ..integrations.github.client import GitHubClient
 from ..queue.file_queue import FileQueue
 from ..safeguards.circuit_breaker import CircuitBreaker
 from ..workspace.multi_repo_manager import MultiRepoManager
@@ -144,7 +142,7 @@ def analyze(ctx, repo, severity, max_issues, dry_run, focus):
         console.print(f"[green]✓ Found in config: JIRA project {jira_project}[/]")
 
     console.print()
-    console.print(f"[bold]Analysis Settings:[/]")
+    console.print("[bold]Analysis Settings:[/]")
     console.print(f"  Repository: {repo}")
     console.print(f"  JIRA Project: {jira_project}")
     console.print(f"  Severity Filter: {severity}")
@@ -236,24 +234,24 @@ When analyzing this repository:
         console.print("[green]✓ Agents started[/]")
 
     console.print()
-    console.print(f"[bold cyan]Analysis in progress...[/]")
-    console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
-    console.print(f"[dim]📝 View logs: tail -f logs/architect.log[/]")
+    console.print("[bold cyan]Analysis in progress...[/]")
+    console.print("[dim]📋 Monitor progress: agent status --watch[/]")
+    console.print("[dim]📝 View logs: tail -f logs/architect.log[/]")
     console.print()
 
     if not dry_run:
         console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {repo}")
-        console.print(f"  2. Detect languages and run static analyzers")
-        console.print(f"  3. Aggregate findings by file/module")
+        console.print("  2. Detect languages and run static analyzers")
+        console.print("  3. Aggregate findings by file/module")
         console.print(f"  4. Create JIRA epic in project {jira_project}")
-        console.print(f"  5. Create subtasks for each file group")
+        console.print("  5. Create subtasks for each file group")
     else:
         console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {repo}")
-        console.print(f"  2. Detect languages and run static analyzers")
-        console.print(f"  3. Aggregate findings by file/module")
-        console.print(f"  4. Generate analysis report (no JIRA tickets)")
+        console.print("  2. Detect languages and run static analyzers")
+        console.print("  3. Aggregate findings by file/module")
+        console.print("  4. Generate analysis report (no JIRA tickets)")
 
 
 @cli.command()
@@ -393,7 +391,7 @@ def work(ctx, no_dashboard, epic, parallel, preview):
     queue = FileQueue(workspace)
     queue.push(task, "architect")
 
-    console.print(f"\n[green]✓[/] Task queued: Analyze goal and create JIRA epic with breakdown")
+    console.print("\n[green]✓[/] Task queued: Analyze goal and create JIRA epic with breakdown")
 
     # Step 4: Ensure agents are running (don't block)
     orchestrator = Orchestrator(workspace)
@@ -420,20 +418,20 @@ def work(ctx, no_dashboard, epic, parallel, preview):
         if selected_repo.jira_project:
             console.print(f"\n[bold cyan]Epic will be created in JIRA project: {selected_repo.jira_project}[/]")
         else:
-            console.print(f"\n[bold cyan]Tasks will be created in local queues[/]")
-        console.print(f"[dim]Monitor progress: agent status --watch[/]")
-        console.print(f"[dim]View logs: tail -f logs/architect.log[/]")
+            console.print("\n[bold cyan]Tasks will be created in local queues[/]")
+        console.print("[dim]Monitor progress: agent status --watch[/]")
+        console.print("[dim]View logs: tail -f logs/architect.log[/]")
         console.print()
         console.print("[yellow]The Architect agent will:[/]")
         console.print(f"  1. Clone/update {selected_repo.github_repo} to ~/.agent-workspaces/")
-        console.print(f"  2. Analyze the codebase")
+        console.print("  2. Analyze the codebase")
         if selected_repo.jira_project:
             console.print(f"  3. Create JIRA epic in project {selected_repo.jira_project}")
-            console.print(f"  4. Break down into architect -> engineer -> qa subtasks")
+            console.print("  4. Break down into architect -> engineer -> qa subtasks")
         else:
-            console.print(f"  3. Create tasks in local queues (.agent-communication/queues/)")
-            console.print(f"  4. Route to appropriate agents based on workflow")
-        console.print(f"  5. Queue tasks for other agents")
+            console.print("  3. Create tasks in local queues (.agent-communication/queues/)")
+            console.print("  4. Route to appropriate agents based on workflow")
+        console.print("  5. Queue tasks for other agents")
     else:
         # Start live dashboard (blocks terminal)
         console.print("\n[bold cyan]✓ Task queued, starting live dashboard...[/]")
@@ -704,7 +702,6 @@ def summary(ctx, epic):
     try:
         epic_data = jira_client.get_epic_with_subtasks(epic)
         epic_issue = epic_data["epic"]
-        issues = epic_data["issues"]
 
         console.print(f"[bold cyan]Epic: {epic} - {epic_issue.fields.summary}[/]")
         console.print()
@@ -714,7 +711,6 @@ def summary(ctx, epic):
         console.print("[dim]Showing local task data only...[/]")
         console.print()
         epic_issue = None
-        issues = []
 
     # Get tasks from local queue
     queue = FileQueue(workspace)
@@ -733,15 +729,15 @@ def summary(ctx, epic):
         return
 
     # Status summary
-    status_text = f"Status: "
+    status_text = "Status: "
     if total_in_progress > 0:
-        status_text += f"[yellow]IN_PROGRESS[/yellow]"
+        status_text += "[yellow]IN_PROGRESS[/yellow]"
     elif total_failed > 0 and total_pending == 0:
-        status_text += f"[red]FAILED[/red]"
+        status_text += "[red]FAILED[/red]"
     elif total_completed == total_tasks:
-        status_text += f"[green]COMPLETED[/green]"
+        status_text += "[green]COMPLETED[/green]"
     else:
-        status_text += f"[cyan]PENDING[/cyan]"
+        status_text += "[cyan]PENDING[/cyan]"
 
     status_text += f" ({total_completed}/{total_tasks} tickets)"
     console.print(status_text)
@@ -872,7 +868,7 @@ def guide(ctx, task_id, hint):
 
     # Show escalation report if available
     if task.escalation_report:
-        console.print(f"[bold cyan]Escalation Report:[/]")
+        console.print("[bold cyan]Escalation Report:[/]")
         console.print(f"Pattern: {task.escalation_report.failure_pattern}")
         console.print(f"Hypothesis: {task.escalation_report.root_cause_hypothesis}")
         console.print()
@@ -923,8 +919,8 @@ def guide(ctx, task_id, hint):
         esc_file.unlink(missing_ok=True)
 
     console.print(f"[green]✓ Guidance injected and task re-queued to {task.assigned_to}[/]")
-    console.print(f"[dim]The agent will receive your guidance on next attempt[/]")
-    console.print(f"[dim]Monitor with: agent status --watch[/]")
+    console.print("[dim]The agent will receive your guidance on next attempt[/]")
+    console.print("[dim]Monitor with: agent status --watch[/]")
 
 
 @cli.command()
@@ -976,7 +972,7 @@ def cancel(ctx, task_id, reason, yes):
     console.print(f"[green]Task {jira_key} cancelled[/]")
     if reason:
         console.print(f"[dim]Reason: {reason}[/]")
-    console.print(f"[dim]If the agent is mid-execution, it will skip retry on exit.[/]")
+    console.print("[dim]If the agent is mid-execution, it will skip retry on exit.[/]")
 
 
 @cli.command()
@@ -1035,7 +1031,7 @@ def retry(ctx, identifier, reset_retries, retry_all, yes):
             console.print(f"  [green]✓[/] {jira_key} - {task.title[:40]}...")
 
         console.print(f"\n[green]✓ Queued {len(failed_tasks)} tasks for retry[/]")
-        console.print(f"[dim]Monitor with: agent status --watch[/]")
+        console.print("[dim]Monitor with: agent status --watch[/]")
         return
 
     # Single task retry
@@ -1062,13 +1058,13 @@ def retry(ctx, identifier, reset_retries, retry_all, yes):
     # Reset retry count if requested
     if reset_retries:
         task.retry_count = 0
-        console.print(f"[dim]Retry count reset to 0[/]")
+        console.print("[dim]Retry count reset to 0[/]")
 
     # Re-queue the task
     queue.requeue_task(task)
 
     console.print(f"[green]✓ Task queued for {task.assigned_to}[/]")
-    console.print(f"[dim]Monitor with: agent status --watch[/]")
+    console.print("[dim]Monitor with: agent status --watch[/]")
 
 
 @cli.command()
@@ -1228,7 +1224,7 @@ def up(ctx, port, no_browser, watchdog, replicas, log_level):
 
         # --- Summary ---
         console.print()
-        console.print(f"[bold green]Agent Framework is up[/]")
+        console.print("[bold green]Agent Framework is up[/]")
         console.print(f"  Dashboard: http://localhost:{port}")
         console.print(f"  Agents:    {len(running)}")
         console.print()
@@ -2007,6 +2003,61 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
         traceback.print_exc()
 
 
+@cli.command("cleanup-branches")
+@click.option("--repo", "-r", required=True, help="GitHub repo (owner/repo)")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted")
+@click.pass_context
+def cleanup_branches(ctx, repo, dry_run):
+    """Delete remote branches matching agent-framework patterns that are merged into main.
+
+    Finds remote branches prefixed with agent-, chain-, engineer-, architect-, qa-
+    that have been merged into main and deletes them.
+    """
+    workspace = ctx.obj["workspace"]
+
+    console.print("[bold]Merged Branch Cleanup[/]")
+    console.print(f"Repository: [cyan]{repo}[/]")
+    if dry_run:
+        console.print("[dim]Dry run mode — no branches will be deleted[/]")
+    console.print()
+
+    try:
+        from ..utils.validators import validate_owner_repo
+        validate_owner_repo(repo)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/]")
+        return
+
+    try:
+        from types import SimpleNamespace
+        from ..core.git_operations import GitOperationsManager
+
+        logger = logging.getLogger("agent-framework.cleanup")
+        logger.setLevel(logging.INFO)
+        git_ops = GitOperationsManager(
+            config=SimpleNamespace(id="cleanup-cli"),
+            workspace=workspace,
+            queue=SimpleNamespace(queue_dir=workspace / "queue"),
+            logger=logger,
+        )
+
+        deleted = git_ops.cleanup_merged_branches(repo, dry_run=dry_run)
+
+        console.print()
+        if deleted:
+            verb = "Would delete" if dry_run else "Deleted"
+            console.print(f"[green]{verb} {len(deleted)} branch(es):[/]")
+            for branch in deleted:
+                console.print(f"  - {branch}")
+        else:
+            console.print("[green]No merged agent branches found[/]")
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/]")
+        import traceback
+        traceback.print_exc()
+
+
 @cli.command()
 @click.option("--task-id", "-t", default=None, help="Specific task ID (default: all recent)")
 @click.option("--format", "-f", "fmt", type=click.Choice(["table", "json"]), default="table")
@@ -2014,7 +2065,6 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
 def metrics(ctx, task_id, fmt):
     """Show metrics from session logs (cost, tokens, duration, tool usage)."""
     import json as _json
-    from datetime import datetime, timezone
 
     workspace = ctx.obj["workspace"]
     logs_dir = workspace / "logs" / "sessions"
@@ -2152,7 +2202,7 @@ def apply_pattern(ctx, reference, files, targets, description, branch_prefix, dr
             console.print(f"\n[bold cyan]Processing: {target}[/]")
 
             if dry_run:
-                console.print(f"  [yellow]Would clone, create branch, run Claude, and create PR[/]")
+                console.print("  [yellow]Would clone, create branch, run Claude, and create PR[/]")
                 continue
 
             # Track state for rollback
@@ -2164,7 +2214,7 @@ def apply_pattern(ctx, reference, files, targets, description, branch_prefix, dr
 
             try:
                 # Ensure target repo is cloned/updated
-                console.print(f"  Ensuring repo is up to date...")
+                console.print("  Ensuring repo is up to date...")
                 target_path = manager.ensure_repo(target)
                 console.print(f"  [green]✓ Repo ready at {target_path}[/]")
 
@@ -2179,25 +2229,25 @@ def apply_pattern(ctx, reference, files, targets, description, branch_prefix, dr
                 console.print(f"  Creating branch: {branch}")
                 manager.create_branch(target, branch)
                 branch_created = True
-                console.print(f"  [green]✓ Branch created[/]")
+                console.print("  [green]✓ Branch created[/]")
 
                 # Build prompt with reference context
                 prompt = _build_apply_pattern_prompt(description, reference_content, ref_repo, target)
 
                 # Run Claude CLI in target repo directory
-                console.print(f"  Running Claude to implement pattern...")
+                console.print("  Running Claude to implement pattern...")
                 _run_claude_cli(prompt, target_path, framework_config)
-                console.print(f"  [green]✓ Claude completed[/]")
+                console.print("  [green]✓ Claude completed[/]")
 
                 # Commit and push
-                console.print(f"  Committing and pushing...")
+                console.print("  Committing and pushing...")
                 commit_msg = f"Implement: {description}\n\nApplied pattern from {ref_repo}"
                 manager.commit_and_push(target, branch, commit_msg)
                 changes_pushed = True
-                console.print(f"  [green]✓ Changes pushed[/]")
+                console.print("  [green]✓ Changes pushed[/]")
 
                 # Create PR
-                console.print(f"  Creating pull request...")
+                console.print("  Creating pull request...")
                 pr_body = f"""## Description
 {description}
 
@@ -2227,26 +2277,26 @@ This PR implements the same pattern/functionality as the reference implementatio
                 continue
             except ValueError as e:
                 console.print(f"  [red]✗ Validation error for {target}: {e}[/]")
-                console.print(f"  [yellow]Check your inputs - repository name, branch prefix, or file paths may be invalid[/]")
+                console.print("  [yellow]Check your inputs - repository name, branch prefix, or file paths may be invalid[/]")
                 _rollback_changes(manager, target, target_path, original_branch, branch, branch_created, changes_pushed)
                 continue
             except PermissionError as e:
                 console.print(f"  [red]✗ Permission denied for {target}: {e}[/]")
-                console.print(f"  [yellow]Verify your GitHub token has write access to this repository[/]")
+                console.print("  [yellow]Verify your GitHub token has write access to this repository[/]")
                 _rollback_changes(manager, target, target_path, original_branch, branch, branch_created, changes_pushed)
                 continue
             except RuntimeError as e:
                 console.print(f"  [red]✗ Claude CLI failed for {target}: {e}[/]")
-                console.print(f"  [yellow]Check Claude CLI installation and configuration[/]")
+                console.print("  [yellow]Check Claude CLI installation and configuration[/]")
                 _rollback_changes(manager, target, target_path, original_branch, branch, branch_created, changes_pushed)
                 continue
             except Exception as e:
                 console.print(f"  [red]✗ Unexpected error processing {target}: {e}[/]")
-                console.print(f"  [yellow]Rolling back changes...[/]")
+                console.print("  [yellow]Rolling back changes...[/]")
                 _rollback_changes(manager, target, target_path, original_branch, branch, branch_created, changes_pushed)
                 continue
 
-        console.print(f"\n[bold green]✓ Pattern application complete![/]")
+        console.print("\n[bold green]✓ Pattern application complete![/]")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/]")
@@ -2266,8 +2316,6 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
         parallel: If True, process tickets in parallel (no dependencies)
         preview: If True, run engineer in read-only preview mode first
     """
-    from datetime import datetime
-    import time
 
     # Validate epic key format
     if "-" not in epic_key:
@@ -2408,9 +2456,9 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
 
         console.print(f"\n[green]✓ Queued {len(queued_tasks)} tasks from epic {epic_key}[/]")
         if parallel:
-            console.print(f"[dim]Tasks will process in PARALLEL using worktrees[/]")
+            console.print("[dim]Tasks will process in PARALLEL using worktrees[/]")
         else:
-            console.print(f"[dim]Tasks will process sequentially: ticket 1 → ticket 2 → ...[/]")
+            console.print("[dim]Tasks will process sequentially: ticket 1 → ticket 2 → ...[/]")
 
         # Ensure agents are running
         orchestrator = Orchestrator(workspace)
@@ -2426,9 +2474,9 @@ def _handle_epic_mode(ctx, workspace, framework_config, epic_key: str, no_dashbo
 
         if no_dashboard:
             console.print(f"\n[bold cyan]🎯 Processing epic: {epic_key}[/]")
-            console.print(f"[dim]📋 Monitor progress: agent status --watch[/]")
-            console.print(f"[dim]⏸ Pause anytime: agent pause[/]")
-            console.print(f"[dim]▶ Resume: agent resume[/]")
+            console.print("[dim]📋 Monitor progress: agent status --watch[/]")
+            console.print("[dim]⏸ Pause anytime: agent pause[/]")
+            console.print("[dim]▶ Resume: agent resume[/]")
         else:
             console.print("\n[bold cyan]✓ Tasks queued, starting live dashboard...[/]")
             console.print("[dim]Press Ctrl+C to exit dashboard[/]\n")
@@ -2478,7 +2526,7 @@ def _rollback_changes(
                 )
                 console.print(f"  [yellow]Returned to branch: {original_branch}[/]")
             except subprocess.CalledProcessError:
-                console.print(f"  [yellow]Could not return to original branch[/]")
+                console.print("  [yellow]Could not return to original branch[/]")
 
         # Delete local branch if we created it
         if branch_created and new_branch:
@@ -2490,8 +2538,8 @@ def _rollback_changes(
 
         # Provide guidance for remote cleanup if changes were pushed
         if changes_pushed and new_branch:
-            console.print(f"  [yellow]⚠ Changes were pushed to remote before failure[/]")
-            console.print(f"  [yellow]To delete remote branch, run:[/]")
+            console.print("  [yellow]⚠ Changes were pushed to remote before failure[/]")
+            console.print("  [yellow]To delete remote branch, run:[/]")
             console.print(f"  [dim]cd {repo_path} && git push origin --delete {new_branch}[/]")
 
         console.print(f"  [green]✓ Rollback complete for {repo_name}[/]")

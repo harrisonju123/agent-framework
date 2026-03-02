@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from ..utils.atomic_io import atomic_write_text
 from ..utils.subprocess_utils import run_git_command
+from .task import Task
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ def save_chain_state(workspace: Path, state: ChainState) -> None:
 
 def append_step(
     workspace: Path,
-    task: "Task",
+    task: Task,
     agent_id: str,
     response_content: str,
     working_dir: Optional[Path] = None,
@@ -323,7 +324,7 @@ def _iso_delta_seconds(start_iso: str, end_iso: str) -> Optional[float]:
         return None
 
 
-def _build_step_summary(task: "Task", response_content: str, step_id: str) -> str:
+def _build_step_summary(task: Task, response_content: str, step_id: str) -> str:
     """Build a structured summary from task data rather than raw LLM output.
 
     Prefers structured data (plan objectives, verdicts, findings) over
@@ -355,7 +356,7 @@ def _build_step_summary(task: "Task", response_content: str, step_id: str) -> st
 
     # Fallback: extract first substantive paragraph from response
     if response_content:
-        lines = [l.strip() for l in response_content.split("\n") if l.strip()]
+        lines = [line.strip() for line in response_content.split("\n") if line.strip()]
         # Skip tool call noise — take first lines that look like prose
         prose_lines = []
         for line in lines:
