@@ -974,6 +974,11 @@ class Agent:
             else:
                 self.logger.warning("Architect plan step completed but no PlanDocument found in response")
 
+            # Extract design rationale sentences so downstream agents understand constraints
+            rationale = self._extract_design_rationale(content)
+            if rationale:
+                task.context["_design_rationale"] = rationale
+
         # Verdict must be set before serialization so it persists to disk
         self._set_structured_verdict(task, response)
 
@@ -1150,9 +1155,17 @@ class Agent:
 
             # Push + PR lifecycle after chain routing. Skip if the chain
             # successfully routed a downstream task — that agent will handle PR.
+            # Also skip PR creation if the terminal step verdict is needs_fix
+            # (review rejected the code — creating a PR would ship broken work)
             if not chain_routed:
-                self._git_ops.push_and_create_pr_if_needed(task)
-                self._git_ops.manage_pr_lifecycle(task)
+                terminal_verdict = task.context.get("verdict")
+                if terminal_verdict == "needs_fix" and self._is_at_terminal_workflow_step(task):
+                    self.logger.warning(
+                        f"Skipping PR creation: terminal step verdict is needs_fix for {task.id}"
+                    )
+                else:
+                    self._git_ops.push_and_create_pr_if_needed(task)
+                    self._git_ops.manage_pr_lifecycle(task)
 
         self._extract_and_store_memories(task, response)
         tool_call_count = self._analyze_tool_patterns(task)
@@ -1677,8 +1690,8 @@ class Agent:
                 )
 
         _DIVERSITY_THRESHOLD = 0.5
-        # Tighter interval for implementation steps to reduce max work loss
-        _COMMIT_CHECKPOINT_INTERVAL = 15 if self._is_implementation_step(task) else 25
+        # Tighter interval for implementation steps to reduce max work loss (was 15/25)
+        _COMMIT_CHECKPOINT_INTERVAL = 8 if self._is_implementation_step(task) else 25
 
         def _has_uncommitted_work() -> bool:
             """Check if working directory has uncommitted changes worth preserving."""
@@ -1819,6 +1832,23 @@ class Agent:
                     if committed:
                         self._git_ops.push_if_unpushed()
 
+                    # Progress stall: high context usage + no commits = stuck agent
+                    if (self._is_implementation_step(task)
+                            and _tool_call_count[0] >= _COMMIT_CHECKPOINT_INTERVAL * 3
+                            and self._context_window_manager):
+                        util = self._context_window_manager.budget.utilization_percent
+                        if util > 75 and not committed and not self._git_ops._has_unpushed_commits(working_dir):
+                            self.logger.warning(
+                                f"Progress stall: {util:.0f}% context, no commits after "
+                                f"{_tool_call_count[0]} tool calls"
+                            )
+                            self._session_logger.log(
+                                "progress_stall",
+                                context_utilization=util,
+                                tool_calls=_tool_call_count[0],
+                            )
+                            _circuit_breaker_event.set()
+
                 now = time.time()
                 if now - _last_write_time[0] < 1.0:
                     return
@@ -1885,6 +1915,10 @@ class Agent:
         if task.plan:
             from .task_decomposer import estimate_plan_lines
             _estimated_lines = estimate_plan_lines(task.plan)
+
+        # Force stronger model on retry after context exhaustion or circuit breaker
+        if task.context.get("_escalate_model"):
+            _estimated_lines = max(_estimated_lines, 600)
 
         _budget_remaining_usd = None
         _budget_ceiling = task.context.get("_budget_ceiling")
@@ -3053,6 +3087,41 @@ class Agent:
             except Exception:
                 continue
         return None
+
+    _RATIONALE_RE = re.compile(
+        r'[^.]*\b(?:because|tradeoff|trade-off|instead of|constraint|reason)\b[^.]*\.',
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _extract_design_rationale(content: str) -> Optional[str]:
+        """Extract design rationale sentences from planning response.
+
+        Pulls sentences containing reasoning keywords (because, tradeoff,
+        constraint, etc.) to preserve the architect's design intent for
+        downstream agents.
+        """
+        if not content:
+            return None
+
+        sentences = Agent._RATIONALE_RE.findall(content)
+        if not sentences:
+            return None
+
+        # Deduplicate while preserving order, cap at 1000 chars
+        seen: set[str] = set()
+        unique = []
+        for s in sentences:
+            s = s.strip()
+            if s not in seen and len(s) > 20:
+                seen.add(s)
+                unique.append(s)
+
+        if not unique:
+            return None
+
+        result = " ".join(unique)
+        return result[:1000] if len(result) > 1000 else result
 
     def _get_repo_slug(self, task: Task) -> Optional[str]:
         """Extract repo slug from task context."""

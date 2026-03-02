@@ -408,13 +408,14 @@ class WorktreeManager:
                 # Create worktree with new branch, preferring start_point if available
                 base_ref = None
                 if start_point:
-                    # Only trust remote refs — local branches in shared clones
-                    # may belong to another agent's worktree and haven't been pushed
                     if self._remote_branch_exists(base_repo, start_point):
                         base_ref = f"origin/{start_point}"
+                    elif self._local_branch_exists(base_repo, start_point):
+                        # Local branch from a previous attempt (fetched from worktree)
+                        base_ref = start_point
                     else:
                         logger.debug(
-                            f"start_point {start_point} not on remote, falling back to default branch"
+                            f"start_point {start_point} not found, falling back to default branch"
                         )
                 if not base_ref:
                     default_branch = self._get_default_branch(base_repo)
@@ -468,8 +469,11 @@ class WorktreeManager:
                         )
                     else:
                         base_ref = None
-                        if start_point and self._remote_branch_exists(base_repo, start_point):
-                            base_ref = f"origin/{start_point}"
+                        if start_point:
+                            if self._remote_branch_exists(base_repo, start_point):
+                                base_ref = f"origin/{start_point}"
+                            elif self._local_branch_exists(base_repo, start_point):
+                                base_ref = start_point
                         if not base_ref:
                             default_branch = self._get_default_branch(base_repo)
                             base_ref = f"origin/{default_branch}"
@@ -941,6 +945,23 @@ class WorktreeManager:
             return False
 
         return self._remote_branch_exists(repo_path, branch_name)
+
+    def _local_branch_exists(self, repo_path: Path, branch_name: str) -> bool:
+        """Check if a branch exists as a local ref (not just remote).
+
+        Used for resume branches fetched from a previous attempt's worktree
+        into the shared clone's local refs.
+        """
+        try:
+            result = run_git_command(
+                ["rev-parse", "--verify", f"refs/heads/{branch_name}"],
+                cwd=repo_path,
+                check=False,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
 
     def _remote_branch_exists(self, repo_path: Path, branch_name: str) -> bool:
         """Check if branch exists on the remote (origin) only.

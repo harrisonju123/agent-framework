@@ -135,6 +135,11 @@ class ErrorRecoveryManager:
             if self._replan_enabled and task.retry_count >= self._replan_min_retry:
                 await self.request_replan(task)
 
+            # Signal model escalation for errors that suggest the model is underpowered
+            error_type = self._categorize_error(task.last_error or "")
+            if error_type in ("context_exhausted", "circuit_breaker"):
+                task.context["_escalate_model"] = True
+
             # Clear stale upstream context from failed attempt — prevents the
             # retried agent from seeing its own previous output as upstream input
             task.context.pop("upstream_summary", None)
@@ -230,17 +235,16 @@ class ErrorRecoveryManager:
                 continue
         return "", ""
 
-    def _build_checklist_report(self, task: Task, git_evidence: str) -> str:
+    def _build_checklist_report(self, task: Task, git_evidence: str) -> tuple:
         """Cross-reference requirements checklist against git diff evidence.
 
-        Gives the self-eval LLM structured signal about which deliverables
-        appear in the code changes vs which are missing.
+        Returns (report_text, matched, total). report_text is empty string
+        when no checklist exists.
         """
         checklist = task.context.get("requirements_checklist")
         if not checklist:
-            return ""
+            return ("", 0, 0)
 
-        # Extract modified file names from git evidence for matching
         diff_lower = git_evidence.lower() if git_evidence else ""
 
         lines = ["## Requirements Checklist Status"]
@@ -251,8 +255,6 @@ class ErrorRecoveryManager:
             desc = item.get("description", "")
             files = item.get("files", [])
 
-            # Check if any associated file appears in the diff,
-            # or if keywords from the description appear
             found = False
             match_hint = ""
 
@@ -264,7 +266,6 @@ class ErrorRecoveryManager:
                     break
 
             if not found:
-                # Keyword heuristic: check if distinctive words from description appear in diff
                 words = [w.lower() for w in desc.split() if len(w) > 6]
                 matching_words = [w for w in words[:5] if w in diff_lower]
                 if len(matching_words) >= 2:
@@ -287,7 +288,7 @@ class ErrorRecoveryManager:
             )
 
         lines.append("")
-        return "\n".join(lines)
+        return ("\n".join(lines), matched, total)
 
     def has_deliverables(self, task: Task, working_dir: Path) -> bool:
         """Check whether the agent produced any git-visible code changes.
@@ -369,8 +370,33 @@ class ErrorRecoveryManager:
         else:
             test_section = "## Test Results\nNot run"
 
-        # No objective evidence → evaluating prose alone causes false negatives
+        # No objective evidence — implementation steps should fail (no code = no pass),
+        # non-implementation steps (plan, review) can auto-pass since they produce prose
+        is_impl = task.context.get("workflow_step") in (
+            "implement", "implementation", "fix",
+        ) or (not task.context.get("workflow_step") and task.context.get("source_agent") == "engineer")
         if not git_evidence and test_passed is None:
+            if is_impl:
+                self.logger.warning(
+                    f"Self-eval FAILED for task {task.id}: implementation step with no git changes"
+                )
+                self.session_logger.log(
+                    "self_eval",
+                    verdict="FAIL",
+                    reason="no_deliverables_implementation_step",
+                    eval_attempt=eval_retries + 1,
+                )
+                task.context["_self_eval_count"] = eval_retries + 1
+                task.context["_self_eval_critique"] = (
+                    "No code changes detected. Implementation steps must produce git-visible changes."
+                )
+                task.notes.append(f"Self-eval failed (attempt {eval_retries + 1}): no deliverables")
+                task.status = TaskStatus.PENDING
+                task.started_at = None
+                task.started_by = None
+                self.queue.update(task)
+                return False
+
             self.logger.warning(
                 f"Self-eval skipped for task {task.id}: no git diff or test results to evaluate"
             )
@@ -391,7 +417,34 @@ class ErrorRecoveryManager:
             )
 
         # Build checklist completion report if requirements checklist exists
-        checklist_report = self._build_checklist_report(task, git_evidence)
+        checklist_report, matched, total = self._build_checklist_report(task, git_evidence)
+        if total > 0 and matched / total < 0.5:
+            self.logger.warning(
+                f"Self-eval FAILED for task {task.id}: checklist {matched}/{total} "
+                f"items matched (below 50% threshold)"
+            )
+            self.session_logger.log(
+                "self_eval",
+                verdict="FAIL",
+                reason="checklist_below_threshold",
+                matched=matched,
+                total=total,
+                eval_attempt=eval_retries + 1,
+            )
+            task.context["_self_eval_count"] = eval_retries + 1
+            task.context["_self_eval_critique"] = (
+                f"Only {matched}/{total} checklist items appear in code changes. "
+                "Most deliverables are missing."
+            )
+            task.notes.append(
+                f"Self-eval failed (attempt {eval_retries + 1}): "
+                f"checklist {matched}/{total}"
+            )
+            task.status = TaskStatus.PENDING
+            task.started_at = None
+            task.started_by = None
+            self.queue.update(task)
+            return False
 
         eval_prompt = f"""Review this agent's output against the acceptance criteria.
 Reply with PASS if all criteria are met, or FAIL followed by specific gaps.

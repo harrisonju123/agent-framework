@@ -56,6 +56,7 @@ def _make_agent(**overrides):
     error_recovery.self_evaluate = ErrorRecoveryManager.self_evaluate.__get__(error_recovery)
     error_recovery.gather_git_evidence = ErrorRecoveryManager.gather_git_evidence.__get__(error_recovery)
     error_recovery._try_diff_strategies = ErrorRecoveryManager._try_diff_strategies.__get__(error_recovery)
+    error_recovery._build_checklist_report = ErrorRecoveryManager._build_checklist_report.__get__(error_recovery)
     error_recovery._self_eval_max_retries = overrides.get("max_retries", 2)
     error_recovery._self_eval_model = overrides.get("model", "haiku")
     error_recovery.session_logger = MagicMock()

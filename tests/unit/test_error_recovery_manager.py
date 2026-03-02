@@ -1020,11 +1020,13 @@ class TestChecklistReport:
             ],
         })
         git_evidence = "## Git Diff\n### Summary\nsrc/dashboard.py | 50 +++\nsrc/config.py | 30 +++"
-        report = manager._build_checklist_report(task, git_evidence)
+        report, matched, total = manager._build_checklist_report(task, git_evidence)
 
         assert "2/2 items appear in code changes" in report
         assert "✅" in report
         assert "❌" not in report
+        assert matched == 2
+        assert total == 2
 
     def test_report_with_missing_files(self):
         manager = _make_manager()
@@ -1035,18 +1037,20 @@ class TestChecklistReport:
             ],
         })
         git_evidence = "## Git Diff\n### Summary\nsrc/dashboard.py | 50 +++"
-        report = manager._build_checklist_report(task, git_evidence)
+        report, matched, total = manager._build_checklist_report(task, git_evidence)
 
         assert "1/2 items appear in code changes" in report
         assert "✅" in report
         assert "❌" in report
         assert "1 deliverable(s) appear to be missing" in report
+        assert matched == 1
 
     def test_no_report_without_checklist(self):
         manager = _make_manager()
         task = _make_task(context={})
-        report = manager._build_checklist_report(task, "some diff")
+        report, matched, total = manager._build_checklist_report(task, "some diff")
         assert report == ""
+        assert matched == 0 and total == 0
 
     def test_keyword_matching_fallback(self):
         """When no file matches, distinctive words (>6 chars) from description are used."""
@@ -1058,9 +1062,10 @@ class TestChecklistReport:
         })
         # "workflow" (8 chars) and "routing" (7 chars) both appear in diff
         git_evidence = "diff --git a/src/routing.py\n+class WorkflowRoutingHandler:\n+    workflow routing handler"
-        report = manager._build_checklist_report(task, git_evidence)
+        report, matched, total = manager._build_checklist_report(task, git_evidence)
 
         assert "1/1 items appear in code changes" in report
+        assert matched == 1
 
     def test_short_keywords_not_matched(self):
         """Words <= 6 chars shouldn't trigger keyword fallback."""
@@ -1072,6 +1077,7 @@ class TestChecklistReport:
         })
         # "panel" (5 chars) and "app" (3 chars) are too short to match
         git_evidence = "diff --git a/panel.py\n+panel = Panel()\n+app.register(panel)"
-        report = manager._build_checklist_report(task, git_evidence)
+        report, matched, total = manager._build_checklist_report(task, git_evidence)
 
         assert "0/1 items appear in code changes" in report
+        assert matched == 0

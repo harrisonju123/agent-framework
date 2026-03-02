@@ -43,6 +43,7 @@ class AttemptRecord:
     deletions: int = 0
     error: Optional[str] = None
     error_type: Optional[str] = None
+    working_dir: Optional[str] = None  # worktree path for cross-attempt recovery
     # Per-attempt cost visibility
     input_tokens: int = 0
     output_tokens: int = 0
@@ -166,6 +167,7 @@ def record_attempt(
             deletions=stats.get("deletions", 0),
             error=_truncate_error(error),
             error_type=_classify_error(error),
+            working_dir=str(working_dir),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cost_usd=cost_usd,
@@ -239,6 +241,35 @@ def render_for_retry(workspace: Path, task_id: str) -> str:
     if len(rendered) > ATTEMPT_HISTORY_MAX_PROMPT_CHARS:
         rendered = rendered[:ATTEMPT_HISTORY_MAX_PROMPT_CHARS] + "\n[attempt history truncated]"
     return rendered
+
+
+def get_best_resume_branch(
+    workspace: Path, task_id: str
+) -> Optional[tuple]:
+    """Find the best branch to resume from across previous attempts.
+
+    Prefers pushed branches (code survives worktree deletion), falls back
+    to unpushed branches with a known local path.
+
+    Returns:
+        (branch, commit_sha, working_dir) tuple, or None if no usable attempt.
+    """
+    history = load_attempt_history(workspace, task_id)
+    if not history or not history.attempts:
+        return None
+
+    # First pass: find most recent pushed attempt with a commit
+    for a in reversed(history.attempts):
+        if a.pushed and a.branch and a.commit_sha:
+            return (a.branch, a.commit_sha, a.working_dir)
+
+    # Second pass: unpushed but has commit and working_dir still exists
+    for a in reversed(history.attempts):
+        if a.branch and a.commit_sha and a.working_dir:
+            if Path(a.working_dir).exists():
+                return (a.branch, a.commit_sha, a.working_dir)
+
+    return None
 
 
 def get_last_pushed_branch(workspace: Path, task_id: str) -> Optional[str]:

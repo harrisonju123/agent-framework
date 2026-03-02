@@ -271,6 +271,14 @@ class GitOperationsManager:
                 start_point = None
                 is_chain = task.context.get("chain_step", False)
 
+                # On retry, try to resume from the previous attempt's branch
+                if task.retry_count > 0 and not branch_name:
+                    from .attempt_tracker import get_best_resume_branch
+                    resume = get_best_resume_branch(self.workspace, task.id)
+                    if resume:
+                        start_point = resume[0]  # branch name
+                        self.logger.info(f"Resuming from previous attempt branch: {start_point}")
+
                 if not branch_name:
                     impl_branch = task.context.get("implementation_branch")
                     if impl_branch and (self._is_own_branch(impl_branch) or is_chain):
@@ -279,8 +287,8 @@ class GitOperationsManager:
                         jira_key = task.context.get("jira_key", "task")
                         task_hash = hashlib.sha256(task.id.encode()).hexdigest()[:8]
                         branch_name = f"agent/{self.config.id}/{jira_key}-{task_hash}"
-                        # Base new branch on upstream engineer's code
-                        if impl_branch:
+                        # Base new branch on upstream engineer's code (resume takes priority)
+                        if not start_point and impl_branch:
                             start_point = impl_branch
 
                 # Reload registry so we see worktrees created by other agent processes

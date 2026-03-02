@@ -48,6 +48,7 @@ class StepRecord:
     error: Optional[str] = None       # if step failed
     started_at: Optional[str] = None  # ISO timestamp (when agent began processing)
     duration_seconds: Optional[float] = None  # computed: completed_at - started_at
+    design_rationale: Optional[str] = None  # why the approach was chosen (plan/implement steps)
 
 
 @dataclass
@@ -192,6 +193,13 @@ def append_step(
         sa = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
         duration = max(0.0, round((completed_at - sa).total_seconds(), 1))
 
+    # Capture design rationale from task context (set by plan extraction)
+    design_rationale = task.context.get("_design_rationale")
+    if design_rationale and isinstance(design_rationale, str):
+        design_rationale = design_rationale[:1000]
+    else:
+        design_rationale = None
+
     record = StepRecord(
         step_id=step_id,
         agent_id=agent_id,
@@ -209,6 +217,7 @@ def append_step(
         tool_stats=tool_stats,
         started_at=started_at_iso,
         duration_seconds=duration,
+        design_rationale=design_rationale,
     )
 
     # Dedup: skip if a record with the same task_id already exists (e.g. retried
@@ -524,6 +533,11 @@ def _render_for_implement(state: ChainState) -> str:
         lines.append("\n**Risks:**")
         for risk in plan["risks"]:
             lines.append(f"- {risk}")
+
+    # Surface design rationale so the engineer understands constraints
+    if plan_step.design_rationale:
+        lines.append("\n### DESIGN RATIONALE")
+        lines.append(plan_step.design_rationale)
     lines.append("")
 
     return _truncate("\n".join(lines))
@@ -551,6 +565,10 @@ def _render_for_fix(state: ChainState) -> str:
             elif step.summary:
                 lines.append(step.summary)
             lines.append("")
+
+            # Show reviewer's reasoning so the engineer understands the intent
+            if step.design_rationale:
+                lines.append(f"### REVIEWER REASONING\n{step.design_rationale}\n")
 
             # Show files from the implement step (what needs fixing), not the review step
             impl_step = _find_step(state, "implement")
