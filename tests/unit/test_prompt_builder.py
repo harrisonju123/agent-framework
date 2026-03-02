@@ -2180,3 +2180,138 @@ class TestQAWarningsInjection:
         result = builder._inject_qa_warnings("Base prompt", task)
 
         assert result == "Base prompt"
+
+    def test_structured_findings_files_extend_match_set(self, agent_config, sample_task, tmp_path):
+        """Files from structured_findings in task context expand the match set."""
+        repo_slug = sample_task.context["github_repo"]
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+        store.remember(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="qa_recurring_warnings",
+            content="QA finding: Missing validation in routes.py",
+            source_task_id="old-task",
+            tags=["qa_recurring", "routes.py"],
+        )
+
+        sample_task.deliverables = ["models.py"]
+        sample_task.context["structured_findings"] = {
+            "findings": [{"description": "Some issue", "file": "routes.py"}]
+        }
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert "RECURRING QA WARNINGS" in result
+        assert "routes.py" in result
+
+    def test_non_dict_finding_in_structured_findings_safe(self, agent_config, sample_task, tmp_path):
+        """Non-dict entries in structured_findings.findings are safely skipped during file extraction."""
+        repo_slug = sample_task.context["github_repo"]
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+        store.remember(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="qa_recurring_warnings",
+            content="QA finding: General warning",
+            source_task_id="old-task",
+            tags=["qa_recurring"],
+        )
+
+        sample_task.context["structured_findings"] = {
+            "findings": ["not a dict", 42, None]
+        }
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base prompt", sample_task)
+
+        assert "RECURRING QA WARNINGS" in result
+
+    def test_warnings_appended_after_base_prompt(self, agent_config, sample_task, tmp_path):
+        """QA warnings section is appended at the end, not prepended."""
+        repo_slug = sample_task.context["github_repo"]
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+        store.remember(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="qa_recurring_warnings",
+            content="QA finding: Check return values",
+            source_task_id="old-task",
+            tags=["qa_recurring"],
+        )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        base = "This is the base prompt content."
+        result = builder._inject_qa_warnings(base, sample_task)
+
+        assert result.startswith(base)
+        assert result.index("RECURRING QA WARNINGS") > len(base)
+
+    def test_session_event_emitted_on_injection(self, agent_config, sample_task, tmp_path):
+        """Session logger records qa_warnings_injected event."""
+        repo_slug = sample_task.context["github_repo"]
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+        store.remember(
+            repo_slug=repo_slug,
+            agent_type="shared",
+            category="qa_recurring_warnings",
+            content="QA finding: Always validate inputs",
+            source_task_id="old-task",
+            tags=["qa_recurring"],
+        )
+
+        session_logger = Mock()
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+            session_logger=session_logger,
+        )
+        builder = PromptBuilder(ctx)
+        builder._inject_qa_warnings("Base prompt", sample_task)
+
+        session_logger.log.assert_called_once()
+        call_args = session_logger.log.call_args
+        assert call_args[0][0] == "qa_warnings_injected"
+        assert call_args[1]["repo"] == repo_slug
+        assert call_args[1]["count"] == 1
+        assert call_args[1]["chars"] > 0
+
+    def test_warnings_deduplication_by_content(self, agent_config, sample_task, tmp_path):
+        """MemoryStore deduplicates, so duplicate warnings don't appear twice."""
+        repo_slug = sample_task.context["github_repo"]
+        store = MemoryStore(workspace=tmp_path, enabled=True)
+        for _ in range(3):
+            store.remember(
+                repo_slug=repo_slug,
+                agent_type="shared",
+                category="qa_recurring_warnings",
+                content="QA finding: Always check null",
+                source_task_id="old-task",
+                tags=["qa_recurring"],
+            )
+
+        ctx = PromptContext(
+            config=agent_config, workspace=tmp_path,
+            mcp_enabled=False, optimization_config={},
+            memory_store=store,
+        )
+        builder = PromptBuilder(ctx)
+        result = builder._inject_qa_warnings("Base", sample_task)
+
+        assert result.count("Always check null") == 1

@@ -558,3 +558,118 @@ class TestEdgeCases:
 
         entries = store.recall(repo, "engineer", category=CATEGORY_SELF_EVAL_GAPS)
         assert len(entries) == 1
+
+    def test_different_agent_types_stored_separately(self, store, repo):
+        """Findings from architect vs engineer are stored under their respective types."""
+        bus = FeedbackBus(memory_store=store)
+        task_eng = _make_task(
+            id="eng-task",
+            assigned_to="engineer",
+            context={
+                "github_repo": repo,
+                "_self_eval_critique": "Engineer missed edge cases",
+            },
+        )
+        task_arch = _make_task(
+            id="arch-task",
+            assigned_to="architect",
+            context={
+                "github_repo": repo,
+                "_self_eval_critique": "Architect missed design review",
+            },
+        )
+        bus.process(task_eng, repo)
+        bus.process(task_arch, repo)
+
+        eng_entries = store.recall(repo, "engineer", category=CATEGORY_SELF_EVAL_GAPS)
+        arch_entries = store.recall(repo, "architect", category=CATEGORY_SELF_EVAL_GAPS)
+        assert len(eng_entries) == 1
+        assert len(arch_entries) == 1
+        assert "Engineer" in eng_entries[0].content
+        assert "Architect" in arch_entries[0].content
+
+    def test_findings_empty_list_no_storage(self, bus, store, repo):
+        """structured_findings with empty findings list stores nothing."""
+        task = _make_task(
+            context={
+                "github_repo": repo,
+                "structured_findings": {"findings": []},
+            },
+        )
+        bus.process(task, repo)
+        assert store.recall(repo, "engineer", category=CATEGORY_QA_RECURRING) == []
+
+    def test_debate_missing_recommendation_key(self, bus, store, repo):
+        """debate_result missing the 'recommendation' key is safely skipped."""
+        task = _make_task(
+            context={
+                "github_repo": repo,
+                "debate_result": {
+                    "topic": "Which database technology?",
+                    "confidence": "high",
+                    # 'recommendation' key missing
+                },
+            },
+        )
+        bus.process(task, repo)
+        assert store.recall(repo, SHARED_AGENT_TYPE, category=CATEGORY_SPECIALIZATION_HINT) == []
+
+    def test_qa_findings_stored_under_correct_agent(self, bus, store, repo):
+        """QA findings are stored under the task's assigned_to agent, not 'shared'."""
+        task = _make_task(
+            assigned_to="qa",
+            context={
+                "github_repo": repo,
+                "structured_findings": {
+                    "findings": [{"description": "Missing validation"}],
+                },
+            },
+        )
+        bus.process(task, repo)
+
+        qa_entries = store.recall(repo, "qa", category=CATEGORY_QA_RECURRING)
+        assert len(qa_entries) == 1
+        # Not stored under engineer
+        engineer_entries = store.recall(repo, "engineer", category=CATEGORY_QA_RECURRING)
+        assert len(engineer_entries) == 0
+
+    def test_replan_in_progress_skipped(self, store, session_logger, repo):
+        """Tasks still in-progress don't trigger replan storage."""
+        error_recovery = MagicMock()
+        bus = FeedbackBus(
+            memory_store=store,
+            session_logger=session_logger,
+            error_recovery=error_recovery,
+        )
+        task = _make_task(
+            status=TaskStatus.IN_PROGRESS,
+            context={"github_repo": repo},
+            replan_history=[{"error_type": "test_failure"}],
+        )
+        bus.process(task, repo)
+        error_recovery.store_replan_outcome.assert_not_called()
+
+
+class TestCriteriaExtractionEdgeCases:
+    """Additional edge cases for _extract_missed_criteria matching logic."""
+
+    def test_partial_word_overlap_requires_half_match(self):
+        """Criterion with 4+ words requires >= half to match."""
+        critique = "The database migration scripts are missing"
+        criteria = ["Database migration complete and verified"]
+        result = _extract_missed_criteria(critique, criteria)
+        assert "Database migration complete and verified" in result
+
+    def test_single_long_word_criterion_matches(self):
+        """Criterion with only one significant word still matches."""
+        critique = "Authentication is broken across the app"
+        criteria = ["Authentication works"]
+        result = _extract_missed_criteria(critique, criteria)
+        assert "Authentication works" in result
+
+    def test_case_insensitive_matching(self):
+        """Matching is case-insensitive."""
+        critique = "ALL TESTS ARE FAILING"
+        criteria = ["all tests pass"]
+        result = _extract_missed_criteria(critique, criteria)
+        assert "all tests pass" in result
