@@ -1,5 +1,17 @@
 """Type conversion helper utilities."""
 
+import os
+import time
+
+
+def unique_id_suffix() -> str:
+    """Collision-resistant suffix for task/team IDs.
+
+    Combines second-granularity timestamp with PID and random hex
+    so concurrent processes in the same second get distinct IDs.
+    """
+    return f"{int(time.time())}-{os.getpid() % 10000:04d}{os.urandom(2).hex()}"
+
 
 def strip_chain_prefixes(title: str) -> str:
     """Remove accumulated [chain]/[pr] prefixes so re-wrapping adds exactly one."""

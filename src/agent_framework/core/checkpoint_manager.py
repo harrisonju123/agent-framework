@@ -14,23 +14,7 @@ from typing import Optional
 from .activity import ActivityEvent, ToolActivity
 
 
-def _load_diagnostic_commands():
-    """Import diagnostic command set from agent.py to stay in sync."""
-    try:
-        from .agent import _DIAGNOSTIC_PREFIXES
-        return _DIAGNOSTIC_PREFIXES
-    except ImportError:
-        # Fallback if circular import
-        return frozenset({
-            "pwd", "echo", "test", "[", "cd",
-            "ls", "find", "stat", "file",
-            "readlink", "realpath",
-            "which", "type", "env", "printenv",
-            "whoami", "id", "uname", "hostname",
-        })
-
-
-_DIAGNOSTIC_COMMANDS = None  # lazy-loaded
+_DIAGNOSTIC_COMMANDS = None  # lazy-loaded from agent.py
 
 # Productive threshold: if this fraction of commands are productive, use a
 # higher ceiling before tripping the breaker
@@ -42,7 +26,8 @@ def _is_diagnostic_command(summary: str) -> bool:
     """Check if a Bash command summary looks like a diagnostic probe."""
     global _DIAGNOSTIC_COMMANDS
     if _DIAGNOSTIC_COMMANDS is None:
-        _DIAGNOSTIC_COMMANDS = _load_diagnostic_commands()
+        from .agent import _DIAGNOSTIC_PREFIXES
+        _DIAGNOSTIC_COMMANDS = _DIAGNOSTIC_PREFIXES
     if not summary:
         return False
     stripped = summary.strip()

@@ -1,20 +1,10 @@
 """Shared utilities for building tasks across CLI and web interfaces."""
 
-import os
-import time
 from datetime import datetime, timezone
 from typing import Optional
 
 from .task import Task, TaskStatus, TaskType
-
-
-def _unique_suffix() -> str:
-    """Generate a collision-resistant suffix for task IDs.
-
-    Combines second-granularity timestamp with PID and a random hex nibble
-    so concurrent processes in the same second get distinct IDs.
-    """
-    return f"{int(time.time())}-{os.getpid() % 10000:04d}{os.urandom(2).hex()}"
+from ..utils.type_helpers import unique_id_suffix
 
 
 def build_planning_task(
@@ -39,7 +29,7 @@ def build_planning_task(
         Task configured for architect queue
     """
     project_id = jira_project or github_repo.replace("/", "-")
-    task_id = f"planning-{project_id}-{_unique_suffix()}"
+    task_id = f"planning-{project_id}-{unique_id_suffix()}"
 
     # Build task context - only include jira_project if configured
     context = {
@@ -93,7 +83,7 @@ def build_analysis_task(
     Returns:
         Task configured for architect queue
     """
-    task_id = f"analysis-{repository.replace('/', '-')}-{_unique_suffix()}"
+    task_id = f"analysis-{repository.replace('/', '-')}-{unique_id_suffix()}"
 
     # Build task description
     description = _build_analysis_description(

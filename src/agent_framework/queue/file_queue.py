@@ -348,9 +348,8 @@ class FileQueue:
         # next startup will clean up the duplicate via push() rejection.
         atomic_write_model(completed_file, task)
 
-        # Remove from queue — missing_ok so partial-crash recovery is idempotent
-        if task_file.exists():
-            task_file.unlink(missing_ok=True)
+        # Remove from queue — missing_ok handles partial-crash recovery
+        task_file.unlink(missing_ok=True)
 
     def mark_failed(self, task: Task) -> None:
         """Mark task as permanently failed."""

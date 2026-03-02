@@ -3,7 +3,7 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Tuple
 
 if TYPE_CHECKING:
     from .config import AgentConfig
@@ -235,7 +235,7 @@ class ErrorRecoveryManager:
                 continue
         return "", ""
 
-    def _build_checklist_report(self, task: Task, git_evidence: str) -> tuple:
+    def _build_checklist_report(self, task: Task, git_evidence: str) -> Tuple[str, int, int]:
         """Cross-reference requirements checklist against git diff evidence.
 
         Returns (report_text, matched, total). report_text is empty string

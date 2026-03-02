@@ -159,12 +159,10 @@ def analyze(ctx, repo, severity, max_issues, dry_run, focus):
         console.print()
 
     # Create analysis task for architect agent
-    import os
-    import time
     from datetime import datetime, timezone
+    from ..utils.type_helpers import unique_id_suffix
 
-    suffix = f"{int(time.time())}-{os.getpid() % 10000:04d}{os.urandom(2).hex()}"
-    task_id = f"analysis-{repo.replace('/', '-')}-{suffix}"
+    task_id = f"analysis-{repo.replace('/', '-')}-{unique_id_suffix()}"
 
     # Build task description
     description = f"""Perform full repository analysis on {repo}.

@@ -284,9 +284,8 @@ class EscalationHandler:
                 "This would cause an infinite loop."
             )
 
-        import os
-        suffix = f"{int(time.time())}-{os.getpid() % 10000:04d}{os.urandom(2).hex()}"
-        escalation_id = f"escalation-{suffix}-{failed_task.id}"
+        from ..utils.type_helpers import unique_id_suffix
+        escalation_id = f"escalation-{unique_id_suffix()}-{failed_task.id}"
 
         # Truncate error if enabled (Strategy 8: Error Truncation)
         error_msg = failed_task.last_error or "Unknown error"
