@@ -55,3 +55,12 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -q --tb=short
+<<<<<<< Updated upstream
+||||||| Stash base
+        run: >-
+          pytest tests/ -q --tb=short
+          --ignore=tests/test_optimization.py
+          --ignore=tests/unit/test_review_fix.py
+=======
+          pytest tests/ -q --tb=short
+>>>>>>> Stashed changes

@@ -264,11 +264,20 @@ def test_purge_handles_missing_directories(mock_orch_cls, tmp_path, monkeypatch)
     mock_orch_cls.return_value = _mock_orchestrator()
     # Only create the bare minimum so the command proceeds past the early-exit check
     _make_comm_dir(tmp_path)
+<<<<<<< Updated upstream
     # Isolate from real ~/.agent-workspaces which may exist on dev machines
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
+||||||| Stash base
+
+=======
+    # Isolate from real ~/.agent-workspaces
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+>>>>>>> Stashed changes
     runner = CliRunner()
     result = runner.invoke(cli, ["--workspace", str(tmp_path), "purge", "--yes"])
 
