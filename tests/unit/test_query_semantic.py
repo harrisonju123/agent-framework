@@ -4,14 +4,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_framework.indexing.models import (
+pytest.importorskip("numpy", reason="numpy not installed")
+
+from agent_framework.indexing.models import (  # noqa: E402
     CodebaseIndex,
     ModuleEntry,
     SymbolEntry,
     SymbolKind,
 )
-from agent_framework.indexing.query import IndexQuery
-from agent_framework.indexing.store import IndexStore
+from agent_framework.indexing.query import IndexQuery  # noqa: E402
+from agent_framework.indexing.store import IndexStore  # noqa: E402
 
 
 def _make_index(symbols=None, modules=None) -> CodebaseIndex:

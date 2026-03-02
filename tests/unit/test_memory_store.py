@@ -1,8 +1,5 @@
 """Tests for MemoryStore — persistence, dedup, eviction, filtering, forget."""
 
-import json
-import time
-from pathlib import Path
 
 import pytest
 

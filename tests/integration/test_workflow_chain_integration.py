@@ -5,17 +5,13 @@ WorkflowRouter, and mock LLM. Verifies chain state accumulation, verdict
 routing, and design rationale propagation across steps.
 """
 
-import json
 from datetime import datetime, timezone
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from agent_framework.core.agent import Agent
 from agent_framework.core.task import Task, TaskStatus, TaskType, PlanDocument
 from agent_framework.queue.file_queue import FileQueue
-from agent_framework.llm.base import LLMResponse
 
 
 def _make_task(tmp_path, **overrides):

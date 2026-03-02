@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
-import json
 
 import pytest
 

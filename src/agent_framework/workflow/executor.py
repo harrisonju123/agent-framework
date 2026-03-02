@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from ..queue.file_queue import FileQueue
     from ..core.activity import ActivityManager
 
-from .dag import WorkflowDAG, WorkflowStep, WorkflowEdge, EdgeConditionType
+from .dag import WorkflowDAG, WorkflowStep, WorkflowEdge
 from .conditions import ConditionRegistry
 from ..core.task import TaskStatus, TaskType
 from ..core.routing import WORKFLOW_COMPLETE

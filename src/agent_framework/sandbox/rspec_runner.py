@@ -77,7 +77,7 @@ class RspecRunner:
         import asyncio
 
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(

@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
 
 from agent_framework.core.task import Task, TaskStatus, TaskType, RetryAttempt, EscalationReport
 from agent_framework.safeguards.escalation import EscalationHandler

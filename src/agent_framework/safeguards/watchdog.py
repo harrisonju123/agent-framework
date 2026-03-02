@@ -9,7 +9,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
 
 from ..core.activity import ActivityManager, AgentActivity, AgentStatus
 from ..utils.process_utils import kill_process_tree

@@ -241,7 +241,7 @@ class ShadowModeAnalyzer:
     ) -> str:
         """Generate recommendation for a specific strategy."""
         if not is_safe:
-            return f"Not recommended: Insufficient data or unusual savings pattern"
+            return "Not recommended: Insufficient data or unusual savings pattern"
 
         if avg_savings_pct > 20:
             return f"Highly recommended: Deploy immediately for ~{avg_savings_pct:.1f}% cost reduction"

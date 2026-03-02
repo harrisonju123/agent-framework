@@ -5,9 +5,7 @@ import pytest
 from agent_framework.core.context_window_manager import (
     ContextWindowManager,
     ContextPriority,
-    ContextItem,
     ContextBudget,
-    MEMORY_BUDGET_RATIO,
     MIN_MEMORY_CHARS,
     MAX_MEMORY_CHARS,
 )

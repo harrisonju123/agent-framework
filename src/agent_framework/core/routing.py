@@ -75,7 +75,7 @@ def validate_routing_signal(
         return None
 
     if task_type == "escalation":
-        logger.warning(f"Routing signal rejected: escalation tasks cannot be re-routed")
+        logger.warning("Routing signal rejected: escalation tasks cannot be re-routed")
         return None
 
     return target

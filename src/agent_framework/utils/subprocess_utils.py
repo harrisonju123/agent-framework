@@ -140,7 +140,7 @@ def run_git_command(
             check=check,
             timeout=timeout,
         )
-    except SubprocessError as e:
+    except SubprocessError:
         # Add git-specific context to error
         logger.error(f"Git command failed in {cwd}: {' '.join(args)}")
         raise

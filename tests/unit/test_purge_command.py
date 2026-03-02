@@ -259,11 +259,14 @@ def test_purge_confirmation_cancelled(tmp_path):
 
 
 @patch("agent_framework.cli.main.Orchestrator")
-def test_purge_handles_missing_directories(mock_orch_cls, tmp_path):
+def test_purge_handles_missing_directories(mock_orch_cls, tmp_path, monkeypatch):
     """Purge handles a workspace where most subdirectories don't exist yet."""
     mock_orch_cls.return_value = _mock_orchestrator()
-    # Only create the bare minimum so the command proceeds past the early-exit check
     _make_comm_dir(tmp_path)
+    # Isolate from real ~/.agent-workspaces which may exist on dev machines
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
     runner = CliRunner()
     result = runner.invoke(cli, ["--workspace", str(tmp_path), "purge", "--yes"])

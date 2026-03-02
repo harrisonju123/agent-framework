@@ -1,6 +1,5 @@
 """Tests for IndexQuery keyword extraction, scoring, and formatting."""
 
-import pytest
 
 from agent_framework.indexing.models import (
     CodebaseIndex,
@@ -169,7 +168,7 @@ class TestOverviewFormatting:
 
         result = query.format_overview_only("org/repo")
         lines = result.split("\n")
-        module_line = next(l for l in lines if "utils/" in l)
+        module_line = next(line for line in lines if "utils/" in line)
         module_idx = lines.index(module_line)
         # Either the module line is last, or the next line isn't an indented file entry
         assert module_idx + 1 >= len(lines) or not lines[module_idx + 1].startswith("  - `")

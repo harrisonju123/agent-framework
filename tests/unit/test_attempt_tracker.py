@@ -2,10 +2,8 @@
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from agent_framework.core.attempt_tracker import (
     AttemptHistory,

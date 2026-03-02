@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List
 
-from ..docker_executor import DockerExecutor, ExecutionResult
+from ..docker_executor import DockerExecutor
 from ..static_analyzer import AnalysisResult, Finding, Severity
 
 logger = logging.getLogger(__name__)

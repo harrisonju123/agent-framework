@@ -20,7 +20,6 @@ from agent_framework.core.activity import ActivityEvent, ActivityManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.analytics.performance_metrics import (
     HandoffRecord,
-    HandoffSummary,
     PerformanceMetrics,
 )
 from agent_framework.workflow.executor import WorkflowExecutor
@@ -41,7 +40,7 @@ def _make_event(type: str, agent: str, task_id: str, offset_s: int,
         "type": type,
         "agent": agent,
         "task_id": task_id,
-        "title": f"[chain] task",
+        "title": "[chain] task",
         "timestamp": _ts(offset_s).isoformat(),
     }
     if root_task_id:
@@ -194,7 +193,7 @@ class TestExecutorQueuedEvent:
         target_step = WorkflowStep(id="implement", agent="engineer")
 
         # Pre-create the chain task file so dedup triggers
-        chain_id = f"chain-root-789-implement-d1"
+        chain_id = "chain-root-789-implement-d1"
         agent_dir = queue.queue_dir / "engineer"
         agent_dir.mkdir(parents=True, exist_ok=True)
         (agent_dir / f"{chain_id}.json").write_text(json.dumps({"title": "[chain] Implement feature X"}))

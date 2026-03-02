@@ -62,7 +62,7 @@ class TestRootTaskIdInEnv:
 
 
 class TestPopulateReadCache:
-    """Test Agent._populate_read_cache() via bound method."""
+    """Test ReadCacheManager.populate_read_cache()."""
 
     @pytest.fixture
     def workspace(self, tmp_path):
@@ -70,15 +70,23 @@ class TestPopulateReadCache:
 
     @pytest.fixture
     def agent(self, workspace):
-        from agent_framework.core.agent import Agent
+        from agent_framework.core.read_cache_manager import ReadCacheManager
 
+        session_logger = MagicMock()
+        logger = MagicMock()
+        prompt_builder = MagicMock()
+        mgr = ReadCacheManager(
+            workspace=workspace,
+            session_logger=session_logger,
+            logger=logger,
+            config_base_id="engineer",
+            prompt_builder=prompt_builder,
+        )
+        # Expose session_logger on agent-like wrapper for test compatibility
         agent = MagicMock()
-        agent.workspace = workspace
-        agent.config = MagicMock()
-        agent.config.base_id = "engineer"
-        agent.logger = MagicMock()
-        agent._session_logger = MagicMock()
-        agent._populate_read_cache = Agent._populate_read_cache.__get__(agent)
+        agent._session_logger = session_logger
+        agent.logger = logger
+        agent._populate_read_cache = mgr.populate_read_cache
         return agent
 
     @pytest.fixture
@@ -340,7 +348,7 @@ class TestDisplayPath:
 
 
 class TestRepoScopedCache:
-    """Test repo-scoped read cache written by Agent._update_repo_cache."""
+    """Test repo-scoped read cache written by ReadCacheManager._update_repo_cache."""
 
     @pytest.fixture
     def workspace(self, tmp_path):
@@ -348,16 +356,23 @@ class TestRepoScopedCache:
 
     @pytest.fixture
     def agent(self, workspace):
-        from agent_framework.core.agent import Agent
+        from agent_framework.core.read_cache_manager import ReadCacheManager
 
+        session_logger = MagicMock()
+        logger = MagicMock()
+        prompt_builder = MagicMock()
+        mgr = ReadCacheManager(
+            workspace=workspace,
+            session_logger=session_logger,
+            logger=logger,
+            config_base_id="architect",
+            prompt_builder=prompt_builder,
+        )
         agent = MagicMock()
-        agent.workspace = workspace
-        agent.config = MagicMock()
-        agent.config.base_id = "architect"
-        agent.logger = MagicMock()
-        agent._session_logger = MagicMock()
-        agent._populate_read_cache = Agent._populate_read_cache.__get__(agent)
-        agent._update_repo_cache = Agent._update_repo_cache.__get__(agent)
+        agent._session_logger = session_logger
+        agent.logger = logger
+        agent._populate_read_cache = mgr.populate_read_cache
+        agent._update_repo_cache = mgr._update_repo_cache
         return agent
 
     @pytest.fixture
@@ -435,7 +450,7 @@ class TestRepoScopedCache:
 
     def test_repo_cache_evicts_oldest(self, agent, workspace):
         """Entries beyond _MAX_REPO_CACHE_ENTRIES are evicted by read_at age."""
-        from agent_framework.core.agent import _MAX_REPO_CACHE_ENTRIES
+        from agent_framework.core.read_cache_manager import _MAX_REPO_CACHE_ENTRIES
 
         cache_dir = workspace / ".agent-communication" / "read-cache"
         cache_dir.mkdir(parents=True)
@@ -503,7 +518,7 @@ class TestToRelativePath:
     """Test the module-level _to_relative_path() helper."""
 
     def test_strips_worktree_prefix(self):
-        from agent_framework.core.agent import _to_relative_path
+        from agent_framework.core.read_cache_manager import _to_relative_path
         result = _to_relative_path(
             "/home/worktrees/org/repo/engineer-AF-123/src/models.py",
             Path("/home/worktrees/org/repo/engineer-AF-123"),
@@ -511,7 +526,7 @@ class TestToRelativePath:
         assert result == "src/models.py"
 
     def test_non_matching_absolute_path(self):
-        from agent_framework.core.agent import _to_relative_path
+        from agent_framework.core.read_cache_manager import _to_relative_path
         result = _to_relative_path(
             "/other/path/src/models.py",
             Path("/home/worktrees/org/repo/engineer-AF-123"),
@@ -519,7 +534,7 @@ class TestToRelativePath:
         assert result == "/other/path/src/models.py"
 
     def test_already_relative_path(self):
-        from agent_framework.core.agent import _to_relative_path
+        from agent_framework.core.read_cache_manager import _to_relative_path
         result = _to_relative_path(
             "src/models.py",
             Path("/home/worktrees/org/repo/engineer-AF-123"),
@@ -527,12 +542,12 @@ class TestToRelativePath:
         assert result == "src/models.py"
 
     def test_none_working_dir(self):
-        from agent_framework.core.agent import _to_relative_path
+        from agent_framework.core.read_cache_manager import _to_relative_path
         result = _to_relative_path("/absolute/path/file.py", None)
         assert result == "/absolute/path/file.py"
 
     def test_trailing_slash_on_working_dir(self):
-        from agent_framework.core.agent import _to_relative_path
+        from agent_framework.core.read_cache_manager import _to_relative_path
         result = _to_relative_path(
             "/workspace/src/file.py",
             Path("/workspace/"),
@@ -541,7 +556,7 @@ class TestToRelativePath:
 
 
 class TestPopulateReadCacheRelativeKeys:
-    """Verify _populate_read_cache stores repo-relative keys while passing absolute paths to summarize_file."""
+    """Verify populate_read_cache stores repo-relative keys while passing absolute paths to summarize_file."""
 
     @pytest.fixture
     def workspace(self, tmp_path):
@@ -555,15 +570,22 @@ class TestPopulateReadCacheRelativeKeys:
 
     @pytest.fixture
     def agent(self, workspace):
-        from agent_framework.core.agent import Agent
+        from agent_framework.core.read_cache_manager import ReadCacheManager
 
+        session_logger = MagicMock()
+        logger = MagicMock()
+        prompt_builder = MagicMock()
+        mgr = ReadCacheManager(
+            workspace=workspace,
+            session_logger=session_logger,
+            logger=logger,
+            config_base_id="engineer",
+            prompt_builder=prompt_builder,
+        )
         agent = MagicMock()
-        agent.workspace = workspace
-        agent.config = MagicMock()
-        agent.config.base_id = "engineer"
-        agent.logger = MagicMock()
-        agent._session_logger = MagicMock()
-        agent._populate_read_cache = Agent._populate_read_cache.__get__(agent)
+        agent._session_logger = session_logger
+        agent.logger = logger
+        agent._populate_read_cache = mgr.populate_read_cache
         return agent
 
     @pytest.fixture
@@ -692,7 +714,7 @@ class TestAgentWorkingDirEnv:
 
 
 class TestMeasureCacheEffectiveness:
-    """Test Agent._measure_cache_effectiveness() metrics."""
+    """Test ReadCacheManager.measure_cache_effectiveness() metrics."""
 
     @pytest.fixture
     def workspace(self, tmp_path):
@@ -700,16 +722,23 @@ class TestMeasureCacheEffectiveness:
 
     @pytest.fixture
     def agent(self, workspace):
-        from agent_framework.core.agent import Agent
+        from agent_framework.core.read_cache_manager import ReadCacheManager
 
+        session_logger = MagicMock()
+        logger = MagicMock()
+        prompt_builder = MagicMock()
+        mgr = ReadCacheManager(
+            workspace=workspace,
+            session_logger=session_logger,
+            logger=logger,
+            config_base_id="engineer",
+            prompt_builder=prompt_builder,
+        )
         agent = MagicMock()
-        agent.workspace = workspace
-        agent.config = MagicMock()
-        agent.config.base_id = "engineer"
-        agent.logger = MagicMock()
-        agent._session_logger = MagicMock()
-        agent._prompt_builder = MagicMock()
-        agent._measure_cache_effectiveness = Agent._measure_cache_effectiveness.__get__(agent)
+        agent._session_logger = session_logger
+        agent.logger = logger
+        agent._prompt_builder = prompt_builder
+        agent._measure_cache_effectiveness = mgr.measure_cache_effectiveness
         return agent
 
     @pytest.fixture
@@ -1051,15 +1080,22 @@ class TestReadCacheBypassMetric:
 
     @pytest.fixture
     def agent(self, workspace):
-        from agent_framework.core.agent import Agent
+        from agent_framework.core.read_cache_manager import ReadCacheManager
 
+        session_logger = MagicMock()
+        logger = MagicMock()
+        prompt_builder = MagicMock()
+        mgr = ReadCacheManager(
+            workspace=workspace,
+            session_logger=session_logger,
+            logger=logger,
+            config_base_id="engineer",
+            prompt_builder=prompt_builder,
+        )
         agent = MagicMock()
-        agent.workspace = workspace
-        agent.config = MagicMock()
-        agent.config.base_id = "engineer"
-        agent.logger = MagicMock()
-        agent._session_logger = MagicMock()
-        agent._populate_read_cache = Agent._populate_read_cache.__get__(agent)
+        agent._session_logger = session_logger
+        agent.logger = logger
+        agent._populate_read_cache = mgr.populate_read_cache
         return agent
 
     def _seed_cache(self, workspace, root_id, entries):

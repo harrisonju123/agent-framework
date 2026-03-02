@@ -1,6 +1,5 @@
 """JIRA client for ticket management."""
 
-import time
 from datetime import datetime, timezone
 from typing import List, Optional
 

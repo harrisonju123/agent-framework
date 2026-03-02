@@ -6,13 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.core.agent import (
-    Agent,
-    AgentConfig,
-    MAX_REVIEW_CYCLES,
-    QAFinding,
-    ReviewOutcome,
-)
+from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.review_cycle import MAX_REVIEW_CYCLES, QAFinding, ReviewOutcome
 from agent_framework.core.task import Task, TaskStatus, TaskType
 
 

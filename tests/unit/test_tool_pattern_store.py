@@ -1,7 +1,6 @@
 """Tests for tool pattern store — persistence, dedup, scoring, eviction."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -9,7 +8,6 @@ from agent_framework.memory.tool_pattern_analyzer import ToolPatternRecommendati
 from agent_framework.memory.tool_pattern_store import (
     ToolPatternStore,
     MAX_PATTERNS,
-    RECENCY_HALF_LIFE,
 )
 
 

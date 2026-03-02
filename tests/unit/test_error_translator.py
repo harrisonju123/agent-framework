@@ -1,6 +1,5 @@
 """Tests for ErrorTranslator — verifies user-friendly error messages."""
 
-import pytest
 
 from agent_framework.errors.translator import ErrorTranslator, UserFriendlyError
 

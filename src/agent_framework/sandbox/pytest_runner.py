@@ -1,6 +1,5 @@
 """Pytest runner with structured output parsing."""
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional
@@ -88,7 +87,7 @@ class PytestRunner:
         import asyncio
 
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 future = pool.submit(

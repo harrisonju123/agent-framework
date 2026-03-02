@@ -3,11 +3,10 @@
 import asyncio
 import logging
 import re
-import time
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,7 +41,6 @@ from .models import (
     AnalyzeRequest,
     RunTicketRequest,
     OperationResponse,
-    LogEntry,
     JIRAValidationRequest,
     JIRAValidationResponse,
     GitHubValidationRequest,
@@ -563,7 +561,6 @@ def register_routes(app: FastAPI):
     async def get_setup_status():
         """Return current setup completion status."""
         import os
-        from pathlib import Path
 
         config_dir = app.state.workspace / "config"
 
@@ -734,7 +731,7 @@ def register_routes(app: FastAPI):
 
             return OperationResponse(
                 success=True,
-                task_id=task_id,
+                task_id=task.id,
                 message=f"Analysis queued for {request.repository}"
             )
 

@@ -1,11 +1,9 @@
 """Test dashboard functionality."""
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 
-import pytest
 
 from agent_framework.core.activity import (
     ActivityManager,

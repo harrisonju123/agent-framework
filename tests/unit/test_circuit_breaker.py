@@ -3,13 +3,12 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_framework.core.agent import Agent
 from agent_framework.core.task import Task, TaskStatus, TaskType
-from agent_framework.llm.base import LLMResponse
 
 
 @pytest.fixture

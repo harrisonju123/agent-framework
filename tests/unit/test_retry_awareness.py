@@ -194,7 +194,7 @@ class TestRetryStartupRecovery:
         working_dir = Path("/tmp/test-worktree")
 
         with patch("agent_framework.core.attempt_tracker.get_last_pushed_branch", return_value="feature/x"), \
-             patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_fetch:
+             patch("agent_framework.utils.subprocess_utils.run_git_command"):
             # Simulate the retry startup block from _process_task
             from agent_framework.core.attempt_tracker import get_last_pushed_branch
             from agent_framework.utils.subprocess_utils import run_git_command

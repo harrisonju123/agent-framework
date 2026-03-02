@@ -1,19 +1,16 @@
 """Unit tests for WorktreeManager."""
 
 import json
-import time
 import pytest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import subprocess
 
 from agent_framework.workspace.worktree_manager import (
     WorktreeManager,
     WorktreeConfig,
     WorktreeInfo,
-    STALE_ACTIVE_THRESHOLD_SECONDS,
-    MIN_WORKTREE_AGE_SECONDS,
 )
 
 
@@ -2360,7 +2357,7 @@ class TestSafeWorktreeRemoval:
         mock_prune.assert_called_once_with(base_repo, wt_path)
 
 
-class TestActiveWorktreeProtection:
+class TestActiveWorktreeProtectionOnRemoval:
     """Tests that active worktrees are protected from removal."""
 
     def test_remove_worktree_refuses_active(self, tmp_path):

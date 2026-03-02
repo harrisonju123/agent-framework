@@ -2,10 +2,11 @@
 
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
-from agent_framework.indexing.embeddings.embedder import Embedder
+np = pytest.importorskip("numpy", reason="numpy not installed")
+
+from agent_framework.indexing.embeddings.embedder import Embedder  # noqa: E402
 
 
 def _make_embedder(dimensions: int = 256) -> Embedder:

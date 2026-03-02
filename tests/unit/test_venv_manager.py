@@ -2,7 +2,6 @@
 
 import os
 import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from agent_framework.workspace.venv_manager import VenvManager

@@ -4,10 +4,10 @@ import logging
 import re
 from typing import Optional
 
-logger = logging.getLogger(__name__)
-
 from agent_framework.indexing.models import CodebaseIndex, SymbolEntry
 from agent_framework.indexing.store import IndexStore
+
+logger = logging.getLogger(__name__)
 
 _STOPWORDS: frozenset[str] = frozenset({
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",

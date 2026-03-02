@@ -4,7 +4,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.indexing.embeddings.semantic_query import SemanticQuery
+pytest.importorskip("numpy", reason="numpy not installed")
+
+from agent_framework.indexing.embeddings.semantic_query import SemanticQuery  # noqa: E402
 from agent_framework.indexing.models import SymbolEntry, SymbolKind
 
 

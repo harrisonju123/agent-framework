@@ -3,12 +3,9 @@
 import asyncio
 import hashlib
 import json
-import logging
 import re
-import subprocess
 import time
-import traceback
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -16,26 +13,26 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from .config import AgentDefinition, RepositoryConfig, WorkflowDefinition
+    from ..queue.locks import FileLock
 
 from .task import PlanDocument, Task, TaskStatus, TaskType
-from .task_validator import validate_task, ValidationResult
-from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase, ToolActivity
-from .routing import read_routing_signal, validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
+from .task_validator import validate_task
+from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase
+from .routing import read_routing_signal, WORKFLOW_COMPLETE
 from .team_composer import compose_default_team, compose_team
 from .context_window_manager import ContextWindowManager
-from .review_cycle import ReviewCycleManager, QAFinding, ReviewOutcome, MAX_REVIEW_CYCLES
+from .review_cycle import ReviewCycleManager, ReviewOutcome
 from .git_operations import GitOperationsManager
 from .task_manifest import load_manifest
 from ..llm.base import LLMBackend, LLMRequest, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
 from ..safeguards.escalation import EscalationHandler
-from ..workspace.worktree_manager import WorktreeManager, WorktreeConfig
-from ..utils.rich_logging import ContextLogger, setup_rich_logging
-from ..utils.type_helpers import get_type_str, strip_chain_prefixes
+from ..workspace.worktree_manager import WorktreeManager
+from ..utils.rich_logging import setup_rich_logging
+from ..utils.type_helpers import get_type_str
 from ..memory.memory_store import MemoryStore
 from ..memory.memory_retriever import MemoryRetriever
-from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer
 from ..memory.tool_pattern_store import ToolPatternStore
 from .session_logger import SessionLogger, noop_logger
 from .prompt_builder import PromptBuilder, PromptContext
@@ -67,7 +64,6 @@ SUMMARY_CONTEXT_MAX_CHARS = 2000
 SUMMARY_MAX_LENGTH = 500
 _CONVERSATIONAL_PREFIXES = ("i ", "i'", "thank", "sure", "certainly", "of course", "let me")
 BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
-_MAX_REPO_CACHE_ENTRIES = 200
 
 # Circuit breaker: commands that indicate productive work (test/build/lint/git)
 # rather than stuck-agent flailing (ls, pwd, echo). When most commands are
@@ -129,20 +125,6 @@ def _is_diagnostic_command(cmd: str) -> bool:
     bare = token.split("/")[-1].lower()
     return bare in _DIAGNOSTIC_PREFIXES
 
-
-def _repo_cache_slug(github_repo: str) -> str:
-    """Convert 'owner/repo' to 'owner-repo' for cache file naming."""
-    return github_repo.replace("/", "-")
-
-
-def _to_relative_path(file_path: str, working_dir: Optional[Path]) -> str:
-    """Strip worktree prefix for cache portability across chain steps."""
-    if not working_dir or not file_path.startswith("/"):
-        return file_path
-    prefix = str(working_dir).rstrip("/") + "/"
-    if file_path.startswith(prefix):
-        return file_path[len(prefix):]
-    return file_path
 
 # Downstream agents get the correct task type for model selection
 CHAIN_TASK_TYPES = {
@@ -329,13 +311,6 @@ class Agent:
         self._replan_enabled = replan_cfg.get("enabled", False)
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
         self._replan_model = replan_cfg.get("model", "haiku")
-
-        # Cross-feature learning loop — single coordinator for all post-task learnings
-        self._feedback_bus = FeedbackBus(
-            memory_store=self._memory_store,
-            session_logger=self._session_logger,
-            error_recovery=self._error_recovery,
-        )
 
     def _init_session_logging(self, session_logging_config):
         """Initialize session logging configuration."""
@@ -556,6 +531,16 @@ class Agent:
         )
         self._prompt_builder = PromptBuilder(prompt_ctx)
 
+        # Read cache manager — cross-step file read dedup
+        from .read_cache_manager import ReadCacheManager
+        self._read_cache = ReadCacheManager(
+            workspace=workspace,
+            session_logger=self._session_logger,
+            logger=self.logger,
+            config_base_id=config.base_id,
+            prompt_builder=self._prompt_builder,
+        )
+
         # Git/PR/Worktree operations manager
         self._git_ops = GitOperationsManager(
             config=config,
@@ -586,6 +571,13 @@ class Agent:
             memory_store=self._memory_store,
             replan_config=replan_config,
             self_eval_config=self_eval_config,
+        )
+
+        # Cross-feature learning loop — depends on _error_recovery + _memory_store
+        self._feedback_bus = FeedbackBus(
+            memory_store=self._memory_store,
+            session_logger=self._session_logger,
+            error_recovery=self._error_recovery,
         )
 
         self._budget = BudgetManager(
@@ -1067,8 +1059,8 @@ class Agent:
                 # workflow_router handles PR creation via queue_pr_creation_if_needed
                 # (which checks implementation_branch to skip PR when no code exists).
                 self.logger.info(
-                    f"No plan extracted at plan step — passing __complete__ signal "
-                    f"to workflow router for PR lifecycle handling"
+                    "No plan extracted at plan step — passing __complete__ signal "
+                    "to workflow router for PR lifecycle handling"
                 )
                 self._session_logger.log(
                     "routing_signal_passthrough", task_id=task.id,
@@ -1562,7 +1554,6 @@ class Agent:
 
     def _setup_task_context(self, task: Task, task_start_time) -> None:
         """Setup task context: logging, session logger, validation."""
-        from datetime import datetime
 
         # Set task context for logging
         jira_key = task.context.get("jira_key")
@@ -1578,9 +1569,10 @@ class Agent:
             log_prompts=self._session_log_prompts,
             log_tool_inputs=self._session_log_tool_inputs,
         )
-        # Update workflow router and executor session loggers for this task
+        # Update workflow router, executor, and read cache session loggers for this task
         self._workflow_router.set_session_logger(self._session_logger)
         self._workflow_executor.set_session_logger(self._session_logger)
+        self._read_cache.set_session_logger(self._session_logger)
         self._session_logger.log(
             "task_start",
             agent=self.config.id,
@@ -2036,14 +2028,14 @@ class Agent:
             # Check if we should trigger a checkpoint due to budget exhaustion
             if self._context_window_manager.should_trigger_checkpoint():
                 self.logger.warning(
-                    f"Context budget critically low (>90% used). "
-                    f"Consider splitting task into subtasks."
+                    "Context budget critically low (>90% used). "
+                    "Consider splitting task into subtasks."
                 )
                 self.activity_manager.append_event(ActivityEvent(
                     type="context_budget_critical",
                     agent=self.config.id,
                     task_id=task.id,
-                    title=f"Context budget >90%: consider task splitting",
+                    title="Context budget >90%: consider task splitting",
                     timestamp=datetime.now(timezone.utc)
                 ))
                 self._session_logger.log(
@@ -2061,7 +2053,6 @@ class Agent:
     async def _handle_task(self, task: Task, *, lock: Optional["FileLock"] = None) -> None:
         """Handle task execution with retry/escalation logic."""
         from datetime import datetime
-        from ..queue.locks import FileLock
 
         # Normalize legacy workflow names and validate task
         self._normalize_workflow(task)
@@ -2074,7 +2065,7 @@ class Agent:
         if lock is None:
             lock = self.queue.acquire_lock(task.id, self.config.id)
             if not lock:
-                self.logger.warning(f"⏸️  Could not acquire lock, will retry later")
+                self.logger.warning("⏸️  Could not acquire lock, will retry later")
                 return
 
         task_start_time = datetime.now(timezone.utc)
@@ -2183,8 +2174,8 @@ class Agent:
             # Handle response
             if response.success:
                 # Populate shared read cache for downstream chain steps
-                file_reads = self._populate_read_cache(task, working_dir=working_dir)
-                self._measure_cache_effectiveness(task, file_reads, working_dir=working_dir)
+                file_reads = self._read_cache.populate_read_cache(task, working_dir=working_dir)
+                self._read_cache.measure_cache_effectiveness(task, file_reads, working_dir=working_dir)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             elif self._can_salvage_verdict(task, response):
                 self.logger.warning(
@@ -2199,8 +2190,8 @@ class Agent:
                 )
                 response.success = True
                 response.finish_reason = "stop"
-                file_reads = self._populate_read_cache(task, working_dir=working_dir)
-                self._measure_cache_effectiveness(task, file_reads, working_dir=working_dir)
+                file_reads = self._read_cache.populate_read_cache(task, working_dir=working_dir)
+                self._read_cache.measure_cache_effectiveness(task, file_reads, working_dir=working_dir)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
                 await self._handle_failed_response(task, response, working_dir=working_dir)
@@ -2615,228 +2606,6 @@ class Agent:
             self.logger.debug(f"Tool stats computation failed (non-fatal): {e}")
             return None
 
-    def _populate_read_cache(self, task: Task, working_dir: Optional[Path] = None) -> list[str]:
-        """Populate shared read cache with files read during this session.
-
-        Appends to .agent-communication/read-cache/{root_task_id}.json so
-        downstream chain steps can skip re-reading the same files.
-        Cache keys are repo-relative so they match across worktrees.
-        Non-fatal — workflow continues even if this fails.
-
-        Returns the raw file_reads list so callers can reuse it without
-        re-parsing the session log.
-        """
-        try:
-            from ..utils.atomic_io import atomic_write_text
-            from ..utils.file_summarizer import summarize_file
-
-            file_reads = self._session_logger.extract_file_reads()
-            if not file_reads:
-                return file_reads
-
-            root_task_id = task.root_id
-            cache_dir = self.workspace / ".agent-communication" / "read-cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_file = cache_dir / f"{root_task_id}.json"
-
-            # Load existing cache (may have entries from MCP tool calls with summaries)
-            existing: dict = {}
-            if cache_file.exists():
-                try:
-                    existing = json.loads(cache_file.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    existing = {}
-
-            entries = existing.get("entries", {})
-            pre_existing_keys = set(entries.keys())
-            step = task.context.get("workflow_step", "unknown")
-            now_iso = datetime.now(timezone.utc).isoformat()
-
-            # Detect files modified in this step so stale summaries get refreshed
-            from .chain_state import _collect_files_modified
-            modified_in_step = set(_collect_files_modified(working_dir))
-
-            added = 0
-            refreshed = 0
-            for file_path in file_reads:
-                # Store repo-relative key for cross-worktree portability
-                cache_key = _to_relative_path(file_path, working_dir)
-                is_modified = cache_key in modified_in_step
-                if cache_key not in entries or is_modified:
-                    # Preserve original reader lineage when refreshing modified entries
-                    old_entry = entries.get(cache_key, {})
-                    entry = {
-                        "summary": summarize_file(file_path),
-                        "read_by": old_entry.get("read_by", self.config.base_id),
-                        "read_at": old_entry.get("read_at", now_iso),
-                        "workflow_step": old_entry.get("workflow_step", step),
-                    }
-                    if is_modified:
-                        entry["modified_by"] = self.config.base_id
-                        entry["modified_at"] = now_iso
-                        refreshed += 1
-                    else:
-                        # New entry -- attribute to current agent
-                        entry["read_by"] = self.config.base_id
-                        entry["read_at"] = now_iso
-                        entry["workflow_step"] = step
-                        added += 1
-                    entries[cache_key] = entry
-
-            # Measure cache bypass rate at the storage layer (complements
-            # _measure_cache_effectiveness which measures from prompt-injected paths)
-            if pre_existing_keys:
-                read_keys = {_to_relative_path(fp, working_dir) for fp in file_reads}
-                re_read = read_keys & pre_existing_keys
-                # Partition: re-reads of modified files are justified, others are wasteful
-                modified_keys = {k for k, v in entries.items() if v.get("modified_by")}
-                justified = sorted(re_read & modified_keys)
-                wasteful = sorted(re_read - modified_keys)
-                wasteful_rate = len(wasteful) / len(pre_existing_keys)
-                self._session_logger.log(
-                    "read_cache_bypass",
-                    cached_files=len(pre_existing_keys),
-                    re_read_count=len(re_read),
-                    bypass_rate=round(len(re_read) / len(pre_existing_keys), 3),
-                    justified_rereads=len(justified),
-                    wasteful_rereads=len(wasteful),
-                    wasteful_rate=round(wasteful_rate, 3),
-                    new_reads=added,
-                    total_reads=len(file_reads),
-                    re_read_files=sorted(re_read)[:20],
-                )
-
-            if added + refreshed == 0:
-                return file_reads
-
-            cache_data = {
-                "root_task_id": root_task_id,
-                "entries": entries,
-            }
-            atomic_write_text(cache_file, json.dumps(cache_data))
-            self.logger.debug(
-                f"Read cache: added {added}, refreshed {refreshed} "
-                f"({len(entries)} total) for {root_task_id}"
-            )
-
-            # Merge into repo-scoped cache for cross-attempt persistence
-            github_repo = task.context.get("github_repo")
-            if github_repo:
-                self._update_repo_cache(cache_dir, github_repo, entries)
-            return file_reads
-        except Exception as e:
-            self.logger.warning(f"Failed to populate read cache for {task.id}: {e}")
-            return []
-
-    def _measure_cache_effectiveness(
-        self, task: Task, file_reads: list[str], *, working_dir: Optional[Path] = None,
-    ) -> None:
-        """Log how well the read cache prevented redundant file reads.
-
-        Compares the set of paths injected into the prompt (from previous steps)
-        against the files actually read during this session. Non-fatal.
-        """
-        try:
-            injected = self._prompt_builder._injected_cache_paths
-            if not injected:
-                return
-
-            session_paths = {_to_relative_path(p, working_dir) for p in file_reads}
-
-            cache_hits = injected - session_paths   # cached and NOT re-read
-            cache_misses = injected & session_paths  # cached but re-read anyway
-            new_reads = session_paths - injected     # not cached, first time
-
-            # Load cache to identify modified files for justified/wasteful split
-            modified_keys: set[str] = set()
-            root_task_id = task.root_id
-            cache_file = self.workspace / ".agent-communication" / "read-cache" / f"{root_task_id}.json"
-            if cache_file.exists():
-                try:
-                    cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
-                    modified_keys = {
-                        k for k, v in cache_data.get("entries", {}).items()
-                        if v.get("modified_by")
-                    }
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            justified = cache_misses & modified_keys   # re-read because file changed
-            wasteful = cache_misses - modified_keys    # avoidable re-reads
-
-            total_cached = len(injected)
-            hit_rate = len(cache_hits) / total_cached if total_cached else 0.0
-            wasteful_rate = len(wasteful) / total_cached if total_cached else 0.0
-
-            self._session_logger.log(
-                "read_cache_effectiveness",
-                total_cached=total_cached,
-                cache_hits=len(cache_hits),
-                cache_misses=len(cache_misses),
-                justified_rereads=len(justified),
-                wasteful_rereads=len(wasteful),
-                wasteful_rate=round(wasteful_rate, 3),
-                new_reads=len(new_reads),
-                hit_rate=round(hit_rate, 3),
-                missed_files=sorted(cache_misses)[:20],
-                new_files=sorted(new_reads)[:20],
-            )
-            self.logger.debug(
-                f"Read cache effectiveness: {len(cache_hits)}/{total_cached} hits "
-                f"({hit_rate:.0%}), {len(cache_misses)} re-reads "
-                f"({len(justified)} justified, {len(wasteful)} wasteful), "
-                f"{len(new_reads)} new"
-            )
-        except Exception as e:
-            self.logger.debug(f"Cache effectiveness measurement failed (non-fatal): {e}")
-
-    def _update_repo_cache(self, cache_dir: Path, github_repo: str, entries: dict) -> None:
-        """Merge entries into repo-scoped cache for cross-attempt persistence.
-
-        Accumulates file-read knowledge across independent task attempts on the
-        same repo. New tasks can seed from this when no task-specific cache exists.
-        Non-fatal — exceptions are logged and swallowed.
-        """
-        try:
-            from ..utils.atomic_io import atomic_write_text
-
-            slug = _repo_cache_slug(github_repo)
-            repo_cache_file = cache_dir / f"_repo-{slug}.json"
-
-            existing: dict = {}
-            if repo_cache_file.exists():
-                try:
-                    existing = json.loads(repo_cache_file.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    existing = {}
-
-            repo_entries = existing.get("entries", {})
-
-            # Merge: newer wins by read_at timestamp
-            for path, entry in entries.items():
-                if path not in repo_entries:
-                    repo_entries[path] = entry
-                else:
-                    existing_at = repo_entries[path].get("read_at", "")
-                    new_at = entry.get("read_at", "")
-                    if new_at > existing_at:
-                        repo_entries[path] = entry
-
-            # Evict oldest entries if over limit
-            if len(repo_entries) > _MAX_REPO_CACHE_ENTRIES:
-                sorted_paths = sorted(
-                    repo_entries.keys(),
-                    key=lambda p: repo_entries[p].get("read_at", ""),
-                )
-                for path in sorted_paths[:len(repo_entries) - _MAX_REPO_CACHE_ENTRIES]:
-                    del repo_entries[path]
-
-            repo_data = {"github_repo": github_repo, "entries": repo_entries}
-            atomic_write_text(repo_cache_file, json.dumps(repo_data))
-            self.logger.debug(f"Repo cache: {len(repo_entries)} entries for {github_repo}")
-        except Exception as e:
-            self.logger.warning(f"Failed to update repo cache for {github_repo}: {e}")
-
     def _save_pre_scan_findings(self, task: Task, response) -> None:
         """Persist QA pre-scan results so downstream agents can load them.
 
@@ -3169,271 +2938,6 @@ class Agent:
                     timestamp=datetime.now(timezone.utc),
                     phase=phase
                 ))
-
-    def _push_and_create_pr_if_needed(self, task: Task) -> None:
-        """Push branch and create PR if the agent produced unpushed commits.
-
-        Runs after the LLM finishes but before the task is marked completed,
-        so the PR URL is available in task.context for downstream chain steps.
-        Only acts when working in a worktree with actual unpushed commits.
-
-        Intermediate workflow steps push their branch but skip PR creation —
-        the terminal step (or pr_creator) handles that.
-        """
-        from ..utils.subprocess_utils import run_git_command, run_command, SubprocessError
-
-        # Already has a PR (created by the LLM via MCP)
-        if task.context.get("pr_url"):
-            self.logger.debug(f"PR already exists for {task.id}: {task.context['pr_url']}")
-            return
-
-        # PR creation task with an implementation branch from upstream — create
-        # the PR from that branch without needing a worktree
-        impl_branch = task.context.get("implementation_branch")
-        if task.context.get("pr_creation_step") and impl_branch:
-            self._create_pr_from_branch(task, impl_branch)
-            return
-
-        # Only act if we have an active worktree with changes
-        if not self._active_worktree or not self.worktree_manager:
-            self.logger.debug(f"No active worktree for {task.id}, skipping PR creation")
-            return
-
-        has_unpushed = self.worktree_manager.has_unpushed_commits(self._active_worktree)
-        branch_already_pushed = False
-        if not has_unpushed:
-            # LLM may have pushed the branch itself — check if it exists on the remote
-            branch_already_pushed = self._remote_branch_exists(self._active_worktree)
-            if not branch_already_pushed:
-                self.logger.debug(f"No unpushed commits and no remote branch for {task.id}")
-                return
-            self.logger.debug(f"Branch already pushed to remote for {task.id}, will create PR only")
-
-        github_repo = task.context.get("github_repo")
-        if not github_repo:
-            self.logger.debug(f"No github_repo in task context for {task.id}, skipping PR creation")
-            return
-
-        try:
-            worktree = self._active_worktree
-
-            # Get the current branch name
-            result = run_git_command(
-                ["rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=worktree, check=False, timeout=10,
-            )
-            if result.returncode != 0:
-                self.logger.warning("Could not determine branch name, skipping PR creation")
-                return
-            branch = result.stdout.strip()
-
-            # Don't create PRs from main/master
-            if branch in ("main", "master"):
-                self.logger.debug(f"On {branch} branch for {task.id}, skipping PR creation")
-                return
-
-            # Push the branch (skip if LLM already pushed it)
-            if not branch_already_pushed:
-                self.logger.info(f"Pushing branch {branch} to origin")
-                push_result = run_git_command(
-                    ["push", "-u", "origin", branch],
-                    cwd=worktree, check=False, timeout=60,
-                )
-                if push_result.returncode != 0:
-                    self.logger.error(f"Failed to push branch: {push_result.stderr}")
-                    return
-
-            # Intermediate workflow steps: push code but skip PR creation.
-            # Store the branch so downstream agents can create the PR later.
-            if not self._is_at_terminal_workflow_step(task):
-                task.context["implementation_branch"] = branch
-                self.logger.info(
-                    f"Intermediate step — pushed {branch} but skipped PR creation"
-                )
-                return
-
-            self._create_pr_via_gh(task, github_repo, branch, cwd=worktree)
-
-        except SubprocessError as e:
-            self.logger.error(f"Subprocess error during PR creation: {e}")
-        except Exception as e:
-            self.logger.error(f"Error creating PR: {e}")
-
-    def _manage_pr_lifecycle(self, task: Task) -> None:
-        """Autonomously monitor CI, fix failures, and merge PR if repo opts in."""
-        if not self._pr_lifecycle_manager:
-            return
-        if not self._pr_lifecycle_manager.should_manage(task):
-            return
-
-        try:
-            merged = self._pr_lifecycle_manager.manage(task, self.config.id)
-            if merged:
-                self._sync_jira_status(
-                    task, "Done",
-                    comment=f"PR merged automatically: {task.context.get('pr_url')}",
-                )
-        except Exception as e:
-            self.logger.error(f"PR lifecycle error for {task.id}: {e}")
-
-    def _create_pr_from_branch(self, task: Task, branch: str) -> None:
-        """Create a PR from an existing pushed branch (used by pr_creation_step tasks).
-
-        Called when the terminal PR creation agent receives a task with an
-        implementation_branch set by an upstream agent. No worktree needed —
-        just runs `gh pr create --head <branch>` against the repo.
-        """
-        github_repo = task.context.get("github_repo")
-        if not github_repo:
-            self.logger.warning("No github_repo in context, cannot create PR from branch")
-            return
-
-        # Determine cwd — use shared clone if available, otherwise workspace
-        cwd = self.workspace
-        if self.multi_repo_manager:
-            try:
-                cwd = self.multi_repo_manager.ensure_repo(github_repo)
-            except Exception:
-                pass
-
-        self._create_pr_via_gh(task, github_repo, branch, cwd=cwd)
-
-    def _create_pr_via_gh(self, task: Task, github_repo: str, branch: str, *, cwd) -> None:
-        """Create a PR via gh CLI. Shared by worktree and branch-based flows."""
-        from ..utils.subprocess_utils import run_command, SubprocessError
-
-        # Build a clean PR title — strip workflow prefixes
-        pr_title = strip_chain_prefixes(task.title)[:70]
-
-        pr_body = f"## Summary\n\n{task.context.get('user_goal', task.description)}"
-
-        self.logger.info(f"Creating PR for {github_repo} from branch {branch}")
-        try:
-            pr_result = run_command(
-                ["gh", "pr", "create",
-                 "--repo", github_repo,
-                 "--title", pr_title,
-                 "--body", pr_body,
-                 "--head", branch],
-                cwd=cwd, check=False, timeout=30,
-            )
-
-            if pr_result.returncode == 0:
-                pr_url = pr_result.stdout.strip()
-                task.context["pr_url"] = pr_url
-                self.logger.info(f"Created PR: {pr_url}")
-                # Clean up orphaned subtask PRs/branches for fan-in tasks
-                self._close_subtask_prs(task, pr_url)
-                self._cleanup_subtask_branches(task)
-            else:
-                if "already exists" in pr_result.stderr:
-                    self.logger.info("PR already exists for this branch")
-                else:
-                    self.logger.error(f"Failed to create PR: {pr_result.stderr}")
-        except SubprocessError as e:
-            self.logger.error(f"Failed to create PR: {e}")
-
-    def _close_subtask_prs(self, task: Task, fan_in_pr_url: str) -> None:
-        """Close orphaned PRs created by subtask LLMs. Best-effort.
-
-        Subtask LLMs may create PRs via MCP despite prompt suppression.
-        After the fan-in PR is created, close those orphans so they don't
-        linger as duplicates.
-        """
-        if not task.context.get("fan_in"):
-            return
-
-        from ..utils.subprocess_utils import run_command
-
-        parent_task_id = task.context.get("parent_task_id")
-        if not parent_task_id:
-            return
-
-        parent = self.queue.find_task(parent_task_id)
-        if not parent or not parent.subtask_ids:
-            return
-
-        github_repo = task.context.get("github_repo")
-        if not github_repo:
-            return
-
-        for sid in parent.subtask_ids:
-            subtask = self.queue.get_completed(sid)
-            if not subtask:
-                continue
-            pr_url = subtask.context.get("pr_url")
-            if not pr_url:
-                continue
-            # Extract PR number from URL (e.g. .../pull/18 → 18)
-            pr_number = pr_url.rstrip("/").split("/")[-1]
-            self.logger.info(f"Closing orphaned subtask PR #{pr_number}")
-            run_command(
-                ["gh", "pr", "close", pr_number,
-                 "--repo", github_repo,
-                 "--comment", f"Superseded by fan-in PR {fan_in_pr_url}"],
-                check=False, timeout=30,
-            )
-
-    def _cleanup_subtask_branches(self, task: Task) -> None:
-        """Delete remote branches created by subtask LLMs. Best-effort.
-
-        After the fan-in PR lands, subtask branches are stale. Clean them up
-        so they don't clutter the remote.
-        """
-        if not task.context.get("fan_in"):
-            return
-
-        from ..utils.subprocess_utils import run_command
-
-        parent_task_id = task.context.get("parent_task_id")
-        if not parent_task_id:
-            return
-
-        parent = self.queue.find_task(parent_task_id)
-        if not parent or not parent.subtask_ids:
-            return
-
-        github_repo = task.context.get("github_repo")
-        if not github_repo:
-            return
-
-        for sid in parent.subtask_ids:
-            subtask = self.queue.get_completed(sid)
-            if not subtask:
-                continue
-            branch = (
-                subtask.context.get("implementation_branch")
-                or subtask.context.get("worktree_branch")
-            )
-            if not branch:
-                continue
-            self.logger.info(f"Deleting subtask branch: {branch}")
-            run_command(
-                ["git", "push", "origin", "--delete", branch],
-                check=False, timeout=30,
-            )
-
-    def _remote_branch_exists(self, worktree_path) -> bool:
-        """Check if current branch exists on the remote (origin)."""
-        from ..utils.subprocess_utils import run_git_command, SubprocessError
-
-        try:
-            branch_result = run_git_command(
-                ["rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=worktree_path, check=False, timeout=10,
-            )
-            if branch_result.returncode != 0:
-                return False
-            branch = branch_result.stdout.strip()
-            if branch in ("main", "master", "HEAD"):
-                return False
-            result = run_git_command(
-                ["ls-remote", "--heads", "origin", branch],
-                cwd=worktree_path, check=False, timeout=10,
-            )
-            return bool(result.stdout.strip())
-        except SubprocessError:
-            return False
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
         """Transition a JIRA ticket to target_status if all preconditions are met.

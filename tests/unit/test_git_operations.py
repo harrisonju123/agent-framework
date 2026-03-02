@@ -1,14 +1,13 @@
 """Unit tests for GitOperationsManager."""
 
-import hashlib
 import json
 import pytest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch, call
+from unittest.mock import MagicMock, Mock, patch
 
 from agent_framework.core.git_operations import GitOperationsManager
-from agent_framework.core.task import Task, TaskStatus
+from agent_framework.core.task import Task, TaskStatus, TaskType
 
 
 @pytest.fixture
@@ -1438,3 +1437,112 @@ class TestStaleEntryRecoveryInGetWorkingDirectory:
         # Verify it called remove_registry_entry_by_path instead of remove_worktree
         mock_worktree_manager.remove_registry_entry_by_path.assert_called_once_with(missing_path)
         mock_worktree_manager.remove_worktree.assert_not_called()
+
+
+class TestCleanupMergedBranches:
+    """Tests for GitOperationsManager.cleanup_merged_branches."""
+
+    def test_deletes_agent_prefixed_merged_branches(self, mock_config, mock_logger, mock_queue, tmp_path):
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        branch_output = (
+            "  origin/main\n"
+            "  origin/agent-task-123\n"
+            "  origin/chain-root-impl-d0\n"
+            "  origin/engineer-AF-42\n"
+            "  origin/feature/unrelated\n"
+        )
+
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                MagicMock(returncode=0, stdout="", stderr=""),  # fetch --prune
+                MagicMock(returncode=0, stdout=branch_output, stderr=""),  # branch -r --merged
+                MagicMock(returncode=0, stdout="", stderr=""),  # batch push --delete
+            ]
+            deleted = git_ops.cleanup_merged_branches("owner/repo")
+
+        assert set(deleted) == {"agent-task-123", "chain-root-impl-d0", "engineer-AF-42"}
+        # Batch delete: fetch + branch -r + single push --delete
+        assert mock_git.call_count == 3
+
+    def test_dry_run_does_not_delete(self, mock_config, mock_logger, mock_queue, tmp_path):
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        branch_output = "  origin/agent-task-1\n  origin/main\n"
+
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                MagicMock(returncode=0, stdout="", stderr=""),  # fetch
+                MagicMock(returncode=0, stdout=branch_output, stderr=""),  # branch -r
+            ]
+            deleted = git_ops.cleanup_merged_branches("owner/repo", dry_run=True)
+
+        assert deleted == ["agent-task-1"]
+        # Only 2 calls: fetch + branch -r (no delete calls)
+        assert mock_git.call_count == 2
+
+    def test_no_merged_branches_returns_empty(self, mock_config, mock_logger, mock_queue, tmp_path):
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+        )
+        with patch("agent_framework.utils.subprocess_utils.run_git_command") as mock_git:
+            mock_git.side_effect = [
+                MagicMock(returncode=0, stdout="", stderr=""),  # fetch
+                MagicMock(returncode=0, stdout="  origin/main\n", stderr=""),  # branch -r
+            ]
+            deleted = git_ops.cleanup_merged_branches("owner/repo")
+
+        assert deleted == []
+
+
+class TestManagePrLifecycleTriggersCleanup:
+    """Verify cleanup_merged_branches is called after successful PR merge."""
+
+    def test_cleanup_called_after_merge(self, mock_config, mock_logger, mock_queue, tmp_path):
+        pr_manager = MagicMock()
+        pr_manager.should_manage.return_value = True
+        pr_manager.manage.return_value = True  # merged
+
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+            pr_lifecycle_manager=pr_manager,
+        )
+        git_ops.cleanup_merged_branches = MagicMock(return_value=[])
+        git_ops._sync_jira_status = MagicMock()
+
+        task = Task(
+            id="test-1", title="Test", description="d", priority=1,
+            type=TaskType.IMPLEMENTATION, status=TaskStatus.IN_PROGRESS,
+            created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={"github_repo": "owner/repo", "pr_url": "https://github.com/owner/repo/pull/1"},
+        )
+
+        git_ops.manage_pr_lifecycle(task)
+
+        git_ops.cleanup_merged_branches.assert_called_once_with("owner/repo")
+
+    def test_cleanup_not_called_when_not_merged(self, mock_config, mock_logger, mock_queue, tmp_path):
+        pr_manager = MagicMock()
+        pr_manager.should_manage.return_value = True
+        pr_manager.manage.return_value = False  # not merged
+
+        git_ops = GitOperationsManager(
+            config=mock_config, workspace=tmp_path, queue=mock_queue, logger=mock_logger,
+            pr_lifecycle_manager=pr_manager,
+        )
+        git_ops.cleanup_merged_branches = MagicMock()
+
+        task = Task(
+            id="test-2", title="Test", description="d", priority=1,
+            type=TaskType.IMPLEMENTATION, status=TaskStatus.IN_PROGRESS,
+            created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            context={"github_repo": "owner/repo"},
+        )
+
+        git_ops.manage_pr_lifecycle(task)
+
+        git_ops.cleanup_merged_branches.assert_not_called()

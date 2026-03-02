@@ -2,7 +2,6 @@
 
 import json
 
-import pytest
 
 from agent_framework.indexing.models import CodebaseIndex, ModuleEntry, SymbolEntry, SymbolKind
 from agent_framework.indexing.store import IndexStore

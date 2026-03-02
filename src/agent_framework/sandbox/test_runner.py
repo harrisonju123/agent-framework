@@ -135,7 +135,7 @@ class GoTestRunner:
 
         # Check if we're in an event loop
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             # We're in an async context, can't use run_until_complete
             # Just call the async method directly via coroutine
             import concurrent.futures

@@ -10,7 +10,6 @@ Provides tabbed interface showing:
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 from rich.console import Console
 from rich.layout import Layout
@@ -100,20 +99,20 @@ class AnalyticsDashboard:
 
         # Overview panel
         overview_text = Text()
-        overview_text.append(f"📈 Overall Success Rate: ", style="bold")
+        overview_text.append("📈 Overall Success Rate: ", style="bold")
         success_style = "green" if report.overall_success_rate >= 85 else "yellow" if report.overall_success_rate >= 70 else "red"
         overview_text.append(f"{report.overall_success_rate:.1f}%\n", style=success_style)
 
-        overview_text.append(f"📊 Total Tasks: ", style="bold")
+        overview_text.append("📊 Total Tasks: ", style="bold")
         overview_text.append(f"{report.total_tasks}\n")
 
-        overview_text.append(f"💰 Total Cost: ", style="bold")
+        overview_text.append("💰 Total Cost: ", style="bold")
         overview_text.append(f"${report.total_cost:.2f}\n")
 
-        overview_text.append(f"⏱  Time Range: ", style="bold")
+        overview_text.append("⏱  Time Range: ", style="bold")
         overview_text.append(f"Last {report.time_range_hours} hours\n")
 
-        overview_text.append(f"🔄 Last Updated: ", style="bold")
+        overview_text.append("🔄 Last Updated: ", style="bold")
         overview_text.append(f"{report.generated_at.strftime('%Y-%m-%d %H:%M:%S')}\n", style="dim")
 
         layout["overview"].update(Panel(overview_text, title="Performance Overview", border_style="blue"))
@@ -173,17 +172,17 @@ class AnalyticsDashboard:
 
         # Overview panel
         overview_text = Text()
-        overview_text.append(f"🔍 Total Failures: ", style="bold")
+        overview_text.append("🔍 Total Failures: ", style="bold")
         overview_text.append(f"{report.total_failures}\n", style="red")
 
-        overview_text.append(f"📉 Failure Rate: ", style="bold")
+        overview_text.append("📉 Failure Rate: ", style="bold")
         rate_style = "green" if report.failure_rate < 10 else "yellow" if report.failure_rate < 25 else "red"
         overview_text.append(f"{report.failure_rate:.1f}%\n", style=rate_style)
 
-        overview_text.append(f"⏱  Time Range: ", style="bold")
+        overview_text.append("⏱  Time Range: ", style="bold")
         overview_text.append(f"Last {report.time_range_hours} hours ({report.time_range_hours // 24} days)\n")
 
-        overview_text.append(f"🔄 Last Updated: ", style="bold")
+        overview_text.append("🔄 Last Updated: ", style="bold")
         overview_text.append(f"{report.generated_at.strftime('%Y-%m-%d %H:%M:%S')}\n\n", style="dim")
 
         if report.trends:
@@ -240,13 +239,13 @@ class AnalyticsDashboard:
 
         # Overview panel
         overview_text = Text()
-        overview_text.append(f"🔬 Shadow Mode Runs: ", style="bold")
+        overview_text.append("🔬 Shadow Mode Runs: ", style="bold")
         overview_text.append(f"{report.total_shadow_runs}\n")
 
-        overview_text.append(f"📊 Strategies Analyzed: ", style="bold")
+        overview_text.append("📊 Strategies Analyzed: ", style="bold")
         overview_text.append(f"{report.strategies_analyzed}\n")
 
-        overview_text.append(f"✅ Safe Strategies: ", style="bold")
+        overview_text.append("✅ Safe Strategies: ", style="bold")
         safe_count = len(report.safe_strategies)
         safe_style = "green" if safe_count > 0 else "yellow"
         overview_text.append(f"{safe_count}\n", style=safe_style)
@@ -254,7 +253,7 @@ class AnalyticsDashboard:
         if report.safe_strategies:
             overview_text.append(f"  → {', '.join(report.safe_strategies)}\n", style="dim green")
 
-        overview_text.append(f"⏱  Time Range: ", style="bold")
+        overview_text.append("⏱  Time Range: ", style="bold")
         overview_text.append(f"Last {report.time_range_hours} hours ({report.time_range_hours // 24} days)\n")
 
         layout["overview"].update(Panel(overview_text, title="Shadow Mode Overview", border_style="blue"))
@@ -311,23 +310,23 @@ class AnalyticsDashboard:
 
         # Overview panel
         overview_text = Text()
-        overview_text.append(f"Total Cost: ", style="bold")
+        overview_text.append("Total Cost: ", style="bold")
         overview_text.append(f"${report.total_cost:.4f}\n")
 
-        overview_text.append(f"Total LLM Calls: ", style="bold")
+        overview_text.append("Total LLM Calls: ", style="bold")
         overview_text.append(f"{report.total_llm_calls}\n")
 
-        overview_text.append(f"Token Efficiency (out/in): ", style="bold")
+        overview_text.append("Token Efficiency (out/in): ", style="bold")
         eff_style = "green" if report.overall_token_efficiency > 0.3 else "yellow"
         overview_text.append(f"{report.overall_token_efficiency:.3f}\n", style=eff_style)
 
-        overview_text.append(f"Total Tokens In: ", style="bold")
+        overview_text.append("Total Tokens In: ", style="bold")
         overview_text.append(f"{report.total_tokens_in:,}\n")
 
-        overview_text.append(f"Total Tokens Out: ", style="bold")
+        overview_text.append("Total Tokens Out: ", style="bold")
         overview_text.append(f"{report.total_tokens_out:,}\n")
 
-        overview_text.append(f"Time Range: ", style="bold")
+        overview_text.append("Time Range: ", style="bold")
         overview_text.append(f"Last {report.time_range_hours} hours\n")
 
         layout["overview"].update(Panel(overview_text, title="LLM Cost Overview", border_style="blue"))
@@ -392,27 +391,27 @@ class AnalyticsDashboard:
 
         # Overview panel
         overview_text = Text()
-        overview_text.append(f"Total Chains: ", style="bold")
+        overview_text.append("Total Chains: ", style="bold")
         overview_text.append(f"{report.total_chains}\n")
 
-        overview_text.append(f"Completed: ", style="bold")
+        overview_text.append("Completed: ", style="bold")
         overview_text.append(f"{report.completed_chains}\n")
 
-        overview_text.append(f"Completion Rate: ", style="bold")
+        overview_text.append("Completion Rate: ", style="bold")
         rate_style = "green" if report.chain_completion_rate >= 80 else "yellow" if report.chain_completion_rate >= 50 else "red"
         overview_text.append(f"{report.chain_completion_rate:.1f}%\n", style=rate_style)
 
-        overview_text.append(f"Avg Chain Depth: ", style="bold")
+        overview_text.append("Avg Chain Depth: ", style="bold")
         overview_text.append(f"{report.avg_chain_depth:.1f} steps\n")
 
-        overview_text.append(f"Avg Files Modified: ", style="bold")
+        overview_text.append("Avg Files Modified: ", style="bold")
         overview_text.append(f"{report.avg_files_modified:.1f}\n")
 
-        overview_text.append(f"Avg Attempts: ", style="bold")
+        overview_text.append("Avg Attempts: ", style="bold")
         attempt_style = "green" if report.avg_attempts < 1.5 else "yellow" if report.avg_attempts < 3 else "red"
         overview_text.append(f"{report.avg_attempts:.1f}\n", style=attempt_style)
 
-        overview_text.append(f"Time Range: ", style="bold")
+        overview_text.append("Time Range: ", style="bold")
         overview_text.append(f"Last {report.time_range_hours} hours\n")
 
         layout["overview"].update(Panel(overview_text, title="Workflow Overview", border_style="blue"))

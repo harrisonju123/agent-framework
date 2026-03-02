@@ -1,7 +1,6 @@
 """Tests for fan-in logic in FileQueue and task decomposition."""
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 

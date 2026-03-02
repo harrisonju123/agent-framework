@@ -1,10 +1,9 @@
 """Tests for _set_structured_verdict() emitting verdict_audit events."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from agent_framework.core.agent import Agent
-from agent_framework.core.review_cycle import ReviewCycleManager, ReviewOutcome
-from agent_framework.core.verdict_audit import VerdictAudit
+from agent_framework.core.review_cycle import ReviewCycleManager
 
 
 def _make_agent(**overrides):

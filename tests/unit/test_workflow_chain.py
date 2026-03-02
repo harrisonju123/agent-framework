@@ -1178,7 +1178,6 @@ class TestDAGReviewCycleCap:
         executor._route_to_step(task, engineer_step, workflow, "qa", None)
 
         queue.push.assert_called_once()
-        chain_task = queue.push.call_args[0][0]
         target_queue = queue.push.call_args[0][1]
         # Redirected to PR step instead of back to engineer
         assert target_queue == "architect"
@@ -2267,7 +2266,7 @@ class TestNoChangesRouting:
     def test_no_changes_verdict_terminates_workflow(self, queue, tmp_path):
         """Plan step with no_changes has no DAG edge to follow — workflow ends."""
         from agent_framework.workflow.dag import (
-            WorkflowStep, WorkflowEdge,
+            WorkflowEdge,
             EdgeCondition, EdgeConditionType,
         )
 
@@ -2984,7 +2983,7 @@ class TestCleanupTaskExecutionOrdering:
     @pytest.fixture
     def cleanup_agent(self, queue, tmp_path):
         """Minimal agent with enough wiring for _cleanup_task_execution."""
-        from agent_framework.core.activity import AgentStatus, AgentActivity, ActivityManager
+        from agent_framework.core.activity import AgentStatus, ActivityManager
 
         config = AgentConfig(id="engineer", name="Engineer", queue="engineer", prompt="p")
         a = Agent.__new__(Agent)
@@ -3452,8 +3451,8 @@ class TestRoutingSignalVerdictOverride:
                 routing_signal = None
             else:
                 agent.logger.info(
-                    f"No plan extracted at plan step — passing __complete__ signal "
-                    f"to workflow router for PR lifecycle handling"
+                    "No plan extracted at plan step — passing __complete__ signal "
+                    "to workflow router for PR lifecycle handling"
                 )
                 agent._session_logger.log(
                     "routing_signal_passthrough", task_id=task.id,

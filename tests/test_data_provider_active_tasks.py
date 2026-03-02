@@ -1,6 +1,5 @@
 """Tests for DashboardDataProvider active task and cancel methods."""
 
-import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path

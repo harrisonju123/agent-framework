@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional
 
 from .docker_executor import DockerExecutor
 

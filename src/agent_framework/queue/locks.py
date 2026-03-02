@@ -3,9 +3,7 @@
 import logging
 import os
 import shutil
-import signal
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
