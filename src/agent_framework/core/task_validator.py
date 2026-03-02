@@ -64,9 +64,14 @@ def validate_task(task: Task, mode: str = "warn") -> ValidationResult:
     if task.context.get("jira_key") or task.created_by == "jira":
         return ValidationResult(is_valid=True, skipped=True)
 
-    # Skip validation for CLI-created tasks (user explicitly created these)
+    # CLI tasks get relaxed validation — skip vague-pattern checks but still
+    # catch obviously broken tasks (empty title/description)
     if task.created_by == "cli":
-        return ValidationResult(is_valid=True, skipped=True)
+        if not task.title or not task.title.strip():
+            return ValidationResult(is_valid=False, issues=["Task title is empty"])
+        if not task.description or not task.description.strip():
+            return ValidationResult(is_valid=False, issues=["Task description is empty"])
+        return ValidationResult(is_valid=True, skipped=False)
 
     issues: list[str] = []
 

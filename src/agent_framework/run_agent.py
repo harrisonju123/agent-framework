@@ -263,10 +263,13 @@ def main():
             exploration_alert_thresholds=framework_config.optimization.exploration_alert_thresholds,
         )
 
-        # Let SIGTERM trigger a clean exit through the polling loop
-        # so the agent can release locks and reset in-progress tasks
+        # SIGTERM: cancel in-flight LLM subprocess, then exit via polling loop
         def _handle_sigterm(signum, frame):
             agent._running = False
+            try:
+                agent.llm.cancel()
+            except Exception:
+                pass
 
         signal.signal(signal.SIGTERM, _handle_sigterm)
 

@@ -15,9 +15,9 @@ from .task import Task, TaskType
 from .activity import ActivityEvent
 
 
-# Model pricing (per 1M tokens, as of 2025-01)
+# Model pricing (per 1M tokens, as of 2025-10)
 MODEL_PRICING = {
-    "haiku": {"input": 0.25, "output": 1.25},
+    "haiku": {"input": 0.80, "output": 4.00},
     "sonnet": {"input": 3.0, "output": 15.0},
     "opus": {"input": 15.0, "output": 75.0},
 }

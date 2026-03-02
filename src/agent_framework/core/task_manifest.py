@@ -94,9 +94,26 @@ def get_or_create_manifest(
         created_at=datetime.now(timezone.utc).isoformat(),
         **kwargs,
     )
-    save_manifest(workspace, manifest)
-    logger.info("Created task manifest for %s on branch %s", root_task_id, branch)
 
-    # Re-read to handle the (benign) race where two agents both see None
-    # and write simultaneously — return whichever one landed on disk
+    # Atomic write-once: use a sentinel directory as a mutex so only one
+    # agent creates the manifest when concurrent agents race on the same task
+    sentinel = _manifest_dir(workspace) / f".creating-{root_task_id}"
+    try:
+        sentinel.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        # Another agent is creating it — wait briefly and return theirs
+        import time
+        time.sleep(0.1)
+        return load_manifest(workspace, root_task_id) or manifest
+
+    try:
+        # Re-check after winning the mutex (another agent may have finished first)
+        existing = load_manifest(workspace, root_task_id)
+        if existing is not None:
+            return existing
+        save_manifest(workspace, manifest)
+        logger.info("Created task manifest for %s on branch %s", root_task_id, branch)
+    finally:
+        sentinel.rmdir()
+
     return load_manifest(workspace, root_task_id) or manifest

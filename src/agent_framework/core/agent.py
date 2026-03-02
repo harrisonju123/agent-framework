@@ -144,13 +144,6 @@ def _to_relative_path(file_path: str, working_dir: Optional[Path]) -> str:
         return file_path[len(prefix):]
     return file_path
 
-# Model pricing (per 1M tokens, as of 2025-01)
-MODEL_PRICING = {
-    "haiku": {"input": 0.25, "output": 1.25},
-    "sonnet": {"input": 3.0, "output": 15.0},
-    "opus": {"input": 15.0, "output": 75.0},
-}
-
 # Downstream agents get the correct task type for model selection
 CHAIN_TASK_TYPES = {
     "engineer": TaskType.IMPLEMENTATION,
@@ -711,6 +704,24 @@ class Agent:
             f"{new_version[:8] if new_version else '?'}...), "
             f"restarting agent process"
         )
+
+        # Clean up mkdir-based locks owned by this process (directories survive exec)
+        try:
+            locks_dir = self.workspace / ".agent-communication" / "locks"
+            if locks_dir.exists():
+                pid = _os.getpid()
+                for lock_dir in locks_dir.iterdir():
+                    if lock_dir.is_dir():
+                        pid_file = lock_dir / "pid"
+                        if pid_file.exists():
+                            try:
+                                if int(pid_file.read_text().strip()) == pid:
+                                    import shutil
+                                    shutil.rmtree(lock_dir, ignore_errors=True)
+                            except (ValueError, OSError):
+                                pass
+        except Exception:
+            pass
 
         # Write IDLE so watchdog doesn't think we crashed
         self.activity_manager.update_activity(AgentActivity(

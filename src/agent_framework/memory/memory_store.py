@@ -8,10 +8,12 @@ Storage layout:
   .agent-communication/memory/{repo_slug}/{agent_type}.json
 """
 
+import fcntl
 import json
 import logging
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -59,6 +61,19 @@ class MemoryStore:
         safe_repo = repo_slug.replace("/", "__")
         return self._base_dir / safe_repo / f"{agent_type}.json"
 
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """Exclusive file lock for read-modify-write atomicity."""
+        lock_path = path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
+
     def _load_entries(self, path: Path) -> List[Dict[str, Any]]:
         if not path.exists():
             return []
@@ -98,30 +113,32 @@ class MemoryStore:
 
         content = content[:MAX_CONTENT_LENGTH]
         path = self._store_path(repo_slug, agent_type)
-        entries = self._load_entries(path)
 
-        # Deduplicate: if same category+content exists, just touch it
-        for entry in entries:
-            if entry.get("category") == category and entry.get("content") == content:
-                entry["last_accessed"] = time.time()
-                entry["access_count"] = entry.get("access_count", 0) + 1
-                self._save_entries(path, entries)
-                return True
+        with self._file_lock(path):
+            entries = self._load_entries(path)
 
-        new_entry = MemoryEntry(
-            category=category,
-            content=content,
-            source_task_id=source_task_id,
-            tags=tags or [],
-        )
-        entries.append(asdict(new_entry))
+            # Deduplicate: if same category+content exists, just touch it
+            for entry in entries:
+                if entry.get("category") == category and entry.get("content") == content:
+                    entry["last_accessed"] = time.time()
+                    entry["access_count"] = entry.get("access_count", 0) + 1
+                    self._save_entries(path, entries)
+                    return True
 
-        # Evict oldest entries if over limit
-        if len(entries) > MAX_MEMORIES_PER_STORE:
-            entries.sort(key=lambda e: e.get("last_accessed", 0))
-            entries = entries[-MAX_MEMORIES_PER_STORE:]
+            new_entry = MemoryEntry(
+                category=category,
+                content=content,
+                source_task_id=source_task_id,
+                tags=tags or [],
+            )
+            entries.append(asdict(new_entry))
 
-        self._save_entries(path, entries)
+            # Evict oldest entries if over limit
+            if len(entries) > MAX_MEMORIES_PER_STORE:
+                entries.sort(key=lambda e: e.get("last_accessed", 0))
+                entries = entries[-MAX_MEMORIES_PER_STORE:]
+
+            self._save_entries(path, entries)
         return True
 
     def recall(
@@ -169,15 +186,17 @@ class MemoryStore:
             return False
 
         path = self._store_path(repo_slug, agent_type)
-        entries = self._load_entries(path)
 
-        original_count = len(entries)
-        entries = [
-            e for e in entries
-            if not (e.get("category") == category and e.get("content") == content)
-        ]
+        with self._file_lock(path):
+            entries = self._load_entries(path)
 
-        if len(entries) < original_count:
-            self._save_entries(path, entries)
-            return True
+            original_count = len(entries)
+            entries = [
+                e for e in entries
+                if not (e.get("category") == category and e.get("content") == content)
+            ]
+
+            if len(entries) < original_count:
+                self._save_entries(path, entries)
+                return True
         return False

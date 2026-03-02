@@ -838,9 +838,10 @@ class GitOperationsManager:
                 pr_url = pr_result.stdout.strip()
                 task.context["pr_url"] = pr_url
                 self.logger.info(f"Created PR: {pr_url}")
-                # Clean up orphaned subtask PRs/branches for fan-in tasks
+                # Close orphaned subtask PRs (superseded by fan-in PR).
+                # Branch cleanup is deferred to post-merge — deleting branches
+                # before the PR is merged would strand code if the PR is rejected.
                 self._close_subtask_prs(task, pr_url)
-                self._cleanup_subtask_branches(task)
             else:
                 if "already exists" in pr_result.stderr:
                     self.logger.info("PR already exists for this branch")
@@ -1134,6 +1135,10 @@ class GitOperationsManager:
 
         Returns True for standalone tasks (no workflow) to preserve backward
         compatibility — standalone agents should always be allowed to create PRs.
+
+        NOTE: Duplicated from WorkflowRouter.is_at_terminal_workflow_step() because
+        GitOperationsManager can't import WorkflowRouter (circular dependency).
+        Keep both copies in sync when modifying.
         """
         workflow_name = task.context.get("workflow")
         if not workflow_name or workflow_name not in self._workflows_config:

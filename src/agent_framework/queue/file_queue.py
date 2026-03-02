@@ -119,7 +119,7 @@ class FileQueue:
             current_mtime = queue_path.stat().st_mtime
         except OSError:
             return None
-        task_files = sorted(queue_path.glob("*.json"))
+        task_files = sorted(queue_path.glob("*.json"), key=lambda f: f.stat().st_mtime)
         current_count = len(task_files)
         if (
             current_mtime != self._queue_dir_mtime.get(queue_id, 0)
@@ -245,7 +245,7 @@ class FileQueue:
             current_mtime = queue_path.stat().st_mtime
         except OSError:
             return None
-        task_files = sorted(queue_path.glob("*.json"))
+        task_files = sorted(queue_path.glob("*.json"), key=lambda f: f.stat().st_mtime)
         current_count = len(task_files)
         if (
             current_mtime != self._queue_dir_mtime.get(queue_id, 0)

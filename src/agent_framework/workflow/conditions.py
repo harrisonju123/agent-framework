@@ -154,8 +154,8 @@ class TestPassedCondition(ConditionEvaluator):
             if "test failed" in content or "tests failed" in content:
                 return False
 
-        # Default to True if no test information found
-        return True
+        # No test evidence — don't assume tests passed
+        return False
 
 
 class TestFailedCondition(ConditionEvaluator):

@@ -2740,8 +2740,8 @@ class TestNoDiffGuard:
         with patch("agent_framework.utils.subprocess_utils.run_git_command", return_value=mock_result):
             assert executor._has_diff_for_pr(task, step) is False
 
-    def test_git_failure_blocks_create_pr(self, queue, tmp_path):
-        """Layer 2: git command fails → return False (fail closed)."""
+    def test_git_failure_allows_create_pr(self, queue, tmp_path):
+        """Layer 2: git command fails → return True (fail open to avoid stranding work)."""
         from agent_framework.workflow.executor import WorkflowExecutor
         from agent_framework.workflow.dag import WorkflowStep
         from unittest.mock import patch
@@ -2751,7 +2751,7 @@ class TestNoDiffGuard:
         step = WorkflowStep(id="create_pr", agent="architect")
 
         with patch("agent_framework.utils.subprocess_utils.run_git_command", side_effect=Exception("git error")):
-            assert executor._has_diff_for_pr(task, step) is False
+            assert executor._has_diff_for_pr(task, step) is True
 
 
 # -- Fix: Review cycle counter propagation across all chain hops --

@@ -413,10 +413,6 @@ class TaskDecomposer:
             if any(fname in step for fname in file_names):
                 relevant_steps.append(step)
 
-        # If no specific matches, include all steps (conservative approach)
-        if not relevant_steps:
-            relevant_steps = approach_steps
-
         return relevant_steps
 
     def _create_subtask(

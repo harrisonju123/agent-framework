@@ -59,7 +59,7 @@ class ErrorRecoveryManager:
         replan_cfg = replan_config or {}
         self._replan_enabled = replan_cfg.get("enabled", True)
         self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
-        self._replan_model = replan_cfg.get("model", "haiku")
+        self._replan_model = replan_cfg.get("model", "sonnet")
 
     async def handle_failure(self, task: Task) -> None:
         """

@@ -330,14 +330,14 @@ class TestTestPassedCondition:
         evaluator = TestPassedCondition()
         assert evaluator.evaluate(condition, task, response, context=context) is False
 
-    def test_no_test_info_defaults_true(self):
-        """Default to True when no test information."""
+    def test_no_test_info_defaults_false(self):
+        """Default to False when no test evidence — don't assume tests passed."""
         condition = EdgeCondition(EdgeConditionType.TEST_PASSED)
         task = _make_task()
         response = _make_response("Completed implementation")
 
         evaluator = TestPassedCondition()
-        assert evaluator.evaluate(condition, task, response) is True
+        assert evaluator.evaluate(condition, task, response) is False
 
 
 class TestFilesMatchCondition:

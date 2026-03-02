@@ -494,7 +494,11 @@ class WorkflowExecutor:
             "workflow_step": target_step.id,
             "_chain_depth": chain_depth,
             "_root_task_id": root_task_id,
-            "_global_cycle_count": task.context.get("_global_cycle_count", 0) + 1,
+            # Preview steps don't count toward global ceiling — they're lightweight
+            # plan evaluations, not full implementation cycles
+            "_global_cycle_count": task.context.get("_global_cycle_count", 0) + (
+                0 if target_step.id in ("preview", "preview_review") else 1
+            ),
             "_dag_review_cycles": task.context.get("_dag_review_cycles", 0),
         }
         # Clear stale verdict so the next agent's output is evaluated fresh
@@ -630,11 +634,12 @@ class WorkflowExecutor:
                     )
                     return False
             except Exception as e:
+                # Fail open: git error shouldn't strand committed work
                 self.logger.warning(
                     f"No-diff guard: git check failed ({e}) for task {task.id} — "
-                    f"blocking create_pr (fail closed)"
+                    f"proceeding with create_pr (fail open)"
                 )
-                return False
+                return True
 
         return True
 
