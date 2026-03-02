@@ -38,7 +38,7 @@ class _AgentMock:
         self._error_recovery = error_recovery
         self._session_logger = error_recovery.session_logger
         self.logger = error_recovery.logger
-        self._request_replan = Agent._request_replan.__get__(self)
+        self._request_replan = error_recovery.request_replan
         self._inject_replan_context = Agent._inject_replan_context.__get__(self)
         self._build_replan_memory_context = lambda task: error_recovery._build_replan_memory_context(task)
         self._replan_model = "haiku"

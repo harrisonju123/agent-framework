@@ -3254,15 +3254,6 @@ class Agent:
             task, response, test_passed=test_passed, working_dir=working_dir
         )
 
-    # -- Dynamic Replanning --
-
-    async def _request_replan(self, task: Task) -> None:
-        """Generate a revised approach based on what failed.
-
-        Delegated to ErrorRecoveryManager.
-        """
-        await self._error_recovery.request_replan(task)
-
     def _categorize_error(self, error_message: str) -> Optional[str]:
         """Categorize error message for better diagnostics.
 
@@ -3320,14 +3311,6 @@ class Agent:
         except Exception as e:
             # Don't fail task if metrics recording fails
             self.logger.debug(f"Unexpected error recording optimization metrics: {e}")
-
-    def _estimate_cost(self, response: LLMResponse) -> float:
-        """Estimate cost based on model and token usage.
-
-        Delegated to BudgetManager.
-        """
-        return self._budget.estimate_cost(response)
-
 
     def _update_phase(self, phase: TaskPhase):
         """Update current execution phase."""

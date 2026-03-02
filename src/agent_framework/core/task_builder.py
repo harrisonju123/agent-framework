@@ -243,9 +243,10 @@ def build_decomposed_subtask(
     """
     subtask_id = f"{parent_task.id}-sub{index + 1}"
 
-    # Build context inheriting from parent
+    # Deep copy to avoid sharing mutable refs (lists, dicts) across siblings
+    import copy
     subtask_context = {
-        **parent_task.context,
+        **copy.deepcopy(parent_task.context),
         "parent_task_id": parent_task.id,
         "subtask_index": index,
         "files_to_modify": files_to_modify,

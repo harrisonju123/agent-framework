@@ -68,9 +68,9 @@ class FileQueue:
         self.heartbeat_dir.mkdir(parents=True, exist_ok=True)
         self.malformed_dir.mkdir(parents=True, exist_ok=True)
 
-    def push(self, task: Task, queue_id: str) -> None:
+    def push(self, task: Task, queue_id: str) -> bool:
         """
-        Add a task to a queue.
+        Add a task to a queue. Returns True if pushed, False if rejected.
 
         Uses atomic write: write to .tmp then mv.
         Rejects tasks that already exist in completed/ to prevent
@@ -84,7 +84,7 @@ class FileQueue:
             logger.warning(
                 f"Rejecting push for already-completed task {task.id}"
             )
-            return
+            return False
 
         queue_path = self.queue_dir / queue_id
         queue_path.mkdir(parents=True, exist_ok=True)
@@ -97,6 +97,7 @@ class FileQueue:
 
         # Atomic write
         atomic_write_model(task_file, task)
+        return True
 
     def pop(self, queue_id: str) -> Optional[Task]:
         """
@@ -342,12 +343,14 @@ class FileQueue:
 
         completed_file = self.completed_dir / f"{task.id}.json"
 
-        # Write to completed directory
+        # Write to completed directory first, then remove from queue.
+        # If we crash between the two operations, mark_completed on
+        # next startup will clean up the duplicate via push() rejection.
         atomic_write_model(completed_file, task)
 
-        # Remove from queue
+        # Remove from queue — missing_ok so partial-crash recovery is idempotent
         if task_file.exists():
-            task_file.unlink()
+            task_file.unlink(missing_ok=True)
 
     def mark_failed(self, task: Task) -> None:
         """Mark task as permanently failed."""
@@ -755,9 +758,11 @@ class FileQueue:
         # Subtasks inherit parent context (including the parent's _cumulative_cost
         # as a baseline), then accumulate their own LLM cost on top. To avoid
         # counting the parent baseline N times, subtract it from each subtask.
+        # Clamp each subtask's own cost to >= 0 to prevent negative aggregation
+        # from incomplete LLM calls or cost tracking bugs.
         parent_baseline = parent_task.context.get("_cumulative_cost", 0.0)
         subtask_own_costs = sum(
-            st.context.get("_cumulative_cost", 0.0) - parent_baseline
+            max(0.0, st.context.get("_cumulative_cost", 0.0) - parent_baseline)
             for st in completed_subtasks
         )
         context["_cumulative_cost"] = parent_baseline + subtask_own_costs

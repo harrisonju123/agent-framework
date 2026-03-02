@@ -423,7 +423,12 @@ class PRLifecycleManager:
             self._log.warning("No branch in task context, cannot rebase")
             return False
 
-        cwd = self._resolve_repo_cwd(github_repo)
+        # Prefer the task's worktree (isolated) over the shared clone
+        worktree = task.context.get("worktree_path")
+        if worktree and Path(worktree).exists():
+            cwd = Path(worktree)
+        else:
+            cwd = self._resolve_repo_cwd(github_repo)
 
         try:
             run_git_command(["fetch", "origin", "main"], cwd=cwd, timeout=60)

@@ -334,6 +334,7 @@ class GitOperationsManager:
                         self.worktree_manager.acquire_worktree(worktree_path, self.config.id)
                     self._setup_worktree_venv(worktree_path)
                     task.context["worktree_branch"] = branch_name
+                    task.context["worktree_path"] = str(worktree_path)
                     self._write_manifest_if_needed(task, branch_name, worktree_path)
                     self.logger.info(f"Using worktree: {github_repo} at {worktree_path}")
                     return worktree_path

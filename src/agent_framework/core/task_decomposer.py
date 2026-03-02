@@ -1,5 +1,6 @@
 """Task decomposition logic for splitting large plans into subtasks."""
 
+import copy
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -365,7 +366,7 @@ class TaskDecomposer:
         boundary_names = {Path(f).name.lower() for f in boundary_files}
 
         return [
-            item for item in parent_checklist
+            copy.deepcopy(item) for item in parent_checklist
             if any(
                 Path(f).name.lower() in boundary_names
                 for f in item.get("files", [])
@@ -492,7 +493,7 @@ class TaskDecomposer:
                 f"Estimated lines: {boundary.estimated_lines}",
             ],
             context={
-                **parent.context,
+                **copy.deepcopy(parent.context),
                 "parent_task_id": parent.id,
                 "subtask_index": index,
                 "subtask_total": total,

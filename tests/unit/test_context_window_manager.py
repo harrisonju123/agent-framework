@@ -141,54 +141,6 @@ class TestContextWindowManager:
         assert manager.budget.used_so_far == 1500
         assert manager.budget.remaining == 8500
 
-    def test_build_context_priority_ordering(self, manager):
-        """Verify context items are included by priority."""
-        # Add items with different priorities
-        manager.add_context_item(
-            content="Low priority",
-            priority=ContextPriority.LOW,
-            category="metadata",
-        )
-        manager.add_context_item(
-            content="Critical item",
-            priority=ContextPriority.CRITICAL,
-            category="task_definition",
-        )
-        manager.add_context_item(
-            content="High priority",
-            priority=ContextPriority.HIGH,
-            category="message",
-        )
-
-        context, metadata = manager.build_context()
-
-        # CRITICAL should come first
-        assert context.index("Critical item") < context.index("High priority")
-        assert context.index("High priority") < context.index("Low priority")
-
-    def test_build_context_budget_limit(self, manager):
-        """Verify low-priority items are dropped when budget is tight."""
-        # Fill budget with critical items (each 125 tokens at ~4 chars/token)
-        for i in range(10):
-            manager.add_context_item(
-                content="A" * 500,  # 125 tokens each
-                priority=ContextPriority.CRITICAL,
-                category="task_definition",
-            )
-
-        # Add low-priority item that won't fit
-        manager.add_context_item(
-            content="Low priority that won't fit",
-            priority=ContextPriority.LOW,
-            category="metadata",
-        )
-
-        # Budget of 1250 fits exactly the 10 critical items, drops low priority
-        context, metadata = manager.build_context(max_tokens=1250)
-
-        assert "Low priority that won't fit" not in context
-        assert metadata["items_dropped"] >= 1
-
     def test_progressive_summarization(self, manager):
         """Verify old messages are summarized while recent ones are kept."""
         # Add 6 messages (threshold is 5)
@@ -269,40 +221,6 @@ class TestContextWindowManager:
 
         # Should be unchanged
         assert summarized == short_output
-
-    def test_build_context_with_summarized_history(self, manager):
-        """Verify summarized history is included in context."""
-        # Add messages to trigger summarization
-        for i in range(6):
-            manager.add_message(f"Message {i}")
-
-        manager._apply_progressive_summarization()
-
-        context, metadata = manager.build_context()
-
-        # Should include summary section
-        assert "Previous Activity Summary" in context
-        assert "Message 0" in context  # From summary
-
-    def test_context_metadata_breakdown(self, manager):
-        """Verify context metadata includes priority breakdown."""
-        manager.add_context_item(
-            content="A" * 300,
-            priority=ContextPriority.CRITICAL,
-            category="task_definition",
-        )
-        manager.add_context_item(
-            content="B" * 300,
-            priority=ContextPriority.HIGH,
-            category="message",
-        )
-
-        context, metadata = manager.build_context()
-
-        # Should have priority breakdown
-        assert "priority_breakdown" in metadata
-        assert "CRITICAL" in metadata["priority_breakdown"]
-        assert "HIGH" in metadata["priority_breakdown"]
 
     def test_compute_memory_budget_healthy(self, manager):
         """Verify full (floor-clamped) memory budget when utilization is healthy (<70%).

@@ -918,6 +918,12 @@ def guide(ctx, task_id, hint):
     # Re-queue the task
     queue.requeue_task(task)
 
+    # Clean up the escalation file now that we've handled it
+    esc_dir = workspace / ".agent-communication" / "escalations"
+    esc_file = esc_dir / f"{task_id}.json"
+    if esc_file.exists():
+        esc_file.unlink(missing_ok=True)
+
     console.print(f"[green]✓ Guidance injected and task re-queued to {task.assigned_to}[/]")
     console.print(f"[dim]The agent will receive your guidance on next attempt[/]")
     console.print(f"[dim]Monitor with: agent status --watch[/]")

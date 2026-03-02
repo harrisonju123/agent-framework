@@ -329,7 +329,8 @@ def _commit_wip(working_dir: Path, task_id: str, log: logging.Logger) -> bool:
         if status.returncode != 0 or not status.stdout.strip():
             return False
 
-        run_git_command(["add", "-A"], cwd=working_dir, check=False, timeout=10)
+        # Use "git add ." instead of "git add -A" to respect .gitignore
+        run_git_command(["add", "."], cwd=working_dir, check=False, timeout=10)
         result = run_git_command(
             ["commit", "-m", f"[auto-commit] WIP: auto-save on failure ({task_id})"],
             cwd=working_dir, check=False, timeout=10,
