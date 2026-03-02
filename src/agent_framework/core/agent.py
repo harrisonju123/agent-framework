@@ -1672,207 +1672,34 @@ class Agent:
         """Execute LLM with interruption watching, return response or None if interrupted."""
         from datetime import datetime
 
-        # Setup tool activity callback
-        _tool_call_count = [0]
-        _last_write_time = [0.0]
-        _consecutive_bash = [0]
-        _consecutive_diagnostic = [0]
-        _bash_commands: list[list[str]] = [[]]  # mutable list for closure access
-        _soft_threshold_logged = [False]
+        # Setup tool activity tracking via CheckpointManager
+        from .checkpoint_manager import CheckpointManager
         _circuit_breaker_event = asyncio.Event()
-        _diagnostic_trip = [False]  # tracks which trigger fired
-        _exploration_alerted = [False]
-        # Resolve once — workflow_step is immutable during a session
         _workflow_step = task.context.get("workflow_step")
         _exploration_threshold = (
             self._exploration_alert_thresholds.get(_workflow_step, self._exploration_alert_threshold)
             if _workflow_step else self._exploration_alert_threshold
         )
-        _subagent_spawns: list[list[dict]] = [[]]
-
-        def _emit_subagent_summary(outcome: str, orphan_risk: bool):
-            if _subagent_spawns[0]:
-                self._session_logger.log(
-                    "subagent_summary",
-                    total_spawned=len(_subagent_spawns[0]),
-                    session_outcome=outcome,
-                    orphan_risk=orphan_risk,
-                    spawns=_subagent_spawns[0],
-                )
-
-        _DIVERSITY_THRESHOLD = 0.5
-        # Tighter interval for implementation steps to reduce max work loss (was 15/25)
-        _COMMIT_CHECKPOINT_INTERVAL = 8 if self._is_implementation_step(task) else 25
-
-        def _has_uncommitted_work() -> bool:
-            """Check if working directory has uncommitted changes worth preserving."""
-            try:
-                result = subprocess.run(
-                    ["git", "status", "--porcelain"],
-                    cwd=str(working_dir),
-                    capture_output=True, text=True, timeout=5,
-                )
-                return bool(result.stdout.strip())
-            except Exception:
-                return False
+        _checkpoint_mgr = CheckpointManager(
+            task=task,
+            working_dir=working_dir,
+            is_implementation_step=self._is_implementation_step(task),
+            max_consecutive_tool_calls=self._max_consecutive_tool_calls,
+            max_consecutive_diagnostic_calls=self._max_consecutive_diagnostic_calls,
+            exploration_threshold=_exploration_threshold,
+            workflow_step=_workflow_step,
+            git_ops=self._git_ops,
+            session_logger=self._session_logger,
+            activity_manager=self.activity_manager,
+            context_window_manager=self._context_window_manager,
+            logger=self.logger,
+            circuit_breaker_event=_circuit_breaker_event,
+            agent_id=self.config.id,
+            agent_base_id=self.config.base_id,
+        )
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
-            try:
-                _tool_call_count[0] += 1
-
-                if tool_name == "Task":
-                    _subagent_spawns[0].append({
-                        "summary": tool_input_summary,
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    })
-                    self._session_logger.log(
-                        "subagent_spawned",
-                        spawn_index=len(_subagent_spawns[0]),
-                        tool_input_summary=tool_input_summary,
-                    )
-
-                # Circuit breaker: track consecutive Bash calls with command diversity
-                if tool_name == "Bash":
-                    _consecutive_bash[0] += 1
-                    _bash_commands[0].append(tool_input_summary or "")
-                    count = _consecutive_bash[0]
-                    threshold = self._max_consecutive_tool_calls
-
-                    # Diagnostic sub-breaker: catches stuck agents probing their
-                    # environment after worktree deletion. These commands are
-                    # inherently diverse so the main diversity heuristic never fires.
-                    if _is_diagnostic_command(tool_input_summary or ""):
-                        _consecutive_diagnostic[0] += 1
-                        if _consecutive_diagnostic[0] >= self._max_consecutive_diagnostic_calls:
-                            _diagnostic_trip[0] = True
-                            _circuit_breaker_event.set()
-                            return
-                    else:
-                        _consecutive_diagnostic[0] = 0
-
-                    if count >= threshold:
-                        unique = len(set(_bash_commands[0]))
-                        diversity = unique / count if count > 0 else 0.0
-
-                        if diversity <= _DIVERSITY_THRESHOLD:
-                            productive = sum(1 for c in _bash_commands[0] if _is_productive_command(c))
-                            productive_ratio = productive / count
-
-                            if productive_ratio > _PRODUCTIVE_RATIO_THRESHOLD:
-                                # Productive workflow — use higher threshold before tripping
-                                effective = threshold * _PRODUCTIVE_THRESHOLD_MULTIPLIER
-                                if count >= effective:
-                                    if _has_uncommitted_work():
-                                        self.logger.warning(
-                                            f"Circuit breaker suppressed: {count} consecutive Bash calls "
-                                            f"exceeded hard ceiling={effective}, but uncommitted work exists"
-                                        )
-                                    else:
-                                        self.logger.warning(
-                                            f"Circuit breaker: {count} consecutive Bash calls, "
-                                            f"low diversity={diversity:.2f} (unique_commands={unique}), "
-                                            f"productive_ratio={productive_ratio:.2f} exceeded hard ceiling={effective}"
-                                        )
-                                        _circuit_breaker_event.set()
-                                elif not _soft_threshold_logged[0]:
-                                    self.logger.info(
-                                        f"Circuit breaker deferred: {count} consecutive Bash calls, "
-                                        f"productive_ratio={productive_ratio:.2f} (effective threshold={effective})"
-                                    )
-                                    _soft_threshold_logged[0] = True
-                            else:
-                                if _has_uncommitted_work():
-                                    self.logger.warning(
-                                        f"Circuit breaker suppressed: {count} consecutive Bash calls, "
-                                        f"low diversity={diversity:.2f}, "
-                                        f"productive_ratio={productive_ratio:.2f}, but uncommitted work exists"
-                                    )
-                                else:
-                                    self.logger.warning(
-                                        f"Circuit breaker: {count} consecutive Bash calls, "
-                                        f"low diversity={diversity:.2f} (unique_commands={unique}), "
-                                        f"productive_ratio={productive_ratio:.2f}"
-                                    )
-                                    _circuit_breaker_event.set()
-                        elif not _soft_threshold_logged[0]:
-                            # Diverse commands — log once and let them continue
-                            self.logger.info(
-                                f"Circuit breaker deferred: {count} consecutive Bash calls "
-                                f"but diversity={diversity:.2f} (unique_commands={unique})"
-                            )
-                            _soft_threshold_logged[0] = True
-                else:
-                    _consecutive_bash[0] = 0
-                    _consecutive_diagnostic[0] = 0
-                    _bash_commands[0] = []
-                    _soft_threshold_logged[0] = False
-
-                # Exploration metric: one-time alert when total calls exceed threshold
-                total = _tool_call_count[0]
-                if total >= _exploration_threshold and not _exploration_alerted[0]:
-                    _exploration_alerted[0] = True
-                    self.logger.info(
-                        f"Exploration alert: {total} tool calls in session "
-                        f"(threshold={_exploration_threshold}, step={_workflow_step or 'standalone'})"
-                    )
-                    self._session_logger.log(
-                        "exploration_alert",
-                        total_tool_calls=total,
-                        threshold=_exploration_threshold,
-                        workflow_step=_workflow_step,
-                        agent_type=self.config.base_id,
-                    )
-                    self.activity_manager.append_event(ActivityEvent(
-                        type="exploration_alert",
-                        agent=self.config.id,
-                        task_id=task.id,
-                        title=(
-                            f"Exploration: {total} calls "
-                            f"(threshold={_exploration_threshold}, step={_workflow_step or 'standalone'})"
-                        ),
-                        timestamp=datetime.now(timezone.utc),
-                    ))
-
-                # Periodic checkpoint: commit + push so work survives worktree deletion
-                if (_tool_call_count[0] % _COMMIT_CHECKPOINT_INTERVAL == 0
-                        and working_dir and working_dir.exists()):
-                    committed = self._git_ops.safety_commit(
-                        working_dir,
-                        f"WIP: periodic checkpoint (tool call {_tool_call_count[0]})",
-                    )
-                    if committed:
-                        self._git_ops.push_if_unpushed()
-
-                    # Progress stall: high context usage + no commits = stuck agent
-                    if (self._is_implementation_step(task)
-                            and _tool_call_count[0] >= _COMMIT_CHECKPOINT_INTERVAL * 3
-                            and self._context_window_manager):
-                        util = self._context_window_manager.budget.utilization_percent
-                        if util > 75 and not committed and not self._git_ops._has_unpushed_commits(working_dir):
-                            self.logger.warning(
-                                f"Progress stall: {util:.0f}% context, no commits after "
-                                f"{_tool_call_count[0]} tool calls"
-                            )
-                            self._session_logger.log(
-                                "progress_stall",
-                                context_utilization=util,
-                                tool_calls=_tool_call_count[0],
-                            )
-                            _circuit_breaker_event.set()
-
-                now = time.time()
-                if now - _last_write_time[0] < 1.0:
-                    return
-                _last_write_time[0] = now
-                ta = ToolActivity(
-                    tool_name=tool_name,
-                    tool_input_summary=tool_input_summary,
-                    started_at=datetime.now(timezone.utc),
-                    tool_call_count=_tool_call_count[0],
-                )
-                self.activity_manager.update_tool_activity(self.config.id, ta)
-            except Exception as e:
-                self.logger.debug(f"Tool activity tracking error (non-fatal): {e}")
+            _checkpoint_mgr.on_tool_activity(tool_name, tool_input_summary)
 
         # Log LLM start
         self._update_phase(TaskPhase.EXECUTING_LLM)
@@ -1970,10 +1797,10 @@ class Agent:
 
         if circuit_breaker_task in done:
             # Stuck agent detected — kill subprocess and return synthetic failure
-            count = _consecutive_bash[0]
-            diag_count = _consecutive_diagnostic[0]
-            is_diagnostic = _diagnostic_trip[0]
-            commands = _bash_commands[0]
+            count = _checkpoint_mgr.consecutive_bash
+            diag_count = _checkpoint_mgr.consecutive_diagnostic
+            is_diagnostic = _checkpoint_mgr.diagnostic_tripped
+            commands = _checkpoint_mgr.bash_commands
             unique = len(set(commands))
             diversity = unique / count if count > 0 else 0.0
             productive = sum(1 for c in commands if _is_productive_command(c))
@@ -2058,7 +1885,7 @@ class Agent:
                 title=event_title,
                 timestamp=datetime.now(timezone.utc),
             ))
-            _emit_subagent_summary("circuit_breaker", True)
+            _checkpoint_mgr.emit_subagent_summary("circuit_breaker", True)
             return LLMResponse(
                 content="",
                 model_used="",
@@ -2119,7 +1946,7 @@ class Agent:
                 timestamp=datetime.now(timezone.utc),
             ))
             self.logger.info(f"Task {task.id} reset to pending after {event_type}")
-            _emit_subagent_summary(event_type, True)
+            _checkpoint_mgr.emit_subagent_summary(event_type, True)
             return None
         else:
             # LLM finished first — cancel watcher and circuit breaker, return response
@@ -2131,7 +1958,7 @@ class Agent:
                 pass
             result = llm_task.result()
             outcome = "success" if result and result.success else "failed"
-            _emit_subagent_summary(outcome, not (result and result.success))
+            _checkpoint_mgr.emit_subagent_summary(outcome, not (result and result.success))
             return result
 
     async def _auto_commit_wip(self, task: Task, working_dir: Path, bash_count: int) -> None:

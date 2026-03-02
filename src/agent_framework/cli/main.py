@@ -2009,6 +2009,94 @@ def cleanup_worktrees(ctx, max_age, force, dry_run):
         traceback.print_exc()
 
 
+@cli.command()
+@click.option("--task-id", "-t", default=None, help="Specific task ID (default: all recent)")
+@click.option("--format", "-f", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.pass_context
+def metrics(ctx, task_id, fmt):
+    """Show metrics from session logs (cost, tokens, duration, tool usage)."""
+    import json as _json
+    from datetime import datetime, timezone
+
+    workspace = ctx.obj["workspace"]
+    logs_dir = workspace / "logs" / "sessions"
+
+    if not logs_dir.exists():
+        console.print("[yellow]No session logs found[/]")
+        return
+
+    # Collect session files
+    if task_id:
+        files = [logs_dir / f"{task_id}.jsonl"]
+        if not files[0].exists():
+            console.print(f"[red]No session log for task {task_id}[/]")
+            return
+    else:
+        files = sorted(logs_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)[:20]
+
+    if not files:
+        console.print("[yellow]No session logs found[/]")
+        return
+
+    # Parse events and aggregate
+    rows = []
+    for f in files:
+        tid = f.stem
+        total_cost = 0.0
+        tokens_in = 0
+        tokens_out = 0
+        tool_calls = 0
+        duration_ms = 0
+        model = ""
+        try:
+            for line in f.read_text().splitlines():
+                if not line.strip():
+                    continue
+                evt = _json.loads(line)
+                event_name = evt.get("event", "")
+                if event_name == "llm_complete":
+                    total_cost += evt.get("cost", 0) or 0
+                    tokens_in = max(tokens_in, evt.get("tokens_in", 0) or 0)
+                    tokens_out += evt.get("tokens_out", 0) or 0
+                    duration_ms += evt.get("duration_ms", 0) or 0
+                    model = evt.get("model", model) or model
+                elif event_name == "tool_call":
+                    tool_calls += 1
+        except Exception:
+            continue
+
+        if total_cost > 0 or tool_calls > 0:
+            rows.append({
+                "task_id": tid[:24],
+                "model": model[:10],
+                "cost": f"${total_cost:.3f}",
+                "tokens_in": f"{tokens_in:,}",
+                "tokens_out": f"{tokens_out:,}",
+                "tools": str(tool_calls),
+                "duration": f"{duration_ms / 1000:.1f}s",
+            })
+
+    if not rows:
+        console.print("[yellow]No LLM activity in recent session logs[/]")
+        return
+
+    if fmt == "json":
+        console.print(_json.dumps(rows, indent=2))
+        return
+
+    table = Table(title="Session Metrics (recent tasks)")
+    for col in ["task_id", "model", "cost", "tokens_in", "tokens_out", "tools", "duration"]:
+        table.add_column(col)
+    for row in rows:
+        table.add_row(*row.values())
+
+    console.print(table)
+
+    # Totals
+    total = sum(float(r["cost"].lstrip("$")) for r in rows)
+    console.print(f"\n[bold]Total cost: ${total:.3f}[/] across {len(rows)} tasks")
+
+
 @cli.command("apply-pattern")
 @click.option("--reference", "-r", required=True, help="Reference repo: owner/repo")
 @click.option("--files", "-f", required=True, help="Reference files (comma-separated)")
