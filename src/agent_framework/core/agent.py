@@ -1045,25 +1045,20 @@ class Agent:
                     plan_files=len(task.plan.files_to_modify),
                 )
                 routing_signal = None
-            elif task.context.get("verdict") != "no_changes":
-                # No plan extracted + __complete__ → genuinely nothing to implement
-                prev_verdict = task.context.get("verdict")
-                task.context["verdict"] = "no_changes"
-                audit = task.context.get("verdict_audit")
-                if isinstance(audit, dict):
-                    audit["method"] = "routing_signal_complete"
-                    audit["value"] = "no_changes"
+            else:
+                # No plan extracted + __complete__ → nothing more to implement.
+                # Let the signal pass through to enforce_chain where
+                # workflow_router handles PR creation via queue_pr_creation_if_needed
+                # (which checks implementation_branch to skip PR when no code exists).
                 self.logger.info(
-                    f"Verdict overridden: {prev_verdict!r} → 'no_changes' "
-                    f"(routing signal WORKFLOW_COMPLETE at plan step, no plan extracted)"
+                    f"No plan extracted at plan step — passing __complete__ signal "
+                    f"to workflow router for PR lifecycle handling"
                 )
                 self._session_logger.log(
-                    "verdict_override", task_id=task.id,
-                    prev_verdict=prev_verdict, new_verdict="no_changes",
-                    method="routing_signal_complete",
+                    "routing_signal_passthrough", task_id=task.id,
+                    reason="no_plan_at_plan_step",
                     routing_signal_reason=routing_signal.reason,
                 )
-                self._patch_chain_state_verdict(task)
 
         self._run_post_completion_flow(task, response, routing_signal, task_start_time)
 
@@ -2640,34 +2635,6 @@ class Agent:
             )
         except Exception as e:
             self.logger.warning(f"Failed to save chain state for {task.id}: {e}")
-
-    def _patch_chain_state_verdict(self, task: Task) -> None:
-        """Patch the last step's verdict in chain state to match a post-hoc override.
-
-        Called when the routing signal (MCP tool) corrects the verdict after
-        chain state was already written by _save_step_to_chain_state.
-        """
-        try:
-            from .chain_state import load_chain_state, save_chain_state
-
-            state = load_chain_state(self.workspace, task.root_id)
-            if state is None or not state.steps:
-                return
-
-            last_step = state.steps[-1]
-            if last_step.task_id != task.id:
-                self.logger.debug(
-                    f"Chain state last step ({last_step.task_id}) != current task "
-                    f"({task.id}) — skipping verdict patch"
-                )
-                return
-
-            last_step.verdict = task.context.get("verdict")
-            last_step.verdict_audit = task.context.get("verdict_audit")
-            save_chain_state(self.workspace, state)
-            self.logger.debug(f"Chain state patched: verdict → {last_step.verdict!r}")
-        except Exception as e:
-            self.logger.warning(f"Failed to patch chain state verdict for {task.id}: {e}")
 
     def _emit_workflow_summary(self, task: Task) -> None:
         """Emit a waterfall summary event capturing the full workflow timeline.
