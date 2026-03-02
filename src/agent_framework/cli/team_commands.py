@@ -207,7 +207,7 @@ def start(ctx, template, repo, epic):
         logger.debug(f"Could not load framework config: {e}")
 
     # Generate team name upfront so worktree branch includes it
-    team_name = f"{tmpl.team_name_prefix}-{int(time.time())}"
+    team_name = f"{tmpl.team_name_prefix}-{int(time.time())}-{os.getpid() % 10000:04d}"
 
     # Resolve repo path if specified, then create isolated worktree
     repo_info = None
@@ -379,7 +379,7 @@ def escalate(ctx, task_id, template):
     repo_info = None
     repo_path = None
     github_repo = task.context.get("github_repo")
-    team_name = f"{tmpl.team_name_prefix}-escalation-{int(time.time())}"
+    team_name = f"{tmpl.team_name_prefix}-escalation-{int(time.time())}-{os.getpid() % 10000:04d}"
     if github_repo:
         try:
             github_token = os.environ.get("GITHUB_TOKEN")

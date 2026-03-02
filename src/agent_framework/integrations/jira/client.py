@@ -214,7 +214,8 @@ class JIRAClient:
 
     def issue_to_task(self, issue: Issue, assigned_to: str) -> Task:
         """Convert JIRA issue to internal Task."""
-        task_id = f"jira-{issue.key}-{int(time.time())}"
+        import os
+        task_id = f"jira-{issue.key}-{int(time.time())}-{os.getpid() % 10000:04d}{os.urandom(2).hex()}"
 
         # Determine task type from issue type
         task_type = TaskType.IMPLEMENTATION

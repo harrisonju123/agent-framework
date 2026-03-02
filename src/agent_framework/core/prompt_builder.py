@@ -211,6 +211,15 @@ class PromptBuilder:
         task.context["_upstream_context_source"] = self._last_upstream_source
         task.context["_upstream_context_chars"] = self._last_upstream_chars
 
+        # Hard cap: truncate prompt if it would exceed model context window.
+        # ~4 chars per token; 180K token limit leaves room for output tokens.
+        _MAX_PROMPT_CHARS = 720_000
+        if len(prompt) > _MAX_PROMPT_CHARS:
+            self.ctx.logger.warning(
+                f"Prompt exceeds size limit ({len(prompt)} chars > {_MAX_PROMPT_CHARS}), truncating"
+            ) if self.ctx.logger else None
+            prompt = prompt[:_MAX_PROMPT_CHARS] + "\n\n[prompt truncated due to size limit]"
+
         # Session log: capture what was sent to the LLM
         if self.ctx.session_logger:
             prompt_hash = hashlib.md5(prompt.encode(), usedforsecurity=False).hexdigest()[:12]

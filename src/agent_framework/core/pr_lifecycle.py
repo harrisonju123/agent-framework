@@ -314,6 +314,7 @@ class PRLifecycleManager:
             "jira_key": task.context.get("jira_key"),
             "ci_fix_count": count,
             "ci_fix_parent_task_id": task.id,
+            "chain_step": True,
         }
 
         fix_task = Task(

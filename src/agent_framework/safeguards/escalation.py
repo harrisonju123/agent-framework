@@ -284,7 +284,9 @@ class EscalationHandler:
                 "This would cause an infinite loop."
             )
 
-        escalation_id = f"escalation-{int(time.time())}-{failed_task.id}"
+        import os
+        suffix = f"{int(time.time())}-{os.getpid() % 10000:04d}{os.urandom(2).hex()}"
+        escalation_id = f"escalation-{suffix}-{failed_task.id}"
 
         # Truncate error if enabled (Strategy 8: Error Truncation)
         error_msg = failed_task.last_error or "Unknown error"
@@ -314,6 +316,11 @@ class EscalationHandler:
                 "error": error_msg,
                 "failure_pattern": escalation_report.failure_pattern,
                 "root_cause_hypothesis": escalation_report.root_cause_hypothesis,
+                # Propagate execution context so escalation agent can act
+                "github_repo": failed_task.context.get("github_repo"),
+                "jira_key": failed_task.context.get("jira_key"),
+                "implementation_branch": failed_task.context.get("implementation_branch"),
+                "workflow": failed_task.context.get("workflow"),
             },
         )
 

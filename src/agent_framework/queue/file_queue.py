@@ -54,8 +54,9 @@ class FileQueue:
         self._queue_dir_mtime: dict[str, float] = {}
         self._queue_file_count: dict[str, int] = {}
 
-        # Cache of completed dependency lookups with 60s TTL
+        # Cache of completed dependency lookups with 60s TTL and bounded size
         self._completed_cache: dict[str, tuple[bool, float]] = {}
+        self._COMPLETED_CACHE_MAX = 500
 
         self._ensure_dirs()
 
@@ -424,6 +425,12 @@ class FileQueue:
                     if not is_completed:
                         return False
                     continue
+
+            # Evict oldest entries when cache is full
+            if len(self._completed_cache) >= self._COMPLETED_CACHE_MAX:
+                oldest = sorted(self._completed_cache, key=lambda k: self._completed_cache[k][1])
+                for k in oldest[:len(oldest) // 2]:
+                    del self._completed_cache[k]
 
             dep_file = self.completed_dir / f"{dep_id}.json"
             if not dep_file.exists():
