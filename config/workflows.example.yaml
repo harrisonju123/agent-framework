@@ -46,10 +46,19 @@ workflows:
           - target: engineer
             condition: needs_fix
             priority: 5
+          - target: qa
+            condition: always
+            priority: 0
 
       qa:
         agent: qa
-        next: []
+        next:
+          - target: engineer
+            condition: needs_fix
+            priority: 5
+          - target: create_pr
+            condition: always
+            priority: 0
     start_step: architect
     pr_creator: qa
     auto_review: true
@@ -114,7 +123,8 @@ workflows:
     auto_review: true
     require_tests: true
 
-  # Preview workflow: architect plans, engineer does read-only preview, architect reviews
+  # Preview workflow (fallback edges not needed here since review step
+  # already has an always-condition fallback to implement): architect plans, engineer does read-only preview, architect reviews
   # and authorizes, then engineer implements. Use for high-risk or unfamiliar changes.
   preview:
     description: "Preview workflow with architect review gate before implementation"
