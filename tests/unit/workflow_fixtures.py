@@ -10,6 +10,7 @@ PREVIEW_WORKFLOW's structure stays consistent with the live YAML.
 """
 
 from agent_framework.core.config import WorkflowDefinition, WorkflowStepDefinition
+from agent_framework.workflow.constants import WorkflowStepConstants as Steps
 
 # Subset of the `preview` workflow starting at the preview step.
 # The real workflow begins with a `plan` step (architect → architect), but
@@ -21,53 +22,53 @@ from agent_framework.core.config import WorkflowDefinition, WorkflowStepDefiniti
 # False — which is the scenario Bug 1 and Bug 2 are designed to catch.
 REVIEW_WORKFLOW = WorkflowDefinition(
     description="Workflow with conditional review steps",
-    start_step="implement",
+    start_step=Steps.IMPLEMENT,
     pr_creator="architect",
     steps={
-        "implement": WorkflowStepDefinition(
+        Steps.IMPLEMENT: WorkflowStepDefinition(
             agent="engineer",
-            next=[{"target": "code_review"}],
+            next=[{"target": Steps.CODE_REVIEW}],
         ),
-        "code_review": WorkflowStepDefinition(
+        Steps.CODE_REVIEW: WorkflowStepDefinition(
             agent="architect",
             next=[
-                {"target": "qa_review", "condition": "approved", "priority": 10},
-                {"target": "implement", "condition": "needs_fix", "priority": 5},
+                {"target": Steps.QA_REVIEW, "condition": "approved", "priority": 10},
+                {"target": Steps.IMPLEMENT, "condition": "needs_fix", "priority": 5},
             ],
         ),
-        "qa_review": WorkflowStepDefinition(
+        Steps.QA_REVIEW: WorkflowStepDefinition(
             agent="qa",
             next=[
-                {"target": "create_pr", "condition": "approved", "priority": 10},
-                {"target": "implement", "condition": "needs_fix", "priority": 5},
+                {"target": Steps.CREATE_PR, "condition": "approved", "priority": 10},
+                {"target": Steps.IMPLEMENT, "condition": "needs_fix", "priority": 5},
             ],
         ),
-        "create_pr": WorkflowStepDefinition(agent="architect"),
+        Steps.CREATE_PR: WorkflowStepDefinition(agent="architect"),
     },
 )
 
 PREVIEW_WORKFLOW = WorkflowDefinition(
     description="Read-only preview before implementation",
-    start_step="preview",
+    start_step=Steps.PREVIEW,
     pr_creator="architect",
     steps={
-        "preview": WorkflowStepDefinition(
+        Steps.PREVIEW: WorkflowStepDefinition(
             agent="engineer",
             task_type="preview",
-            next=[{"target": "preview_review"}],
+            next=[{"target": Steps.PREVIEW_REVIEW}],
         ),
-        "preview_review": WorkflowStepDefinition(
+        Steps.PREVIEW_REVIEW: WorkflowStepDefinition(
             agent="architect",
             next=[
-                {"target": "implement", "condition": "preview_approved", "priority": 10},
-                {"target": "preview", "condition": "needs_fix", "priority": 5},
-                {"target": "implement", "condition": "always", "priority": 0},
+                {"target": Steps.IMPLEMENT, "condition": "preview_approved", "priority": 10},
+                {"target": Steps.PREVIEW, "condition": "needs_fix", "priority": 5},
+                {"target": Steps.IMPLEMENT, "condition": "always", "priority": 0},
             ],
         ),
-        "implement": WorkflowStepDefinition(
+        Steps.IMPLEMENT: WorkflowStepDefinition(
             agent="engineer",
-            next=[{"target": "create_pr"}],
+            next=[{"target": Steps.CREATE_PR}],
         ),
-        "create_pr": WorkflowStepDefinition(agent="architect"),
+        Steps.CREATE_PR: WorkflowStepDefinition(agent="architect"),
     },
 )

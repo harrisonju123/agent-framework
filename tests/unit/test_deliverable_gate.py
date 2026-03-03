@@ -12,6 +12,7 @@ from agent_framework.core.post_completion import PostCompletionManager, _IMPLEME
 from agent_framework.core.error_recovery import ErrorRecoveryManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
+from agent_framework.workflow.constants import WorkflowStepConstants as Steps
 
 
 # ---------------------------------------------------------------------------
@@ -182,12 +183,12 @@ class TestIsImplementationStep:
 
     def test_true_for_implement_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "implement"})
+        task = _make_task(context={"workflow_step": Steps.IMPLEMENT})
         assert agent._is_implementation_step(task) is True
 
     def test_true_for_implementation_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "implementation"})
+        task = _make_task(context={"workflow_step": Steps.IMPLEMENTATION})
         assert agent._is_implementation_step(task) is True
 
     def test_true_for_direct_queue_engineer(self):
@@ -199,32 +200,32 @@ class TestIsImplementationStep:
 
     def test_false_for_plan_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "plan"})
+        task = _make_task(context={"workflow_step": Steps.PLAN})
         assert agent._is_implementation_step(task) is False
 
     def test_false_for_code_review_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "code_review"})
+        task = _make_task(context={"workflow_step": Steps.CODE_REVIEW})
         assert agent._is_implementation_step(task) is False
 
     def test_false_for_qa_review_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "qa_review"})
+        task = _make_task(context={"workflow_step": Steps.QA_REVIEW})
         assert agent._is_implementation_step(task) is False
 
     def test_false_for_create_pr_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "create_pr"})
+        task = _make_task(context={"workflow_step": Steps.CREATE_PR})
         assert agent._is_implementation_step(task) is False
 
     def test_false_for_preview_review_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "preview_review"})
+        task = _make_task(context={"workflow_step": Steps.PREVIEW_REVIEW})
         assert agent._is_implementation_step(task) is False
 
     def test_false_for_preview_step(self):
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "preview"})
+        task = _make_task(context={"workflow_step": Steps.PREVIEW})
         assert agent._is_implementation_step(task) is False
 
     def test_false_for_architect_with_no_step(self):

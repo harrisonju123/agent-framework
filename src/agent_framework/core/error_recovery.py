@@ -387,7 +387,7 @@ class ErrorRecoveryManager:
         # No objective evidence — implementation steps should fail (no code = no pass),
         # non-implementation steps (plan, review) can auto-pass since they produce prose
         is_impl = task.context.get("workflow_step") in (
-            "implement", "implementation", "fix",
+            Steps.IMPLEMENT, Steps.IMPLEMENTATION, Steps.FIX,
         ) or (not task.context.get("workflow_step") and task.context.get("source_agent") == "engineer")
         if not git_evidence and test_passed is None:
             if is_impl:
