@@ -262,7 +262,7 @@ class TestDeliverableGateIntegration:
         """Implementation step + no git changes → _handle_failure, not mark_completed."""
         agent = _make_agent()
         agent._error_recovery.has_deliverables.return_value = False
-        task = _make_task(context={"workflow_step": "implement"})
+        task = _make_task(context={"workflow_step": Steps.IMPLEMENT})
         response = _ok_response()
 
         await agent._handle_successful_response(
@@ -278,7 +278,7 @@ class TestDeliverableGateIntegration:
     async def test_gate_skips_when_working_dir_none(self, _mock_routing):
         """No working directory → gate cannot run, task completes normally."""
         agent = _make_agent()
-        task = _make_task(context={"workflow_step": "implement"})
+        task = _make_task(context={"workflow_step": Steps.IMPLEMENT})
         response = _ok_response()
 
         await agent._handle_successful_response(
@@ -295,7 +295,7 @@ class TestDeliverableGateIntegration:
         """Plan steps produce prose, not code — gate should not fire."""
         agent = _make_agent()
         agent.config.base_id = "architect"
-        task = _make_task(context={"workflow_step": "plan"})
+        task = _make_task(context={"workflow_step": Steps.PLAN})
         response = _ok_response()
 
         await agent._handle_successful_response(
@@ -311,7 +311,7 @@ class TestDeliverableGateIntegration:
         """Implementation step with git changes → normal completion."""
         agent = _make_agent()
         agent._error_recovery.has_deliverables.return_value = True
-        task = _make_task(context={"workflow_step": "implement"})
+        task = _make_task(context={"workflow_step": Steps.IMPLEMENT})
         response = _ok_response()
 
         await agent._handle_successful_response(
@@ -328,7 +328,7 @@ class TestDeliverableGateIntegration:
         """Code review is prose-only — exempt from deliverable gate."""
         agent = _make_agent()
         agent.config.base_id = "architect"
-        task = _make_task(context={"workflow_step": "code_review"})
+        task = _make_task(context={"workflow_step": Steps.CODE_REVIEW})
         response = _ok_response()
 
         await agent._handle_successful_response(

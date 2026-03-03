@@ -10,6 +10,7 @@ from agent_framework.core.workflow_router import WorkflowRouter
 from agent_framework.core.config import WorkflowDefinition
 from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW, REVIEW_WORKFLOW
 from agent_framework.core.task import Task, TaskStatus, TaskType
+from agent_framework.workflow.constants import WorkflowStepConstants as Steps
 
 
 # -- Fixtures --
@@ -381,7 +382,7 @@ class TestEnforceChain:
         """Engineer completing the preview step routes to architect at preview_review."""
         task = _make_task(
             workflow="preview",
-            workflow_step="preview",
+            workflow_step=Steps.PREVIEW,
             _chain_depth=1,
             _root_task_id="root-preview-router-1",
             _global_cycle_count=1,
@@ -396,7 +397,7 @@ class TestEnforceChain:
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "architect"
         assert chain_task.assigned_to == "architect"
-        assert chain_task.context.get("workflow_step") == "preview_review"
+        assert chain_task.context.get("workflow_step") == Steps.PREVIEW_REVIEW
 
 
 # -- Terminal step detection --
