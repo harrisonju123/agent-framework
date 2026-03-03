@@ -10,6 +10,7 @@ from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.memory.memory_retriever import MemoryRetriever
 from agent_framework.memory.memory_store import MemoryStore
+from agent_framework.workflow.constants import WorkflowStepConstants as Steps
 
 
 @pytest.fixture
@@ -874,7 +875,7 @@ class TestTestSuppressionGuidance:
 
     def test_code_review_step_suppresses_tests_legacy(self, prompt_builder, sample_task):
         """code_review step injects test suppression in legacy prompt."""
-        task = self._make_task_with_step(sample_task, "code_review")
+        task = self._make_task_with_step(sample_task, Steps.CODE_REVIEW)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "Do NOT run the test suite" in prompt
@@ -903,7 +904,7 @@ class TestTestSuppressionGuidance:
 
     def test_code_review_step_suppresses_tests_optimized(self, prompt_builder, sample_task):
         """code_review step injects test suppression in optimized prompt."""
-        task = self._make_task_with_step(sample_task, "code_review")
+        task = self._make_task_with_step(sample_task, Steps.CODE_REVIEW)
         prompt = prompt_builder._build_prompt_optimized(task)
 
         assert "Do NOT run the test suite" in prompt
@@ -1091,7 +1092,7 @@ class TestCodeReviewConstraints:
 
     def test_code_review_injects_constraints_legacy(self, prompt_builder, sample_task):
         """code_review step injects review-only guidance in legacy prompt."""
-        task = self._make_task_with_step(sample_task, "code_review")
+        task = self._make_task_with_step(sample_task, Steps.CODE_REVIEW)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "REVIEWER" in prompt
@@ -1101,7 +1102,7 @@ class TestCodeReviewConstraints:
 
     def test_code_review_injects_constraints_optimized(self, prompt_builder, sample_task):
         """code_review step injects review-only guidance in optimized prompt."""
-        task = self._make_task_with_step(sample_task, "code_review")
+        task = self._make_task_with_step(sample_task, Steps.CODE_REVIEW)
         prompt = prompt_builder._build_prompt_optimized(task)
 
         assert "REVIEWER" in prompt
@@ -1159,7 +1160,7 @@ class TestCodeReviewConstraints:
 
     def test_code_review_does_not_get_preview_guidance(self, prompt_builder, sample_task):
         """code_review step gets code-review guidance, not preview-review guidance."""
-        task = self._make_task_with_step(sample_task, "code_review")
+        task = self._make_task_with_step(sample_task, Steps.CODE_REVIEW)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "CODE REVIEW CONSTRAINTS" in prompt

@@ -14,6 +14,7 @@ from agent_framework.core.post_completion import (
     _NO_CHANGES_MARKER,
 )
 from agent_framework.core.task import Task, TaskStatus, TaskType
+from agent_framework.workflow.constants import WorkflowStepConstants as Steps
 
 
 # ---------------------------------------------------------------------------
@@ -110,11 +111,11 @@ class TestIsNoChangesResponse:
 
 class TestIsImplementationStep:
     def test_implement_step(self):
-        task = _make_task(workflow_step="implement")
+        task = _make_task(workflow_step=Steps.IMPLEMENT)
         assert PostCompletionManager.is_implementation_step(task, "engineer") is True
 
     def test_plan_step_not_implementation(self):
-        task = _make_task(workflow_step="plan")
+        task = _make_task(workflow_step=Steps.PLAN)
         assert PostCompletionManager.is_implementation_step(task, "engineer") is False
 
     def test_unknown_step_engineer(self):
@@ -230,12 +231,12 @@ class TestExtractStructuredFindings:
 class TestApprovalVerdict:
     def test_standard_step(self):
         mgr = _make_manager()
-        task = _make_task(workflow_step="qa_review")
+        task = _make_task(workflow_step=Steps.QA_REVIEW)
         assert mgr.approval_verdict(task) == "approved"
 
     def test_preview_review_step(self):
         mgr = _make_manager()
-        task = _make_task(workflow_step="preview_review")
+        task = _make_task(workflow_step=Steps.PREVIEW_REVIEW)
         assert mgr.approval_verdict(task) == "preview_approved"
 
 
