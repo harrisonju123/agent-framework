@@ -883,21 +883,21 @@ class TestTestSuppressionGuidance:
 
     def test_create_pr_step_suppresses_tests_legacy(self, prompt_builder, sample_task):
         """create_pr step injects test suppression in legacy prompt."""
-        task = self._make_task_with_step(sample_task, "create_pr")
+        task = self._make_task_with_step(sample_task, Steps.CREATE_PR)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "Do NOT run the test suite" in prompt
 
     def test_qa_review_step_does_not_suppress(self, prompt_builder, sample_task):
         """qa_review step should NOT suppress tests — QA owns testing."""
-        task = self._make_task_with_step(sample_task, "qa_review")
+        task = self._make_task_with_step(sample_task, Steps.QA_REVIEW)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "Do NOT run the test suite" not in prompt
 
     def test_implement_step_does_not_suppress(self, prompt_builder, sample_task):
         """implement step should NOT suppress tests."""
-        task = self._make_task_with_step(sample_task, "implement")
+        task = self._make_task_with_step(sample_task, Steps.IMPLEMENT)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "Do NOT run the test suite" not in prompt
@@ -912,7 +912,7 @@ class TestTestSuppressionGuidance:
 
     def test_create_pr_step_suppresses_tests_optimized(self, prompt_builder, sample_task):
         """create_pr step injects test suppression in optimized prompt."""
-        task = self._make_task_with_step(sample_task, "create_pr")
+        task = self._make_task_with_step(sample_task, Steps.CREATE_PR)
         prompt = prompt_builder._build_prompt_optimized(task)
 
         assert "Do NOT run the test suite" in prompt
@@ -1111,7 +1111,7 @@ class TestCodeReviewConstraints:
 
     def test_implement_step_no_review_constraints(self, prompt_builder, sample_task):
         """implement step should NOT have review-only constraints."""
-        task = self._make_task_with_step(sample_task, "implement")
+        task = self._make_task_with_step(sample_task, Steps.IMPLEMENT)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "REVIEWER" not in prompt
@@ -1119,14 +1119,14 @@ class TestCodeReviewConstraints:
 
     def test_plan_step_no_review_constraints(self, prompt_builder, sample_task):
         """plan step should NOT have review-only constraints."""
-        task = self._make_task_with_step(sample_task, "plan")
+        task = self._make_task_with_step(sample_task, Steps.PLAN)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "REVIEWER" not in prompt
 
     def test_qa_review_step_no_review_constraints(self, prompt_builder, sample_task):
         """qa_review step should NOT have review-only constraints."""
-        task = self._make_task_with_step(sample_task, "qa_review")
+        task = self._make_task_with_step(sample_task, Steps.QA_REVIEW)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "REVIEWER" not in prompt
@@ -1139,7 +1139,7 @@ class TestCodeReviewConstraints:
 
     def test_preview_review_injects_guidance_legacy(self, prompt_builder, sample_task):
         """preview_review step injects preview-specific review guidance in legacy prompt."""
-        task = self._make_task_with_step(sample_task, "preview_review")
+        task = self._make_task_with_step(sample_task, Steps.PREVIEW_REVIEW)
         prompt = prompt_builder._build_prompt_legacy(task)
 
         assert "PREVIEW REVIEW CONSTRAINTS" in prompt
@@ -1151,7 +1151,7 @@ class TestCodeReviewConstraints:
 
     def test_preview_review_injects_guidance_optimized(self, prompt_builder, sample_task):
         """preview_review step injects preview-specific review guidance in optimized prompt."""
-        task = self._make_task_with_step(sample_task, "preview_review")
+        task = self._make_task_with_step(sample_task, Steps.PREVIEW_REVIEW)
         prompt = prompt_builder._build_prompt_optimized(task)
 
         assert "PREVIEW REVIEW CONSTRAINTS" in prompt
@@ -1172,7 +1172,7 @@ class TestCodeReviewConstraints:
         _inject_preview_mode is applied by build() after _build_prompt_legacy.
         Test both together to mirror the real call path.
         """
-        task = self._make_task_with_step(sample_task, "preview")
+        task = self._make_task_with_step(sample_task, Steps.PREVIEW)
         task.type = TaskType.PREVIEW
         prompt = prompt_builder._build_prompt_legacy(task)
         prompt = prompt_builder._inject_preview_mode(prompt, task)
