@@ -99,7 +99,7 @@ class TestChainStateAccumulation:
         )
         save_chain_state(tmp_path, state)
 
-        rendered = render_for_step(state, "implement")
+        rendered = render_for_step(state, Steps.IMPLEMENT)
         assert "PLAN" in rendered
         assert "DESIGN RATIONALE" in rendered
         assert "JWT because stateless" in rendered
@@ -112,7 +112,7 @@ class TestVerdictRouting:
         """no_changes verdict at plan step terminates the workflow."""
         task = _make_task(tmp_path, context={
             "workflow": "default",
-            "workflow_step": "plan",
+            "workflow_step": Steps.PLAN,
             "verdict": "no_changes",
             "chain_step": True,
             "github_repo": "org/repo",
@@ -150,7 +150,7 @@ class TestVerdictRouting:
         """needs_fix verdict at terminal step blocks PR creation."""
         task = _make_task(tmp_path, context={
             "workflow": "default",
-            "workflow_step": "qa_review",
+            "workflow_step": Steps.QA_REVIEW,
             "verdict": "needs_fix",
             "chain_step": True,
             "github_repo": "org/repo",
