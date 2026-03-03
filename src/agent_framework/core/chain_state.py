@@ -571,7 +571,7 @@ def _render_for_fix(state: ChainState) -> str:
 
     # Find the most recent review step with findings
     for step in reversed(state.steps):
-        if step.step_id in ("code_review", "qa_review") and step.verdict == "needs_fix":
+        if step.step_id in (Steps.CODE_REVIEW, Steps.QA_REVIEW) and step.verdict == "needs_fix":
             lines.append(f"### REVIEW FINDINGS ({step.step_id})")
             if step.findings:
                 for i, f in enumerate(step.findings, 1):
@@ -701,7 +701,7 @@ def _render_for_create_pr(state: ChainState) -> str:
     # Review verdicts
     review_verdicts = []
     for step in state.steps:
-        if step.verdict and step.step_id in ("code_review", "qa_review"):
+        if step.verdict and step.step_id in (Steps.CODE_REVIEW, Steps.QA_REVIEW):
             review_verdicts.append(f"- {step.step_id}: {step.verdict}")
     if review_verdicts:
         lines.append("### Review results")

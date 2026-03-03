@@ -36,12 +36,9 @@ _JSON_FENCE_PATTERN = re.compile(r'```json\s*\n(.*?)\n?\s*```', re.DOTALL)
 
 _NO_CHANGES_MARKER = "[NO_CHANGES_NEEDED]"
 
-# Step classification for the deliverable gate
-_IMPLEMENTATION_STEP_IDS = frozenset({"implement", "implementation"})
-_NON_CODE_STEP_IDS = frozenset({
-    "plan", "planning", "code_review", "qa_review", "create_pr",
-    "preview_review", "preview",
-})
+# Step classification for the deliverable gate — canonical source is WorkflowStepConstants
+_IMPLEMENTATION_STEP_IDS = Steps.IMPLEMENTATION_STEPS
+_NON_CODE_STEP_IDS = Steps.NON_CODE_STEPS
 
 _RATIONALE_RE = re.compile(
     r'[^.]*\b(?:because|tradeoff|trade-off|instead of|constraint|reason)\b[^.]*\.',
@@ -159,7 +156,7 @@ class PostCompletionManager:
 
         # no_changes marker overrides any previous verdict at plan step
         if (self.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
+                and task.context.get("workflow_step", get_type_str(task.type)) in (Steps.PLAN, "planning")):
             if self.is_no_changes_response(content):
                 task.context["verdict"] = "no_changes"
                 audit.method = "no_changes_marker"
@@ -565,7 +562,7 @@ class PostCompletionManager:
         # Extract structured plan from architect's planning response
         if (task.plan is None
                 and self.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
+                and task.context.get("workflow_step", get_type_str(task.type)) in (Steps.PLAN, "planning")):
             extracted = self.extract_plan_from_response(content)
             if extracted:
                 task.plan = extracted
@@ -643,7 +640,7 @@ class PostCompletionManager:
         if (routing_signal
                 and routing_signal.target_agent == WORKFLOW_COMPLETE
                 and self.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
+                and task.context.get("workflow_step", get_type_str(task.type)) in (Steps.PLAN, "planning")):
             if task.plan is not None:
                 self.logger.info(
                     f"Clearing __complete__ routing signal at plan step — "
