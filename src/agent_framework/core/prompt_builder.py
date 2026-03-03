@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from ..workflow.executor import PREVIEW_REVIEW_STEPS
+from ..workflow.constants import WorkflowStepConstants as Steps
 
 if TYPE_CHECKING:
     from .config import AgentConfig, AgentDefinition, WorkflowDefinition
@@ -97,7 +97,7 @@ class PromptBuilder:
 
     # Steps where test execution should be suppressed in the LLM prompt.
     # QA handles testing at qa_review; running tests at review/PR steps wastes budget.
-    _TEST_SUPPRESSED_STEPS = frozenset({"code_review", "preview_review", "create_pr"})
+    _TEST_SUPPRESSED_STEPS = Steps.TEST_SUPPRESSED_STEPS
 
     # Which optional prompt sections to include per workflow phase.
     # Unlisted phases get all sections (backward-compatible default).
