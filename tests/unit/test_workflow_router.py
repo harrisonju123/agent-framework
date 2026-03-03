@@ -167,8 +167,8 @@ class TestFanInTaskCreation:
         queue.find_task.assert_not_called()
 
     def test_fan_in_gets_workflow_step_and_chain_step(self, router, queue):
-        """Fan-in task is stamped with workflow_step=code_review and chain_step=True
-        so the DAG executor routes to code_review instead of misidentifying as plan."""
+        """Fan-in task gets workflow_step derived from DAG (engineer's next step)
+        so the DAG executor routes correctly instead of misidentifying as plan."""
         parent = _make_task(task_id="parent-routing")
         parent.subtask_ids = ["sub-1"]
 
@@ -184,7 +184,9 @@ class TestFanInTaskCreation:
 
         router.check_and_create_fan_in_task(subtask)
 
-        assert fan_in.context["workflow_step"] == "code_review"
+        # DEFAULT_WORKFLOW is legacy format [architect, engineer, qa],
+        # so engineer's next step is "qa"
+        assert fan_in.context["workflow_step"] == "qa"
         assert fan_in.context["chain_step"] is True
 
     def test_fan_in_skips_workflow_step_without_workflow(self, router, queue):

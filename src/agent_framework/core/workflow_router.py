@@ -105,9 +105,9 @@ class WorkflowRouter:
                 # Stamp DAG routing context so the executor knows which step
                 # the fan-in enters at, instead of falling back to agent-name
                 # scan (which picks the architect's first step "plan" and loops)
-                workflow_name = parent.context.get("workflow")
-                if workflow_name and workflow_name in self._workflows_config:
-                    fan_in_task.context["workflow_step"] = "code_review"
+                fan_in_step = self._resolve_fan_in_step(parent)
+                if fan_in_step:
+                    fan_in_task.context["workflow_step"] = fan_in_step
                     fan_in_task.context["chain_step"] = True
                 self.queue.push(fan_in_task, fan_in_task.assigned_to)
                 self.logger.info(
@@ -397,6 +397,36 @@ class WorkflowRouter:
             context["test_result"] = task.context["test_result"]
 
         return context
+
+    def _resolve_fan_in_step(self, parent: Task) -> str | None:
+        """Derive the workflow step that a fan-in task should enter at.
+
+        Subtasks represent the "implement" phase. The fan-in should enter at
+        whatever step follows the engineer's step in the workflow DAG, rather
+        than hardcoding "code_review" (which doesn't exist in legacy-format
+        workflows where step IDs match agent names).
+
+        Returns the step ID or None if the workflow isn't available.
+        """
+        workflow_name = parent.context.get("workflow")
+        if not workflow_name or workflow_name not in self._workflows_config:
+            return None
+
+        try:
+            dag = self._workflows_config[workflow_name].to_dag(workflow_name)
+        except Exception:
+            return None
+
+        # Find the engineer's step (the one subtasks executed at)
+        for step in dag.steps.values():
+            if step.agent == "engineer":
+                # Return the first outgoing edge target — that's where
+                # the fan-in should continue the chain
+                if step.next:
+                    return step.next[0].target
+                break
+
+        return None
 
     def _get_changed_files(self) -> List[str]:
         """Get list of changed files from git diff (staged and unstaged)."""
