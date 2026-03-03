@@ -90,6 +90,7 @@ class CheckpointManager:
         diversity_threshold: float = 0.5,
         reread_threshold: int = 3,
         escalation_multipliers: Optional[list[float]] = None,
+        cached_paths: frozenset[str] = frozenset(),
     ):
         self.task = task
         self.working_dir = working_dir
@@ -125,6 +126,13 @@ class CheckpointManager:
         self._file_reads: dict[str, FileReadInfo] = {}
         self._reread_threshold: int = reread_threshold
         self._reread_interrupted: bool = False
+        # Cached files get a free first read (count starts at 0 instead of 1)
+        # so the circuit breaker doesn't penalize files already in the prompt.
+        # Store last-3 segments for suffix matching against abbreviated tool summaries.
+        self._cached_suffixes: tuple[str, ...] = tuple(
+            "/".join(p.replace("\\", "/").split("/")[-3:])
+            for p in cached_paths if p
+        )
 
         # Escalating exploration levels replace the old boolean flag.
         # Level 0 = normal, 1 = alert, 2 = wrap-up warning, 3 = force halt
@@ -176,7 +184,14 @@ class CheckpointManager:
         info = self._file_reads.get(path)
 
         if info is None:
-            info = FileReadInfo(count=1, first_seq=seq, last_seq=seq, was_full_read=True)
+            # Tool summaries and cache paths may differ in prefix length;
+            # require match at a "/" boundary to avoid "foobar.py" matching "bar.py"
+            is_cached = any(
+                s == path or s.endswith("/" + path) or path.endswith("/" + s)
+                for s in self._cached_suffixes
+            )
+            initial_count = 0 if is_cached else 1
+            info = FileReadInfo(count=initial_count, first_seq=seq, last_seq=seq, was_full_read=True)
             self._file_reads[path] = info
             return
 

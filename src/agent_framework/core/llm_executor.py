@@ -91,6 +91,7 @@ class LLMExecutionManager:
         optimization_config: Optional[dict] = None,
         finalize_failed_attempt_cb=None,
         read_cache_cb=None,
+        cached_paths: frozenset[str] = frozenset(),
     ) -> Optional[LLMResponse]:
         """Execute LLM with interruption watching, return response or None if interrupted."""
 
@@ -126,6 +127,7 @@ class LLMExecutionManager:
             agent_id=self.config.id,
             agent_base_id=self.config.base_id,
             reread_threshold=_reread_threshold,
+            cached_paths=cached_paths,
         )
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
@@ -156,9 +158,10 @@ class LLMExecutionManager:
         efficiency_parts = [
             "FILE READS: (1) NEVER use offset or limit parameters on Read — always read the full file. "
             "(2) If you need a specific section, use Grep with -C context lines instead. "
-            "(3) NEVER read the same file twice — after reading, the contents are in your context. "
-            "(4) If you have read 3+ files and need to recall one, use Grep to find the section. "
-            "(5) Reading a file you already read WILL trigger an automatic session interrupt.",
+            "(3) Files listed in 'FILES ANALYZED BY PREVIOUS AGENTS' are already summarized — prefer Grep over re-reading them. "
+            "(4) NEVER read the same file twice — after reading, the contents are in your context. "
+            "(5) If you have read 3+ files and need to recall one, use Grep to find the section. "
+            "(6) Reading a file you already read WILL trigger an automatic session interrupt.",
             "COMMITS: After each deliverable, git add + commit + push immediately.",
             "CIRCUIT BREAKER: 3+ consecutive failed shell commands → stop and report.",
         ]

@@ -1111,6 +1111,7 @@ class Agent:
             current_specialization=self._current_specialization,
             current_file_count=self._current_file_count,
             optimization_config=dict(self._optimization_config),
+            cached_paths=self._prompt_builder.injected_cache_paths,
             finalize_failed_attempt_cb=self._finalize_failed_attempt,
             read_cache_cb=self._read_cache.populate_read_cache,
         )
@@ -1264,6 +1265,10 @@ class Agent:
                 self._read_cache.measure_cache_effectiveness(task, file_reads, working_dir=working_dir)
                 await self._handle_successful_response(task, response, task_start_time, working_dir=working_dir)
             else:
+                # Circuit breaker / interruption paths already populate the cache
+                # via read_cache_cb in llm_executor — skip to avoid double I/O
+                if response.finish_reason not in ("circuit_breaker", "interrupted"):
+                    self._read_cache.populate_read_cache(task, working_dir=working_dir)
                 await self._handle_failed_response(task, response, working_dir=working_dir)
 
         except Exception as e:

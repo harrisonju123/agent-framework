@@ -2487,7 +2487,7 @@ class TestShouldInject:
 
 
 class TestReadCacheTrivialSkip:
-    """_inject_read_cache skips injection when fewer than 3 entries exist."""
+    """_inject_read_cache injects even small caches (1-2 entries)."""
 
     @pytest.fixture
     def builder(self, agent_config, tmp_path):
@@ -2499,8 +2499,8 @@ class TestReadCacheTrivialSkip:
         )
         return PromptBuilder(ctx)
 
-    def test_skip_trivial_cache(self, builder, tmp_path):
-        """Cache with fewer than 3 entries should not be injected."""
+    def test_small_cache_still_injected(self, builder, tmp_path):
+        """Cache with fewer than 3 entries should still be injected."""
         import json
         cache_dir = tmp_path / ".agent-communication" / "read-cache"
         cache_dir.mkdir(parents=True)
@@ -2526,7 +2526,7 @@ class TestReadCacheTrivialSkip:
             context={"_root_task_id": "root-trivial"},
         )
         result = builder._inject_read_cache("base prompt", task)
-        assert result == "base prompt"
+        assert "FILES" in result
 
 
 class TestLegacyPromptMinimalJson:

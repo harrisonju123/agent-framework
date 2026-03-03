@@ -336,8 +336,10 @@ class TestHandleCircuitBreakerReread:
 # Helpers for threshold wiring and circuit breaker callback tests
 # ---------------------------------------------------------------------------
 
-async def _run_with_captured_reread_threshold(*, task_ctx=None, execute_kwargs=None):
-    """Execute LLM and return the reread_threshold passed to CheckpointManager."""
+async def _run_with_captured_checkpoint_kwarg(
+    kwarg_name: str, *, default=None, task_ctx=None, execute_kwargs=None,
+):
+    """Execute LLM and capture a specific kwarg passed to CheckpointManager."""
     from agent_framework.core.checkpoint_manager import CheckpointManager
 
     mgr = _make_manager()
@@ -345,7 +347,7 @@ async def _run_with_captured_reread_threshold(*, task_ctx=None, execute_kwargs=N
     original_init = CheckpointManager.__init__
 
     def _capture_init(self_cm, **kwargs):
-        captured.append(kwargs.get("reread_threshold"))
+        captured.append(kwargs.get(kwarg_name, default))
         original_init(self_cm, **kwargs)
 
     async def _fast_complete(request, *, task_id=None, **kwargs):
@@ -423,10 +425,35 @@ class TestRereadThresholdWiring:
         ),
     ])
     async def test_reread_threshold(self, task_ctx, execute_kwargs, expected):
-        result = await _run_with_captured_reread_threshold(
+        result = await _run_with_captured_checkpoint_kwarg(
+            "reread_threshold",
             task_ctx=task_ctx, execute_kwargs=execute_kwargs,
         )
         assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# cached_paths wiring: agent → LLMExecutionManager → CheckpointManager
+# ---------------------------------------------------------------------------
+
+class TestCachedPathsWiring:
+    """Verify cached_paths flows from execute() to CheckpointManager."""
+
+    @pytest.mark.asyncio
+    async def test_cached_paths_passed_to_checkpoint_manager(self):
+        paths = frozenset(["src/agent_framework/core/agent.py", "src/utils/helpers.py"])
+        result = await _run_with_captured_checkpoint_kwarg(
+            "cached_paths", default=frozenset(),
+            execute_kwargs={"cached_paths": paths},
+        )
+        assert result == paths
+
+    @pytest.mark.asyncio
+    async def test_default_cached_paths_is_empty(self):
+        result = await _run_with_captured_checkpoint_kwarg(
+            "cached_paths", default=frozenset(),
+        )
+        assert result == frozenset()
 
 
 # ---------------------------------------------------------------------------

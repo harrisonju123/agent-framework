@@ -181,7 +181,7 @@ class ReadCacheManager:
         against the files actually read during this session. Non-fatal.
         """
         try:
-            injected = self._prompt_builder._injected_cache_paths
+            injected = self._prompt_builder.injected_cache_paths
             if not injected:
                 return
 

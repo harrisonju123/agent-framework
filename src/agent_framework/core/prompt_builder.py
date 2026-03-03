@@ -145,6 +145,11 @@ class PromptBuilder:
 
         # Upstream context cascade result — written to task.context in build()
         self._last_upstream_source: str = "unknown"
+
+    @property
+    def injected_cache_paths(self) -> frozenset[str]:
+        """Paths injected via read cache manifest, for downstream consumers."""
+        return frozenset(self._injected_cache_paths)
         self._last_upstream_chars: int = 0
 
     def build(self, task: Task) -> str:
@@ -1530,11 +1535,6 @@ If a tool call fails:
 
         entries = data.get("entries", {})
         if not entries:
-            return prompt
-
-        # Skip injection for trivial caches — the overhead isn't worth it
-        # when only 1-2 files were read by a prior step
-        if len(entries) < 3:
             return prompt
 
         # Migrate legacy absolute-path keys to repo-relative

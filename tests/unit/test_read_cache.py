@@ -761,7 +761,7 @@ class TestMeasureCacheEffectiveness:
 
     def test_all_hits(self, agent, task):
         """All cached files skipped — 100% hit rate."""
-        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py"}
+        agent._prompt_builder.injected_cache_paths = {"src/a.py", "src/b.py"}
         file_reads = ["/workspace/src/c.py"]
 
         agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
@@ -774,7 +774,7 @@ class TestMeasureCacheEffectiveness:
 
     def test_all_misses(self, agent, task):
         """All cached files re-read — 0% hit rate."""
-        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py"}
+        agent._prompt_builder.injected_cache_paths = {"src/a.py", "src/b.py"}
         file_reads = ["/workspace/src/a.py", "/workspace/src/b.py"]
 
         agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
@@ -787,7 +787,7 @@ class TestMeasureCacheEffectiveness:
 
     def test_mixed(self, agent, task):
         """Some hits, some misses, some new reads."""
-        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py", "src/c.py"}
+        agent._prompt_builder.injected_cache_paths = {"src/a.py", "src/b.py", "src/c.py"}
         # Re-read a.py and b.py, skip c.py, read new d.py
         file_reads = ["/workspace/src/a.py", "/workspace/src/b.py", "/workspace/src/d.py"]
 
@@ -801,7 +801,7 @@ class TestMeasureCacheEffectiveness:
 
     def test_empty_cache(self, agent, task):
         """No injected paths — method exits early, no log event."""
-        agent._prompt_builder._injected_cache_paths = set()
+        agent._prompt_builder.injected_cache_paths = set()
         file_reads = ["/workspace/src/a.py"]
 
         agent._measure_cache_effectiveness(task, file_reads, working_dir=Path("/workspace"))
@@ -835,7 +835,7 @@ class TestMeasureCacheEffectiveness:
         }
         (cache_dir / "root1.json").write_text(json.dumps(cache_data))
 
-        agent._prompt_builder._injected_cache_paths = {"src/a.py", "src/b.py", "src/c.py"}
+        agent._prompt_builder.injected_cache_paths = {"src/a.py", "src/b.py", "src/c.py"}
         # Re-read a.py (modified) and b.py (not modified), skip c.py
         file_reads = ["/workspace/src/a.py", "/workspace/src/b.py"]
 

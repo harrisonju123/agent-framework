@@ -30,6 +30,7 @@ def _make_checkpoint_manager(
     reread_threshold=3,
     escalation_multipliers=None,
     working_dir=None,
+    cached_paths=frozenset(),
 ):
     """Build CheckpointManager with mock dependencies."""
     task = _make_task()
@@ -52,6 +53,7 @@ def _make_checkpoint_manager(
         agent_base_id="engineer",
         reread_threshold=reread_threshold,
         escalation_multipliers=escalation_multipliers,
+        cached_paths=cached_paths,
     )
     return mgr, circuit_breaker
 
@@ -462,3 +464,70 @@ class TestEscalatingExploration:
         ]
         assert len(escalation_calls) == 1
         assert escalation_calls[0][1]["level"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Cached paths: free first read for files already in the prompt
+# ---------------------------------------------------------------------------
+
+
+class TestCachedPaths:
+    def test_cached_file_starts_at_count_zero(self):
+        """First read of a cached file should have count=0 (free read)."""
+        mgr, _ = _make_checkpoint_manager(
+            cached_paths=frozenset(["src/agent_framework/core/agent.py"]),
+        )
+        mgr.on_tool_activity("Read", "core/agent.py")
+
+        info = mgr._file_reads["core/agent.py"]
+        assert info.count == 0
+
+    def test_non_cached_file_starts_at_count_one(self):
+        """Non-cached files should still start at count=1."""
+        mgr, _ = _make_checkpoint_manager(
+            cached_paths=frozenset(["src/agent_framework/core/agent.py"]),
+        )
+        mgr.on_tool_activity("Read", "core/config.py")
+
+        info = mgr._file_reads["core/config.py"]
+        assert info.count == 1
+
+    def test_cached_file_needs_threshold_plus_one_to_trip(self):
+        """Cached file needs threshold+1 reads to trip the circuit breaker."""
+        mgr, cb = _make_checkpoint_manager(
+            reread_threshold=3,
+            cached_paths=frozenset(["src/agent_framework/core/agent.py"]),
+        )
+        # 3 reads: counts go 0, 1, 2 — all below threshold of 3
+        for _ in range(3):
+            mgr.on_tool_activity("Read", "core/agent.py")
+        assert not mgr._reread_interrupted
+        assert not cb.is_set()
+
+        # 4th read: count=3, hits threshold → trips
+        mgr.on_tool_activity("Read", "core/agent.py")
+        assert mgr._reread_interrupted
+        assert cb.is_set()
+
+    def test_suffix_matching(self):
+        """Cache paths with deep prefixes match abbreviated 3-segment tool summaries."""
+        mgr, _ = _make_checkpoint_manager(
+            cached_paths=frozenset([
+                "src/agent_framework/core/prompt_builder.py",
+                "src/agent_framework/utils/cascade.py",
+            ]),
+        )
+        # Tool summaries are abbreviated to last 3 segments
+        mgr.on_tool_activity("Read", "core/prompt_builder.py")
+        mgr.on_tool_activity("Read", "utils/cascade.py")
+
+        assert mgr._file_reads["core/prompt_builder.py"].count == 0
+        assert mgr._file_reads["utils/cascade.py"].count == 0
+
+    def test_empty_cached_paths_preserves_default_behavior(self):
+        """Empty cached_paths doesn't change behavior."""
+        mgr, _ = _make_checkpoint_manager(cached_paths=frozenset())
+        mgr.on_tool_activity("Read", "core/agent.py")
+
+        info = mgr._file_reads["core/agent.py"]
+        assert info.count == 1
