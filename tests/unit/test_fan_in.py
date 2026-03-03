@@ -244,6 +244,17 @@ class TestGetParentTask:
         assert result is None
 
 
+class TestFanInTaskDagRouting:
+    """Tests for fan-in workflow_step / chain_step set by WorkflowRouter."""
+
+    def test_fan_in_without_router_has_no_workflow_step(self, queue, parent_task, completed_subtasks):
+        """Bare create_fan_in_task doesn't set workflow_step — caller (router) must."""
+        fan_in = queue.create_fan_in_task(parent_task, completed_subtasks)
+        assert fan_in is not None
+        assert fan_in.context.get("workflow_step") is None
+        assert fan_in.context.get("chain_step") is None
+
+
 class TestCreateFanInTask:
     """Tests for create_fan_in_task method."""
 

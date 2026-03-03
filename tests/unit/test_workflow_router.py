@@ -166,6 +166,50 @@ class TestFanInTaskCreation:
 
         queue.find_task.assert_not_called()
 
+    def test_fan_in_gets_workflow_step_and_chain_step(self, router, queue):
+        """Fan-in task is stamped with workflow_step=code_review and chain_step=True
+        so the DAG executor routes to code_review instead of misidentifying as plan."""
+        parent = _make_task(task_id="parent-routing")
+        parent.subtask_ids = ["sub-1"]
+
+        subtask = _make_task(task_id="sub-1")
+        subtask.parent_task_id = "parent-routing"
+
+        queue.find_task.return_value = parent
+        queue.check_subtasks_complete.return_value = True
+        queue.get_completed.return_value = subtask
+
+        fan_in = _make_task(task_id="fan-in-parent-routing")
+        queue.create_fan_in_task.return_value = fan_in
+
+        router.check_and_create_fan_in_task(subtask)
+
+        assert fan_in.context["workflow_step"] == "code_review"
+        assert fan_in.context["chain_step"] is True
+
+    def test_fan_in_skips_workflow_step_without_workflow(self, router, queue):
+        """Fan-in for a parent without a workflow does not stamp workflow_step."""
+        parent = _make_task(task_id="parent-noflow", workflow=None)
+        parent.context.pop("workflow", None)
+        parent.subtask_ids = ["sub-1"]
+
+        subtask = _make_task(task_id="sub-1", workflow=None)
+        subtask.context.pop("workflow", None)
+        subtask.parent_task_id = "parent-noflow"
+
+        queue.find_task.return_value = parent
+        queue.check_subtasks_complete.return_value = True
+        queue.get_completed.return_value = subtask
+
+        fan_in = _make_task(task_id="fan-in-parent-noflow", workflow=None)
+        fan_in.context.pop("workflow", None)
+        queue.create_fan_in_task.return_value = fan_in
+
+        router.check_and_create_fan_in_task(subtask)
+
+        assert "workflow_step" not in fan_in.context
+        assert "chain_step" not in fan_in.context
+
     def test_logs_warning_when_parent_not_found(self, router, queue):
         """Phantom parent triggers warning log."""
         subtask = _make_task(task_id="sub-orphan")

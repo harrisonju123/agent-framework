@@ -764,6 +764,107 @@ class TestDecomposeThresholdChange:
         assert decomposer.should_decompose(plan, 250, requirements_count=5) is False
 
 
+class TestSubtaskContextStripping:
+    """Subtask context must not inherit stale parent keys."""
+
+    STALE_KEYS = {
+        "_previous_attempt_summary": "architect monologue...",
+        "_previous_attempt_branch": "agent/old-branch",
+        "_previous_attempt_commit_sha": "abc123",
+        "verdict": "approved",
+        "verdict_audit": {"reason": "looks good"},
+        "_tool_stats_cache": {"reads": 5},
+        "upstream_summary": "old upstream context",
+        "upstream_context_file": "/tmp/old.json",
+        "upstream_source_agent": "qa",
+        "upstream_source_step": "qa_review",
+        "files_modified": ["old_file.py"],
+        "mode": "planning",
+    }
+
+    def test_stale_keys_stripped(self):
+        """Stale parent context keys are removed from subtask context."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(
+            id="parent-strip",
+            context={
+                "github_repo": "test/repo",
+                "workflow": "default",
+                **self.STALE_KEYS,
+            },
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            for key in self.STALE_KEYS:
+                if key == "mode":
+                    # mode gets overwritten, not just stripped
+                    assert subtask.context["mode"] == "implementation"
+                else:
+                    assert key not in subtask.context, (
+                        f"Stale key {key!r} should be stripped from subtask context"
+                    )
+
+    def test_safe_keys_preserved(self):
+        """Non-stale context keys survive stripping."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(
+            id="parent-keep",
+            context={
+                "github_repo": "test/repo",
+                "workflow": "default",
+                "user_goal": "Build feature X",
+                "implementation_branch": "agent/task-123",
+                **self.STALE_KEYS,
+            },
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            assert subtask.context["github_repo"] == "test/repo"
+            assert subtask.context["workflow"] == "default"
+            assert subtask.context["user_goal"] == "Build feature X"
+            assert subtask.context["implementation_branch"] == "agent/task-123"
+
+    def test_subtask_mode_is_implementation(self):
+        """Subtask mode is always 'implementation' regardless of parent mode."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(
+            id="parent-mode",
+            context={"mode": "planning"},
+        )
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            assert subtask.context["mode"] == "implementation"
+
+    def test_subtask_root_id_matches_parent(self):
+        """Subtask.root_id returns parent's ID so aggregation keys are correct."""
+        decomposer = TaskDecomposer()
+        parent = _make_task(id="parent-root")
+        plan = _make_plan(
+            files_to_modify=["src/core/file1.py", "src/api/file2.py"]
+        )
+
+        subtasks = decomposer.decompose(parent, plan, estimated_lines=600)
+
+        for subtask in subtasks:
+            assert subtask.root_id == "parent-root"
+            assert subtask.context["_root_task_id"] == "parent-root"
+
+
 class TestSubtaskAssignedTo:
     """Subtasks must always be assigned to 'engineer' regardless of parent."""
 

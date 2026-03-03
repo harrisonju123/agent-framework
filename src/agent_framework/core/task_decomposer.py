@@ -35,6 +35,23 @@ _TEST_DIRS = frozenset({
 })
 _DEFAULT_TIER = 1
 
+# Keys inherited from parent context that are stale/misleading for subtasks.
+# Stripped during _create_subtask() to prevent downstream logic confusion.
+SUBTASK_CONTEXT_STRIP_KEYS = frozenset({
+    # Architect's interrupted-attempt monologue — noise for engineer subtasks
+    "_previous_attempt_summary", "_previous_attempt_branch", "_previous_attempt_commit_sha",
+    # Parent's verdict — would confuse downstream verdict logic
+    "verdict", "verdict_audit",
+    # Parent's tool stats — irrelevant to subtask execution
+    "_tool_stats_cache",
+    # Parent's upstream context — stale references from prior chain steps
+    "upstream_summary", "upstream_context_file", "upstream_source_agent", "upstream_source_step",
+    # Files from previous commits on reused branch — not this subtask's scope
+    "files_modified",
+    # Parent planning mode — subtasks are implementation
+    "mode",
+})
+
 
 def extract_requirements_checklist(plan: PlanDocument) -> list[dict]:
     """Parse plan approach steps into a numbered checklist of discrete deliverables.
@@ -647,10 +664,15 @@ class TaskDecomposer:
                 f"Estimated lines: {boundary.estimated_lines}",
             ],
             context={
-                **copy.deepcopy(parent.context),
+                **copy.deepcopy({
+                    k: v for k, v in parent.context.items()
+                    if k not in SUBTASK_CONTEXT_STRIP_KEYS
+                }),
+                "_root_task_id": parent.root_id,
                 "parent_task_id": parent.id,
                 "subtask_index": index,
                 "subtask_total": total,
+                "mode": "implementation",
             },
             plan=subtask_plan,
         )

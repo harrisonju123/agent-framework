@@ -102,6 +102,13 @@ class WorkflowRouter:
             completed_subtasks = [s for s in completed_subtasks if s is not None]
             fan_in_task = self.queue.create_fan_in_task(parent, completed_subtasks)
             if fan_in_task is not None:
+                # Stamp DAG routing context so the executor knows which step
+                # the fan-in enters at, instead of falling back to agent-name
+                # scan (which picks the architect's first step "plan" and loops)
+                workflow_name = parent.context.get("workflow")
+                if workflow_name and workflow_name in self._workflows_config:
+                    fan_in_task.context["workflow_step"] = "code_review"
+                    fan_in_task.context["chain_step"] = True
                 self.queue.push(fan_in_task, fan_in_task.assigned_to)
                 self.logger.info(
                     f"🔀 All subtasks complete - created fan-in task {fan_in_task.id}"

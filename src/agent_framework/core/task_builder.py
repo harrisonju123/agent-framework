@@ -233,13 +233,21 @@ def build_decomposed_subtask(
     """
     subtask_id = f"{parent_task.id}-sub{index + 1}"
 
-    # Deep copy to avoid sharing mutable refs (lists, dicts) across siblings
+    # Deep copy to avoid sharing mutable refs (lists, dicts) across siblings.
+    # Strip stale parent keys that confuse downstream logic (verdict, upstream
+    # context, previous attempt data) — mirrors task_decomposer.SUBTASK_CONTEXT_STRIP_KEYS.
     import copy
+    from .task_decomposer import SUBTASK_CONTEXT_STRIP_KEYS
     subtask_context = {
-        **copy.deepcopy(parent_task.context),
+        **copy.deepcopy({
+            k: v for k, v in parent_task.context.items()
+            if k not in SUBTASK_CONTEXT_STRIP_KEYS
+        }),
+        "_root_task_id": parent_task.root_id,
         "parent_task_id": parent_task.id,
         "subtask_index": index,
         "files_to_modify": files_to_modify,
+        "mode": "implementation",
     }
 
     # Build plan document for the subtask
