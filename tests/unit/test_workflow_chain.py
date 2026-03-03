@@ -14,6 +14,7 @@ from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
 from agent_framework.core.routing import RoutingSignal, WORKFLOW_COMPLETE
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.utils.type_helpers import get_type_str
+from agent_framework.workflow.constants import WorkflowStepConstants as Steps
 
 
 # -- Fixtures --
@@ -861,7 +862,7 @@ class TestPreviewMode:
         """Engineer completing the preview step routes to architect for preview_review."""
         task = _make_task(
             workflow="preview",
-            workflow_step="preview",
+            workflow_step=Steps.PREVIEW,
             _chain_depth=1,
             _root_task_id="root-preview-1",
             _global_cycle_count=1,
@@ -876,13 +877,13 @@ class TestPreviewMode:
         target_queue = queue.push.call_args[0][1]
         assert target_queue == "architect"
         assert chain_task.assigned_to == "architect"
-        assert chain_task.context.get("workflow_step") == "preview_review"
+        assert chain_task.context.get("workflow_step") == Steps.PREVIEW_REVIEW
 
     def test_preview_does_not_route_to_qa(self, preview_agent, queue):
         """PREVIEW tasks route to architect for review, not directly to QA."""
         task = _make_task(
             workflow="preview",
-            workflow_step="preview",
+            workflow_step=Steps.PREVIEW,
             _chain_depth=1,
             _root_task_id="root-preview-2",
             _global_cycle_count=1,
@@ -1016,7 +1017,7 @@ class TestExecutorWorkflowCompleteSignal:
         executor = WorkflowExecutor(queue, queue.queue_dir)
         dag = DEFAULT_WORKFLOW.to_dag("default")
 
-        task = _make_task(workflow="default", workflow_step="plan")
+        task = _make_task(workflow="default", workflow_step=Steps.PLAN)
         response = _make_response(pr_url="https://github.com/org/repo/pull/77")
         signal = _make_signal(target=WORKFLOW_COMPLETE)
 
@@ -1039,7 +1040,7 @@ class TestExecutorWorkflowCompleteSignal:
         executor = WorkflowExecutor(queue, queue.queue_dir)
         dag = DEFAULT_WORKFLOW.to_dag("default")
 
-        task = _make_task(workflow="default", workflow_step="plan")
+        task = _make_task(workflow="default", workflow_step=Steps.PLAN)
         response = _make_response()
         signal = _make_signal(target=WORKFLOW_COMPLETE)
 
@@ -1194,7 +1195,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=4,
             _root_task_id="root-1",
@@ -1203,9 +1204,9 @@ class TestDAGReviewCycleCap:
         )
 
         engineer_step = WorkflowStep(id="engineer", agent="engineer")
-        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        pr_step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
         workflow = MagicMock()
-        workflow.steps = {"engineer": engineer_step, "create_pr": pr_step}
+        workflow.steps = {"engineer": engineer_step, Steps.CREATE_PR: pr_step}
 
         executor._route_to_step(task, engineer_step, workflow, "qa", None)
 
@@ -1223,7 +1224,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _dag_review_cycles=0,
             _chain_depth=2,
             _root_task_id="root-1",
@@ -1252,7 +1253,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _dag_review_cycles=0,
             _chain_depth=2,
             _root_task_id="root-1",
@@ -1283,7 +1284,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=4,
             _root_task_id="root-1",
@@ -1292,9 +1293,9 @@ class TestDAGReviewCycleCap:
         )
 
         engineer_step = WorkflowStep(id="engineer", agent="engineer")
-        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        pr_step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
         workflow = MagicMock()
-        workflow.steps = {"engineer": engineer_step, "create_pr": pr_step}
+        workflow.steps = {"engineer": engineer_step, Steps.CREATE_PR: pr_step}
 
         executor._route_to_step(task, engineer_step, workflow, "qa", None)
 
@@ -1304,7 +1305,7 @@ class TestDAGReviewCycleCap:
         assert call_kwargs[1]["count_before"] == 1
         assert call_kwargs[1]["count_after"] == 2
         assert call_kwargs[1]["enforced"] is True
-        assert call_kwargs[1]["target_step"] == "create_pr"
+        assert call_kwargs[1]["target_step"] == Steps.CREATE_PR
 
     def test_no_event_without_logger(self, queue, tmp_path):
         """No session_logger configured — no crash, no event."""
@@ -1315,7 +1316,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _dag_review_cycles=0,
             _chain_depth=2,
             _root_task_id="root-1",
@@ -1340,16 +1341,16 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="preview_review",
+            workflow_step=Steps.PREVIEW_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=2,
             _root_task_id="root-1",
             _global_cycle_count=2,
         )
 
-        implement_step = WorkflowStep(id="implement", agent="engineer")
+        implement_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
         workflow = MagicMock()
-        workflow.steps = {"implement": implement_step}
+        workflow.steps = {Steps.IMPLEMENT: implement_step}
 
         executor._route_to_step(task, implement_step, workflow, "architect", None)
 
@@ -1370,7 +1371,7 @@ class TestDAGReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=4,
             _root_task_id="root-1",
@@ -1407,7 +1408,7 @@ class TestUpstreamSummaryInChainTask:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             upstream_summary="Tests failing in module X",
             _chain_depth=1,
             _root_task_id="root-1",
@@ -1445,7 +1446,7 @@ class TestUpstreamSummaryInChainTask:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _chain_depth=1,
             _root_task_id="root-1",
             _global_cycle_count=1,
@@ -1471,7 +1472,7 @@ class TestStepAwareDescriptions:
         from agent_framework.workflow.executor import WorkflowExecutor
         return WorkflowExecutor(queue, queue.queue_dir)
 
-    def _task_with_goal(self, step="plan", **extra):
+    def _task_with_goal(self, step=Steps.PLAN, **extra):
         return _make_task(
             workflow="default",
             workflow_step=step,
@@ -1484,8 +1485,8 @@ class TestStepAwareDescriptions:
 
     def test_implement_step_gets_directive(self, executor):
         from agent_framework.workflow.dag import WorkflowStep
-        task = self._task_with_goal(step="plan")
-        step = WorkflowStep(id="implement", agent="engineer")
+        task = self._task_with_goal(step=Steps.PLAN)
+        step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
 
         chain = executor._build_chain_task(task, step, "architect")
 
@@ -1494,8 +1495,8 @@ class TestStepAwareDescriptions:
 
     def test_code_review_step_gets_directive(self, executor):
         from agent_framework.workflow.dag import WorkflowStep
-        task = self._task_with_goal(step="implement")
-        step = WorkflowStep(id="code_review", agent="architect")
+        task = self._task_with_goal(step=Steps.IMPLEMENT)
+        step = WorkflowStep(id=Steps.CODE_REVIEW, agent="architect")
 
         chain = executor._build_chain_task(task, step, "engineer")
 
@@ -1504,8 +1505,8 @@ class TestStepAwareDescriptions:
 
     def test_qa_review_step_gets_directive(self, executor):
         from agent_framework.workflow.dag import WorkflowStep
-        task = self._task_with_goal(step="code_review")
-        step = WorkflowStep(id="qa_review", agent="qa")
+        task = self._task_with_goal(step=Steps.CODE_REVIEW)
+        step = WorkflowStep(id=Steps.QA_REVIEW, agent="qa")
 
         chain = executor._build_chain_task(task, step, "architect")
 
@@ -1514,8 +1515,8 @@ class TestStepAwareDescriptions:
 
     def test_create_pr_step_gets_directive(self, executor):
         from agent_framework.workflow.dag import WorkflowStep
-        task = self._task_with_goal(step="qa_review")
-        step = WorkflowStep(id="create_pr", agent="architect")
+        task = self._task_with_goal(step=Steps.QA_REVIEW)
+        step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
 
         chain = executor._build_chain_task(task, step, "qa")
 
@@ -1525,8 +1526,8 @@ class TestStepAwareDescriptions:
     def test_same_step_fallback_to_original_description(self, executor):
         """When target step == current step, directive guard skips rewrite."""
         from agent_framework.workflow.dag import WorkflowStep
-        task = self._task_with_goal(step="implement")
-        step = WorkflowStep(id="implement", agent="engineer")
+        task = self._task_with_goal(step=Steps.IMPLEMENT)
+        step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
 
         chain = executor._build_chain_task(task, step, "engineer")
 
@@ -1537,12 +1538,12 @@ class TestStepAwareDescriptions:
         from agent_framework.workflow.dag import WorkflowStep
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             _chain_depth=1,
             _root_task_id="root-1",
             _global_cycle_count=1,
         )
-        step = WorkflowStep(id="implement", agent="engineer")
+        step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
 
         chain = executor._build_chain_task(task, step, "architect")
 
@@ -1555,11 +1556,11 @@ class TestStepAwareDescriptions:
         """QA→engineer description uses user_goal for ORIGINAL TASK section."""
         from agent_framework.workflow.dag import WorkflowStep
         task = self._task_with_goal(
-            step="qa_review",
+            step=Steps.QA_REVIEW,
             upstream_summary="Tests failing in auth module",
-            upstream_source_step="qa_review",
+            upstream_source_step=Steps.QA_REVIEW,
         )
-        step = WorkflowStep(id="implement", agent="engineer")
+        step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
 
         chain = executor._build_chain_task(
             task, step, "qa", is_review_to_engineer=True,
@@ -1587,7 +1588,7 @@ class TestCodeReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="code_review",
+            workflow_step=Steps.CODE_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=4,
             _root_task_id="root-1",
@@ -1595,10 +1596,10 @@ class TestCodeReviewCycleCap:
             implementation_branch="feature/xyz",
         )
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
-        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
+        pr_step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
         workflow = MagicMock()
-        workflow.steps = {"implement": engineer_step, "create_pr": pr_step}
+        workflow.steps = {Steps.IMPLEMENT: engineer_step, Steps.CREATE_PR: pr_step}
 
         executor._route_to_step(task, engineer_step, workflow, "architect", None)
 
@@ -1615,16 +1616,16 @@ class TestCodeReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="code_review",
+            workflow_step=Steps.CODE_REVIEW,
             _dag_review_cycles=0,
             _chain_depth=2,
             _root_task_id="root-1",
             _global_cycle_count=2,
         )
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
         workflow = MagicMock()
-        workflow.steps = {"implement": engineer_step}
+        workflow.steps = {Steps.IMPLEMENT: engineer_step}
 
         executor._route_to_step(task, engineer_step, workflow, "architect", None)
 
@@ -1644,7 +1645,7 @@ class TestCodeReviewCycleCap:
         # code_review used 1 cycle, now qa_review tries to use another
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=5,
             _root_task_id="root-1",
@@ -1652,10 +1653,10 @@ class TestCodeReviewCycleCap:
             implementation_branch="feature/xyz",
         )
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
-        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
+        pr_step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
         workflow = MagicMock()
-        workflow.steps = {"implement": engineer_step, "create_pr": pr_step}
+        workflow.steps = {Steps.IMPLEMENT: engineer_step, Steps.CREATE_PR: pr_step}
 
         executor._route_to_step(task, engineer_step, workflow, "qa", None)
 
@@ -1673,16 +1674,16 @@ class TestCodeReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="code_review",
+            workflow_step=Steps.CODE_REVIEW,
             upstream_summary="Missing error handling in auth module",
             _chain_depth=1,
             _root_task_id="root-1",
             _global_cycle_count=1,
         )
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
         workflow = MagicMock()
-        workflow.steps = {"implement": engineer_step}
+        workflow.steps = {Steps.IMPLEMENT: engineer_step}
 
         executor._route_to_step(task, engineer_step, workflow, "architect", None)
 
@@ -1700,15 +1701,15 @@ class TestCodeReviewCycleCap:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             _chain_depth=0,
             _root_task_id="root-1",
             _global_cycle_count=0,
         )
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
         workflow = MagicMock()
-        workflow.steps = {"implement": engineer_step}
+        workflow.steps = {Steps.IMPLEMENT: engineer_step}
 
         executor._route_to_step(task, engineer_step, workflow, "architect", None)
 
@@ -2055,7 +2056,7 @@ class TestVerdictStorageAndClearing:
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
-        task = _make_task(workflow="preview", workflow_step="preview_review")
+        task = _make_task(workflow="preview", workflow_step=Steps.PREVIEW_REVIEW)
         response = _make_response("VERDICT: APPROVE")
 
         agent._set_structured_verdict(task, response)
@@ -2071,7 +2072,7 @@ class TestVerdictStorageAndClearing:
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
-        task = _make_task(workflow="preview", workflow_step="preview_review")
+        task = _make_task(workflow="preview", workflow_step=Steps.PREVIEW_REVIEW)
         response = _make_response("The plan looks comprehensive and well-structured.")
 
         agent._set_structured_verdict(task, response)
@@ -2087,7 +2088,7 @@ class TestVerdictStorageAndClearing:
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
-        task = _make_task(workflow="default", workflow_step="code_review")
+        task = _make_task(workflow="default", workflow_step=Steps.CODE_REVIEW)
         response = _make_response("VERDICT: APPROVE")
 
         agent._set_structured_verdict(task, response)
@@ -2099,7 +2100,7 @@ class TestVerdictStorageAndClearing:
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
-        task = _make_task(workflow="default", workflow_step="code_review")
+        task = _make_task(workflow="default", workflow_step=Steps.CODE_REVIEW)
         response = _make_response("I reviewed the changes. Some observations noted.")
 
         agent._set_structured_verdict(task, response)
@@ -2112,7 +2113,7 @@ class TestVerdictStorageAndClearing:
         qa_config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
         agent.config = qa_config
         agent._post_completion.config = qa_config
-        task = _make_task(workflow="default", workflow_step="qa_review")
+        task = _make_task(workflow="default", workflow_step=Steps.QA_REVIEW)
         response = _make_response("Ran the test suite. Results are inconclusive.")
 
         agent._set_structured_verdict(task, response)
@@ -2125,7 +2126,7 @@ class TestVerdictStorageAndClearing:
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
-        task = _make_task(workflow="default", workflow_step="plan")
+        task = _make_task(workflow="default", workflow_step=Steps.PLAN)
         response = _make_response("Here is the implementation plan for the feature.")
 
         agent._set_structured_verdict(task, response)
@@ -2143,7 +2144,7 @@ class TestNoChangesVerdict:
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
-        task = _make_task(workflow="default", workflow_step="plan")
+        task = _make_task(workflow="default", workflow_step=Steps.PLAN)
         response = _make_response("[NO_CHANGES_NEEDED]\nThe feature already exists in production.")
 
         agent._set_structured_verdict(task, response)
@@ -2179,7 +2180,7 @@ class TestNoChangesVerdict:
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
-        task = _make_task(workflow="default", workflow_step="code_review")
+        task = _make_task(workflow="default", workflow_step=Steps.CODE_REVIEW)
         response = _make_response("[NO_CHANGES_NEEDED]\nNothing to change, already implemented.")
 
         agent._set_structured_verdict(task, response)
@@ -2189,7 +2190,7 @@ class TestNoChangesVerdict:
 
     def test_no_changes_verdict_not_set_for_engineer(self, agent, queue):
         """Engineer at plan step (edge case) → no no_changes verdict."""
-        task = _make_task(workflow="default", workflow_step="plan")
+        task = _make_task(workflow="default", workflow_step=Steps.PLAN)
         response = _make_response("[NO_CHANGES_NEEDED]\nFeature already exists.")
 
         agent._set_structured_verdict(task, response)
@@ -2200,7 +2201,7 @@ class TestNoChangesVerdict:
         """When verdict is no_changes at plan step, workflow terminates — no chain enforcement."""
         agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent._workflow_router.config = agent.config
-        task = _make_task(workflow="default", workflow_step="plan")
+        task = _make_task(workflow="default", workflow_step=Steps.PLAN)
         # Verdict is now set by _set_structured_verdict before _run_post_completion_flow
         task.context["verdict"] = "no_changes"
         response = _make_response("[NO_CHANGES_NEEDED]\nNo engineering work needed.")
@@ -2314,7 +2315,7 @@ class TestNoChangesRouting:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="no_changes",
         )
 
@@ -2323,7 +2324,7 @@ class TestNoChangesRouting:
         # Current config: plan only has always → implement (no no_changes edge)
         edges = [
             WorkflowEdge(
-                target="implement",
+                target=Steps.IMPLEMENT,
                 condition=EdgeCondition(EdgeConditionType.ALWAYS),
             ),
         ]
@@ -2340,7 +2341,7 @@ class TestNoChangesRouting:
                 break
         # ALWAYS matches, but agent.py skip_chain guard prevents this
         # from firing — tested in test_no_changes_skips_enforce_chain
-        assert matched_target == "implement"
+        assert matched_target == Steps.IMPLEMENT
 
     def test_plan_routes_to_implement_without_no_changes(self, queue, tmp_path):
         """Plan step without no_changes verdict falls through to implement."""
@@ -2351,7 +2352,7 @@ class TestNoChangesRouting:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="approved",
         )
 
@@ -2359,7 +2360,7 @@ class TestNoChangesRouting:
 
         edges = [
             WorkflowEdge(
-                target="implement",
+                target=Steps.IMPLEMENT,
                 condition=EdgeCondition(EdgeConditionType.ALWAYS),
             ),
         ]
@@ -2371,7 +2372,7 @@ class TestNoChangesRouting:
                 matched_target = edge.target
                 break
 
-        assert matched_target == "implement"
+        assert matched_target == Steps.IMPLEMENT
 
 
 # -- Same-agent upstream context clearing --
@@ -2391,14 +2392,14 @@ class TestSameAgentUpstreamClearing:
             upstream_summary="Previous code review analysis...",
             upstream_context_file="/tmp/ctx.md",
             upstream_source_agent="architect",
-            upstream_source_step="code_review",
+            upstream_source_step=Steps.CODE_REVIEW,
             _chain_depth=2,
             _root_task_id="root-1",
             _global_cycle_count=2,
         )
 
         # Route back to code_review — same step that produced the upstream
-        architect_step = WorkflowStep(id="code_review", agent="architect")
+        architect_step = WorkflowStep(id=Steps.CODE_REVIEW, agent="architect")
         chain_task = executor._build_chain_task(task, architect_step, "qa")
 
         assert "upstream_summary" not in chain_task.context
@@ -2418,20 +2419,20 @@ class TestSameAgentUpstreamClearing:
             upstream_summary="Plan output: implement auth module",
             upstream_context_file="/tmp/plan-ctx.md",
             upstream_source_agent="architect",
-            upstream_source_step="plan",
+            upstream_source_step=Steps.PLAN,
             _chain_depth=2,
             _root_task_id="root-1",
             _global_cycle_count=2,
         )
 
         # Route to code_review — different step, same agent
-        code_review_step = WorkflowStep(id="code_review", agent="architect")
+        code_review_step = WorkflowStep(id=Steps.CODE_REVIEW, agent="architect")
         chain_task = executor._build_chain_task(task, code_review_step, "architect")
 
         assert chain_task.context["upstream_summary"] == "Plan output: implement auth module"
         assert chain_task.context["upstream_context_file"] == "/tmp/plan-ctx.md"
         assert chain_task.context["upstream_source_agent"] == "architect"
-        assert chain_task.context["upstream_source_step"] == "plan"
+        assert chain_task.context["upstream_source_step"] == Steps.PLAN
 
     def test_chain_to_different_agent_preserves_upstream_summary(self, queue):
         """Chain task targeting a different agent keeps upstream context intact."""
@@ -2445,7 +2446,7 @@ class TestSameAgentUpstreamClearing:
             upstream_summary="QA findings: tests failing",
             upstream_context_file="/tmp/qa-ctx.md",
             upstream_source_agent="qa",
-            upstream_source_step="qa_review",
+            upstream_source_step=Steps.QA_REVIEW,
             _chain_depth=2,
             _root_task_id="root-1",
             _global_cycle_count=2,
@@ -2476,13 +2477,13 @@ class TestSameAgentUpstreamClearing:
             session_logs_dir=tmp_path / "logs",
         )
 
-        task = _make_task(workflow_step="plan")
+        task = _make_task(workflow_step=Steps.PLAN)
         response = _make_response("Analysis complete: all looks good.")
 
         pc.save_upstream_context(task, response)
 
         assert task.context["upstream_source_agent"] == "architect"
-        assert task.context["upstream_source_step"] == "plan"
+        assert task.context["upstream_source_step"] == Steps.PLAN
 
 
 # -- Stale worktree_branch clearing --
@@ -2754,7 +2755,7 @@ class TestNoDiffGuard:
 
         executor = WorkflowExecutor(queue, queue.queue_dir)
         task = _make_task(workflow="default")
-        step = WorkflowStep(id="create_pr", agent="architect")
+        step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
 
         assert executor._has_diff_for_pr(task, step) is False
 
@@ -2765,7 +2766,7 @@ class TestNoDiffGuard:
 
         executor = WorkflowExecutor(queue, queue.queue_dir)
         task = _make_task(workflow="default", implementation_branch="feature/xyz")
-        step = WorkflowStep(id="create_pr", agent="architect")
+        step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
 
         assert executor._has_diff_for_pr(task, step) is True
 
@@ -2776,7 +2777,7 @@ class TestNoDiffGuard:
 
         executor = WorkflowExecutor(queue, queue.queue_dir)
         task = _make_task(workflow="default")
-        step = WorkflowStep(id="implement", agent="engineer")
+        step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
 
         assert executor._has_diff_for_pr(task, step) is True
 
@@ -2789,7 +2790,7 @@ class TestNoDiffGuard:
 
         executor = WorkflowExecutor(queue, queue.queue_dir, workspace=tmp_path)
         task = _make_task(workflow="default", implementation_branch="feature/empty")
-        step = WorkflowStep(id="create_pr", agent="architect")
+        step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
 
         mock_result = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
         with patch("agent_framework.utils.subprocess_utils.run_git_command", return_value=mock_result):
@@ -2803,7 +2804,7 @@ class TestNoDiffGuard:
 
         executor = WorkflowExecutor(queue, queue.queue_dir, workspace=tmp_path)
         task = _make_task(workflow="default", implementation_branch="feature/broken")
-        step = WorkflowStep(id="create_pr", agent="architect")
+        step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
 
         with patch("agent_framework.utils.subprocess_utils.run_git_command", side_effect=Exception("git error")):
             assert executor._has_diff_for_pr(task, step) is True
@@ -2823,16 +2824,16 @@ class TestReviewCycleCounterPropagation:
 
         task = _make_task(
             workflow="default",
-            workflow_step="implement",
+            workflow_step=Steps.IMPLEMENT,
             _dag_review_cycles=1,
             _chain_depth=3,
             _root_task_id="root-1",
             _global_cycle_count=3,
         )
 
-        code_review_step = WorkflowStep(id="code_review", agent="architect")
+        code_review_step = WorkflowStep(id=Steps.CODE_REVIEW, agent="architect")
         workflow = MagicMock()
-        workflow.steps = {"code_review": code_review_step}
+        workflow.steps = {Steps.CODE_REVIEW: code_review_step}
 
         executor._route_to_step(task, code_review_step, workflow, "engineer", None)
 
@@ -2852,20 +2853,20 @@ class TestReviewCycleCounterPropagation:
 
         executor = WorkflowExecutor(queue, queue.queue_dir)
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
-        code_review_step = WorkflowStep(id="code_review", agent="architect")
-        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
+        code_review_step = WorkflowStep(id=Steps.CODE_REVIEW, agent="architect")
+        pr_step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
         workflow = MagicMock()
         workflow.steps = {
-            "implement": engineer_step,
-            "code_review": code_review_step,
-            "create_pr": pr_step,
+            Steps.IMPLEMENT: engineer_step,
+            Steps.CODE_REVIEW: code_review_step,
+            Steps.CREATE_PR: pr_step,
         }
 
         # Hop 1: code_review→implement (first fix cycle, counter 0→1)
         task1 = _make_task(
             workflow="default",
-            workflow_step="code_review",
+            workflow_step=Steps.CODE_REVIEW,
             _dag_review_cycles=0,
             _chain_depth=2,
             _root_task_id="root-1",
@@ -2880,7 +2881,7 @@ class TestReviewCycleCounterPropagation:
         # Hop 2: implement→code_review (non-review hop, counter stays 1)
         task2 = _make_task(
             workflow="default",
-            workflow_step="implement",
+            workflow_step=Steps.IMPLEMENT,
             _dag_review_cycles=1,
             _chain_depth=3,
             _root_task_id="root-1",
@@ -2894,7 +2895,7 @@ class TestReviewCycleCounterPropagation:
         # Hop 3: code_review→implement (second fix cycle, counter 1→2 >= MAX)
         task3 = _make_task(
             workflow="default",
-            workflow_step="code_review",
+            workflow_step=Steps.CODE_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=4,
             _root_task_id="root-1",
@@ -2906,7 +2907,7 @@ class TestReviewCycleCounterPropagation:
         target = queue.push.call_args[0][1]
         # Cap fired — redirected to create_pr (architect)
         assert target == "architect"
-        assert chain3.context["workflow_step"] == "create_pr"
+        assert chain3.context["workflow_step"] == Steps.CREATE_PR
 
     def test_counter_starts_at_zero_on_fresh_chain(self, queue, tmp_path):
         """First task in a chain without prior counter gets 0."""
@@ -2917,7 +2918,7 @@ class TestReviewCycleCounterPropagation:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             _chain_depth=0,
             _root_task_id="root-1",
             _global_cycle_count=0,
@@ -2925,9 +2926,9 @@ class TestReviewCycleCounterPropagation:
         # No _dag_review_cycles in context at all
         assert "_dag_review_cycles" not in task.context
 
-        implement_step = WorkflowStep(id="implement", agent="engineer")
+        implement_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
         workflow = MagicMock()
-        workflow.steps = {"implement": implement_step}
+        workflow.steps = {Steps.IMPLEMENT: implement_step}
 
         executor._route_to_step(task, implement_step, workflow, "architect", None)
 
@@ -2944,17 +2945,17 @@ class TestReviewCycleCounterPropagation:
         # No implementation_branch — would normally fail _has_diff_for_pr
         task = _make_task(
             workflow="default",
-            workflow_step="code_review",
+            workflow_step=Steps.CODE_REVIEW,
             _dag_review_cycles=1,
             _chain_depth=4,
             _root_task_id="root-1",
             _global_cycle_count=4,
         )
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
-        pr_step = WorkflowStep(id="create_pr", agent="architect")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
+        pr_step = WorkflowStep(id=Steps.CREATE_PR, agent="architect")
         workflow = MagicMock()
-        workflow.steps = {"implement": engineer_step, "create_pr": pr_step}
+        workflow.steps = {Steps.IMPLEMENT: engineer_step, Steps.CREATE_PR: pr_step}
 
         executor._route_to_step(task, engineer_step, workflow, "architect", None)
 
@@ -2963,7 +2964,7 @@ class TestReviewCycleCounterPropagation:
         chain_task = queue.push.call_args[0][0]
         target = queue.push.call_args[0][1]
         assert target == "architect"
-        assert chain_task.context["workflow_step"] == "create_pr"
+        assert chain_task.context["workflow_step"] == Steps.CREATE_PR
 
 
 # -- Worktree race condition fixes --
@@ -2980,14 +2981,14 @@ class TestPRCreationStepInChainBuilder:
 
         task = _make_task(
             workflow="default",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             _chain_depth=3,
             _root_task_id="root-1",
             _global_cycle_count=3,
         )
 
         pr_step = WorkflowStep(
-            id="create_pr", agent="architect", task_type_override="pr_request",
+            id=Steps.CREATE_PR, agent="architect", task_type_override="pr_request",
         )
         chain_task = executor._build_chain_task(task, pr_step, "qa")
 
@@ -3007,7 +3008,7 @@ class TestPRCreationStepInChainBuilder:
             _global_cycle_count=0,
         )
 
-        engineer_step = WorkflowStep(id="implement", agent="engineer")
+        engineer_step = WorkflowStep(id=Steps.IMPLEMENT, agent="engineer")
         chain_task = executor._build_chain_task(task, engineer_step, "architect")
 
         assert "pr_creation_step" not in chain_task.context
@@ -3027,7 +3028,7 @@ class TestPRCreationStepInChainBuilder:
             _global_cycle_count=1,
         )
 
-        qa_step = WorkflowStep(id="qa_review", agent="qa")
+        qa_step = WorkflowStep(id=Steps.QA_REVIEW, agent="qa")
         chain_task = executor._build_chain_task(task, qa_step, "engineer")
 
         assert "pr_creation_step" not in chain_task.context
@@ -3177,20 +3178,20 @@ class TestEmitWorkflowSummary:
 
         task = _make_task(
             workflow="default",
-            workflow_step="create_pr",
+            workflow_step=Steps.CREATE_PR,
             chain_step=True,
         )
 
         self._make_chain_state_file(agent.workspace, task.root_id, [
             StepRecord(
-                step_id="plan", agent_id="architect", task_id="t1",
+                step_id=Steps.PLAN, agent_id="architect", task_id="t1",
                 started_at="2026-02-19T10:00:00+00:00",
                 completed_at="2026-02-19T10:01:00+00:00",
                 duration_seconds=60.0,
                 summary="planned",
             ),
             StepRecord(
-                step_id="create_pr", agent_id="qa", task_id="t2",
+                step_id=Steps.CREATE_PR, agent_id="qa", task_id="t2",
                 started_at="2026-02-19T10:02:00+00:00",
                 completed_at="2026-02-19T10:02:30+00:00",
                 duration_seconds=30.0,
@@ -3235,7 +3236,7 @@ class TestEmitWorkflowSummary:
         """When not at terminal step, no summary is emitted in _run_post_completion_flow."""
         task = _make_task(
             workflow="default",
-            workflow_step="implement",
+            workflow_step=Steps.IMPLEMENT,
             chain_step=True,
         )
 
@@ -3256,14 +3257,14 @@ class TestEmitWorkflowSummary:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             chain_step=True,
             verdict="no_changes",
         )
 
         self._make_chain_state_file(agent.workspace, task.root_id, [
             StepRecord(
-                step_id="plan", agent_id="architect", task_id="t1",
+                step_id=Steps.PLAN, agent_id="architect", task_id="t1",
                 started_at="2026-02-19T10:00:00+00:00",
                 completed_at="2026-02-19T10:00:15+00:00",
                 duration_seconds=15.0,
@@ -3293,7 +3294,7 @@ class TestEmitWorkflowSummary:
 
     def test_emit_workflow_summary_no_chain_state_is_noop(self, agent):
         """When chain state file doesn't exist, emission is silently skipped."""
-        task = _make_task(workflow="default", workflow_step="create_pr")
+        task = _make_task(workflow="default", workflow_step=Steps.CREATE_PR)
 
         pc = agent._post_completion
         pc.session_logging_enabled = True
@@ -3310,13 +3311,13 @@ class TestEmitWorkflowSummary:
 
         task = _make_task(
             workflow="default",
-            workflow_step="create_pr",
+            workflow_step=Steps.CREATE_PR,
             pr_url="https://github.com/org/repo/pull/99",
         )
 
         self._make_chain_state_file(agent.workspace, task.root_id, [
             StepRecord(
-                step_id="create_pr", agent_id="qa", task_id="t1",
+                step_id=Steps.CREATE_PR, agent_id="qa", task_id="t1",
                 completed_at="2026-02-19T10:00:00+00:00",
                 summary="PR created",
             ),
@@ -3535,7 +3536,7 @@ class TestRoutingSignalVerdictOverride:
         if (routing_signal
                 and routing_signal.target_agent == WORKFLOW_COMPLETE
                 and agent.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
+                and task.context.get("workflow_step", get_type_str(task.type)) in (Steps.PLAN, "planning")):
             if task.plan is not None:
                 agent.logger.info(
                     f"Clearing __complete__ routing signal at plan step — "
@@ -3564,7 +3565,7 @@ class TestRoutingSignalVerdictOverride:
         """__complete__ at plan step without plan passes signal through for PR handling."""
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="approved",
             verdict_audit={"method": "ambiguous_default", "value": "approved"},
         )
@@ -3586,7 +3587,7 @@ class TestRoutingSignalVerdictOverride:
         """Even with existing no_changes verdict, signal passes through for PR handling."""
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="no_changes",
             verdict_audit={"method": "no_changes_marker", "value": "no_changes"},
         )
@@ -3601,7 +3602,7 @@ class TestRoutingSignalVerdictOverride:
 
     def test_ignored_at_non_plan_step(self, architect_agent):
         """No override at code_review/qa_review steps."""
-        for step in ("code_review", "qa_review", "implement"):
+        for step in (Steps.CODE_REVIEW, Steps.QA_REVIEW, Steps.IMPLEMENT):
             architect_agent._session_logger.reset_mock()
             task = _make_task(
                 workflow="default",
@@ -3620,7 +3621,7 @@ class TestRoutingSignalVerdictOverride:
         """Engineer with WORKFLOW_COMPLETE doesn't get verdict override."""
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="approved",
         )
         signal = _make_signal(target=WORKFLOW_COMPLETE)
@@ -3639,7 +3640,7 @@ class TestRoutingSignalVerdictOverride:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="approved",
             implementation_branch="agent/architect/task-abc123",
         )
@@ -3662,7 +3663,7 @@ class TestRoutingSignalVerdictOverride:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="approved",
             verdict_audit={"method": "ambiguous_default", "value": "approved"},
         )
@@ -3693,7 +3694,7 @@ class TestRoutingSignalVerdictOverride:
 
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="approved",
         )
         task.plan = PlanDocument(
@@ -3721,7 +3722,7 @@ class TestRoutingSignalVerdictOverride:
         """__complete__ at plan step WITHOUT plan or branch → no PR queued."""
         task = _make_task(
             workflow="default",
-            workflow_step="plan",
+            workflow_step=Steps.PLAN,
             verdict="approved",
         )
         assert task.plan is None
