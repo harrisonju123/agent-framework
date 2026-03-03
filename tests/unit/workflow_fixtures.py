@@ -47,6 +47,39 @@ REVIEW_WORKFLOW = WorkflowDefinition(
     },
 )
 
+# Full pipeline workflow including the plan step. Used by pipeline E2E tests
+# that exercise the complete chain: plan → implement → code_review → qa_review → create_pr.
+PIPELINE_WORKFLOW = WorkflowDefinition(
+    description="Full pipeline with planning step",
+    start_step=Steps.PLAN,
+    pr_creator="architect",
+    steps={
+        Steps.PLAN: WorkflowStepDefinition(
+            agent="architect",
+            next=[{"target": Steps.IMPLEMENT}],
+        ),
+        Steps.IMPLEMENT: WorkflowStepDefinition(
+            agent="engineer",
+            next=[{"target": Steps.CODE_REVIEW}],
+        ),
+        Steps.CODE_REVIEW: WorkflowStepDefinition(
+            agent="architect",
+            next=[
+                {"target": Steps.QA_REVIEW, "condition": "approved", "priority": 10},
+                {"target": Steps.IMPLEMENT, "condition": "needs_fix", "priority": 5},
+            ],
+        ),
+        Steps.QA_REVIEW: WorkflowStepDefinition(
+            agent="qa",
+            next=[
+                {"target": Steps.CREATE_PR, "condition": "approved", "priority": 10},
+                {"target": Steps.IMPLEMENT, "condition": "needs_fix", "priority": 5},
+            ],
+        ),
+        Steps.CREATE_PR: WorkflowStepDefinition(agent="architect"),
+    },
+)
+
 PREVIEW_WORKFLOW = WorkflowDefinition(
     description="Read-only preview before implementation",
     start_step=Steps.PREVIEW,
