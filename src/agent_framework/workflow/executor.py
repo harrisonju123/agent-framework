@@ -324,7 +324,7 @@ class WorkflowExecutor:
                     f"Review→engineer cycle {review_cycles} exceeds max ({MAX_DAG_REVIEW_CYCLES}) "
                     f"for task {task.id} — routing to PR creation instead of another fix cycle"
                 )
-                pr_step = workflow.steps.get("create_pr")
+                pr_step = workflow.steps.get(Steps.CREATE_PR)
                 if pr_step and pr_step != target_step:
                     target_step = pr_step
                     next_agent = pr_step.agent
@@ -382,7 +382,7 @@ class WorkflowExecutor:
 
         if is_review_to_engineer:
             chain_task.context["_dag_review_cycles"] = review_cycles
-        elif task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS and target_step.id == "implement":
+        elif task.context.get("workflow_step") in Steps.PREVIEW_REVIEW_STEPS and target_step.id == Steps.IMPLEMENT:
             # Phase transition resets the counter — write 0 explicitly so the chain
             # task doesn't inherit a non-zero value from the previous preview round.
             chain_task.context["_dag_review_cycles"] = 0
@@ -409,8 +409,8 @@ class WorkflowExecutor:
 
         # Side-channel: queue QA pre-scan in parallel with code review.
         # Skip for docs-only changes — the workflow edge will route straight to create_pr.
-        if (task.context.get("workflow_step") == "implement"
-                and target_step.id == "code_review"):
+        if (task.context.get("workflow_step") == Steps.IMPLEMENT
+                and target_step.id == Steps.CODE_REVIEW):
             if not self._is_docs_only_change(task):
                 self._queue_qa_pre_scan(task)
 
@@ -499,7 +499,7 @@ class WorkflowExecutor:
             # Preview steps don't count toward global ceiling — they're lightweight
             # plan evaluations, not full implementation cycles
             "_global_cycle_count": task.context.get("_global_cycle_count", 0) + (
-                0 if target_step.id in ("preview", "preview_review") else 1
+                0 if target_step.id in (Steps.PREVIEW, Steps.PREVIEW_REVIEW) else 1
             ),
             "_dag_review_cycles": task.context.get("_dag_review_cycles", 0),
         }
@@ -553,14 +553,14 @@ class WorkflowExecutor:
             upstream = task.context.get("upstream_summary", "")
             if upstream:
                 workflow_step = task.context.get("workflow_step", "")
-                header = "CODE REVIEW FINDINGS TO ADDRESS" if workflow_step == "code_review" else "QA FINDINGS TO ADDRESS"
+                header = "CODE REVIEW FINDINGS TO ADDRESS" if workflow_step == Steps.CODE_REVIEW else "QA FINDINGS TO ADDRESS"
                 description = f"## {header}\n{upstream}\n\n## ORIGINAL TASK\n{user_goal or description}"
         elif user_goal and target_step.id != task.context.get("workflow_step"):
             step_directives = {
-                "implement": "Implement the following changes",
-                "code_review": "Review the implementation for the following task",
-                "qa_review": "Test and verify the implementation for the following task",
-                "create_pr": "Create a pull request for the following completed work",
+                Steps.IMPLEMENT: "Implement the following changes",
+                Steps.CODE_REVIEW: "Review the implementation for the following task",
+                Steps.QA_REVIEW: "Test and verify the implementation for the following task",
+                Steps.CREATE_PR: "Create a pull request for the following completed work",
             }
             directive = step_directives.get(target_step.id)
             if directive:
@@ -605,7 +605,7 @@ class WorkflowExecutor:
         Returns True (proceed) unless we can definitively prove there's nothing to PR.
         Only gates the create_pr step — all other steps pass through unconditionally.
         """
-        if target_step.id != "create_pr":
+        if target_step.id != Steps.CREATE_PR:
             return True
 
         impl_branch = task.context.get("implementation_branch") if task.context else None
