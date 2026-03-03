@@ -102,11 +102,11 @@ class PromptBuilder:
     # Which optional prompt sections to include per workflow phase.
     # Unlisted phases get all sections (backward-compatible default).
     _PHASE_INJECTIONS: dict[str, set[str]] = {
-        "plan": {"upstream_context", "human_guidance"},
-        "implement": {"read_cache", "codebase_index", "memories", "tool_tips", "requirements"},
-        "code_review": {"read_cache", "upstream_context"},
-        "qa_review": {"codebase_index", "upstream_context"},
-        "create_pr": set(),
+        Steps.PLAN: {"upstream_context", "human_guidance"},
+        Steps.IMPLEMENT: {"read_cache", "codebase_index", "memories", "tool_tips", "requirements"},
+        Steps.CODE_REVIEW: {"read_cache", "upstream_context"},
+        Steps.QA_REVIEW: {"codebase_index", "upstream_context"},
+        Steps.CREATE_PR: set(),
     }
 
     # Testing tasks have a tight 20K budget; drop heavyweight sections
@@ -115,14 +115,13 @@ class PromptBuilder:
 
     # Steps where the LLM must review only — no file writes or implementation.
     # Injects _build_review_only_guidance() (hard "REVIEWER" constraints + VERDICT format).
-    _REVIEW_ONLY_STEPS = frozenset({"code_review"})
+    _REVIEW_ONLY_STEPS = frozenset({Steps.CODE_REVIEW})
 
     # Steps where the architect evaluates a preview plan rather than live code.
     # Injects _build_preview_review_guidance() (lighter constraints, same VERDICT format).
     # Kept separate from _REVIEW_ONLY_STEPS because the guidance text differs —
     # preview_review evaluates a plan, code_review evaluates a diff.
-    # Canonical source: workflow.executor.PREVIEW_REVIEW_STEPS (shared with Agent and WorkflowExecutor).
-    _PREVIEW_REVIEW_STEPS = PREVIEW_REVIEW_STEPS
+    _PREVIEW_REVIEW_STEPS = Steps.PREVIEW_REVIEW_STEPS
 
     def __init__(self, context: PromptContext):
         """Initialize prompt builder with context.
@@ -373,7 +372,7 @@ class PromptBuilder:
         """Build prompt using legacy format (original implementation)."""
         # Use compressed task JSON for execution steps where the plan carries detail
         step = task.context.get("workflow_step")
-        if step in ("implement", "qa_review", "create_pr"):
+        if step in (Steps.IMPLEMENT, Steps.QA_REVIEW, Steps.CREATE_PR):
             task_json = self._minimal_task_json(task)
         else:
             task_dict = task.model_dump()
@@ -475,7 +474,7 @@ IMPORTANT:
         # Use aggressively compressed JSON for execution steps;
         # fall back to the existing minimal dict for planning/unknown steps
         step = task.context.get("workflow_step")
-        if step in ("implement", "qa_review", "create_pr"):
+        if step in (Steps.IMPLEMENT, Steps.QA_REVIEW, Steps.CREATE_PR):
             task_json = self._minimal_task_json(task)
         else:
             task_dict = self._get_minimal_task_dict(task)
@@ -1654,14 +1653,14 @@ If a tool call fails:
     def _read_cache_step_directive(task: Task) -> str:
         """Return a step-appropriate instruction for using the cache manifest."""
         step = task.context.get("workflow_step", "")
-        if step == "implement":
+        if step == Steps.IMPLEMENT:
             return (
                 "Files marked MODIFY are your primary targets — read them in full when "
                 "ready to edit. Files marked CHANGED were modified in a previous "
                 "implementation pass. Files marked 'ref' were explored for context; "
                 "prefer using the summary and only read if you need specific signatures."
             )
-        if step in ("code_review", "qa_review"):
+        if step in (Steps.CODE_REVIEW, Steps.QA_REVIEW):
             return (
                 "Files marked CHANGED were modified by the engineer — the summary "
                 "reflects post-modification state. Focus on the git diff for review. "

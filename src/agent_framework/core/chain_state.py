@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from ..utils.atomic_io import atomic_write_text
 from ..utils.subprocess_utils import run_git_command
+from ..workflow.constants import WorkflowStepConstants as Steps
 from .task import Task
 
 logger = logging.getLogger(__name__)
@@ -333,7 +334,7 @@ def _build_step_summary(task: Task, response_content: str, step_id: str) -> str:
     """
     parts = []
 
-    if step_id in ("plan", "planning") and task.plan:
+    if step_id in (Steps.PLAN, "planning") and task.plan:
         parts.append("Plan objectives: " + "; ".join(task.plan.objectives[:5]))
         if task.plan.files_to_modify:
             parts.append("Files to modify: " + ", ".join(task.plan.files_to_modify[:10]))
