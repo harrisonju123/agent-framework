@@ -477,15 +477,15 @@ def render_for_step(state: ChainState, consumer_step: str) -> str:
     # Check if this is a fix cycle (review→engineer loop)
     is_fix_cycle = _is_fix_cycle(state, consumer_step)
 
-    if consumer_step == "implement" and is_fix_cycle:
+    if consumer_step == Steps.IMPLEMENT and is_fix_cycle:
         return _render_for_fix(state)
-    elif consumer_step == "implement":
+    elif consumer_step == Steps.IMPLEMENT:
         return _render_for_implement(state)
-    elif consumer_step == "code_review":
+    elif consumer_step == Steps.CODE_REVIEW:
         return _render_for_code_review(state)
-    elif consumer_step in ("qa_review",):
+    elif consumer_step in (Steps.QA_REVIEW,):
         return _render_for_qa_review(state)
-    elif consumer_step == "create_pr":
+    elif consumer_step == Steps.CREATE_PR:
         return _render_for_create_pr(state)
     else:
         return _render_generic(state)
@@ -493,18 +493,18 @@ def render_for_step(state: ChainState, consumer_step: str) -> str:
 
 def _is_fix_cycle(state: ChainState, consumer_step: str) -> bool:
     """Detect if engineer is receiving work back from a review step."""
-    if consumer_step != "implement":
+    if consumer_step != Steps.IMPLEMENT:
         return False
     # If the last step was a review with needs_fix verdict
     for step in reversed(state.steps):
-        if step.step_id in ("code_review", "qa_review"):
+        if step.step_id in (Steps.CODE_REVIEW, Steps.QA_REVIEW):
             return step.verdict == "needs_fix"
     return False
 
 
 def _render_for_implement(state: ChainState) -> str:
     """Render context for the engineer's implementation step."""
-    plan_step = _find_step(state, "plan")
+    plan_step = _find_step(state, Steps.PLAN)
     if not plan_step:
         return ""
     if not plan_step.plan:
@@ -573,7 +573,7 @@ def _render_for_fix(state: ChainState) -> str:
                 lines.append(f"### REVIEWER REASONING\n{step.design_rationale}\n")
 
             # Show files from the implement step (what needs fixing), not the review step
-            impl_step = _find_step(state, "implement")
+            impl_step = _find_step(state, Steps.IMPLEMENT)
             if impl_step and impl_step.files_modified:
                 lines.append(f"### FILES TO FIX\n{', '.join(impl_step.files_modified)}\n")
             break
@@ -586,7 +586,7 @@ def _render_for_code_review(state: ChainState) -> str:
     lines = ["\n## CHAIN STATE — CODE REVIEW CONTEXT\n"]
 
     # Plan objectives as review anchor
-    plan_step = _find_step(state, "plan")
+    plan_step = _find_step(state, Steps.PLAN)
     if plan_step and plan_step.plan:
         objectives = plan_step.plan.get("objectives", [])
         if objectives:
@@ -596,7 +596,7 @@ def _render_for_code_review(state: ChainState) -> str:
             lines.append("")
 
     # Files changed by engineer
-    impl_step = _find_step(state, "implement")
+    impl_step = _find_step(state, Steps.IMPLEMENT)
     if impl_step:
         if impl_step.files_modified:
             lines.append("### FILES CHANGED")
@@ -617,7 +617,7 @@ def _render_for_qa_review(state: ChainState) -> str:
     lines = ["\n## CHAIN STATE — QA REVIEW CONTEXT\n"]
 
     # Plan for acceptance criteria reference
-    plan_step = _find_step(state, "plan")
+    plan_step = _find_step(state, Steps.PLAN)
     if plan_step and plan_step.plan:
         plan = plan_step.plan
         if plan.get("success_criteria"):
@@ -627,7 +627,7 @@ def _render_for_qa_review(state: ChainState) -> str:
             lines.append("")
 
     # Files changed by engineer
-    impl_step = _find_step(state, "implement")
+    impl_step = _find_step(state, Steps.IMPLEMENT)
     if impl_step and impl_step.files_modified:
         lines.append("### FILES CHANGED")
         for f in impl_step.files_modified:
@@ -639,7 +639,7 @@ def _render_for_qa_review(state: ChainState) -> str:
         lines.extend(_render_tool_stats(impl_step))
 
     # Code review result
-    review_step = _find_step(state, "code_review")
+    review_step = _find_step(state, Steps.CODE_REVIEW)
     if review_step:
         lines.append("### CODE REVIEW RESULT")
         lines.append(f"Verdict: {review_step.verdict or 'unknown'}")
@@ -659,7 +659,7 @@ def _render_for_create_pr(state: ChainState) -> str:
         lines.append(f"**Goal:** {state.user_goal[:500]}\n")
 
     # Plan summary
-    plan_step = _find_step(state, "plan")
+    plan_step = _find_step(state, Steps.PLAN)
     if plan_step and plan_step.plan:
         objectives = plan_step.plan.get("objectives", [])
         if objectives:
