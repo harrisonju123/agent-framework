@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 from .dag import WorkflowDAG, WorkflowStep, WorkflowEdge
 from .conditions import ConditionRegistry
+from .constants import WorkflowStepConstants as Steps
 from ..core.task import TaskStatus, TaskType
 from ..core.routing import WORKFLOW_COMPLETE
 from ..utils.type_helpers import strip_chain_prefixes
@@ -35,10 +36,8 @@ MAX_DAG_REVIEW_CYCLES = 2
 # Absolute ceiling on total chain hops — survives escalation and re-planning resets
 MAX_GLOBAL_CYCLES = 15
 
-# Workflow steps where the architect evaluates a plan rather than live code.
-# Used by both WorkflowExecutor (verdict routing) and PromptBuilder (guidance injection)
-# so that both consumers stay in sync when new review-type steps are added.
-PREVIEW_REVIEW_STEPS: frozenset[str] = frozenset({"preview_review"})
+# Re-export for backward compatibility — canonical source is WorkflowStepConstants
+PREVIEW_REVIEW_STEPS = Steps.PREVIEW_REVIEW_STEPS
 
 
 @dataclass
@@ -308,13 +307,13 @@ class WorkflowExecutor:
         enforced = False
         is_review_to_engineer = (
             target_step.agent == "engineer"
-            and task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
+            and task.context.get("workflow_step") in Steps.REVIEW_STEPS
         )
         # preview_review → implement is a phase boundary, not a fix cycle.
         # Reset the counter so implementation review gets a full budget, and
         # don't treat this as a review→fix hand-off (no "QA FINDINGS" prefix).
-        if (task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS
-                and target_step.id == "implement"):
+        if (task.context.get("workflow_step") in Steps.PREVIEW_REVIEW_STEPS
+                and target_step.id == Steps.IMPLEMENT):
             is_review_to_engineer = False
             review_cycles = 0
             phase_reset = True
