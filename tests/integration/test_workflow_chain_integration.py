@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from agent_framework.core.agent import Agent
 from agent_framework.core.task import Task, TaskStatus, TaskType, PlanDocument
 from agent_framework.queue.file_queue import FileQueue
+from agent_framework.workflow.constants import WorkflowStepConstants as Steps
 
 
 def _make_task(tmp_path, **overrides):
@@ -28,7 +29,7 @@ def _make_task(tmp_path, **overrides):
         context={
             "github_repo": "org/repo",
             "workflow": "default",
-            "workflow_step": "plan",
+            "workflow_step": Steps.PLAN,
             "user_goal": "Add user authentication",
             "chain_step": True,
         },
@@ -61,7 +62,7 @@ class TestChainStateAccumulation:
                     state = append_step(tmp_path, task, "architect", "Plan completed")
 
         assert len(state.steps) == 1
-        assert state.steps[0].step_id == "plan"
+        assert state.steps[0].step_id == Steps.PLAN
         assert state.steps[0].design_rationale == "JWT chosen because stateless scaling."
         assert state.steps[0].verdict == "approved"
 
@@ -82,7 +83,7 @@ class TestChainStateAccumulation:
             workflow="default",
             steps=[
                 StepRecord(
-                    step_id="plan",
+                    step_id=Steps.PLAN,
                     agent_id="architect",
                     task_id="chain-root-1-plan-d1",
                     completed_at=datetime.now(timezone.utc).isoformat(),

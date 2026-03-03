@@ -703,7 +703,7 @@ class TestDecomposeParallelFlag:
 class TestReviewFixGuard:
     def test_chain_review_task_passes_through_guard(self, router, queue):
         """Chain task with type REVIEW and chain_step=True is NOT blocked."""
-        task = _make_task(chain_step=True, workflow_step="code_review")
+        task = _make_task(chain_step=True, workflow_step=Steps.CODE_REVIEW)
         task.type = TaskType.REVIEW
         response = _make_response()
 
@@ -747,7 +747,7 @@ class TestEnforceChainNonTerminalGuard:
         router.config.base_id = "architect"
         task = _make_task(
             workflow="review",
-            workflow_step="code_review",
+            workflow_step=Steps.CODE_REVIEW,
             chain_step=True,
             implementation_branch="feature/test",
             _chain_depth=2,
@@ -779,7 +779,7 @@ class TestEnforceChainNonTerminalGuard:
         router._workflows_config["review"] = REVIEW_WORKFLOW
         task = _make_task(
             workflow="review",
-            workflow_step="create_pr",
+            workflow_step=Steps.CREATE_PR,
             implementation_branch="feature/test",
         )
         response = _make_response()
@@ -796,7 +796,7 @@ class TestEnforceChainNonTerminalGuard:
         router.config.base_id = "qa"
         task = _make_task(
             workflow="review",
-            workflow_step="qa_review",
+            workflow_step=Steps.QA_REVIEW,
             chain_step=True,
             implementation_branch="feature/test",
             _chain_depth=3,
