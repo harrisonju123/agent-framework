@@ -7,6 +7,7 @@ and fires a circuit breaker event when the agent is unproductive.
 
 import subprocess
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,20 @@ from .activity import ActivityEvent, ToolActivity
 
 
 _DIAGNOSTIC_COMMANDS = None  # lazy-loaded from agent.py
+
+# Window size for chunked read detection — if the same file was read within
+# this many tool calls, the second read is likely an offset continuation
+_CHUNKED_READ_WINDOW = 5
+
+
+@dataclass
+class FileReadInfo:
+    """Per-file read tracking state."""
+    count: int = 0
+    first_seq: int = 0
+    last_seq: int = 0
+    was_full_read: bool = False  # True if read without offset/limit
+    chunked_sequences: list[int] = field(default_factory=list)  # sequential offset reads
 
 # Productive threshold: if this fraction of commands are productive, use a
 # higher ceiling before tripping the breaker
@@ -73,6 +88,8 @@ class CheckpointManager:
         agent_id: str = "",
         agent_base_id: str = "",
         diversity_threshold: float = 0.5,
+        reread_threshold: int = 3,
+        escalation_multipliers: Optional[list[float]] = None,
     ):
         self.task = task
         self.working_dir = working_dir
@@ -101,9 +118,20 @@ class CheckpointManager:
         self.diagnostic_tripped = False
         self.bash_commands: list[str] = []
         self.soft_threshold_logged = False
-        self.exploration_alerted = False
         self.subagent_spawns: list[dict] = []
         self._last_write_time = 0.0
+
+        # Read tracking — detects redundant file re-reads so we can intervene
+        self._file_reads: dict[str, FileReadInfo] = {}
+        self._reread_threshold: int = reread_threshold
+        self._reread_interrupted: bool = False
+
+        # Escalating exploration levels replace the old boolean flag.
+        # Level 0 = normal, 1 = alert, 2 = wrap-up warning, 3 = force halt
+        self._exploration_level: int = 0
+        self._escalation_multipliers: list[float] = list(
+            escalation_multipliers if escalation_multipliers is not None else [1.0, 2.0, 3.0]
+        )
 
     def on_tool_activity(self, tool_name: str, tool_input_summary: Optional[str]) -> None:
         """Called on each tool invocation during LLM execution."""
@@ -121,6 +149,9 @@ class CheckpointManager:
                     tool_input_summary=tool_input_summary,
                 )
 
+            if tool_name == "Read":
+                self._track_file_read(tool_input_summary)
+
             self._check_circuit_breaker(tool_name, tool_input_summary)
             self._check_exploration_alert()
             self._check_periodic_checkpoint()
@@ -128,6 +159,68 @@ class CheckpointManager:
 
         except Exception as e:
             self._logger.debug(f"Tool activity tracking error (non-fatal): {e}")
+
+    def _track_file_read(self, tool_input_summary: Optional[str]) -> None:
+        """Track per-file read counts and detect re-read anti-patterns.
+
+        tool_input_summary for Read tools is the abbreviated file path
+        (last 3 segments), e.g. "agent_framework/core/checkpoint_manager.py".
+        """
+        if not tool_input_summary:
+            return
+
+        path = tool_input_summary.strip()
+        if not path:
+            return
+        seq = self.tool_call_count
+        info = self._file_reads.get(path)
+
+        if info is None:
+            info = FileReadInfo(count=1, first_seq=seq, last_seq=seq, was_full_read=True)
+            self._file_reads[path] = info
+            return
+
+        info.count += 1
+        prev_seq = info.last_seq
+        info.last_seq = seq
+
+        # Detect chunked reads: same file read again within a small window
+        if (seq - prev_seq) <= _CHUNKED_READ_WINDOW:
+            info.chunked_sequences.append(seq)
+
+        # Trigger interrupt flag when a single file hits the re-read threshold
+        if info.count >= self._reread_threshold and not self._reread_interrupted:
+            self._reread_interrupted = True
+            self._session_logger.log(
+                "reread_threshold_exceeded",
+                file=path,
+                count=info.count,
+                threshold=self._reread_threshold,
+            )
+            self._logger.info(
+                f"Re-read threshold exceeded: {path} read {info.count} times "
+                f"(threshold={self._reread_threshold})"
+            )
+            # Interrupt the LLM session — the flag alone isn't enough
+            self._circuit_breaker_event.set()
+
+    def get_read_stats(self) -> dict[str, int]:
+        """Return {file_path: read_count} for all files read 2+ times."""
+        return {
+            path: info.count
+            for path, info in self._file_reads.items()
+            if info.count >= 2
+        }
+
+    def get_worst_reread(self) -> tuple[str, int] | None:
+        """Return (file, count) of the most re-read file, or None if no reads."""
+        if not self._file_reads:
+            return None
+        worst_path = max(self._file_reads, key=lambda p: self._file_reads[p].count)
+        worst_count = self._file_reads[worst_path].count
+        if worst_count < 1:
+            return None
+        return (worst_path, worst_count)
 
     def _check_circuit_breaker(self, tool_name: str, summary: Optional[str]) -> None:
         """Track consecutive Bash calls and trip breaker on stuck patterns."""
@@ -204,31 +297,101 @@ class CheckpointManager:
             self.soft_threshold_logged = True
 
     def _check_exploration_alert(self) -> None:
-        """One-time alert when total tool calls exceed threshold."""
+        """Progressive escalation when tool calls exceed multiples of the threshold.
+
+        Level 1 (1x threshold): Log alert + emit activity event.
+        Level 2 (2x threshold): Stronger wrap-up warning for prompt injection by T2.
+        Level 3 (3x threshold): Force commit + trip circuit breaker to halt execution.
+        """
         total = self.tool_call_count
-        if total >= self._exploration_threshold and not self.exploration_alerted:
-            self.exploration_alerted = True
-            self._logger.info(
-                f"Exploration alert: {total} tool calls in session "
-                f"(threshold={self._exploration_threshold}, step={self._workflow_step or 'standalone'})"
-            )
-            self._session_logger.log(
-                "exploration_alert",
-                total_tool_calls=total,
-                threshold=self._exploration_threshold,
-                workflow_step=self._workflow_step,
-                agent_type=self._agent_base_id,
-            )
-            self._activity_manager.append_event(ActivityEvent(
-                type="exploration_alert",
-                agent=self._agent_id,
-                task_id=self.task.id,
-                title=(
-                    f"Exploration: {total} calls "
+
+        # Walk through escalation levels we haven't fired yet
+        for level_idx, multiplier in enumerate(self._escalation_multipliers):
+            target_level = level_idx + 1
+            if target_level <= self._exploration_level:
+                continue  # already fired this level
+            trigger_at = int(self._exploration_threshold * multiplier)
+            if total < trigger_at:
+                break  # not yet at this level
+
+            self._exploration_level = target_level
+
+            if target_level == 1:
+                self._logger.info(
+                    f"Exploration alert: {total} tool calls in session "
                     f"(threshold={self._exploration_threshold}, step={self._workflow_step or 'standalone'})"
-                ),
-                timestamp=datetime.now(timezone.utc),
-            ))
+                )
+                self._session_logger.log(
+                    "exploration_alert",
+                    total_tool_calls=total,
+                    threshold=self._exploration_threshold,
+                    workflow_step=self._workflow_step,
+                    agent_type=self._agent_base_id,
+                    level=1,
+                )
+                self._activity_manager.append_event(ActivityEvent(
+                    type="exploration_alert",
+                    agent=self._agent_id,
+                    task_id=self.task.id,
+                    title=(
+                        f"Exploration: {total} calls "
+                        f"(threshold={self._exploration_threshold}, "
+                        f"step={self._workflow_step or 'standalone'})"
+                    ),
+                    timestamp=datetime.now(timezone.utc),
+                ))
+
+            elif target_level == 2:
+                self._logger.warning(
+                    f"WRAP UP: {total} tool calls exceeded 2x threshold "
+                    f"({trigger_at}), step={self._workflow_step or 'standalone'}"
+                )
+                self._session_logger.log(
+                    "exploration_escalation",
+                    total_tool_calls=total,
+                    trigger_at=trigger_at,
+                    level=2,
+                    workflow_step=self._workflow_step,
+                    agent_type=self._agent_base_id,
+                )
+                # Reuse exploration_alert event type — ActivityEvent Literal
+                # doesn't include escalation types; differentiate by title
+                self._activity_manager.append_event(ActivityEvent(
+                    type="exploration_alert",
+                    agent=self._agent_id,
+                    task_id=self.task.id,
+                    title=f"WRAP UP: {total} calls (2x threshold={trigger_at})",
+                    timestamp=datetime.now(timezone.utc),
+                ))
+
+            elif target_level >= 3:
+                self._logger.warning(
+                    f"Exploration force halt: {total} tool calls exceeded 3x threshold "
+                    f"({trigger_at}), forcing commit and halting"
+                )
+                self._session_logger.log(
+                    "exploration_force_halt",
+                    total_tool_calls=total,
+                    trigger_at=trigger_at,
+                    level=3,
+                    workflow_step=self._workflow_step,
+                    agent_type=self._agent_base_id,
+                )
+                self._activity_manager.append_event(ActivityEvent(
+                    type="circuit_breaker",
+                    agent=self._agent_id,
+                    task_id=self.task.id,
+                    title=f"FORCE HALT: {total} calls (3x threshold={trigger_at})",
+                    timestamp=datetime.now(timezone.utc),
+                ))
+                # Commit whatever we have before halting
+                if self.working_dir and self.working_dir.exists():
+                    self._git_ops.safety_commit(
+                        self.working_dir,
+                        f"WIP: force halt at {total} tool calls (exploration limit)",
+                    )
+                self._circuit_breaker_event.set()
+                break  # no point checking further levels
 
     def _check_periodic_checkpoint(self) -> None:
         """Commit + push at regular intervals. Detect progress stalls."""

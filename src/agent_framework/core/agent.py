@@ -2,29 +2,26 @@
 
 import asyncio
 import hashlib
-import json
-import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional  # noqa: F401 (Dict/Any used in shims)
 
 if TYPE_CHECKING:
     from .config import AgentDefinition, RepositoryConfig, WorkflowDefinition
     from ..queue.locks import FileLock
 
-from .task import PlanDocument, Task, TaskStatus, TaskType
+from .task import Task, TaskStatus, TaskType
 from .task_validator import validate_task
 from .activity import ActivityManager, AgentActivity, AgentStatus, CurrentTask, ActivityEvent, TaskPhase
-from .routing import read_routing_signal, WORKFLOW_COMPLETE
 from .team_composer import compose_default_team, compose_team
 from .context_window_manager import ContextWindowManager
 from .review_cycle import ReviewCycleManager, ReviewOutcome
 from .git_operations import GitOperationsManager
 from .task_manifest import load_manifest
-from ..llm.base import LLMBackend, LLMRequest, LLMResponse
+from ..llm.base import LLMBackend, LLMResponse
 from ..queue.file_queue import FileQueue
 from ..safeguards.retry_handler import RetryHandler
 from ..safeguards.escalation import EscalationHandler
@@ -40,91 +37,21 @@ from .workflow_router import WorkflowRouter
 from .error_recovery import ErrorRecoveryManager
 from .budget_manager import BudgetManager
 from .feedback_bus import FeedbackBus
-from ..workflow.executor import PREVIEW_REVIEW_STEPS
+from .post_completion import PostCompletionManager
+from .llm_executor import LLMExecutionManager
+from .task_analytics import TaskAnalyticsManager
 
-
-# Optional sandbox imports (only used if Docker is available)
-try:
-    from ..sandbox import DockerExecutor, GoTestRunner, TestResult
-    SANDBOX_AVAILABLE = True
-except ImportError:
-    SANDBOX_AVAILABLE = False
-    DockerExecutor = None
-    GoTestRunner = None
-    TestResult = None
-
-
-# logger = logging.getLogger(__name__)  # Removed: using self.logger instead
+from .sandbox_runner import SandboxRunner
 
 # Pause/resume signal file
 PAUSE_SIGNAL_FILE = ".agent-communication/pause"
 
-# Constants for optimization strategies
-SUMMARY_CONTEXT_MAX_CHARS = 2000
-SUMMARY_MAX_LENGTH = 500
-_CONVERSATIONAL_PREFIXES = ("i ", "i'", "thank", "sure", "certainly", "of course", "let me")
-BUDGET_WARNING_THRESHOLD = 1.3  # 30% over budget
-
-# Circuit breaker: commands that indicate productive work (test/build/lint/git)
-# rather than stuck-agent flailing (ls, pwd, echo). When most commands are
-# productive, we use a higher threshold to avoid killing legitimate workflows.
-_PRODUCTIVE_PREFIXES = frozenset({
-    "pytest", "python -m pytest", "python -m unittest",
-    "pip", "pip3", "uv ",
-    "npm", "yarn", "pnpm", "bun ",
-    "make", "cmake",
-    "cargo", "go test", "go build", "go vet",
-    "mvn", "gradle",
-    "docker", "docker-compose",
-    "bandit", "pylint", "mypy", "ruff", "flake8", "black", "isort", "tox",
-    "git commit", "git push", "git add", "git diff", "git log", "git stash",
-    "python", "node ",
-})
-_PRODUCTIVE_THRESHOLD_MULTIPLIER = 3
-_PRODUCTIVE_RATIO_THRESHOLD = 0.7
-
-# Matches synthetic [Tool Call: Read], [Tool Call: Bash] etc. markers injected
-# by the Claude CLI backend into response.content for logging visibility.
-# Harmless in session logs but pure noise for downstream agents reading upstream_summary.
-_TOOL_CALL_MARKER_RE = re.compile(r'\n?\[Tool Call: [^\]]+\]\n?')
-
-
-def _strip_tool_call_markers(content: str) -> str:
-    """Remove [Tool Call: ...] markers and compress resulting whitespace."""
-    if not content:
-        return ""
-    cleaned = _TOOL_CALL_MARKER_RE.sub('\n', content)
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-    return cleaned.strip()
-
-# Diagnostic commands: environment-probing commands that indicate the agent is
-# stuck (usually after its working directory is deleted). 5+ consecutive
-# diagnostic commands trips a dedicated circuit breaker that the diversity
-# heuristic misses because pwd/echo/ls/which/find are inherently diverse.
+# Re-exported for checkpoint_manager compatibility
 _DIAGNOSTIC_PREFIXES = frozenset({
-    "pwd", "echo", "test", "[", "cd",     # shell builtins
-    "ls", "find", "stat", "file",         # filesystem probes
-    "readlink", "realpath",               # path resolution
-    "which", "type", "env", "printenv",   # environment probes
-    "whoami", "id", "uname", "hostname",  # identity probes
-    "dirname", "basename",                # path utilities
+    "pwd", "echo", "test", "[", "cd", "ls", "find", "stat", "file",
+    "readlink", "realpath", "which", "type", "env", "printenv",
+    "whoami", "id", "uname", "hostname", "dirname", "basename",
 })
-
-
-def _is_productive_command(cmd: str) -> bool:
-    """Check if a bash command is a productive tool (test/build/lint/git)."""
-    cmd_stripped = cmd.strip().lower()
-    return any(cmd_stripped.startswith(p) for p in _PRODUCTIVE_PREFIXES)
-
-
-def _is_diagnostic_command(cmd: str) -> bool:
-    """Check if a bash command is an environment-probing diagnostic."""
-    stripped = cmd.strip()
-    token = stripped.split()[0] if stripped else ""
-    # Strip path prefix: /usr/bin/echo → echo
-    bare = token.split("/")[-1].lower()
-    return bare in _DIAGNOSTIC_PREFIXES
-
 
 # Downstream agents get the correct task type for model selection
 CHAIN_TASK_TYPES = {
@@ -132,10 +59,6 @@ CHAIN_TASK_TYPES = {
     "qa": TaskType.QA_VERIFICATION,
     "architect": TaskType.REVIEW,
 }
-
-# Review cycle management moved to review_cycle.py
-# Importing for backward compatibility
-# (QAFinding, ReviewOutcome already imported above)
 
 
 @dataclass
@@ -164,200 +87,10 @@ class AgentConfig:
         return parts[0] if len(parts) == 2 and parts[1].isdigit() else self.id
 
 
-_JSON_FENCE_PATTERN = re.compile(r'```json\s*\n(.*?)\n?\s*```', re.DOTALL)
-
-_NO_CHANGES_MARKER = "[NO_CHANGES_NEEDED]"
-
-# Step classification for the deliverable gate — implementation steps must
-# produce git-visible code changes; prose-only steps (plan, review) are exempt.
-_IMPLEMENTATION_STEP_IDS = frozenset({"implement", "implementation"})
-_NON_CODE_STEP_IDS = frozenset({
-    "plan", "planning", "code_review", "qa_review", "create_pr",
-    "preview_review", "preview",
-})
-
-
 class Agent:
-    """
-    Agent with polling loop for processing tasks.
+    """Agent with polling loop for processing tasks."""
 
-    Ported from scripts/async-agent-runner.sh with the main polling loop
-    at lines 254-407.
-    """
-
-    # Steps where only Layer 1 (configured) teammates are needed —
-    # workflow-level teammates (engineer/qa) add redundant exploration
     _SOLO_WORKFLOW_STEPS = frozenset({"plan", "code_review", "preview_review", "create_pr"})
-
-    def _init_core_dependencies(
-        self,
-        config,
-        llm,
-        queue,
-        workspace,
-        jira_client,
-        github_client,
-        multi_repo_manager,
-        jira_config,
-        github_config,
-        mcp_enabled,
-        worktree_manager,
-    ):
-        """Initialize core dependencies and basic state."""
-        self.config = config
-        self.llm = llm
-        self.queue = queue
-        self.workspace = Path(workspace)
-        self.jira_client = jira_client
-        self.github_client = github_client
-        self.multi_repo_manager = multi_repo_manager
-        self.jira_config = jira_config
-        self.github_config = github_config
-        self._mcp_enabled = mcp_enabled
-        self._running = False
-        self._current_task_id: Optional[str] = None
-        self.worktree_manager = worktree_manager
-        self._active_worktree: Optional[Path] = None
-        self._last_worktree_cleanup: float = time.time()
-
-    def _init_team_mode(self, agents_config, agent_definition, team_mode_enabled, team_mode_default_model, workflows_config):
-        """Initialize team mode and workflow configuration."""
-        self._agents_config = agents_config or []
-        self._agent_definition = agent_definition
-        self._team_mode_enabled = team_mode_enabled
-        self._team_mode_default_model = team_mode_default_model
-        self._workflows_config = workflows_config or {}
-
-    def _init_logging(self, workspace):
-        """Setup rich logging and workflow executor."""
-        import os
-        log_level = os.environ.get("AGENT_LOG_LEVEL", "INFO")
-        self.logger = setup_rich_logging(
-            agent_id=self.config.id,
-            workspace=workspace,
-            log_level=log_level,
-            use_file=True,
-            use_json=False,
-        )
-        from ..workflow.executor import WorkflowExecutor
-        self._workflow_executor = WorkflowExecutor(
-            self.queue, self.queue.queue_dir, agent_logger=self.logger,
-            workspace=workspace,
-            activity_manager=None,  # wired in _init_state_tracking after ActivityManager exists
-        )
-
-    def _init_optimization_and_safeguards(self, optimization_config):
-        """Initialize optimization config and safeguards (retry/escalation)."""
-        sanitized_config = self._sanitize_optimization_config(optimization_config or {})
-        self._optimization_config = MappingProxyType(sanitized_config)
-        self.logger.info(f"🔧 Optimization config: {self._get_active_optimizations()}")
-
-        # Initialize model success store for intelligent routing
-        self._model_success_store = None
-        ir_cfg = sanitized_config.get("intelligent_routing", {})
-        if ir_cfg.get("enabled", False):
-            from ..llm.model_success_store import ModelSuccessStore
-            self._model_success_store = ModelSuccessStore(self.workspace, enabled=True)
-
-        self.retry_handler = RetryHandler(max_retries=self.config.max_retries)
-        enable_error_truncation = self._optimization_config.get("enable_error_truncation", False)
-        self.escalation_handler = EscalationHandler(enable_error_truncation=enable_error_truncation)
-
-    def _init_state_tracking(self):
-        """Initialize heartbeat, activity tracking, and caches."""
-        self.heartbeat_file = self.workspace / ".agent-communication" / "heartbeats" / self.config.id
-        self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self.activity_manager = ActivityManager(self.workspace)
-        # Wire activity_manager into executor (created before activity_manager exists)
-        self._workflow_executor.activity_manager = self.activity_manager
-        self._paused = False
-
-        # Caches for prompt guidance
-        self._error_handling_guidance: Optional[str] = None
-        self._guidance_cache: Dict[str, str] = {}
-
-        # Team composition caches
-        self._default_team_cache: Optional[dict] = None
-        self._workflow_team_cache: Dict[str, Optional[dict]] = {}
-        self._current_specialization = None
-        self._current_file_count = 0
-
-        # Pause signal cache
-        self._pause_signal_cache: Optional[bool] = None
-        self._pause_signal_cache_time: float = 0.0
-
-    def _init_agentic_features(self, memory_config, self_eval_config, replan_config):
-        """Initialize agentic features: memory, tool patterns, self-eval, replanning."""
-        # Memory system
-        mem_cfg = memory_config or {}
-        self._memory_enabled = mem_cfg.get("enabled", False)
-        self._memory_store = MemoryStore(self.workspace, enabled=self._memory_enabled)
-        self._memory_retriever = MemoryRetriever(self._memory_store)
-
-        # Tool pattern analysis
-        tool_tips_enabled = self._optimization_config.get("enable_tool_pattern_tips", False)
-        self._tool_pattern_store = ToolPatternStore(self.workspace, enabled=tool_tips_enabled)
-        self._tool_tips_enabled = tool_tips_enabled
-
-        # Self-evaluation
-        eval_cfg = self_eval_config or {}
-        self._self_eval_enabled = eval_cfg.get("enabled", False)
-        self._self_eval_max_retries = eval_cfg.get("max_retries", 2)
-        self._self_eval_model = eval_cfg.get("model", "haiku")
-
-        # Dynamic replanning
-        replan_cfg = replan_config or {}
-        self._replan_enabled = replan_cfg.get("enabled", False)
-        self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
-        self._replan_model = replan_cfg.get("model", "haiku")
-
-    def _init_session_logging(self, session_logging_config):
-        """Initialize session logging configuration."""
-        sl_cfg = session_logging_config or {}
-        self._session_logging_enabled = sl_cfg.get("enabled", False)
-        self._session_log_prompts = sl_cfg.get("log_prompts", True)
-        self._session_log_tool_inputs = sl_cfg.get("log_tool_inputs", True)
-        self._session_logs_dir = self.workspace / "logs"
-        self._session_logger: SessionLogger = noop_logger()
-
-        retention_days = sl_cfg.get("retention_days", 30)
-        if self._session_logging_enabled and retention_days > 0:
-            SessionLogger.cleanup_old_sessions(self._session_logs_dir, retention_days)
-
-    def _init_context_window_manager(self):
-        """Initialize per-task context window manager (set to None, initialized per task)."""
-        self._context_window_manager: Optional[ContextWindowManager] = None
-
-    def _init_sandbox(self):
-        """Initialize sandbox for isolated test execution."""
-        self._test_runner = None
-        if self.config.enable_sandbox and SANDBOX_AVAILABLE:
-            try:
-                executor = DockerExecutor(image=self.config.sandbox_image)
-                if executor.health_check():
-                    self._test_runner = GoTestRunner(executor=executor)
-                    self.logger.info(f"Agent {self.config.id} sandbox enabled with image {self.config.sandbox_image}")
-                else:
-                    self.logger.warning(f"Docker not available, sandbox disabled for {self.config.id}")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize sandbox for {self.config.id}: {e}")
-
-    def _init_pr_lifecycle(self, repositories_config, pr_lifecycle_config):
-        """Initialize PR lifecycle manager for autonomous CI poll → fix → merge."""
-        self._pr_lifecycle_manager = None
-        if repositories_config:
-            from .pr_lifecycle import PRLifecycleManager
-            repo_lookup = {rc.github_repo: rc.model_dump() for rc in repositories_config}
-            if repo_lookup:
-                self._pr_lifecycle_manager = PRLifecycleManager(
-                    queue=self.queue,
-                    workspace=self.workspace,
-                    repo_configs=repo_lookup,
-                    pr_lifecycle_config=pr_lifecycle_config,
-                    logger_instance=self.logger,
-                    multi_repo_manager=self.multi_repo_manager,
-                )
 
     def _init_code_indexing(self, code_indexing_config):
         """Initialize codebase indexing for structural code context in prompts."""
@@ -449,37 +182,117 @@ class Agent:
         self._exploration_alert_thresholds = exploration_alert_thresholds or {}
 
         # Core dependencies and basic state
-        self._init_core_dependencies(
-            config, llm, queue, workspace, jira_client, github_client,
-            multi_repo_manager, jira_config, github_config, mcp_enabled, worktree_manager
-        )
+        self.config = config
+        self.llm = llm
+        self.queue = queue
+        self.workspace = Path(workspace)
+        self.jira_client = jira_client
+        self.github_client = github_client
+        self.multi_repo_manager = multi_repo_manager
+        self.jira_config = jira_config
+        self.github_config = github_config
+        self._mcp_enabled = mcp_enabled
+        self._running = False
+        self._current_task_id: Optional[str] = None
+        self.worktree_manager = worktree_manager
+        self._active_worktree: Optional[Path] = None
+        self._last_worktree_cleanup: float = time.time()
 
         # Team mode and workflow configuration
-        self._init_team_mode(agents_config, agent_definition, team_mode_enabled, team_mode_default_model, workflows_config)
+        self._agents_config = agents_config or []
+        self._agent_definition = agent_definition
+        self._team_mode_enabled = team_mode_enabled
+        self._team_mode_default_model = team_mode_default_model
+        self._workflows_config = workflows_config or {}
 
         # Logging and workflow executor
-        self._init_logging(workspace)
+        import os
+        self.logger = setup_rich_logging(
+            agent_id=self.config.id, workspace=workspace,
+            log_level=os.environ.get("AGENT_LOG_LEVEL", "INFO"),
+            use_file=True, use_json=False,
+        )
+        from ..workflow.executor import WorkflowExecutor
+        self._workflow_executor = WorkflowExecutor(
+            self.queue, self.queue.queue_dir, agent_logger=self.logger,
+            workspace=workspace, activity_manager=None,
+        )
 
         # Optimization config and safeguards
-        self._init_optimization_and_safeguards(optimization_config)
+        sanitized_config = BudgetManager.sanitize_optimization_config(optimization_config or {}, logger=self.logger)
+        self._optimization_config = MappingProxyType(sanitized_config)
+        self.logger.info(f"Optimization config: {BudgetManager.get_active_optimizations(self._optimization_config)}")
+        self._model_success_store = None
+        ir_cfg = sanitized_config.get("intelligent_routing", {})
+        if ir_cfg.get("enabled", False):
+            from ..llm.model_success_store import ModelSuccessStore
+            self._model_success_store = ModelSuccessStore(self.workspace, enabled=True)
+        self.retry_handler = RetryHandler(max_retries=self.config.max_retries)
+        self.escalation_handler = EscalationHandler(
+            enable_error_truncation=self._optimization_config.get("enable_error_truncation", False)
+        )
 
         # State tracking: heartbeat, activity, caches
-        self._init_state_tracking()
+        self.heartbeat_file = self.workspace / ".agent-communication" / "heartbeats" / self.config.id
+        self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self.activity_manager = ActivityManager(self.workspace)
+        self._workflow_executor.activity_manager = self.activity_manager
+        self._paused = False
+        self._error_handling_guidance: Optional[str] = None
+        self._guidance_cache: Dict[str, str] = {}
+        self._default_team_cache: Optional[dict] = None
+        self._workflow_team_cache: Dict[str, Optional[dict]] = {}
+        self._current_specialization = None
+        self._current_file_count = 0
+        self._pause_signal_cache: Optional[bool] = None
+        self._pause_signal_cache_time: float = 0.0
 
         # Session logging (must precede agentic features — FeedbackBus needs _session_logger)
-        self._init_session_logging(session_logging_config)
+        sl_cfg = session_logging_config or {}
+        self._session_logging_enabled = sl_cfg.get("enabled", False)
+        self._session_log_prompts = sl_cfg.get("log_prompts", True)
+        self._session_log_tool_inputs = sl_cfg.get("log_tool_inputs", True)
+        self._session_logs_dir = self.workspace / "logs"
+        self._session_logger: SessionLogger = noop_logger()
+        retention_days = sl_cfg.get("retention_days", 30)
+        if self._session_logging_enabled and retention_days > 0:
+            SessionLogger.cleanup_old_sessions(self._session_logs_dir, retention_days)
 
         # Agentic features: memory, tool patterns, self-eval, replanning
-        self._init_agentic_features(memory_config, self_eval_config, replan_config)
+        mem_cfg = memory_config or {}
+        self._memory_enabled = mem_cfg.get("enabled", False)
+        self._memory_store = MemoryStore(self.workspace, enabled=self._memory_enabled)
+        self._memory_retriever = MemoryRetriever(self._memory_store)
+        tool_tips_enabled = self._optimization_config.get("enable_tool_pattern_tips", False)
+        self._tool_pattern_store = ToolPatternStore(self.workspace, enabled=tool_tips_enabled)
+        self._tool_tips_enabled = tool_tips_enabled
+        eval_cfg = self_eval_config or {}
+        self._self_eval_enabled = eval_cfg.get("enabled", False)
+        self._self_eval_max_retries = eval_cfg.get("max_retries", 2)
+        self._self_eval_model = eval_cfg.get("model", "haiku")
+        replan_cfg = replan_config or {}
+        self._replan_enabled = replan_cfg.get("enabled", False)
+        self._replan_min_retry = replan_cfg.get("min_retry_for_replan", 2)
+        self._replan_model = replan_cfg.get("model", "haiku")
 
-        # Context window manager (initialized per task)
-        self._init_context_window_manager()
+        # Context window manager — initialized per task, starts as None
+        self._context_window_manager: Optional[ContextWindowManager] = None
 
         # Sandbox for test execution
-        self._init_sandbox()
+        self._test_runner = SandboxRunner.create_test_runner(self.config, self.logger)
 
         # PR lifecycle management
-        self._init_pr_lifecycle(repositories_config, pr_lifecycle_config)
+        self._pr_lifecycle_manager = None
+        if repositories_config:
+            from .pr_lifecycle import PRLifecycleManager
+            repo_lookup = {rc.github_repo: rc.model_dump() for rc in repositories_config}
+            if repo_lookup:
+                self._pr_lifecycle_manager = PRLifecycleManager(
+                    queue=queue, workspace=self.workspace, repo_configs=repo_lookup,
+                    pr_lifecycle_config=pr_lifecycle_config, logger_instance=self.logger,
+                    multi_repo_manager=multi_repo_manager,
+                )
 
         # Codebase indexing for structural code context in prompts
         self._init_code_indexing(code_indexing_config)
@@ -557,6 +370,16 @@ class Agent:
             workflows_config=workflows_config,
         )
 
+        # Sandbox test runner
+        self._sandbox = SandboxRunner(
+            config=config,
+            logger=self.logger,
+            queue=queue,
+            activity_manager=self.activity_manager,
+            git_ops=self._git_ops,
+            test_runner=self._test_runner,
+        )
+
         # Error recovery and budget management
         self._error_recovery = ErrorRecoveryManager(
             config=config,
@@ -571,6 +394,9 @@ class Agent:
             memory_store=self._memory_store,
             replan_config=replan_config,
             self_eval_config=self_eval_config,
+            activity_manager=self.activity_manager,
+            review_cycle=self._review_cycle,
+            model_success_store=self._model_success_store,
         )
 
         # Cross-feature learning loop — depends on _error_recovery + _memory_store
@@ -590,68 +416,98 @@ class Agent:
             activity_manager=self.activity_manager,
             model_success_store=self._model_success_store,
         )
+        # Wire budget_manager into error_recovery (created before BudgetManager)
+        self._error_recovery._budget_manager = self._budget
 
-    # Backward-compatibility delegation shims for tests that call Agent._* methods
-    # These delegate to ReviewCycleManager for cleaner architecture
+        # Post-completion flow: verdicts, context handoff, chain routing
+        self._post_completion = PostCompletionManager(
+            config=config,
+            queue=queue,
+            workspace=workspace,
+            logger=self.logger,
+            session_logger=self._session_logger,
+            activity_manager=self.activity_manager,
+            review_cycle=self._review_cycle,
+            workflow_router=self._workflow_router,
+            git_ops=self._git_ops,
+            budget=self._budget,
+            error_recovery=self._error_recovery,
+            optimization_config=dict(self._optimization_config),
+            session_logging_enabled=self._session_logging_enabled,
+            session_logs_dir=self._session_logs_dir,
+            agent_definition=agent_definition,
+        )
+
+        # LLM execution: interruption watching, circuit breaker, completion logging
+        self._llm_executor = LLMExecutionManager(
+            config=config,
+            llm=llm,
+            git_ops=self._git_ops,
+            logger=self.logger,
+            session_logger=self._session_logger,
+            activity_manager=self.activity_manager,
+        )
+
+        # Task analytics: memories, tool patterns, summaries, metrics
+        self._analytics = TaskAnalyticsManager(
+            config=config,
+            logger=self.logger,
+            session_logger=self._session_logger,
+            llm=llm,
+            memory_retriever=self._memory_retriever,
+            tool_pattern_store=self._tool_pattern_store,
+            optimization_config=dict(self._optimization_config),
+            memory_enabled=self._memory_enabled,
+            tool_tips_enabled=self._tool_tips_enabled,
+            session_logging_enabled=self._session_logging_enabled,
+            session_logs_dir=self._session_logs_dir,
+            workspace=workspace,
+            feedback_bus=self._feedback_bus,
+            code_index_query=self._code_index_query,
+        )
+
+    # -- Backward-compat shims: ReviewCycleManager --
+
     def _parse_review_outcome(self, content: str) -> ReviewOutcome:
-        """Delegate to ReviewCycleManager.parse_review_outcome."""
         return self._review_cycle.parse_review_outcome(content)
 
     def _extract_review_findings(self, content: str):
-        """Delegate to ReviewCycleManager.extract_review_findings."""
         return self._review_cycle.extract_review_findings(content)
 
     def _parse_structured_findings(self, content: str):
-        """Delegate to ReviewCycleManager.parse_structured_findings."""
         return self._review_cycle.parse_structured_findings(content)
 
     def _format_findings_checklist(self, findings):
-        """Delegate to ReviewCycleManager.format_findings_checklist."""
         return self._review_cycle.format_findings_checklist(findings)
 
     def _build_review_task(self, task: Task, pr_info: dict) -> Task:
-        """Delegate to ReviewCycleManager.build_review_task."""
         return self._review_cycle.build_review_task(task, pr_info)
 
     def _build_review_fix_task(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> Task:
-        """Delegate to ReviewCycleManager.build_review_fix_task."""
         return self._review_cycle.build_review_fix_task(task, outcome, cycle_count)
 
     def _escalate_review_to_architect(self, task: Task, outcome: ReviewOutcome, cycle_count: int) -> None:
-        """Delegate to ReviewCycleManager.escalate_review_to_architect."""
         return self._review_cycle.escalate_review_to_architect(task, outcome, cycle_count)
 
     def _purge_orphaned_review_tasks(self) -> None:
-        """Delegate to ReviewCycleManager.purge_orphaned_review_tasks."""
         return self._review_cycle.purge_orphaned_review_tasks()
 
     def _get_pr_info(self, task: Task, response):
-        """Delegate to ReviewCycleManager.get_pr_info."""
         return self._review_cycle.get_pr_info(task, response)
 
     def _extract_pr_info_from_response(self, response_content: str):
-        """Delegate to ReviewCycleManager.extract_pr_info_from_response."""
         return self._review_cycle.extract_pr_info_from_response(response_content)
 
     def _queue_code_review_if_needed(self, task: Task, response) -> None:
-        """Delegate to ReviewCycleManager.queue_code_review_if_needed."""
         return self._review_cycle.queue_code_review_if_needed(task, response)
 
     def _queue_review_fix_if_needed(self, task: Task, response) -> None:
-        """Delegate to ReviewCycleManager.queue_review_fix_if_needed (without sync callback)."""
-        # Note: tests don't pass sync_jira_status_callback, so we use a no-op
-        return self._review_cycle.queue_review_fix_if_needed(task, response, lambda *args, **kwargs: None)
-
+        return self._review_cycle.queue_review_fix_if_needed(task, response, lambda *a, **kw: None)
 
     # --- Hot-reload: restart agent process when source code changes ---
 
     def _get_source_code_version(self) -> Optional[str]:
-        """Hash of *.py file mtimes under agent_framework/.
-
-        Detects actual source file edits on disk without depending on git state.
-        Previously used git rev-parse HEAD, but that false-triggered on agent
-        commits to the feature branch (HEAD changes, source files don't).
-        """
+        """Hash of *.py file mtimes — detects source edits without depending on git state."""
         source_dir = Path(__file__).parent.parent  # agent_framework/
         try:
             mtimes = []
@@ -663,10 +519,7 @@ class Agent:
             return None
 
     def _should_hot_restart(self) -> bool:
-        """Check if source code has changed since startup.
-
-        Rate-limited to once per 60s to avoid stat-scanning every poll cycle.
-        """
+        """Check if source code changed since startup (rate-limited to 60s)."""
         if not hasattr(self, "_startup_code_version") or self._startup_code_version is None:
             return False
         now = time.time()
@@ -679,14 +532,7 @@ class Agent:
         return current != self._startup_code_version
 
     def _hot_restart(self) -> None:
-        """Replace the current process with a fresh one to pick up code changes.
-
-        Safe: only called between tasks (never mid-task). os.execv is atomic —
-        it replaces the process image without running finally/atexit handlers.
-        File descriptors (locks, logs) are released by the OS on process replacement.
-        If execv fails (e.g. interpreter gone), OSError propagates and the agent
-        loop continues with the old code.
-        """
+        """Replace process with fresh one to pick up code changes (only between tasks)."""
         import sys
         import os as _os
 
@@ -730,11 +576,7 @@ class Agent:
         ] + sys.argv[1:])
 
     async def run(self) -> None:
-        """
-        Main polling loop.
-
-        Ported from scripts/async-agent-runner.sh lines 254-407.
-        """
+        """Main polling loop."""
         self._running = True
         self._startup_code_version = self._get_source_code_version()
         self._last_version_check: float = 0.0
@@ -833,12 +675,7 @@ class Agent:
         self._write_heartbeat()
 
     def _validate_task_or_reject(self, task: Task) -> bool:
-        """
-        Validate task and reject if invalid.
-
-        Returns:
-            True if task is valid and should be processed, False if rejected
-        """
+        """Validate task and reject if invalid. Returns True if task should proceed."""
         if not self.config.validate_tasks:
             return True
 
@@ -907,11 +744,9 @@ class Agent:
 
     async def _handle_successful_response(self, task: Task, response, task_start_time, *, working_dir: Optional[Path] = None) -> None:
         """Handle successful LLM response including tests, workflow, and completion."""
-        from datetime import datetime, timezone
-
         # Extract summary from response
         if self._optimization_config.get("enable_result_summarization", False):
-            summary = await self._extract_summary(response.content, task)
+            summary = await self._analytics.extract_summary(response.content, task)
             task.result_summary = summary
             self.logger.debug(f"Task {task.id} summary: {summary}")
 
@@ -956,505 +791,78 @@ class Agent:
                 await self._handle_failure(task)
                 return
 
-        # Extract structured plan from architect's planning response
-        if (task.plan is None
-                and self.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
-            content = getattr(response, "content", "") or ""
-            extracted = self._extract_plan_from_response(content)
-            if extracted:
-                task.plan = extracted
-                self.logger.info(
-                    f"Extracted plan from response: {len(extracted.files_to_modify)} files, "
-                    f"{len(extracted.approach)} steps"
-                )
-                # Build requirements checklist so downstream agents have a concrete contract
-                from .task_decomposer import extract_requirements_checklist
-                checklist = extract_requirements_checklist(extracted)
-                if checklist:
-                    task.context["requirements_checklist"] = checklist
-                    self.logger.info(f"Extracted {len(checklist)} requirements checklist items")
-            else:
-                self.logger.warning("Architect plan step completed but no PlanDocument found in response")
-
-            # Extract design rationale sentences so downstream agents understand constraints
-            rationale = self._extract_design_rationale(content)
-            if rationale:
-                task.context["_design_rationale"] = rationale
-
-        # Verdict must be set before serialization so it persists to disk
-        self._set_structured_verdict(task, response)
-
-        # Save upstream context AFTER plan extraction + verdict so task.context
-        # has structured data when _build_chain_task copies it. The raw
-        # upstream_summary is superseded by chain state in prompt rendering.
-        if task.context.get("workflow") or task.context.get("chain_step"):
-            self._save_upstream_context(task, response)
-
-        # Append step to chain state file — structured data for step-aware rendering
-        if task.context.get("workflow") or task.context.get("chain_step"):
-            self._save_step_to_chain_state(task, response, working_dir=working_dir, task_start_time=task_start_time)
-
-        # Safety commit: catch any uncommitted work before marking done
-        if working_dir and working_dir.exists() and self._is_implementation_step(task):
-            self._git_ops.safety_commit(working_dir, f"WIP: uncommitted changes at task completion ({task.id})")
-
-        # Mark completed
-        self.logger.debug(f"Marking task {task.id} as completed")
-        task.mark_completed(self.config.id)
-        self.queue.mark_completed(task)
-        self.logger.info(f"✅ Task {task.id} moved to completed")
-
-        # Deterministic JIRA transition on task completion
-        if self._agent_definition and self._agent_definition.jira_on_complete:
-            comment = f"Task completed by {self.config.id}"
-            pr_url = task.context.get("pr_url")
-            if pr_url:
-                comment += f"\nPR: {pr_url}"
-            self._sync_jira_status(task, self._agent_definition.jira_on_complete, comment=comment)
-
-        # Transition to COMPLETING status
-        self.activity_manager.update_activity(AgentActivity(
-            agent_id=self.config.id,
-            status=AgentStatus.COMPLETING,
-            current_task=CurrentTask(
-                id=task.id,
-                title=task.title,
-                type=get_type_str(task.type),
-                started_at=task_start_time
-            ),
-            last_updated=datetime.now(timezone.utc)
-        ))
-
-        routing_signal = read_routing_signal(self.workspace, task.id)
-        if routing_signal:
-            self.logger.info(
-                f"Routing signal: target={routing_signal.target_agent}, "
-                f"reason={routing_signal.reason}"
-            )
-
-        # __complete__ at plan step: distinguish "done planning" from "no work needed"
-        if (routing_signal
-                and routing_signal.target_agent == WORKFLOW_COMPLETE
-                and self.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
-            if task.plan is not None:
-                # Plan was extracted — __complete__ means "I finished planning",
-                # not "the whole workflow is done." Clear the signal so the
-                # unconditional plan→implement edge fires normally.
-                self.logger.info(
-                    f"Clearing __complete__ routing signal at plan step — "
-                    f"plan was extracted ({len(task.plan.files_to_modify)} files), "
-                    f"proceeding to implement"
-                )
-                self._session_logger.log(
-                    "routing_signal_cleared", task_id=task.id,
-                    reason="plan_extracted_at_plan_step",
-                    plan_files=len(task.plan.files_to_modify),
-                )
-                routing_signal = None
-            else:
-                # No plan extracted + __complete__ → nothing more to implement.
-                # Let the signal pass through to enforce_chain where
-                # workflow_router handles PR creation via queue_pr_creation_if_needed
-                # (which checks implementation_branch to skip PR when no code exists).
-                self.logger.info(
-                    "No plan extracted at plan step — passing __complete__ signal "
-                    "to workflow router for PR lifecycle handling"
-                )
-                self._session_logger.log(
-                    "routing_signal_passthrough", task_id=task.id,
-                    reason="no_plan_at_plan_step",
-                    routing_signal_reason=routing_signal.reason,
-                )
-
-        self._run_post_completion_flow(task, response, routing_signal, task_start_time)
+        # Delegate the rest to PostCompletionManager
+        self._post_completion.finalize_successful_response(
+            task, response, task_start_time,
+            working_dir=working_dir,
+            context_window_manager=self._context_window_manager,
+            extract_and_store_memories_cb=self._analytics.extract_and_store_memories,
+            analyze_tool_patterns_cb=self._analytics.analyze_tool_patterns,
+            sync_jira_status_cb=self._sync_jira_status,
+        )
 
     def _run_post_completion_flow(self, task: Task, response, routing_signal, task_start_time) -> None:
-        """Route completed task through workflow chain, collect metrics.
+        """Delegate to PostCompletionManager."""
+        self._post_completion.run_post_completion_flow(
+            task, response, routing_signal, task_start_time,
+            context_window_manager=self._context_window_manager,
+            extract_and_store_memories_cb=self._analytics.extract_and_store_memories,
+            analyze_tool_patterns_cb=self._analytics.analyze_tool_patterns,
+            sync_jira_status_cb=self._sync_jira_status,
+        )
 
-        Subtasks (parent_task_id set) skip the workflow chain — the fan-in
-        task aggregates results and flows through QA/review/PR instead.
-        """
-        # Accumulate cost before chain routing so _build_chain_task
-        # copies the up-to-date total into the next task's context
-        if response is not None:
-            this_cost = self._budget.estimate_cost(response)
-            prev = task.context.get("_cumulative_cost", 0.0)
-            task.context["_cumulative_cost"] = prev + this_cost
-
-        # Stamp ceiling once on root task; propagated via context copy
-        if "_budget_ceiling" not in task.context:
-            ceiling = self._resolve_budget_ceiling(task)
-            if ceiling is not None:
-                task.context["_budget_ceiling"] = ceiling
-
-        # Pre-scan tasks are fire-and-forget — save findings and skip all
-        # workflow routing (no enforce_chain, no legacy review, no PR creation)
-        if task.context.get("pre_scan"):
-            self._save_pre_scan_findings(task, response)
-            self._extract_and_store_memories(task, response)
-            self._analyze_tool_patterns(task)
-            self._log_task_completion_metrics(task, response, task_start_time)
-            return
-
-        # Validate parent actually exists before fan-in — LLMs can
-        # fabricate parent references when they directly write task JSON.
-        # A phantom parent_task_id causes the guard below to skip the
-        # workflow chain with no fan-in ever firing.
-        if task.parent_task_id is not None:
-            parent = self._workflow_router.queue.find_task(task.parent_task_id)
-            if parent is None:
-                self.logger.warning(
-                    f"Task {task.id} has phantom parent_task_id "
-                    f"{task.parent_task_id!r} — not found in queue/completed. "
-                    f"Clearing to allow normal workflow routing."
-                )
-                task.parent_task_id = None
-
-        # Fan-in check: if this is a subtask, check if all siblings are done
-        self._workflow_router.check_and_create_fan_in_task(task)
-
-        # Subtasks wait for fan-in — don't route them individually through
-        # the workflow chain. The fan-in task handles QA/review/PR creation.
-        if task.parent_task_id is not None:
-            self.logger.debug(
-                f"Subtask {task.id} complete — skipping workflow chain "
-                f"(fan-in will handle routing)"
-            )
-        else:
-            # Legacy direct-queue routing only for tasks without a workflow DAG.
-            # Workflow-managed tasks route through _enforce_workflow_chain() exclusively.
-            has_workflow = bool(task.context.get("workflow"))
-            if not has_workflow and not task.context.get("chain_step"):
-                self.logger.warning(
-                    f"Task {task.id} has no workflow in context — "
-                    f"expected for CLI/web-created tasks"
-                )
-            if not has_workflow:
-                self.logger.debug(f"Checking if code review needed for {task.id}")
-                self._review_cycle.queue_code_review_if_needed(task, response)
-                self._review_cycle.queue_review_fix_if_needed(task, response, self._sync_jira_status)
-
-            # Verdict was already set in _handle_successful_completion() before
-            # serialization. Check it here to decide whether to skip chain enforcement.
-            skip_chain = task.context.get("verdict") == "no_changes"
-            if skip_chain:
-                self.logger.info(
-                    f"No-changes verdict at plan step for task {task.id} — "
-                    f"terminating workflow (nothing to implement or PR)"
-                )
-
-            self._git_ops.detect_implementation_branch(task)
-
-            chain_routed = False
-            if not skip_chain:
-                chain_routed = self._enforce_workflow_chain(task, response, routing_signal=routing_signal)
-
-            # Emit waterfall summary when the chain terminates (either at
-            # terminal step or via no_changes early exit)
-            if skip_chain or self._is_at_terminal_workflow_step(task):
-                self._emit_workflow_summary(task)
-
-            # Push + PR lifecycle after chain routing. Skip if the chain
-            # successfully routed a downstream task — that agent will handle PR.
-            # Also skip PR creation if the terminal step verdict is needs_fix
-            # (review rejected the code — creating a PR would ship broken work)
-            if not chain_routed:
-                terminal_verdict = task.context.get("verdict")
-                if terminal_verdict == "needs_fix" and self._is_at_terminal_workflow_step(task):
-                    self.logger.warning(
-                        f"Skipping PR creation: terminal step verdict is needs_fix for {task.id}"
-                    )
-                else:
-                    self._git_ops.push_and_create_pr_if_needed(task)
-                    self._git_ops.manage_pr_lifecycle(task)
-
-        self._extract_and_store_memories(task, response)
-        tool_call_count = self._analyze_tool_patterns(task)
-        self._log_task_completion_metrics(task, response, task_start_time, tool_call_count=tool_call_count)
+    # -- Backward-compat shims: PostCompletionManager --
 
     def _log_task_completion_metrics(self, task: Task, response, task_start_time, *, tool_call_count=None) -> None:
-        """Log token usage, cost, and completion events.
-
-        Delegated to BudgetManager.
-        """
-        ctx_status = self._context_window_manager.get_budget_status() if self._context_window_manager else None
-        self._budget.log_task_completion_metrics(
+        self._post_completion.log_task_completion_metrics(
             task, response, task_start_time,
             tool_call_count=tool_call_count,
-            root_task_id=task.root_id,
-            context_budget_status=ctx_status,
+            context_window_manager=self._context_window_manager,
         )
 
     def _approval_verdict(self, task: Task) -> str:
-        """Return the appropriate approval verdict for the current workflow step.
-
-        preview_review uses "preview_approved" so the preview_approved DAG edge
-        fires instead of the generic "approved" edge, which routes to qa_review
-        rather than implement.
-        """
-        if task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS:
-            return "preview_approved"
-        return "approved"
+        return self._post_completion.approval_verdict(task)
 
     def _set_structured_verdict(self, task: Task, response) -> None:
-        """Parse review outcome and store verdict + audit trail before task serialization.
-
-        Only qa/architect agents with a workflow produce verdicts.
-        Engineer output may contain stray keywords that cause false verdicts.
-        """
-        if not task.context.get("workflow"):
-            return
-        if self.config.base_id not in ("qa", "architect"):
-            return
-
-        content = getattr(response, "content", "") or ""
-        outcome, audit = self._review_cycle._parse_review_outcome_audited(content)
-
-        workflow_step = task.context.get("workflow_step", "")
-
-        if outcome.approved:
-            task.context["verdict"] = self._approval_verdict(task)
-            audit.method = "review_outcome"
-        elif outcome.needs_fix:
-            task.context["verdict"] = "needs_fix"
-            audit.method = "review_outcome"
-        else:
-            _REVIEW_STEP_IDS = PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
-            if workflow_step in _REVIEW_STEP_IDS:
-                self.logger.warning(
-                    f"Ambiguous review outcome at step {workflow_step!r} for "
-                    f"task {task.id} — not setting verdict (chain will halt)"
-                )
-                audit.method = "ambiguous_halt"
-            else:
-                task.context["verdict"] = self._approval_verdict(task)
-                audit.method = "ambiguous_default"
-
-        # no_changes marker overrides any previous verdict at plan step
-        if (self.config.base_id == "architect"
-                and task.context.get("workflow_step", get_type_str(task.type)) in ("plan", "planning")):
-            if self._is_no_changes_response(content):
-                task.context["verdict"] = "no_changes"
-                audit.method = "no_changes_marker"
-                audit.no_changes_marker_found = True
-
-        audit.agent_id = self.config.id
-        audit.workflow_step = workflow_step
-        audit.task_id = task.id
-        audit.value = task.context.get("verdict")
-
-        task.context["verdict_audit"] = audit.to_dict()
-        self._session_logger.log("verdict_audit", **audit.to_dict())
+        self._post_completion.set_structured_verdict(task, response)
 
     @staticmethod
     def _is_no_changes_response(content: str) -> bool:
-        """Detect if response indicates no code changes are needed.
-
-        Requires the LLM to emit an explicit marker rather than relying
-        on regex over free-text, which is prone to false positives when
-        the planner describes existing state.
-        """
-        if not content:
-            return False
-        # Marker must appear in the first 200 chars (before any plan body)
-        return _NO_CHANGES_MARKER in content[:200]
+        return PostCompletionManager.is_no_changes_response(content)
 
     def _is_implementation_step(self, task: Task) -> bool:
-        """Whether this task is an implementation step that must produce code.
-
-        Returns True for workflow "implement" steps and for engineer agents
-        running without an explicit workflow step (direct-queue work).
-        Returns False for prose-only steps (plan, review, QA, PR creation).
-        """
-        step = task.context.get("workflow_step")
-        if step in _IMPLEMENTATION_STEP_IDS:
-            return True
-        if step in _NON_CODE_STEP_IDS:
-            return False
-        # No explicit step — engineer agents doing direct-queue work
-        return self.config.base_id == "engineer"
+        return PostCompletionManager.is_implementation_step(task, self.config.base_id)
 
     def _resolve_budget_ceiling(self, task: Task) -> Optional[float]:
-        """Resolve USD budget ceiling from task effort and/or absolute cap.
+        return self._post_completion.resolve_budget_ceiling(task)
 
-        Returns the tighter of the two when both are set, or whichever is
-        available when only one is configured.  Returns None when neither applies.
-        """
-        effort_ceiling = None
-        if self._optimization_config.get("enable_effort_budget_ceilings", False):
-            effort = task.estimated_effort
-            if not effort:
-                effort = self._budget.derive_effort_from_plan(task.plan)
-            effort_ceiling = self._budget.get_effort_ceiling(effort.upper())
-
-        absolute = self._optimization_config.get("absolute_budget_ceiling_usd")
-
-        if effort_ceiling is not None and absolute is not None:
-            return min(effort_ceiling, absolute)
-        return effort_ceiling if effort_ceiling is not None else absolute
+    # -- Backward-compat shims: ErrorRecoveryManager --
 
     @staticmethod
     def _extract_partial_progress(content: str, max_bytes: int = 2048) -> str:
-        """Extract meaningful text blocks from a partial LLM response.
-
-        Filters out [Tool Call: ...] noise and keeps the last few
-        substantive text blocks so retries can pick up where we left off.
-        """
-        if not content:
-            return ""
-
-        # Split on tool-call markers and keep non-marker blocks
-        blocks = re.split(r'\[Tool Call:[^\]]*\]', content)
-        meaningful = [b.strip() for b in blocks if b.strip()]
-
-        # Keep last 5 meaningful blocks
-        meaningful = meaningful[-5:]
-        joined = "\n\n".join(meaningful)
-
-        # Enforce size cap
-        if len(joined.encode("utf-8", errors="replace")) > max_bytes:
-            joined = joined[-max_bytes:]
-
-        return joined
+        return ErrorRecoveryManager.extract_partial_progress(content, max_bytes)
 
     def _finalize_failed_attempt(
         self, task: Task, working_dir: Optional[Path], *,
-        content: Optional[str] = None,
-        error: Optional[str] = None,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
-        cost_usd: Optional[float] = None,
+        content: Optional[str] = None, error: Optional[str] = None,
+        input_tokens: int = 0, output_tokens: int = 0, cost_usd: Optional[float] = None,
     ) -> None:
-        """Consolidate all attempt preservation for retry awareness.
-
-        Called from all failure/interruption paths before task reset.
-        Captures partial progress, records attempt to disk, preserves code.
-        """
-        # Extract partial progress from LLM content
-        if content:
-            summary = self._extract_partial_progress(content)
-            if summary:
-                task.context["_previous_attempt_summary"] = summary
-
-        # Record attempt: commit WIP, push, persist to disk
-        try:
-            from .attempt_tracker import record_attempt
-            record = record_attempt(
-                workspace=self.workspace,
-                task=task,
-                agent_id=self.config.id,
-                working_dir=working_dir,
-                error=error or task.last_error,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_usd=cost_usd,
-                logger=self.logger,
-            )
-            if record and record.branch:
-                task.context["_previous_attempt_branch"] = record.branch
-                task.context["_previous_attempt_commit_sha"] = record.commit_sha
-        except Exception as e:
-            self.logger.debug(f"Attempt recording failed (non-fatal): {e}")
+        self._error_recovery.finalize_failed_attempt(
+            task, working_dir, content=content, error=error,
+            input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost_usd,
+        )
 
     def _can_salvage_verdict(self, task: Task, response) -> bool:
-        """Check if a failed response contains a valid review verdict worth salvaging.
-
-        Claude CLI occasionally exits 1 after producing complete output
-        (e.g., cleanup failure after verdict). Salvage rather than retry.
-        """
-        if self.config.base_id not in ("qa", "architect"):
-            return False
-
-        content = getattr(response, "content", "") or ""
-        if len(content) < 200:
-            return False
-
-        outcome = self._review_cycle.parse_review_outcome(content)
-        return outcome.approved or outcome.needs_fix
+        return self._error_recovery.can_salvage_verdict(task, response)
 
     async def _handle_failed_response(self, task: Task, response, *, working_dir: Optional[Path] = None) -> None:
-        """Handle failed LLM response."""
-        from datetime import datetime
-
-        task.last_error = response.error or "Unknown error"
-
-        # Accumulate cost so budget ceilings see failed-attempt spend
-        this_cost = self._budget.estimate_cost(response)
-        prev = task.context.get("_cumulative_cost", 0.0)
-        task.context["_cumulative_cost"] = prev + this_cost
-
-        # Record attempt: partial progress + commit WIP + push + persist
-        self._finalize_failed_attempt(
-            task, working_dir,
-            content=response.content,
-            error=response.error,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            cost_usd=this_cost,
-        )
-
-        # Log detailed error information for debugging
-        self.logger.error(
-            f"Task failed with detailed error:\n"
-            f"  Task ID: {task.id}\n"
-            f"  Error: {task.last_error}\n"
-            f"  Model: {response.model_used}\n"
-            f"  Latency: {response.latency_ms:.0f}ms\n"
-            f"  Finish reason: {response.finish_reason}"
-        )
-        self.logger.task_failed(task.last_error, task.retry_count)
-
-        self._session_logger.log(
-            "task_failed",
-            error=task.last_error,
-            retry=task.retry_count,
-            model=response.model_used,
-            finish_reason=response.finish_reason,
-            tokens_in=response.input_tokens,
-            tokens_out=response.output_tokens,
-            cost=this_cost,
-        )
-
         ctx_budget = self._context_window_manager.budget if self._context_window_manager else None
-        self.activity_manager.append_event(ActivityEvent(
-            type="fail",
-            agent=self.config.id,
-            task_id=task.id,
-            title=task.title,
-            timestamp=datetime.now(timezone.utc),
-            retry_count=task.retry_count,
-            error_message=task.last_error,
-            root_task_id=task.root_id,
-            context_utilization_percent=ctx_budget.utilization_percent if ctx_budget else None,
-            context_budget_tokens=ctx_budget.total_budget if ctx_budget else None,
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            cost=this_cost,
-        ))
-
-        # Record failure outcome for intelligent routing
-        if self._model_success_store is not None and response.model_used:
-            repo_slug = task.context.get("github_repo", "")
-            task_type_str = task.type if isinstance(task.type, str) else task.type.value
-            self._model_success_store.record_outcome(
-                repo_slug=repo_slug,
-                model_tier=response.model_used,
-                task_type=task_type_str,
-                success=False,
-                cost=this_cost,
-            )
-
-        await self._handle_failure(task)
+        await self._error_recovery.handle_failed_response(
+            task, response, working_dir=working_dir, context_budget=ctx_budget,
+        )
 
     def _cleanup_task_execution(self, task: Task, lock) -> None:
-        """Cleanup after task execution.
-
-        IDLE is set AFTER worktree cleanup so the agent stays in the
-        protected set during periodic cleanup (prevents race where our
-        worktree gets evicted mid-cleanup).
-        """
+        """Cleanup after task: safety commit, worktree cleanup, set IDLE, release lock."""
         from datetime import datetime
 
         task_succeeded = task.status == TaskStatus.COMPLETED
@@ -1478,7 +886,7 @@ class Agent:
         self._current_task_id = None
 
     def _get_validated_working_directory(self, task: Task) -> Path:
-        """Get working directory with one retry if the path vanishes between creation and use."""
+        """Get working directory with one retry if path vanishes."""
         # On retries, restore the manifest branch so get_working_directory()
         # checks out the same branch the original attempt used
         if task.retry_count and task.retry_count > 0:
@@ -1512,22 +920,10 @@ class Agent:
         return working_dir
 
     def _maybe_run_periodic_worktree_cleanup(self) -> None:
-        """No-op. Automatic worktree deletion is disabled.
-
-        Worktrees are only cleaned up via the explicit CLI command
-        `agent cleanup-worktrees`. This prevents race conditions where
-        active worktrees get deleted while agents are still using them.
-        """
-        return
+        """No-op — worktrees cleaned via CLI only."""
 
     async def _watch_for_interruption(self) -> None:
-        """Poll for pause/stop signals during LLM execution.
-
-        Completes (returns) when an interruption is detected, which causes
-        the asyncio.wait race in _handle_task to cancel the LLM call.
-        Also monitors worktree existence — returns (triggering LLM cancellation)
-        when directory vanishes instead of letting the LLM burn tool calls.
-        """
+        """Poll for pause/stop/worktree-vanish during LLM execution."""
         while self._running and not self._check_pause_signal():
             self._write_heartbeat()
             wt = self._git_ops.active_worktree
@@ -1569,10 +965,13 @@ class Agent:
             log_prompts=self._session_log_prompts,
             log_tool_inputs=self._session_log_tool_inputs,
         )
-        # Update workflow router, executor, and read cache session loggers for this task
+        # Update all managers' session loggers for this task
         self._workflow_router.set_session_logger(self._session_logger)
         self._workflow_executor.set_session_logger(self._session_logger)
         self._read_cache.set_session_logger(self._session_logger)
+        self._post_completion.set_session_logger(self._session_logger)
+        self._llm_executor.set_session_logger(self._session_logger)
+        self._analytics.set_session_logger(self._session_logger)
         self._session_logger.log(
             "task_start",
             agent=self.config.id,
@@ -1661,394 +1060,38 @@ class Agent:
         return team_agents
 
     async def _execute_llm_with_interruption_watch(self, task: Task, prompt: str, working_dir: Path, team_agents: Optional[dict]) -> Optional[LLMResponse]:
-        """Execute LLM with interruption watching, return response or None if interrupted."""
-        from datetime import datetime
-
-        # Setup tool activity tracking via CheckpointManager
-        from .checkpoint_manager import CheckpointManager
-        _circuit_breaker_event = asyncio.Event()
-        _workflow_step = task.context.get("workflow_step")
-        _exploration_threshold = (
-            self._exploration_alert_thresholds.get(_workflow_step, self._exploration_alert_threshold)
-            if _workflow_step else self._exploration_alert_threshold
-        )
-        _checkpoint_mgr = CheckpointManager(
-            task=task,
-            working_dir=working_dir,
+        """Delegate to LLMExecutionManager."""
+        response = await self._llm_executor.execute(
+            task, prompt, working_dir, team_agents,
+            context_window_manager=self._context_window_manager,
             is_implementation_step=self._is_implementation_step(task),
             max_consecutive_tool_calls=self._max_consecutive_tool_calls,
             max_consecutive_diagnostic_calls=self._max_consecutive_diagnostic_calls,
-            exploration_threshold=_exploration_threshold,
-            workflow_step=_workflow_step,
-            git_ops=self._git_ops,
-            session_logger=self._session_logger,
-            activity_manager=self.activity_manager,
-            context_window_manager=self._context_window_manager,
-            logger=self.logger,
-            circuit_breaker_event=_circuit_breaker_event,
-            agent_id=self.config.id,
-            agent_base_id=self.config.base_id,
+            exploration_alert_threshold=self._exploration_alert_threshold,
+            exploration_alert_thresholds=self._exploration_alert_thresholds,
+            watch_for_interruption_coro=self._watch_for_interruption,
+            update_phase_cb=self._update_phase,
+            current_specialization=self._current_specialization,
+            current_file_count=self._current_file_count,
+            optimization_config=dict(self._optimization_config),
+            finalize_failed_attempt_cb=self._finalize_failed_attempt,
         )
-
-        def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
-            _checkpoint_mgr.on_tool_activity(tool_name, tool_input_summary)
-
-        # Log LLM start
-        self._update_phase(TaskPhase.EXECUTING_LLM)
-        self.logger.phase_change("executing_llm")
-        self.logger.info(
-            f"🤖 Calling LLM (model: {task.type}, attempt: {task.retry_count + 1})"
-        )
-        self._session_logger.log(
-            "llm_start",
-            task_type=get_type_str(task.type),
-            retry=task.retry_count,
-        )
-
-        # PREVIEW tasks get tool-level read-only enforcement so the model cannot write
-        # files even if it ignores the prompt instructions. This supplements (not replaces)
-        # the prompt injection in _inject_preview_mode().
-        preview_allowed_tools: list[str] | None = None
-        if task.type == TaskType.PREVIEW:
-            preview_allowed_tools = [
-                "Read", "Glob", "Grep", "Bash", "WebFetch", "WebSearch",
-            ]
-
-        # Behavioral directive to reduce redundant file reads within a session
-        efficiency_parts = [
-            "EFFICIENCY: Track which files you have already read in this session. "
-            "When you read a file, read it ONCE in full — never chunk through the same "
-            "file with repeated Read calls at different offsets. After one full read, "
-            "the contents are in your context; use your conversation history to recall "
-            "them. Use Grep for targeted searches instead of reading files at all.",
-        ]
-        efficiency_parts.append(
-            "COMMIT DISCIPLINE: After completing each major deliverable, immediately "
-            "commit AND push your work (git add + git commit + git push origin HEAD). "
-            "This preserves progress if you run out of context or lose your working "
-            "directory. Prioritize shipping all deliverables over perfecting any single one."
-        )
-        efficiency_parts.append(
-            "FAILURE CIRCUIT BREAKER: If 3+ consecutive bash/shell commands fail with errors, "
-            "STOP. Do not attempt more diagnostic commands. Instead, report what went wrong "
-            "and what you were trying to do."
-        )
-        if self.config.id == "architect":
-            efficiency_parts.append(
-                "EXPLORATION: Do not delegate file exploration to subagents — "
-                "explore the codebase directly with Grep and Read."
-            )
-        efficiency_directive = " ".join(efficiency_parts)
-
-        # Compute routing signals for intelligent model selection
-        _estimated_lines = 0
-        if task.plan:
-            from .task_decomposer import estimate_plan_lines
-            _estimated_lines = estimate_plan_lines(task.plan)
-
-        # Force stronger model on retry after context exhaustion or circuit breaker
-        if task.context.get("_escalate_model"):
-            _estimated_lines = max(_estimated_lines, 600)
-
-        _budget_remaining_usd = None
-        _budget_ceiling = task.context.get("_budget_ceiling")
-        _cumulative_cost = task.context.get("_cumulative_cost", 0.0)
-        if _budget_ceiling is not None:
-            _budget_remaining_usd = max(0.0, _budget_ceiling - _cumulative_cost)
-
-        # Race LLM execution against pause/stop signal watcher
-        llm_coro = self.llm.complete(
-            LLMRequest(
-                prompt=prompt,
-                task_type=task.type,
-                retry_count=task.retry_count,
-                context=task.context,
-                working_dir=str(working_dir),
-                agents=team_agents,
-                specialization_profile=self._current_specialization.id if self._current_specialization else None,
-                file_count=self._current_file_count,
-                estimated_lines=_estimated_lines,
-                budget_remaining_usd=_budget_remaining_usd,
-                allowed_tools=preview_allowed_tools,
-                append_system_prompt=efficiency_directive,
-                env_vars=self._git_ops.worktree_env_vars,
-            ),
-            task_id=task.id,
-            on_tool_activity=_on_tool_activity,
-            on_session_tool_call=self._session_logger.log_tool_call,
-            on_session_tool_result=self._session_logger.log_tool_result,
-        )
-        llm_task = asyncio.create_task(llm_coro)
-        watcher_task = asyncio.create_task(self._watch_for_interruption())
-        circuit_breaker_task = asyncio.create_task(_circuit_breaker_event.wait())
-
-        done, pending = await asyncio.wait(
-            [llm_task, watcher_task, circuit_breaker_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        if circuit_breaker_task in done:
-            # Stuck agent detected — kill subprocess and return synthetic failure
-            count = _checkpoint_mgr.consecutive_bash
-            diag_count = _checkpoint_mgr.consecutive_diagnostic
-            is_diagnostic = _checkpoint_mgr.diagnostic_tripped
-            commands = _checkpoint_mgr.bash_commands
-            unique = len(set(commands))
-            diversity = unique / count if count > 0 else 0.0
-            productive = sum(1 for c in commands if _is_productive_command(c))
-            productive_ratio = productive / count if count > 0 else 0.0
-            trigger = "diagnostic" if is_diagnostic else "volume"
-
-            wd_str = str(working_dir) if working_dir else "N/A"
-            wd_exists = working_dir.exists() if working_dir else None
-
-            if is_diagnostic:
-                self.logger.warning(
-                    f"Diagnostic circuit breaker tripped for task {task.id}: "
-                    f"{diag_count} consecutive diagnostic commands "
-                    f"(threshold={self._max_consecutive_diagnostic_calls})"
-                    f" (working_dir={wd_str}, exists={wd_exists})"
-                )
-                event_title = (
-                    f"Diagnostic circuit breaker: {diag_count} consecutive diagnostic commands"
-                    f" — {wd_str}"
-                )
-                error_msg = (
-                    f"Stuck agent detected: {diag_count} consecutive diagnostic commands — "
-                    f"working directory {wd_str} (exists={wd_exists})"
-                )
-            else:
-                self.logger.warning(
-                    f"Circuit breaker tripped for task {task.id}: "
-                    f"{count} consecutive Bash calls (threshold={self._max_consecutive_tool_calls}, "
-                    f"diversity={diversity:.2f}, unique_commands={unique}, "
-                    f"productive_ratio={productive_ratio:.2f})"
-                    f" (working_dir={wd_str}, exists={wd_exists})"
-                )
-                event_title = (
-                    f"Circuit breaker: {count} consecutive Bash calls "
-                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f})"
-                    f" — {wd_str}"
-                )
-                error_msg = (
-                    f"Circuit breaker tripped: {count} consecutive Bash calls without other tool types "
-                    f"(diversity={diversity:.2f}, productive_ratio={productive_ratio:.2f}). "
-                    f"Working directory {wd_str} (exists={wd_exists})."
-                )
-
-            # Auto-commit WIP before killing — prevents code loss
-            await self._auto_commit_wip(task, working_dir, count)
-
-            self.llm.cancel()
-
-            # Record attempt for retry awareness (partial progress + disk persistence)
-            try:
-                partial = self.llm.get_partial_output()
-            except Exception:
-                partial = None
-            self._finalize_failed_attempt(task, working_dir, content=partial, error=error_msg)
-
-            llm_task.cancel()
-            watcher_task.cancel()
-            for t in [llm_task, watcher_task]:
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
-
-            self._session_logger.log(
-                "circuit_breaker",
-                trigger=trigger,
-                consecutive_bash=count,
-                consecutive_diagnostic=diag_count,
-                threshold=self._max_consecutive_diagnostic_calls if is_diagnostic else self._max_consecutive_tool_calls,
-                unique_commands=unique,
-                diversity=round(diversity, 2),
-                productive_ratio=round(productive_ratio, 2),
-                working_dir=wd_str,
-                working_dir_exists=wd_exists,
-                last_commands=[c[:200] for c in commands[-5:]],
-            )
-
-            self.activity_manager.append_event(ActivityEvent(
-                type="circuit_breaker",
-                agent=self.config.id,
-                task_id=task.id,
-                title=event_title,
-                timestamp=datetime.now(timezone.utc),
-            ))
-            _checkpoint_mgr.emit_subagent_summary("circuit_breaker", True)
-            return LLMResponse(
-                content="",
-                model_used="",
-                input_tokens=0,
-                output_tokens=0,
-                finish_reason="circuit_breaker",
-                latency_ms=0,
-                success=False,
-                error=error_msg,
-            )
-
-        if watcher_task in done:
-            # Determine cause: worktree vanished vs pause/stop signal
-            wt = self._git_ops.active_worktree
-            worktree_gone = wt is not None and not wt.exists()
-
-            if worktree_gone:
-                error_msg = f"Worktree vanished during LLM execution: {wt}"
-                event_type = "worktree_vanished"
-            else:
-                error_msg = "Interrupted during LLM execution"
-                event_type = "interrupted"
-
-            self.logger.info(f"{error_msg} for task {task.id}, cancelling LLM")
-            self.llm.cancel()
-            llm_task.cancel()
-            circuit_breaker_task.cancel()
-            try:
-                await llm_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                self.logger.debug(f"LLM task raised during cancellation: {e}")
-
-            # Harvest partial output and record attempt for retry awareness
-            partial = self.llm.get_partial_output()
-            self._finalize_failed_attempt(
-                task, working_dir,
-                content=partial,
-                error=error_msg,
-            )
-
-            if worktree_gone:
-                self._session_logger.log(
-                    "worktree_vanished",
-                    path=str(wt),
-                    task_id=task.id,
-                )
-
-            task.last_error = error_msg
-            task.reset_to_pending()
+        # LLMExecutionManager._handle_interruption sets task state but
+        # needs queue.update — handle it here for the interruption case
+        if response is None and task.status == TaskStatus.PENDING:
             self.queue.update(task)
-            self.activity_manager.append_event(ActivityEvent(
-                type=event_type,
-                agent=self.config.id,
-                task_id=task.id,
-                title=task.title,
-                timestamp=datetime.now(timezone.utc),
-            ))
-            self.logger.info(f"Task {task.id} reset to pending after {event_type}")
-            _checkpoint_mgr.emit_subagent_summary(event_type, True)
-            return None
-        else:
-            # LLM finished first — cancel watcher and circuit breaker, return response
-            watcher_task.cancel()
-            circuit_breaker_task.cancel()
-            try:
-                await watcher_task
-            except asyncio.CancelledError:
-                pass
-            result = llm_task.result()
-            outcome = "success" if result and result.success else "failed"
-            _checkpoint_mgr.emit_subagent_summary(outcome, not (result and result.success))
-            return result
+        return response
+
+    # -- Backward-compat shims: LLMExecutionManager --
 
     async def _auto_commit_wip(self, task: Task, working_dir: Path, bash_count: int) -> None:
-        """Best-effort WIP commit so code isn't lost when circuit breaker trips."""
-        try:
-            committed = self._git_ops.safety_commit(
-                working_dir,
-                f"WIP: auto-save before circuit breaker ({bash_count} consecutive Bash calls)",
-            )
-            if committed:
-                self._session_logger.log("wip_auto_commit", task_id=task.id, bash_count=bash_count)
-        except Exception:
-            pass
+        await self._llm_executor.auto_commit_wip(task, working_dir, bash_count)
 
     def _log_routing_decision(self, task: Task, response) -> None:
-        """Log intelligent routing decision if one was made."""
-        backend = self.llm
-        selector = getattr(backend, 'model_selector', None)
-        decision = getattr(selector, '_last_routing_decision', None) if selector else None
-        if decision is None:
-            return
-        # Clear stashed decision so it doesn't leak to the next call
-        selector._last_routing_decision = None
-        self._session_logger.log(
-            "model_routing_decision",
-            chosen_tier=decision.chosen_tier,
-            scores=decision.scores,
-            signals=decision.signals,
-            fallback=decision.fallback,
-            model_used=response.model_used,
-        )
-        self.activity_manager.append_event(ActivityEvent(
-            type="model_routing_decision",
-            agent=self.config.id,
-            task_id=task.id,
-            title=f"Intelligent routing: {decision.chosen_tier} (scores: {decision.scores})",
-            timestamp=datetime.now(timezone.utc),
-        ))
+        self._llm_executor.log_routing_decision(task, response)
 
     def _process_llm_completion(self, response, task: Task) -> None:
-        """Log LLM completion and update context window manager."""
-        from datetime import datetime
-
-        # Log LLM completion to session log
-        self._session_logger.log(
-            "llm_complete",
-            success=response.success,
-            model=response.model_used,
-            tokens_in=response.input_tokens,
-            tokens_out=response.output_tokens,
-            cost=response.reported_cost_usd,
-            duration_ms=response.latency_ms,
-        )
-
-        # Update context window manager with actual token usage
-        if self._context_window_manager:
-            self._context_window_manager.update_token_usage(
-                response.input_tokens,
-                response.output_tokens
-            )
-            budget_status = self._context_window_manager.get_budget_status()
-            self.logger.debug(
-                f"Context budget: {budget_status['utilization_percent']:.1f}% used "
-                f"({budget_status['used_so_far']}/{budget_status['total_budget']} tokens)"
-            )
-
-            self._session_logger.log(
-                "context_budget_update",
-                utilization_percent=budget_status["utilization_percent"],
-                used_tokens=budget_status["used_so_far"],
-                total_budget=budget_status["total_budget"],
-                remaining=budget_status["remaining"],
-            )
-
-            # Check if we should trigger a checkpoint due to budget exhaustion
-            if self._context_window_manager.should_trigger_checkpoint():
-                self.logger.warning(
-                    "Context budget critically low (>90% used). "
-                    "Consider splitting task into subtasks."
-                )
-                self.activity_manager.append_event(ActivityEvent(
-                    type="context_budget_critical",
-                    agent=self.config.id,
-                    task_id=task.id,
-                    title="Context budget >90%: consider task splitting",
-                    timestamp=datetime.now(timezone.utc)
-                ))
-                self._session_logger.log(
-                    "context_budget_critical",
-                    task_id=task.id,
-                    utilization_percent=budget_status["utilization_percent"],
-                )
-
-        # Clear tool activity after LLM completes
-        try:
-            self.activity_manager.update_tool_activity(self.config.id, None)
-        except Exception:
-            pass
+        self._llm_executor.process_completion(response, task, context_window_manager=self._context_window_manager)
 
     async def _handle_task(self, task: Task, *, lock: Optional["FileLock"] = None) -> None:
         """Handle task execution with retry/escalation logic."""
@@ -2061,7 +1104,6 @@ class Agent:
                 lock.release()
             return
 
-        # Use pre-acquired lock from claim(), or fall back to separate acquire
         if lock is None:
             lock = self.queue.acquire_lock(task.id, self.config.id)
             if not lock:
@@ -2070,27 +1112,20 @@ class Agent:
 
         task_start_time = datetime.now(timezone.utc)
 
-        # Setup task context (logging, session logger)
         self._setup_task_context(task, task_start_time)
-
-        # Initialize context window manager
         self._setup_context_window_manager_for_task(task)
 
         working_dir = None
         _cost_before_try = task.context.get("_cumulative_cost", 0.0)
         try:
-            # Initialize task execution state
             self._initialize_task_execution(task, task_start_time)
-
-            # Get working directory for task (worktree, target repo, or framework workspace)
             working_dir = self._get_validated_working_directory(task)
             self.logger.info(f"Working directory: {working_dir}")
 
-            # Discover committed work from previous attempts so retry prompt knows what exists
             if task.retry_count > 0:
                 branch_work = self._git_ops.discover_branch_work(working_dir)
 
-                # Fallback: if discover found nothing, check attempt history for a pushed branch
+                # Fallback: check attempt history for a pushed branch
                 if not branch_work:
                     try:
                         from .attempt_tracker import get_last_pushed_branch
@@ -2120,11 +1155,8 @@ class Agent:
                         file_count=len(branch_work["file_list"]),
                     )
 
-            # Index codebase for structural context (cached by commit SHA)
             self._try_index_codebase(task, working_dir)
-
             self.logger.phase_change("analyzing")
-            # Update prompt builder with per-task context
             self._prompt_builder.ctx.session_logger = self._session_logger
             self._prompt_builder.ctx.context_window_manager = self._context_window_manager
             prompt = self._prompt_builder.build(task)
@@ -2285,639 +1317,79 @@ class Agent:
                 self._session_logger = noop_logger()
 
     async def _handle_failure(self, task: Task) -> None:
-        """
-        Handle task failure with retry/escalation logic.
-
-        Delegated to ErrorRecoveryManager.
-        """
+        """Delegate retry/escalation to ErrorRecoveryManager."""
         await self._error_recovery.handle_failure(task)
 
-
-    def _sanitize_optimization_config(self, config: dict) -> dict:
-        """
-        Sanitize optimization config before making immutable.
-
-        Validates and corrects invalid values, warns about issues.
-        """
-        config = config.copy()  # Don't modify input
-
-        # Clamp canary percentage to valid range
-        canary = config.get("canary_percentage", 0)
-        if not 0 <= canary <= 100:
-            self.logger.warning(f"Invalid canary_percentage: {canary}, clamping to [0, 100]")
-            config["canary_percentage"] = max(0, min(100, canary))
-
-        # Warn about incompatible flag combinations
-        if config.get("shadow_mode") and config.get("canary_percentage", 0) > 0:
-            self.logger.warning(
-                "shadow_mode and canary_percentage both enabled. "
-                "Shadow mode will use legacy prompts regardless of canary setting."
-            )
-
-        return config
+    # -- Backward-compat shims: BudgetManager --
 
     def _get_active_optimizations(self) -> Dict[str, Any]:
-        """Get dict of which optimizations are currently active."""
-        return {
-            "minimal_prompts": self._optimization_config.get("enable_minimal_prompts", False),
-            "compact_json": self._optimization_config.get("enable_compact_json", False),
-            "context_dedup": self._optimization_config.get("enable_context_deduplication", False),
-            "token_tracking": self._optimization_config.get("enable_token_tracking", False),
-            "budget_warnings": self._optimization_config.get("enable_token_budget_warnings", False),
-            "result_summarization": self._optimization_config.get("enable_result_summarization", False),
-            "error_truncation": self._optimization_config.get("enable_error_truncation", False),
-            "shadow_mode": self._optimization_config.get("shadow_mode", False),
-            "canary_percentage": self._optimization_config.get("canary_percentage", 0),
-        }
+        return BudgetManager.get_active_optimizations(self._optimization_config)
 
     def _should_use_optimization(self, task: Task) -> bool:
-        """
-        Determine if task should use optimizations based on canary percentage.
-
-        Uses deterministic hash-based selection for consistent behavior.
-        Task-level overrides take precedence over canary selection.
-        """
-        # Check for task-level override first
-        if hasattr(task, 'optimization_override') and task.optimization_override is not None:
-            reason = getattr(task, 'optimization_override_reason', 'no reason given')
-            self.logger.info(
-                f"Task {task.id} optimization override: {task.optimization_override} ({reason})"
-            )
-            return task.optimization_override
-
-        canary_pct = self._optimization_config.get("canary_percentage", 0)
-
-        if canary_pct == 0:
-            return False
-        elif canary_pct >= 100:
-            return True
-        else:
-            # Use deterministic hash for consistent selection
-            task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
-            return (task_hash % 100) < canary_pct
+        return BudgetManager.should_use_optimization(task, self._optimization_config, logger=self.logger)
 
     def _get_token_budget(self, task_type: TaskType) -> int:
-        """Get expected token budget for task type.
-
-        Delegated to BudgetManager.
-        """
         return self._budget.get_token_budget(task_type)
 
+    # -- Backward-compat shims: TaskAnalyticsManager --
+
     async def _extract_summary(self, response: str, task: Task, _recursion_depth: int = 0) -> str:
-        """
-        Extract key outcomes from agent response.
+        return await self._analytics.extract_summary(response, task, _recursion_depth)
 
-        Implements Strategy 5 (Result Summarization) from the optimization plan.
+    def _get_repo_slug(self, task: Task) -> Optional[str]:
+        return TaskAnalyticsManager.get_repo_slug(task)
 
-        Uses two-tier extraction:
-        1. Regex patterns (free, fast) - extracts JIRA keys, PR URLs, file paths
-        2. Haiku fallback (cheap) - only if regex insufficient
+    def _extract_and_store_memories(self, task: Task, response) -> None:
+        self._analytics.extract_and_store_memories(task, response)
 
-        Args:
-            _recursion_depth: Defensive guard to prevent recursion. Currently
-                            not used since we don't recurse, but kept for safety.
+    def _analyze_tool_patterns(self, task: Task) -> Optional[int]:
+        return self._analytics.analyze_tool_patterns(task)
 
-        Expected savings: 20-30% on follow-up tasks through context reuse.
-        """
-        # Guard against empty response
-        if not response or not response.strip():
-            return f"Task {get_type_str(task.type)} completed (no output)"
-
-        # Defensive guard - prevents recursion even though we don't recurse currently
-        if _recursion_depth > 0:
-            self.logger.debug("Recursion depth exceeded in summary extraction, using fallback")
-            return f"Task {get_type_str(task.type)} completed"
-
-        # Try regex extraction first (fast, no cost)
-        extracted = []
-
-        # Extract JIRA keys: project prefix must NOT be a known non-JIRA
-        # acronym (HTTP, UTF, ISO, etc.) and must be followed by a digit-only ticket number
-        jira_keys = [
-            m for m in re.findall(r'\b([A-Z]{2,5}-\d{1,6})\b', response)
-            if not re.match(r'^(?:HTTP|UTF|ISO|RFC|TCP|UDP|SSH|SSL|TLS|DNS|API|URL|URI|XML|CSV|PDF)-', m)
-        ]
-        if jira_keys:
-            # Deduplicate and limit
-            jira_keys = list(set(jira_keys))[:10]
-            extracted.append(f"Created/Updated: {', '.join(jira_keys)}")
-
-        # Extract PR URLs
-        pr_urls = re.findall(r'github\.com/[^/]+/[^/]+/pull/(\d+)', response)
-        if pr_urls:
-            pr_urls = list(set(pr_urls))[:5]
-            extracted.append(f"PRs: {', '.join(pr_urls)}")
-
-        # Extract file paths (comprehensive pattern)
-        file_paths = re.findall(
-            r'\b(?:src|lib|app|tests?|pkg|internal|cmd)/[^\s:;,]+\.(?:py|ts|tsx|js|jsx|go|rb|java|kt)',
-            response
+    def _record_optimization_metrics(self, task: Task, legacy_prompt_length: int, optimized_prompt_length: int) -> None:
+        self._analytics.record_optimization_metrics(
+            task, legacy_prompt_length, optimized_prompt_length,
+            should_use_optimization_cb=self._should_use_optimization,
+            get_active_optimizations_cb=self._get_active_optimizations,
         )
-        if file_paths:
-            # Deduplicate and limit
-            file_paths = list(set(file_paths))[:5]
-            extracted.append(f"Modified: {', '.join(file_paths)}")
 
-        # If regex extraction found enough, use that
-        if len(extracted) >= 2:
-            return " | ".join(extracted)
-
-        # Fall back to Haiku for summarization (only if enabled and insufficient data)
-        if self._optimization_config.get("enable_result_summarization", False):
-            summary_prompt = (
-                "Extract the key outcomes from the following agent output. "
-                "Return exactly 3 bullet points, each on its own line starting with '- '. "
-                "Focus on: what was done, what files/PRs were created, and the final status.\n\n"
-                "<agent_output>\n"
-                f"{response[:SUMMARY_CONTEXT_MAX_CHARS]}\n"
-                "</agent_output>"
-            )
-            try:
-                summary_response = await self.llm.complete(LLMRequest(
-                    prompt=summary_prompt,
-                    system_prompt="You are a summarization tool. Output only bullet points. Never converse, ask questions, or add commentary.",
-                    model="haiku",
-                    temperature=0.0,
-                    max_tokens=512,
-                ))
-
-                if summary_response.success and summary_response.content:
-                    content = summary_response.content.strip()
-                    # Guard against conversational garbage from the LLM
-                    if content.lower().startswith(_CONVERSATIONAL_PREFIXES):
-                        self.logger.warning("Haiku returned conversational response, using fallback")
-                    else:
-                        return content[:SUMMARY_MAX_LENGTH]
-                else:
-                    self.logger.warning(f"Haiku summary failed: {summary_response.error}")
-            except Exception as e:
-                self.logger.warning(f"Failed to extract summary with Haiku: {e}")
-
-        # Guaranteed fallback
-        return extracted[0] if extracted else f"Task {get_type_str(task.type)} completed"
-
-    # -- Upstream Context Handoff --
+    # -- Backward-compat shims: PostCompletionManager (additional) --
 
     UPSTREAM_CONTEXT_MAX_CHARS = 15000
     UPSTREAM_INLINE_MAX_CHARS = 15000
 
     def _save_upstream_context(self, task: Task, response) -> None:
-        """Save agent's response to disk so downstream agents can read it.
+        self._post_completion.save_upstream_context(task, response)
 
-        Creates .agent-context/summaries/{task_id}-{agent_id}.md with
-        the response content (truncated to UPSTREAM_CONTEXT_MAX_CHARS).
-
-        Note: path mirrors FrameworkConfig.context_dir default.
-        """
-        try:
-            from ..utils.atomic_io import atomic_write_text
-
-            summaries_dir = self.workspace / ".agent-context" / "summaries"
-            summaries_dir.mkdir(parents=True, exist_ok=True)
-
-            content = _strip_tool_call_markers(response.content or "")
-            if len(content) > self.UPSTREAM_CONTEXT_MAX_CHARS:
-                content = content[:self.UPSTREAM_CONTEXT_MAX_CHARS] + "\n\n[truncated]"
-
-            context_file = summaries_dir / f"{task.id}-{self.config.base_id}.md"
-            atomic_write_text(context_file, content)
-
-            # Store path in task context for chain propagation
-            task.context["upstream_context_file"] = str(context_file)
-            # Store inline for cross-worktree portability (file path may not resolve)
-            task.context["upstream_summary"] = content[:self.UPSTREAM_INLINE_MAX_CHARS]
-            task.context["upstream_source_agent"] = self.config.base_id
-            step = task.context.get("workflow_step")
-            if step:
-                task.context["upstream_source_step"] = step
-            self.logger.debug(f"Saved upstream context ({len(content)} chars) to {context_file}")
-        except Exception as e:
-            self.logger.warning(f"Failed to save upstream context for {task.id}: {e}")
-
-    def _save_step_to_chain_state(
-        self, task: Task, response, *,
-        working_dir: Optional[Path] = None,
-        task_start_time: Optional[datetime] = None,
-    ) -> None:
-        """Append a structured step record to the chain state file.
-
-        Called AFTER plan extraction + verdict setting so all structured
-        data is available. Non-fatal — workflow continues on failure.
-        """
-        try:
-            from .chain_state import append_step
-
-            # Compute tool stats from session log (session is fully flushed by this point)
-            tool_stats_dict = None
-            if self._session_logging_enabled:
-                tool_stats_dict = self._compute_tool_stats_for_chain(task)
-
-            content = getattr(response, "content", "") or ""
-            state = append_step(
-                workspace=self.workspace,
-                task=task,
-                agent_id=self.config.base_id,
-                response_content=content,
-                working_dir=working_dir,
-                tool_stats=tool_stats_dict,
-                started_at=task_start_time,
-            )
-
-            # Store files_modified in task context for chain propagation
-            if state.steps:
-                last_step = state.steps[-1]
-                if last_step.files_modified:
-                    task.context["files_modified"] = last_step.files_modified
-
-            self.logger.debug(
-                f"Chain state: appended step {task.context.get('workflow_step', 'unknown')} "
-                f"({len(state.steps)} total steps)"
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to save chain state for {task.id}: {e}")
+    def _save_step_to_chain_state(self, task: Task, response, **kwargs) -> None:
+        self._post_completion.save_step_to_chain_state(task, response, **kwargs)
 
     def _emit_workflow_summary(self, task: Task) -> None:
-        """Emit a waterfall summary event capturing the full workflow timeline.
-
-        Non-fatal — failure to emit doesn't block task completion.
-        """
-        try:
-            from .chain_state import load_chain_state, build_workflow_summary
-
-            state = load_chain_state(self.workspace, task.root_id)
-            if state is None or not state.steps:
-                return
-
-            summary = build_workflow_summary(state)
-
-            # Enrich with PR URL if available
-            pr_url = task.context.get("pr_url")
-            if pr_url:
-                summary["pr_url"] = pr_url
-
-            if self._session_logging_enabled:
-                self._session_logger.log("workflow_summary", **summary)
-
-            self.activity_manager.append_event(ActivityEvent(
-                type="workflow_summary",
-                agent=self.config.id,
-                task_id=task.id,
-                title=f"Workflow {summary.get('outcome', 'unknown')}: {len(summary.get('steps', []))} steps",
-                timestamp=datetime.now(timezone.utc),
-                root_task_id=task.root_id,
-                duration_ms=int(summary["total_duration_seconds"] * 1000) if summary.get("total_duration_seconds") else None,
-            ))
-
-            self.logger.info(
-                f"Workflow summary: {summary.get('outcome')} in {len(summary.get('steps', []))} steps, "
-                f"{summary.get('total_duration_seconds')}s"
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to emit workflow summary for {task.id}: {e}")
+        self._post_completion.emit_workflow_summary(task)
 
     def _compute_tool_stats_for_chain(self, task: Task) -> Optional[Dict]:
-        """Compute tool usage stats dict for embedding in chain state.
-
-        Returns a plain dict suitable for JSON serialization, or None
-        if the session log doesn't exist or has no tool calls.
-
-        Caches on task.context["_tool_stats_cache"] so _analyze_tool_patterns
-        can reuse the parsed result without re-reading the session log.
-        """
-        session_path = self._session_logs_dir / "sessions" / f"{task.id}.jsonl"
-        if not session_path.exists():
-            return None
-
-        try:
-            from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer, compute_tool_usage_stats
-            from dataclasses import asdict
-
-            analyzer = ToolPatternAnalyzer()
-            tool_calls = analyzer.extract_tool_calls(session_path)
-            if not tool_calls:
-                return None
-
-            stats = compute_tool_usage_stats(tool_calls)
-            stats_dict = asdict(stats)
-            # Cache for reuse by _analyze_tool_patterns (avoids double-parse)
-            task.context["_tool_stats_cache"] = stats_dict
-            return stats_dict
-        except Exception as e:
-            self.logger.debug(f"Tool stats computation failed (non-fatal): {e}")
-            return None
+        return self._post_completion.compute_tool_stats_for_chain(task)
 
     def _save_pre_scan_findings(self, task: Task, response) -> None:
-        """Persist QA pre-scan results so downstream agents can load them.
-
-        Writes to .agent-communication/pre-scans/{root_task_id}.json.
-        Non-fatal — workflow continues even if this fails.
-        """
-        try:
-            from ..utils.atomic_io import atomic_write_text
-
-            root_task_id = task.root_id
-            pre_scans_dir = self.workspace / ".agent-communication" / "pre-scans"
-            pre_scans_dir.mkdir(parents=True, exist_ok=True)
-
-            content = getattr(response, "content", "") or ""
-            structured = self._extract_structured_findings_from_content(content)
-
-            findings_data = {
-                "root_task_id": root_task_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "raw_summary": content[:4000],
-                "structured_findings": structured,
-            }
-
-            findings_file = pre_scans_dir / f"{root_task_id}.json"
-            atomic_write_text(findings_file, json.dumps(findings_data, indent=2))
-            self.logger.info(f"Saved pre-scan findings to {findings_file}")
-        except Exception as e:
-            self.logger.warning(f"Failed to save pre-scan findings for {task.id}: {e}")
+        self._post_completion.save_pre_scan_findings(task, response)
 
     @staticmethod
     def _extract_structured_findings_from_content(content: str) -> dict:
-        """Parse structured findings JSON from LLM response content.
-
-        Looks for ```json ... ``` blocks and parses the last one as findings.
-        Returns {"findings": [...], "summary": "..."} or empty dict.
-        """
-        if not content:
-            return {}
-
-        matches = _JSON_FENCE_PATTERN.findall(content)
-        if not matches:
-            return {}
-
-        # Parse the last JSON block (most likely the findings output)
-        try:
-            parsed = json.loads(matches[-1])
-            if isinstance(parsed, list):
-                return {"findings": parsed, "summary": ""}
-            if isinstance(parsed, dict):
-                if "findings" not in parsed:
-                    parsed["findings"] = []
-                return parsed
-            return {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
+        return PostCompletionManager.extract_structured_findings_from_content(content)
 
     @staticmethod
-    def _extract_plan_from_response(content: str) -> Optional[PlanDocument]:
-        """Parse PlanDocument JSON from architect's planning response.
-
-        Looks for ```json blocks containing PlanDocument fields (objectives,
-        approach, success_criteria). Returns the first valid match, or None.
-        """
-        if not content:
-            return None
-
-        matches = _JSON_FENCE_PATTERN.findall(content)
-        if not matches:
-            return None
-
-        for raw in matches:
-            try:
-                parsed = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(parsed, dict):
-                continue
-            # Unwrap {"plan": {...}} wrapper if present
-            if "plan" in parsed and isinstance(parsed["plan"], dict):
-                parsed = parsed["plan"]
-            # Discriminate: must have the 3 required PlanDocument fields
-            if not all(k in parsed for k in ("objectives", "approach", "success_criteria")):
-                continue
-            try:
-                return PlanDocument.model_validate(parsed)
-            except Exception:
-                continue
-        return None
-
-    _RATIONALE_RE = re.compile(
-        r'[^.]*\b(?:because|tradeoff|trade-off|instead of|constraint|reason)\b[^.]*\.',
-        re.IGNORECASE,
-    )
+    def _extract_plan_from_response(content: str):
+        return PostCompletionManager.extract_plan_from_response(content)
 
     @staticmethod
     def _extract_design_rationale(content: str) -> Optional[str]:
-        """Extract design rationale sentences from planning response.
+        return PostCompletionManager.extract_design_rationale(content)
 
-        Pulls sentences containing reasoning keywords (because, tradeoff,
-        constraint, etc.) to preserve the architect's design intent for
-        downstream agents.
-        """
-        if not content:
-            return None
-
-        sentences = Agent._RATIONALE_RE.findall(content)
-        if not sentences:
-            return None
-
-        # Deduplicate while preserving order, cap at 1000 chars
-        seen: set[str] = set()
-        unique = []
-        for s in sentences:
-            s = s.strip()
-            if s not in seen and len(s) > 20:
-                seen.add(s)
-                unique.append(s)
-
-        if not unique:
-            return None
-
-        result = " ".join(unique)
-        return result[:1000] if len(result) > 1000 else result
-
-    def _get_repo_slug(self, task: Task) -> Optional[str]:
-        """Extract repo slug from task context."""
-        return task.context.get("github_repo")
-
-    def _extract_and_store_memories(self, task: Task, response) -> None:
-        """Extract learnings from successful response and store as memories."""
-        if not self._memory_enabled:
-            return
-
-        repo_slug = self._get_repo_slug(task)
-        if not repo_slug:
-            return
-
-        count = self._memory_retriever.extract_memories_from_response(
-            response_content=response.content,
-            repo_slug=repo_slug,
-            agent_type=self.config.base_id,
-            task_id=task.id,
-        )
-        if count > 0:
-            self.logger.info(f"Extracted {count} memories from task {task.id}")
-            self._session_logger.log(
-                "memory_store",
-                repo=repo_slug,
-                count=count,
-            )
-
-        # Cross-feature learning: route all post-task learnings through FeedbackBus
-        # (includes replan success persistence, self-eval gaps, QA recurrence, debate hints)
-        try:
-            self._feedback_bus.process(task, repo_slug)
-        except Exception as e:
-            self.logger.debug(f"Feedback bus error (non-fatal): {e}")
-
-    # -- Tool Pattern Analysis --
-
-    def _analyze_tool_patterns(self, task: Task) -> Optional[int]:
-        """Run post-task analysis on session log to detect inefficient tool usage.
-
-        Returns total tool call count (or None if analysis was skipped).
-        """
-        if not self._session_logging_enabled:
-            return None
-
-        session_path = self._session_logs_dir / "sessions" / f"{task.id}.jsonl"
-        if not session_path.exists():
-            return None
-
-        tool_call_count = None
-        tool_calls = None
-        try:
-            from ..memory.tool_pattern_analyzer import ToolPatternAnalyzer, compute_tool_usage_stats
-
-            analyzer = ToolPatternAnalyzer()
-
-            # Reuse stats from _compute_tool_stats_for_chain if available
-            cached = task.context.pop("_tool_stats_cache", None)
-            if cached:
-                tool_call_count = cached.get("total_calls")
-                self._session_logger.log("tool_usage_stats", agent_id=self.config.id, **cached)
-            else:
-                tool_calls = analyzer.extract_tool_calls(session_path)
-                if tool_calls:
-                    stats = compute_tool_usage_stats(tool_calls)
-                    tool_call_count = stats.total_calls
-                    self._session_logger.log(
-                        "tool_usage_stats",
-                        agent_id=self.config.id,
-                        total_calls=stats.total_calls,
-                        tool_distribution=stats.tool_distribution,
-                        duplicate_reads=stats.duplicate_reads,
-                        read_before_write_ratio=stats.read_before_write_ratio,
-                        edit_write_count=stats.edit_write_count,
-                        exploration_count=stats.exploration_count,
-                        edit_density=stats.edit_density,
-                        files_read=stats.files_read,
-                        files_written=stats.files_written,
-                    )
-
-            # Language mismatch: flag searches for extensions belonging to a different language
-            repo_slug = self._get_repo_slug(task)
-            if repo_slug and self._code_index_query:
-                try:
-                    from ..memory.tool_pattern_analyzer import detect_language_mismatches
-                    from dataclasses import asdict
-                    project_language = self._code_index_query.get_project_language(repo_slug)
-                    if project_language:
-                        if tool_calls is None:
-                            tool_calls = analyzer.extract_tool_calls(session_path)
-                        mismatches = detect_language_mismatches(tool_calls, project_language)
-                        if mismatches:
-                            self._session_logger.log(
-                                "language_mismatch",
-                                agent_id=self.config.id,
-                                project_language=project_language,
-                                repo=repo_slug,
-                                mismatch_count=len(mismatches),
-                                mismatches=[asdict(m) for m in mismatches],
-                            )
-                except Exception as e:
-                    self.logger.debug(f"Language mismatch detection failed (non-fatal): {e}")
-
-            # Qualitative anti-pattern detection (gated by tool_tips config)
-            if self._tool_tips_enabled:
-                if not repo_slug:
-                    repo_slug = self._get_repo_slug(task)
-                if repo_slug:
-                    recommendations = analyzer.analyze_session(session_path)
-                    if recommendations:
-                        count = self._tool_pattern_store.store_patterns(repo_slug, recommendations)
-                        self.logger.debug(f"Stored {count} tool pattern recommendations")
-                        self._session_logger.log(
-                            "tool_patterns_analyzed",
-                            repo=repo_slug,
-                            patterns_found=len(recommendations),
-                            patterns_stored=count,
-                        )
-        except Exception as e:
-            self.logger.debug(f"Tool pattern analysis failed (non-fatal): {e}")
-
-        return tool_call_count
+    # -- Backward-compat shims: ErrorRecoveryManager (additional) --
 
     async def _self_evaluate(self, task: Task, response, *, test_passed=None, working_dir=None) -> bool:
-        """Review agent's own output against acceptance criteria.
-
-        Delegated to ErrorRecoveryManager.
-        """
         return await self._error_recovery.self_evaluate(
             task, response, test_passed=test_passed, working_dir=working_dir
         )
-
-    def _categorize_error(self, error_message: str) -> Optional[str]:
-        """Categorize error message for better diagnostics.
-
-        Delegates to EscalationHandler.categorize_error for consistent
-        pattern matching across the codebase.
-        """
-        return self.escalation_handler.categorize_error(error_message)
-    def _inject_replan_context(self, prompt: str, task: Task) -> str:
-        """Append revised plan and attempt history to prompt if available.
-
-        Delegated to ErrorRecoveryManager.
-        """
-        return self._error_recovery.inject_replan_context(prompt, task)
-
-    def _record_optimization_metrics(
-        self,
-        task: Task,
-        legacy_prompt_length: int,
-        optimized_prompt_length: int
-    ) -> None:
-        """
-        Record optimization metrics for post-deployment analysis.
-
-        Writes metrics to .agent-communication/metrics/optimization.jsonl
-        for later analysis of optimization effectiveness.
-        """
-        try:
-            metrics = {
-                "task_id": task.id,
-                "task_type": get_type_str(task.type),
-                "agent_id": self.config.id,
-                "legacy_prompt_chars": legacy_prompt_length,
-                "optimized_prompt_chars": optimized_prompt_length,
-                "savings_chars": legacy_prompt_length - optimized_prompt_length,
-                "savings_percent": (
-                    (legacy_prompt_length - optimized_prompt_length) / legacy_prompt_length * 100
-                    if legacy_prompt_length > 0 else 0
-                ),
-                "canary_active": self._should_use_optimization(task),
-                "optimizations_enabled": self._get_active_optimizations(),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-
-            # Write to metrics file for later analysis
-            metrics_dir = self.workspace / ".agent-communication" / "metrics"
-            metrics_dir.mkdir(parents=True, exist_ok=True)
-            metrics_file = metrics_dir / "optimization.jsonl"
-
-            with open(metrics_file, "a") as f:
-                f.write(json.dumps(metrics) + "\n")
-        except PermissionError as e:
-            self.logger.warning(f"Permission denied recording optimization metrics: {e}")
-        except OSError as e:
-            self.logger.warning(f"Failed to record optimization metrics (disk full?): {e}")
-        except Exception as e:
-            # Don't fail task if metrics recording fails
-            self.logger.debug(f"Unexpected error recording optimization metrics: {e}")
 
     def _update_phase(self, phase: TaskPhase):
         """Update current execution phase."""
@@ -2940,11 +1412,7 @@ class Agent:
                 ))
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
-        """Transition a JIRA ticket to target_status if all preconditions are met.
-
-        Deterministic framework-level JIRA updates — agents don't reliably call
-        MCP tools, so the framework ensures tickets reflect actual progress.
-        """
+        """Framework-level JIRA status transition if all preconditions are met."""
         jira_key = task.context.get("jira_key")
         if not jira_key:
             return
@@ -2971,11 +1439,7 @@ class Agent:
         self.heartbeat_file.write_text(str(int(time.time())))
 
     async def _heartbeat_loop(self) -> None:
-        """Background loop that writes heartbeats independent of main loop progress.
-
-        Decouples heartbeat freshness from LLM call duration so the watchdog
-        can use a tight timeout (90s) without false-positive kills.
-        """
+        """Background heartbeat independent of main loop progress."""
         while self._running:
             try:
                 self._write_heartbeat()
@@ -2984,14 +1448,7 @@ class Agent:
             await asyncio.sleep(self._heartbeat_interval)
 
     def _check_pause_signal(self) -> bool:
-        """Check if pause signal file exists.
-
-        Checks for two pause signals:
-        1. PAUSE_SIGNAL_FILE - manual pause by user
-        2. PAUSE_INTAKE - automatic pause by orchestrator due to health issues
-
-        Result is cached for 5 seconds to reduce filesystem I/O.
-        """
+        """Check pause signal files (manual or orchestrator). Cached 5s."""
         now = time.time()
         if self._pause_signal_cache is not None and (now - self._pause_signal_cache_time) < 5.0:
             return self._pause_signal_cache
@@ -3008,131 +1465,36 @@ class Agent:
         """Check if agent is currently paused."""
         return self._paused
 
+    # -- Backward-compat shims: SandboxRunner --
+
     async def _run_sandbox_tests(self, task: Task) -> Optional[Any]:
-        """Run tests in Docker sandbox if enabled and applicable.
-
-        Returns:
-            TestResult if tests were run, None if sandbox not enabled/applicable
-        """
-        # Skip if sandbox not initialized
-        if not self._test_runner:
-            return None
-
-        # Only run tests for implementation tasks
-        if task.type not in (TaskType.IMPLEMENTATION, TaskType.FIX, TaskType.BUGFIX, TaskType.ENHANCEMENT):
-            return None
-
-        # Get repository path
-        github_repo = task.context.get("github_repo")
-        if not github_repo:
-            self.logger.debug(f"Skipping sandbox tests for {task.id}: no github_repo in context")
-            return None
-
-        repo_path = self._git_ops.get_working_directory(task)
-        if not repo_path.exists():
-            self.logger.warning(f"Repository path does not exist: {repo_path}")
-            return None
-
-        # Update task status
-        task.status = TaskStatus.TESTING
-        self.queue.update(task)
-        self._update_phase(TaskPhase.COMMITTING)  # Reuse committing phase for testing
-
-        self.logger.info(f"Running tests in sandbox for {task.id} at {repo_path}")
-
-        try:
-            # Run tests
-            test_result = self._test_runner.run_sync(
-                repo_path=repo_path,
-                packages="./...",
-                verbose=True,
-            )
-
-            self.logger.info(f"Test result for {task.id}: {test_result.summary}")
-
-            # Log test event
-            self.activity_manager.append_event(ActivityEvent(
-                type="test_complete" if test_result.success else "test_fail",
-                agent=self.config.id,
-                task_id=task.id,
-                title=test_result.summary,
-                timestamp=datetime.now(timezone.utc)
-            ))
-
-            return test_result
-
-        except Exception as e:
-            self.logger.exception(f"Error running sandbox tests for {task.id}: {e}")
-            # Return a failed result
-            if TestResult:
-                return TestResult(
-                    success=False,
-                    total=0,
-                    passed=0,
-                    failed=0,
-                    skipped=0,
-                    duration_seconds=0,
-                    error_message=str(e),
-                )
-            return None
+        return await self._sandbox.run_sandbox_tests(task)
 
     async def _handle_test_failure(self, task: Task, llm_response, test_result) -> None:
-        """Handle test failure by feeding results back to agent for fixing.
+        await self._sandbox.handle_test_failure(task, llm_response, test_result)
 
-        Args:
-            task: The task being processed
-            llm_response: Original LLM response
-            test_result: TestResult with failure details
-        """
-        # Increment test retry count
-        test_retry = task.context.get("_test_retry_count", 0)
-        task.context["_test_retry_count"] = test_retry + 1
-
-        # Build prompt with test failure context
-        failure_report = self._test_runner.format_failure_report(test_result)
-
-        # Store failure context for next attempt
-        task.context["_test_failure_report"] = failure_report
-        task.notes.append(f"Test failure (attempt {test_retry + 1}): {test_result.error_message}")
-
-        # Reset task to pending for retry
-        task.reset_to_pending()
-        self.queue.update(task)
-
-        self.logger.info(f"Task {task.id} reset for test fix retry (attempt {test_retry + 1})")
-
-    # Review cycle methods moved to ReviewCycleManager
-
-    # Backwards compatibility shims that delegate to WorkflowRouter
+    # -- Backward-compat shims: WorkflowRouter --
 
     def _check_and_create_fan_in_task(self, task: Task) -> None:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.check_and_create_fan_in_task(task)
 
     def _should_decompose_task(self, task: Task) -> bool:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.should_decompose_task(task)
 
     def _decompose_and_queue_subtasks(self, task: Task) -> None:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.decompose_and_queue_subtasks(task)
 
     def _enforce_workflow_chain(self, task: Task, response, routing_signal=None) -> bool:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.enforce_chain(task, response, routing_signal)
 
     def _is_at_terminal_workflow_step(self, task: Task) -> bool:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.is_at_terminal_workflow_step(task)
 
     def _build_workflow_context(self, task: Task) -> Dict[str, Any]:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.build_workflow_context(task)
 
     def _route_to_agent(self, task: Task, target_agent: str, reason: str) -> None:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.route_to_agent(task, target_agent, reason)
 
     def _queue_pr_creation_if_needed(self, task: Task, workflow) -> None:
-        """Delegate to WorkflowRouter for backwards compatibility."""
         return self._workflow_router.queue_pr_creation_if_needed(task, workflow)

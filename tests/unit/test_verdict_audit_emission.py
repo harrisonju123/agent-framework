@@ -1,8 +1,10 @@
 """Tests for _set_structured_verdict() emitting verdict_audit events."""
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from agent_framework.core.agent import Agent
+from agent_framework.core.post_completion import PostCompletionManager
 from agent_framework.core.review_cycle import ReviewCycleManager
 
 
@@ -26,6 +28,24 @@ def _make_agent(**overrides):
         agent_definition=MagicMock(),
         session_logger=agent._session_logger,
         activity_manager=MagicMock(),
+    )
+
+    # PostCompletionManager (delegation target for _set_structured_verdict)
+    agent._post_completion = PostCompletionManager(
+        config=agent.config,
+        queue=MagicMock(),
+        workspace=Path("/tmp"),
+        logger=agent.logger,
+        session_logger=agent._session_logger,
+        activity_manager=MagicMock(),
+        review_cycle=agent._review_cycle,
+        workflow_router=MagicMock(),
+        git_ops=MagicMock(),
+        budget=MagicMock(),
+        error_recovery=MagicMock(),
+        optimization_config={},
+        session_logging_enabled=False,
+        session_logs_dir=Path("/tmp/logs"),
     )
 
     return agent

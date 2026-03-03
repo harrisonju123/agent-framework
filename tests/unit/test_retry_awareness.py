@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent_framework.core.agent import Agent
+from agent_framework.core.error_recovery import ErrorRecoveryManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
 
@@ -30,23 +31,43 @@ def _make_task(**overrides):
 
 def _make_agent():
     a = MagicMock()
-    a._handle_failed_response = Agent._handle_failed_response.__get__(a)
-    a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
-    a._extract_partial_progress = Agent._extract_partial_progress
     a.config = MagicMock()
     a.config.id = "test-agent"
+    a.config.base_id = "test-agent"
     a.workspace = Path("/tmp/test-workspace")
     a.logger = MagicMock()
     a._session_logger = MagicMock()
     a.activity_manager = MagicMock()
     a._handle_failure = AsyncMock()
-    a._error_recovery = MagicMock()
     a._git_ops = MagicMock()
     a._git_ops.safety_commit.return_value = False
     a._model_success_store = None
     a._budget = MagicMock()
     a._budget.estimate_cost.return_value = 0.50
     a._context_window_manager = None
+
+    # Wire a real ErrorRecoveryManager so delegation shims work end-to-end
+    er = ErrorRecoveryManager(
+        config=a.config,
+        queue=MagicMock(),
+        llm=MagicMock(),
+        logger=a.logger,
+        session_logger=a._session_logger,
+        retry_handler=MagicMock(),
+        escalation_handler=MagicMock(),
+        workspace=a.workspace,
+        budget_manager=a._budget,
+        activity_manager=a.activity_manager,
+        model_success_store=None,
+    )
+    # Override handle_failure to use the agent's mock (captures call assertions)
+    er.handle_failure = a._handle_failure
+    a._error_recovery = er
+
+    # Bind Agent shims for backward-compatible test access
+    a._handle_failed_response = Agent._handle_failed_response.__get__(a)
+    a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
+    a._extract_partial_progress = Agent._extract_partial_progress
     return a
 
 

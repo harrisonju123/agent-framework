@@ -7,11 +7,13 @@ Covers three aspects of the preview feature:
 """
 
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent_framework.core.post_completion import PostCompletionManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMRequest
 from agent_framework.workflow.dag import EdgeCondition, EdgeConditionType
@@ -294,11 +296,26 @@ class TestApprovalVerdict:
     """
 
     def _make_agent(self, base_id: str):
-        from unittest.mock import MagicMock
         from agent_framework.core.agent import Agent
         agent = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = base_id
+        agent._post_completion = PostCompletionManager(
+            config=agent.config,
+            queue=MagicMock(),
+            workspace=Path("/tmp"),
+            logger=MagicMock(),
+            session_logger=MagicMock(),
+            activity_manager=MagicMock(),
+            review_cycle=MagicMock(),
+            workflow_router=MagicMock(),
+            git_ops=MagicMock(),
+            budget=MagicMock(),
+            error_recovery=MagicMock(),
+            optimization_config={},
+            session_logging_enabled=False,
+            session_logs_dir=Path("/tmp/logs"),
+        )
         agent._approval_verdict = Agent._approval_verdict.__get__(agent)
         return agent
 

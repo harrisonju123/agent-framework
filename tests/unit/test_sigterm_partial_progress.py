@@ -72,6 +72,9 @@ class TestInterruptionPartialProgress:
     @pytest.fixture
     def agent(self):
         """Minimal mock agent with the real _execute_llm_with_interruption_watch bound."""
+        from agent_framework.core.llm_executor import LLMExecutionManager
+        from agent_framework.core.error_recovery import ErrorRecoveryManager
+
         a = MagicMock()
         a._execute_llm_with_interruption_watch = (
             Agent._execute_llm_with_interruption_watch.__get__(a)
@@ -82,16 +85,63 @@ class TestInterruptionPartialProgress:
         a._session_logger = MagicMock()
         a._session_logger.log = MagicMock()
         a._session_logger.log_tool_call = MagicMock()
+        a._session_logger.log_tool_result = MagicMock()
         a._context_window_manager = None
         a._current_specialization = None
         a._current_file_count = 0
+        a._max_consecutive_tool_calls = 999
+        a._max_consecutive_diagnostic_calls = 999
+        a._exploration_alert_threshold = 999
+        a._exploration_alert_thresholds = {}
+        a._optimization_config = {}
         a.config = MagicMock()
         a.config.id = "test-agent"
+        a.config.base_id = "engineer"
         a.workspace = Path("/tmp/test-workspace")
         a.logger = MagicMock()
         a.queue = MagicMock()
         a.activity_manager = MagicMock()
+        a._is_implementation_step = MagicMock(return_value=True)
+
+        er = ErrorRecoveryManager(
+            config=a.config, queue=MagicMock(), llm=MagicMock(),
+            logger=a.logger, session_logger=a._session_logger,
+            retry_handler=MagicMock(), escalation_handler=MagicMock(),
+            workspace=a.workspace,
+        )
+        a._error_recovery = er
+
+        # Build a real LLMExecutionManager so execute() drives the
+        # interruption race (watcher vs LLM).
+        # Tests must set agent.llm before calling the method; the
+        # _sync_llm helper below keeps the executor in sync.
+        a._git_ops = MagicMock()
+        a._git_ops.active_worktree = None
+        llm_placeholder = MagicMock()
+        executor = LLMExecutionManager(
+            config=a.config,
+            llm=llm_placeholder,
+            git_ops=a._git_ops,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            activity_manager=a.activity_manager,
+        )
+        a._llm_executor = executor
+        a.llm = llm_placeholder
         return a
+
+    def _setup_llm(self, agent, partial_output=""):
+        """Configure a hanging LLM and sync it to the executor."""
+        async def slow_llm(*args, **kwargs):
+            await asyncio.sleep(999)
+
+        llm = MagicMock()
+        llm.complete = slow_llm
+        llm.cancel = MagicMock()
+        llm.get_partial_output = MagicMock(return_value=partial_output)
+        agent.llm = llm
+        agent._llm_executor.llm = llm
+        return llm
 
     @pytest.mark.asyncio
     @patch("agent_framework.core.attempt_tracker.record_attempt", return_value=None)
@@ -100,15 +150,9 @@ class TestInterruptionPartialProgress:
         # Make the watcher finish immediately (simulating interruption)
         agent._watch_for_interruption = AsyncMock(return_value=None)
 
-        # LLM complete hangs forever (will be cancelled)
-        async def slow_llm(*args, **kwargs):
-            await asyncio.sleep(999)
-
-        agent.llm = MagicMock()
-        agent.llm.complete = slow_llm
-        agent.llm.cancel = MagicMock()
-        agent.llm.get_partial_output = MagicMock(
-            return_value="I reviewed the auth module.\n[Tool Call: Read]\nFound 3 issues in token validation."
+        self._setup_llm(
+            agent,
+            partial_output="I reviewed the auth module.\n[Tool Call: Read]\nFound 3 issues in token validation.",
         )
 
         result = await agent._execute_llm_with_interruption_watch(
@@ -126,13 +170,7 @@ class TestInterruptionPartialProgress:
         """When interruption happens but no output was generated, no summary is saved."""
         agent._watch_for_interruption = AsyncMock(return_value=None)
 
-        async def slow_llm(*args, **kwargs):
-            await asyncio.sleep(999)
-
-        agent.llm = MagicMock()
-        agent.llm.complete = slow_llm
-        agent.llm.cancel = MagicMock()
-        agent.llm.get_partial_output = MagicMock(return_value="")
+        self._setup_llm(agent, partial_output="")
 
         result = await agent._execute_llm_with_interruption_watch(
             task, "review this code", MagicMock(), None
@@ -148,16 +186,8 @@ class TestInterruptionPartialProgress:
         """Partial output that's all tool-call noise produces no summary."""
         agent._watch_for_interruption = AsyncMock(return_value=None)
 
-        async def slow_llm(*args, **kwargs):
-            await asyncio.sleep(999)
-
-        agent.llm = MagicMock()
-        agent.llm.complete = slow_llm
-        agent.llm.cancel = MagicMock()
         # Only tool call markers, no meaningful text
-        agent.llm.get_partial_output = MagicMock(
-            return_value="[Tool Call: Read][Tool Call: Glob]"
-        )
+        self._setup_llm(agent, partial_output="[Tool Call: Read][Tool Call: Glob]")
 
         result = await agent._execute_llm_with_interruption_watch(
             task, "review this code", MagicMock(), None

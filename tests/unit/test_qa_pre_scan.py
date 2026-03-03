@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.post_completion import PostCompletionManager
 from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.workflow.executor import WorkflowExecutor
@@ -103,6 +104,31 @@ def agent(queue, tmp_path):
         logger=a.logger, session_logger=a._session_logger,
         workflows_config={}, workflow_executor=a._workflow_executor,
         agents_config=[], multi_repo_manager=None,
+    )
+
+    a._analytics = MagicMock()
+    a._analytics.extract_and_store_memories = MagicMock()
+    a._analytics.analyze_tool_patterns = MagicMock(return_value=None)
+    a._context_window_manager = None
+
+    from agent_framework.core.error_recovery import ErrorRecoveryManager
+    a._error_recovery = MagicMock(spec=ErrorRecoveryManager)
+
+    a._post_completion = PostCompletionManager(
+        config=config,
+        queue=queue,
+        workspace=tmp_path,
+        logger=a.logger,
+        session_logger=a._session_logger,
+        activity_manager=MagicMock(),
+        review_cycle=a._review_cycle,
+        workflow_router=a._workflow_router,
+        git_ops=a._git_ops,
+        budget=a._budget,
+        error_recovery=a._error_recovery,
+        optimization_config={},
+        session_logging_enabled=False,
+        session_logs_dir=tmp_path / "logs",
     )
     return a
 
@@ -218,17 +244,15 @@ class TestPreScanPostCompletion:
         response = _make_response("APPROVE\n```json\n{\"findings\": []}\n```")
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._save_pre_scan_findings = MagicMock()
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
+        agent._post_completion.save_pre_scan_findings = MagicMock()
+        agent._post_completion.log_task_completion_metrics = MagicMock()
 
         agent._run_post_completion_flow(task, response, None, datetime.now(timezone.utc))
 
-        agent._save_pre_scan_findings.assert_called_once_with(task, response)
-        agent._extract_and_store_memories.assert_called_once()
-        agent._analyze_tool_patterns.assert_called_once()
-        agent._log_task_completion_metrics.assert_called_once()
+        agent._post_completion.save_pre_scan_findings.assert_called_once_with(task, response)
+        agent._analytics.extract_and_store_memories.assert_called_once()
+        agent._analytics.analyze_tool_patterns.assert_called_once()
+        agent._post_completion.log_task_completion_metrics.assert_called_once()
 
     def test_prescan_does_not_trigger_fan_in(self, agent):
         """Pre-scan tasks must not trigger fan-in check."""
@@ -237,15 +261,15 @@ class TestPreScanPostCompletion:
         response = _make_response()
 
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._save_pre_scan_findings = MagicMock()
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-        agent._workflow_router = MagicMock()
+        agent._post_completion.save_pre_scan_findings = MagicMock()
+        agent._post_completion.log_task_completion_metrics = MagicMock()
+        # Replace workflow_router on PostCompletionManager to spy on fan-in
+        mock_router = MagicMock()
+        agent._post_completion.workflow_router = mock_router
 
         agent._run_post_completion_flow(task, response, None, datetime.now(timezone.utc))
 
-        agent._workflow_router.check_and_create_fan_in_task.assert_not_called()
+        mock_router.check_and_create_fan_in_task.assert_not_called()
 
 
 # -- TestPreScanFindingsPersistence --
@@ -255,9 +279,6 @@ class TestPreScanFindingsPersistence:
 
     def test_findings_saved_to_correct_path(self, agent, tmp_path):
         """Findings file created at .agent-communication/pre-scans/{root_task_id}.json."""
-        agent._save_pre_scan_findings = Agent._save_pre_scan_findings.__get__(agent)
-        agent._extract_structured_findings_from_content = Agent._extract_structured_findings_from_content
-
         task = _make_task(pre_scan=True, _root_task_id="root-save")
         response = _make_response("All good\n```json\n{\"findings\": []}\n```")
 
@@ -273,9 +294,6 @@ class TestPreScanFindingsPersistence:
 
     def test_findings_parsed_from_json_block(self, agent, tmp_path):
         """Structured findings extracted from ```json block in response."""
-        agent._save_pre_scan_findings = Agent._save_pre_scan_findings.__get__(agent)
-        agent._extract_structured_findings_from_content = Agent._extract_structured_findings_from_content
-
         findings_json = json.dumps({
             "findings": [
                 {"severity": "HIGH", "file": "src/auth.py", "line": 42,
@@ -313,9 +331,6 @@ class TestPreScanFindingsPersistence:
 
     def test_save_failure_nonfatal(self, agent, tmp_path):
         """Failure to write findings file is logged as warning, doesn't raise."""
-        agent._save_pre_scan_findings = Agent._save_pre_scan_findings.__get__(agent)
-        agent._extract_structured_findings_from_content = Agent._extract_structured_findings_from_content
-
         task = _make_task(pre_scan=True, _root_task_id="root-fail")
         response = _make_response("done")
 
@@ -327,9 +342,6 @@ class TestPreScanFindingsPersistence:
 
     def test_raw_summary_truncated(self, agent, tmp_path):
         """Raw summary is truncated to 4000 chars."""
-        agent._save_pre_scan_findings = Agent._save_pre_scan_findings.__get__(agent)
-        agent._extract_structured_findings_from_content = Agent._extract_structured_findings_from_content
-
         task = _make_task(pre_scan=True, _root_task_id="root-trunc")
         long_content = "x" * 10000
         response = _make_response(long_content)

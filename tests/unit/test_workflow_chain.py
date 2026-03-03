@@ -6,7 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_framework.core.agent import Agent, AgentConfig, _strip_tool_call_markers
+from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.post_completion import strip_tool_call_markers
 from agent_framework.core.prompt_builder import PromptBuilder, PromptContext
 from agent_framework.core.config import WorkflowDefinition
 from tests.unit.workflow_fixtures import PREVIEW_WORKFLOW
@@ -151,6 +152,37 @@ def agent(queue, tmp_path):
     a._optimization_config = MappingProxyType({"enable_effort_budget_ceilings": False})
     a._budget = MagicMock()
     a._budget.estimate_cost.return_value = 0.0
+
+    # Error recovery (required by PostCompletionManager)
+    a._error_recovery = MagicMock()
+
+    # PostCompletionManager (required by delegation shims)
+    from agent_framework.core.post_completion import PostCompletionManager
+    a._post_completion = PostCompletionManager(
+        config=config,
+        queue=queue,
+        workspace=tmp_path,
+        logger=a.logger,
+        session_logger=a._session_logger,
+        activity_manager=MagicMock(),
+        review_cycle=a._review_cycle,
+        workflow_router=a._workflow_router,
+        git_ops=a._git_ops,
+        budget=a._budget,
+        error_recovery=a._error_recovery,
+        optimization_config=dict(a._optimization_config),
+        session_logging_enabled=False,
+        session_logs_dir=tmp_path / "logs",
+        agent_definition=None,
+    )
+
+    # TaskAnalyticsManager (required by delegation shims in _run_post_completion_flow)
+    a._analytics = MagicMock()
+    a._analytics.extract_and_store_memories = MagicMock()
+    a._analytics.analyze_tool_patterns = MagicMock(return_value=None)
+
+    # Context window manager (used by post_completion delegation)
+    a._context_window_manager = None
 
     return a
 
@@ -1953,22 +1985,24 @@ class TestVerdictStorageAndClearing:
 
     def test_verdict_stored_before_workflow_routing(self, agent, queue):
         """_set_structured_verdict stores verdict in task.context for review agents."""
-        agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        qa_config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent.config = qa_config
+        agent._post_completion.config = qa_config
         task = _make_task(workflow="default")
         response = _make_response("All checks pass, approved")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "approved"
 
     def test_needs_fix_verdict_stored(self, agent, queue):
         """Verdict 'needs_fix' stored when review finds issues."""
-        agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        qa_config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent.config = qa_config
+        agent._post_completion.config = qa_config
         task = _make_task(workflow="default")
         response = _make_response("CRITICAL: auth module has SQL injection vulnerability")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "needs_fix"
@@ -1978,7 +2012,6 @@ class TestVerdictStorageAndClearing:
         task = _make_task(workflow="default")
         response = _make_response("Implemented feature. CRITICAL log line was added.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
@@ -2009,7 +2042,6 @@ class TestVerdictStorageAndClearing:
         del task.context["workflow"]
         response = _make_response("approved")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
@@ -2020,11 +2052,12 @@ class TestVerdictStorageAndClearing:
         This is the critical distinction that fires the preview_approved DAG edge
         instead of the generic approved edge, routing to implement rather than qa_review.
         """
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         task = _make_task(workflow="preview", workflow_step="preview_review")
         response = _make_response("VERDICT: APPROVE")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "preview_approved"
@@ -2036,11 +2069,12 @@ class TestVerdictStorageAndClearing:
         default to approval. The preview_review "always" fallback edge will
         still route to implement via the DAG, but no verdict is recorded.
         """
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         task = _make_task(workflow="preview", workflow_step="preview_review")
         response = _make_response("The plan looks comprehensive and well-structured.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
@@ -2050,44 +2084,48 @@ class TestVerdictStorageAndClearing:
 
         Regression guard: the new preview_review branching must not affect code_review.
         """
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         task = _make_task(workflow="default", workflow_step="code_review")
         response = _make_response("VERDICT: APPROVE")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "approved"
 
     def test_ambiguous_at_code_review_does_not_set_verdict(self, agent, queue):
         """Ambiguous output at code_review → no verdict, chain will halt."""
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         task = _make_task(workflow="default", workflow_step="code_review")
         response = _make_response("I reviewed the changes. Some observations noted.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
 
     def test_ambiguous_at_qa_review_does_not_set_verdict(self, agent, queue):
         """Ambiguous output at qa_review → no verdict, chain will halt."""
-        agent.config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        qa_config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
+        agent.config = qa_config
+        agent._post_completion.config = qa_config
         task = _make_task(workflow="default", workflow_step="qa_review")
         response = _make_response("Ran the test suite. Results are inconclusive.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
 
     def test_ambiguous_at_plan_step_still_sets_approved(self, agent, queue):
         """Ambiguous output at plan step → verdict='approved' (no regression)."""
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         task = _make_task(workflow="default", workflow_step="plan")
         response = _make_response("Here is the implementation plan for the feature.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "approved"
@@ -2100,18 +2138,21 @@ class TestNoChangesVerdict:
 
     def test_no_changes_verdict_set_at_plan_step(self, agent, queue):
         """Architect at plan step with [NO_CHANGES_NEEDED] marker → verdict='no_changes'."""
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         task = _make_task(workflow="default", workflow_step="plan")
         response = _make_response("[NO_CHANGES_NEEDED]\nThe feature already exists in production.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "no_changes"
 
     def test_no_changes_verdict_set_for_original_planning_task(self, agent, queue):
         """Original planning task (type=PLANNING, no workflow_step) → verdict='no_changes'."""
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         # Original planning task: type=PLANNING but no workflow_step in context
         task = Task(
             id="task-abc123def456",
@@ -2127,18 +2168,18 @@ class TestNoChangesVerdict:
         )
         response = _make_response("[NO_CHANGES_NEEDED]\nThe feature already exists in production.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") == "no_changes"
 
     def test_no_changes_verdict_not_set_at_code_review(self, agent, queue):
         """Architect at code_review step → no 'no_changes' verdict even with marker."""
-        agent.config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
+        agent.config = arch_config
+        agent._post_completion.config = arch_config
         task = _make_task(workflow="default", workflow_step="code_review")
         response = _make_response("[NO_CHANGES_NEEDED]\nNothing to change, already implemented.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         # Should get "approved" verdict from review outcome, not "no_changes"
@@ -2149,7 +2190,6 @@ class TestNoChangesVerdict:
         task = _make_task(workflow="default", workflow_step="plan")
         response = _make_response("[NO_CHANGES_NEEDED]\nFeature already exists.")
 
-        agent._set_structured_verdict = Agent._set_structured_verdict.__get__(agent)
         agent._set_structured_verdict(task, response)
 
         assert task.context.get("verdict") != "no_changes"
@@ -2419,18 +2459,25 @@ class TestSameAgentUpstreamClearing:
 
     def test_upstream_source_agent_and_step_stored_on_save(self, tmp_path):
         """_save_upstream_context stores both upstream_source_agent and upstream_source_step."""
-        agent = MagicMock()
-        agent.config = AgentConfig(
+        from agent_framework.core.post_completion import PostCompletionManager
+
+        config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="p",
         )
-        agent.workspace = tmp_path
-        agent.UPSTREAM_CONTEXT_MAX_CHARS = Agent.UPSTREAM_CONTEXT_MAX_CHARS
-        agent.logger = MagicMock()
+        pc = PostCompletionManager(
+            config=config, queue=MagicMock(), workspace=tmp_path,
+            logger=MagicMock(), session_logger=MagicMock(),
+            activity_manager=MagicMock(), review_cycle=MagicMock(),
+            workflow_router=MagicMock(), git_ops=MagicMock(),
+            budget=MagicMock(), error_recovery=MagicMock(),
+            optimization_config={}, session_logging_enabled=False,
+            session_logs_dir=tmp_path / "logs",
+        )
 
         task = _make_task(workflow_step="plan")
         response = _make_response("Analysis complete: all looks good.")
 
-        Agent._save_upstream_context(agent, task, response)
+        pc.save_upstream_context(task, response)
 
         assert task.context["upstream_source_agent"] == "architect"
         assert task.context["upstream_source_step"] == "plan"
@@ -2441,42 +2488,43 @@ class TestSameAgentUpstreamClearing:
 class TestUpstreamInlineLimit:
     """Verify UPSTREAM_INLINE_MAX_CHARS is used for inline summary truncation."""
 
-    def test_upstream_inline_uses_15kb_limit(self, tmp_path):
-        """_save_upstream_context uses UPSTREAM_INLINE_MAX_CHARS (15KB) for inline summary."""
-        agent = MagicMock()
-        agent.config = AgentConfig(
+    def _make_post_completion(self, tmp_path):
+        from agent_framework.core.post_completion import PostCompletionManager
+        config = AgentConfig(
             id="architect", name="Architect", queue="architect", prompt="p",
         )
-        agent.workspace = tmp_path
-        agent.UPSTREAM_CONTEXT_MAX_CHARS = Agent.UPSTREAM_CONTEXT_MAX_CHARS
-        agent.UPSTREAM_INLINE_MAX_CHARS = Agent.UPSTREAM_INLINE_MAX_CHARS
-        agent.logger = MagicMock()
+        return PostCompletionManager(
+            config=config, queue=MagicMock(), workspace=tmp_path,
+            logger=MagicMock(), session_logger=MagicMock(),
+            activity_manager=MagicMock(), review_cycle=MagicMock(),
+            workflow_router=MagicMock(), git_ops=MagicMock(),
+            budget=MagicMock(), error_recovery=MagicMock(),
+            optimization_config={}, session_logging_enabled=False,
+            session_logs_dir=tmp_path / "logs",
+        )
+
+    def test_upstream_inline_uses_15kb_limit(self, tmp_path):
+        """_save_upstream_context uses UPSTREAM_INLINE_MAX_CHARS (15KB) for inline summary."""
+        pc = self._make_post_completion(tmp_path)
 
         task = _make_task()
         # Content longer than 4KB but shorter than 12KB should be preserved fully
         content = "x" * 10000
         response = _make_response(content)
 
-        Agent._save_upstream_context(agent, task, response)
+        pc.save_upstream_context(task, response)
 
         assert len(task.context["upstream_summary"]) == 10000
 
     def test_upstream_inline_truncates_at_15kb(self, tmp_path):
         """Content longer than 15KB is truncated at UPSTREAM_INLINE_MAX_CHARS."""
-        agent = MagicMock()
-        agent.config = AgentConfig(
-            id="architect", name="Architect", queue="architect", prompt="p",
-        )
-        agent.workspace = tmp_path
-        agent.UPSTREAM_CONTEXT_MAX_CHARS = Agent.UPSTREAM_CONTEXT_MAX_CHARS
-        agent.UPSTREAM_INLINE_MAX_CHARS = Agent.UPSTREAM_INLINE_MAX_CHARS
-        agent.logger = MagicMock()
+        pc = self._make_post_completion(tmp_path)
 
         task = _make_task()
         content = "y" * 20000
         response = _make_response(content)
 
-        Agent._save_upstream_context(agent, task, response)
+        pc.save_upstream_context(task, response)
 
         assert len(task.context["upstream_summary"]) == 15000
 
@@ -2611,19 +2659,24 @@ class TestPushAfterChainRouting:
 
         call_order = []
 
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
+        pc = agent._post_completion
 
         def track_push(*args, **kwargs):
             call_order.append("push")
 
+        def track_manage(*args, **kwargs):
+            pass
+
         def track_chain(*args, **kwargs):
             call_order.append("chain")
+            return False
 
-        agent._git_ops.push_and_create_pr_if_needed = track_push
-        agent._enforce_workflow_chain = track_chain
+        pc.git_ops.push_and_create_pr_if_needed = track_push
+        pc.git_ops.manage_pr_lifecycle = track_manage
+        pc.git_ops.detect_implementation_branch = MagicMock()
+        pc.workflow_router.enforce_chain = track_chain
+        pc.workflow_router.is_at_terminal_workflow_step = MagicMock(return_value=False)
+        pc.workflow_router.check_and_create_fan_in_task = MagicMock()
 
         agent._run_post_completion_flow(task, response, None, 0)
 
@@ -2641,13 +2694,14 @@ class TestPhantomParentTaskIdGuard:
 
     @pytest.fixture(autouse=True)
     def _bind_post_completion(self, agent):
-        """Bind the real method and stub side-effects for all tests."""
-        agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
-        agent._enforce_workflow_chain = MagicMock()
-        agent._git_ops.push_and_create_pr_if_needed = MagicMock()
+        """Stub side-effects on PostCompletionManager for all tests."""
+        pc = agent._post_completion
+        pc.workflow_router.enforce_chain = MagicMock(return_value=False)
+        pc.workflow_router.is_at_terminal_workflow_step = MagicMock(return_value=False)
+        pc.workflow_router.check_and_create_fan_in_task = MagicMock()
+        pc.git_ops.push_and_create_pr_if_needed = MagicMock()
+        pc.git_ops.manage_pr_lifecycle = MagicMock()
+        pc.git_ops.detect_implementation_branch = MagicMock()
 
     def test_phantom_parent_cleared_and_task_flows_through_chain(self, agent, queue):
         """Phantom parent_task_id gets cleared, task routes through normal workflow."""
@@ -2660,7 +2714,7 @@ class TestPhantomParentTaskIdGuard:
         agent._run_post_completion_flow(task, response, None, 0)
 
         assert task.parent_task_id is None
-        agent._enforce_workflow_chain.assert_called_once()
+        agent._post_completion.workflow_router.enforce_chain.assert_called_once()
 
     def test_real_parent_preserves_subtask_behavior(self, agent, queue):
         """Valid parent_task_id still skips workflow chain (fan-in handles it)."""
@@ -2674,7 +2728,7 @@ class TestPhantomParentTaskIdGuard:
         agent._run_post_completion_flow(task, response, None, 0)
 
         assert task.parent_task_id == "real-parent-123"
-        agent._enforce_workflow_chain.assert_not_called()
+        agent._post_completion.workflow_router.enforce_chain.assert_not_called()
 
     def test_no_validation_when_parent_task_id_is_none(self, agent, queue):
         """Regular tasks (no parent) skip the phantom validation entirely."""
@@ -2685,7 +2739,7 @@ class TestPhantomParentTaskIdGuard:
         agent._run_post_completion_flow(task, response, None, 0)
 
         queue.find_task.assert_not_called()
-        agent._enforce_workflow_chain.assert_called_once()
+        agent._post_completion.workflow_router.enforce_chain.assert_called_once()
 
 
 class TestNoDiffGuard:
@@ -3142,13 +3196,14 @@ class TestEmitWorkflowSummary:
             ),
         ])
 
-        agent._session_logging_enabled = True
-        agent.activity_manager = MagicMock()
+        pc = agent._post_completion
+        pc.session_logging_enabled = True
+        pc.activity_manager = MagicMock()
         agent._emit_workflow_summary(task)
 
         # Session logger should have been called with workflow_summary
-        agent._session_logger.log.assert_called_once()
-        call_args = agent._session_logger.log.call_args
+        pc.session_logger.log.assert_called_once()
+        call_args = pc.session_logger.log.call_args
         assert call_args[0][0] == "workflow_summary"
         logged_data = call_args[1]
         assert logged_data["root_task_id"] == task.root_id
@@ -3156,21 +3211,23 @@ class TestEmitWorkflowSummary:
         assert len(logged_data["steps"]) == 2
 
         # Activity stream should have the event
-        agent.activity_manager.append_event.assert_called_once()
-        event = agent.activity_manager.append_event.call_args[0][0]
+        pc.activity_manager.append_event.assert_called_once()
+        event = pc.activity_manager.append_event.call_args[0][0]
         assert event.type == "workflow_summary"
 
     @staticmethod
     def _prepare_for_post_completion(agent):
         """Set attributes needed by _run_post_completion_flow beyond base fixture."""
-        agent._session_logging_enabled = True
-        agent.activity_manager = MagicMock()
-        agent._git_ops = MagicMock()
-        agent._budget = MagicMock()
-        agent._budget.estimate_cost.return_value = 0.0
-        agent._memory_enabled = False
-        agent._analyze_tool_patterns = MagicMock(return_value=0)
-        agent._log_task_completion_metrics = MagicMock()
+        pc = agent._post_completion
+        pc.session_logging_enabled = True
+        pc.activity_manager = MagicMock()
+        pc.git_ops = MagicMock()
+        pc.budget = MagicMock()
+        pc.budget.estimate_cost.return_value = 0.0
+        pc.workflow_router = MagicMock()
+        pc.workflow_router.enforce_chain.return_value = False
+        pc.workflow_router.is_at_terminal_workflow_step.return_value = False
+        pc.workflow_router.check_and_create_fan_in_task = MagicMock()
 
     def test_no_workflow_summary_when_chain_continues(self, agent):
         """When not at terminal step, no summary is emitted in _run_post_completion_flow."""
@@ -3217,11 +3274,16 @@ class TestEmitWorkflowSummary:
 
         response = _make_response()
 
+        pc = agent._post_completion
+        # _prepare_for_post_completion replaces workflow_router with a MagicMock;
+        # ensure is_at_terminal_workflow_step returns True so summary fires on skip_chain
+        pc.workflow_router.is_at_terminal_workflow_step.return_value = True
+
         agent._run_post_completion_flow(task, response, None, datetime.now(timezone.utc))
 
         # Should have workflow_summary in session logger calls
         summary_calls = [
-            c for c in agent._session_logger.log.call_args_list
+            c for c in pc.session_logger.log.call_args_list
             if c[0] and c[0][0] == "workflow_summary"
         ]
         assert len(summary_calls) == 1
@@ -3231,13 +3293,14 @@ class TestEmitWorkflowSummary:
         """When chain state file doesn't exist, emission is silently skipped."""
         task = _make_task(workflow="default", workflow_step="create_pr")
 
-        agent._session_logging_enabled = True
-        agent.activity_manager = MagicMock()
+        pc = agent._post_completion
+        pc.session_logging_enabled = True
+        pc.activity_manager = MagicMock()
         agent._emit_workflow_summary(task)
 
         # Nothing should be logged
-        agent._session_logger.log.assert_not_called()
-        agent.activity_manager.append_event.assert_not_called()
+        pc.session_logger.log.assert_not_called()
+        pc.activity_manager.append_event.assert_not_called()
 
     def test_emit_includes_pr_url_from_context(self, agent):
         """PR URL from task context is included in the summary."""
@@ -3257,19 +3320,20 @@ class TestEmitWorkflowSummary:
             ),
         ])
 
-        agent._session_logging_enabled = True
-        agent.activity_manager = MagicMock()
+        pc = agent._post_completion
+        pc.session_logging_enabled = True
+        pc.activity_manager = MagicMock()
         agent._emit_workflow_summary(task)
 
-        logged_data = agent._session_logger.log.call_args[1]
+        logged_data = pc.session_logger.log.call_args[1]
         assert logged_data["pr_url"] == "https://github.com/org/repo/pull/99"
 
 class TestStripToolCallMarkers:
-    """Module-level _strip_tool_call_markers strips CLI-injected noise."""
+    """Module-level strip_tool_call_markers strips CLI-injected noise."""
 
     def test_removes_single_marker(self):
         content = "Analysis complete.\n[Tool Call: Read]\nThe code looks good."
-        result = _strip_tool_call_markers(content)
+        result = strip_tool_call_markers(content)
         assert "[Tool Call:" not in result
         assert "Analysis complete." in result
         assert "The code looks good." in result
@@ -3284,70 +3348,72 @@ class TestStripToolCallMarkers:
             "[Tool Call: Grep]\n"
             "No issues found."
         )
-        result = _strip_tool_call_markers(content)
+        result = strip_tool_call_markers(content)
         assert result.count("[Tool Call:") == 0
         assert "I'll analyze the codebase." in result
         assert "No issues found." in result
 
     def test_compresses_triple_newlines(self):
         content = "Line 1.\n[Tool Call: Read]\n\n\nLine 2."
-        result = _strip_tool_call_markers(content)
+        result = strip_tool_call_markers(content)
         assert "\n\n\n" not in result
 
     def test_empty_string(self):
-        assert _strip_tool_call_markers("") == ""
+        assert strip_tool_call_markers("") == ""
 
     def test_none_treated_as_empty(self):
-        assert _strip_tool_call_markers(None) == ""
+        assert strip_tool_call_markers(None) == ""
 
     def test_no_markers_passthrough(self):
         content = "Clean content with no markers."
-        assert _strip_tool_call_markers(content) == content
+        assert strip_tool_call_markers(content) == content
 
     def test_marker_with_nested_brackets(self):
         content = "Before\n[Tool Call: Read (src/auth.py)]\nAfter"
-        result = _strip_tool_call_markers(content)
+        result = strip_tool_call_markers(content)
         assert "[Tool Call:" not in result
         assert "Before" in result
         assert "After" in result
 
     def test_strips_leading_trailing_whitespace(self):
         content = "\n[Tool Call: Read]\nActual content.\n[Tool Call: Bash]\n"
-        result = _strip_tool_call_markers(content)
+        result = strip_tool_call_markers(content)
         assert result == "Actual content."
 
 
 class TestUpstreamContextFiltering:
-    """_save_upstream_context strips tool call markers before storing."""
+    """save_upstream_context strips tool call markers before storing."""
 
     @pytest.fixture
-    def ctx_agent(self, queue, tmp_path):
+    def post_completion(self, queue, tmp_path):
+        from agent_framework.core.post_completion import PostCompletionManager
         config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
-        a = Agent.__new__(Agent)
-        a.config = config
-        a.workspace = tmp_path
-        a.logger = MagicMock()
-        a.UPSTREAM_CONTEXT_MAX_CHARS = 15000
-        a.UPSTREAM_INLINE_MAX_CHARS = 15000
-        a._save_upstream_context = Agent._save_upstream_context.__get__(a)
-        return a
+        return PostCompletionManager(
+            config=config, queue=queue, workspace=tmp_path,
+            logger=MagicMock(), session_logger=MagicMock(),
+            activity_manager=MagicMock(), review_cycle=MagicMock(),
+            workflow_router=MagicMock(), git_ops=MagicMock(),
+            budget=MagicMock(), error_recovery=MagicMock(),
+            optimization_config={}, session_logging_enabled=False,
+            session_logs_dir=tmp_path / "logs",
+        )
 
-    def test_markers_stripped_from_file(self, ctx_agent, tmp_path):
+    def test_markers_stripped_from_file(self, post_completion, tmp_path):
         task = _make_task(workflow="default")
         response = _make_response(
             content="Plan:\n[Tool Call: Read]\nStep 1: Add auth.\n[Tool Call: Bash]\nStep 2: Test."
         )
-        ctx_agent._save_upstream_context(task, response)
+        post_completion.save_upstream_context(task, response)
 
         saved = task.context["upstream_summary"]
         assert "[Tool Call:" not in saved
         assert "Step 1: Add auth." in saved
         assert "Step 2: Test." in saved
 
-    def test_markers_stripped_from_inline_summary(self, ctx_agent, tmp_path):
+    def test_markers_stripped_from_inline_summary(self, post_completion, tmp_path):
         task = _make_task(workflow="default")
         response = _make_response(content="Good.\n[Tool Call: Read]\nDone.")
-        ctx_agent._save_upstream_context(task, response)
+        post_completion.save_upstream_context(task, response)
 
         assert "[Tool Call:" not in task.context["upstream_summary"]
 
@@ -3424,6 +3490,37 @@ class TestRoutingSignalVerdictOverride:
         a._optimization_config = MappingProxyType({"enable_effort_budget_ceilings": False})
         a._budget = MagicMock()
         a._budget.estimate_cost.return_value = 0.0
+
+        # Error recovery (required by PostCompletionManager)
+        a._error_recovery = MagicMock()
+
+        # PostCompletionManager (required by delegation shims)
+        from agent_framework.core.post_completion import PostCompletionManager
+        a._post_completion = PostCompletionManager(
+            config=config,
+            queue=queue,
+            workspace=tmp_path,
+            logger=a.logger,
+            session_logger=a._session_logger,
+            activity_manager=MagicMock(),
+            review_cycle=a._review_cycle,
+            workflow_router=a._workflow_router,
+            git_ops=a._git_ops,
+            budget=a._budget,
+            error_recovery=a._error_recovery,
+            optimization_config=dict(a._optimization_config),
+            session_logging_enabled=False,
+            session_logs_dir=tmp_path / "logs",
+            agent_definition=None,
+        )
+
+        # TaskAnalyticsManager (required by delegation shims in _run_post_completion_flow)
+        a._analytics = MagicMock()
+        a._analytics.extract_and_store_memories = MagicMock()
+        a._analytics.analyze_tool_patterns = MagicMock(return_value=None)
+
+        # Context window manager (used by post_completion delegation)
+        a._context_window_manager = None
 
         return a
 
@@ -3552,12 +3649,6 @@ class TestRoutingSignalVerdictOverride:
         assert result is signal  # signal not cleared
         assert task.context["verdict"] == "approved"  # not overridden
 
-        # Stub downstream methods
-        architect_agent._extract_and_store_memories = MagicMock()
-        architect_agent._analyze_tool_patterns = MagicMock(return_value=0)
-        architect_agent._log_task_completion_metrics = MagicMock()
-        architect_agent._emit_workflow_summary = MagicMock()
-
         architect_agent._run_post_completion_flow(task, response, signal, datetime.now(timezone.utc))
 
         # PR creation task should be queued (workflow_complete_signal triggers it)
@@ -3618,10 +3709,6 @@ class TestRoutingSignalVerdictOverride:
         assert cleared_signal is None
 
         architect_agent._session_logger.reset_mock()
-        architect_agent._extract_and_store_memories = MagicMock()
-        architect_agent._analyze_tool_patterns = MagicMock(return_value=0)
-        architect_agent._log_task_completion_metrics = MagicMock()
-        architect_agent._emit_workflow_summary = MagicMock()
 
         architect_agent._run_post_completion_flow(task, response, cleared_signal, datetime.now(timezone.utc))
 
@@ -3646,11 +3733,6 @@ class TestRoutingSignalVerdictOverride:
         # Signal NOT cleared, verdict NOT overridden
         assert result is signal
         assert task.context["verdict"] == "approved"
-
-        architect_agent._extract_and_store_memories = MagicMock()
-        architect_agent._analyze_tool_patterns = MagicMock(return_value=0)
-        architect_agent._log_task_completion_metrics = MagicMock()
-        architect_agent._emit_workflow_summary = MagicMock()
 
         architect_agent._run_post_completion_flow(task, response, signal, datetime.now(timezone.utc))
 

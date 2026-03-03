@@ -3,11 +3,13 @@
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from agent_framework.core.agent import Agent
+from agent_framework.core.post_completion import PostCompletionManager
 from agent_framework.core.task import PlanDocument, Task, TaskStatus, TaskType
 
 
@@ -167,6 +169,7 @@ class TestPlanExtractionIntegration:
         return Task(**defaults)
 
     def _make_agent(self):
+        workspace = Path("/tmp/agent-test-plan")
         agent = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "architect"
@@ -176,11 +179,32 @@ class TestPlanExtractionIntegration:
         agent._agent_definition = None
         agent.logger = MagicMock()
         agent.queue = MagicMock()
-        agent.workspace = MagicMock()
-        agent._save_upstream_context = MagicMock()
-        agent._run_post_completion_flow = MagicMock()
+        agent.workspace = workspace
         agent._run_sandbox_tests = AsyncMock(return_value=None)
         agent.activity_manager = MagicMock()
+        agent._session_logger = MagicMock()
+
+        # PostCompletionManager handles plan extraction, verdicts, and routing
+        budget_mock = MagicMock()
+        budget_mock.estimate_cost.return_value = 0.0
+        review_cycle_mock = MagicMock()
+        # _parse_review_outcome_audited must return a 2-tuple (outcome, audit)
+        outcome_mock = MagicMock(approved=True, needs_fix=False)
+        audit_mock = MagicMock(method="")
+        review_cycle_mock._parse_review_outcome_audited.return_value = (outcome_mock, audit_mock)
+        agent._post_completion = PostCompletionManager(
+            config=agent.config, queue=agent.queue, workspace=workspace,
+            logger=agent.logger, session_logger=agent._session_logger,
+            activity_manager=MagicMock(), review_cycle=review_cycle_mock,
+            workflow_router=MagicMock(), git_ops=MagicMock(),
+            budget=budget_mock, error_recovery=MagicMock(),
+            optimization_config={}, session_logging_enabled=False,
+            session_logs_dir=workspace / "logs",
+        )
+        agent._analytics = MagicMock()
+        agent._analytics.extract_and_store_memories = MagicMock()
+        agent._analytics.analyze_tool_patterns = MagicMock(return_value=None)
+        agent._context_window_manager = None
 
         # Bind the real method + static helper
         agent._handle_successful_response = Agent._handle_successful_response.__get__(agent)
@@ -188,7 +212,7 @@ class TestPlanExtractionIntegration:
         return agent
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_plan_extracted_on_architect_plan_step(self, _mock_routing):
         agent = self._make_agent()
         task = self._make_task()
@@ -206,7 +230,7 @@ class TestPlanExtractionIntegration:
         )
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_no_plan_warns_on_architect_plan_step(self, _mock_routing):
         agent = self._make_agent()
         task = self._make_task()
@@ -220,7 +244,7 @@ class TestPlanExtractionIntegration:
         )
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_skipped_for_non_architect(self, _mock_routing):
         """Engineer agents don't trigger plan extraction."""
         agent = self._make_agent()
@@ -233,7 +257,7 @@ class TestPlanExtractionIntegration:
         assert task.plan is None
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_skipped_for_non_plan_step(self, _mock_routing):
         """Architect on a code_review step doesn't trigger plan extraction."""
         agent = self._make_agent()
@@ -245,7 +269,7 @@ class TestPlanExtractionIntegration:
         assert task.plan is None
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_skipped_when_plan_already_set(self, _mock_routing):
         """Don't overwrite an existing plan."""
         agent = self._make_agent()

@@ -1,5 +1,6 @@
 """Budget and cost tracking manager."""
 
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Dict, Any
@@ -220,3 +221,67 @@ class BudgetManager:
                 success=True,
                 cost=cost,
             )
+
+    # -- Optimization Config Helpers (moved from agent.py) --
+
+    @staticmethod
+    def sanitize_optimization_config(config: dict, logger=None) -> dict:
+        """Sanitize optimization config before making immutable.
+
+        Validates and corrects invalid values, warns about issues.
+        """
+        config = config.copy()
+
+        canary = config.get("canary_percentage", 0)
+        if not 0 <= canary <= 100:
+            if logger:
+                logger.warning(f"Invalid canary_percentage: {canary}, clamping to [0, 100]")
+            config["canary_percentage"] = max(0, min(100, canary))
+
+        if config.get("shadow_mode") and config.get("canary_percentage", 0) > 0:
+            if logger:
+                logger.warning(
+                    "shadow_mode and canary_percentage both enabled. "
+                    "Shadow mode will use legacy prompts regardless of canary setting."
+                )
+
+        return config
+
+    @staticmethod
+    def get_active_optimizations(optimization_config: dict) -> Dict[str, Any]:
+        """Get dict of which optimizations are currently active."""
+        return {
+            "minimal_prompts": optimization_config.get("enable_minimal_prompts", False),
+            "compact_json": optimization_config.get("enable_compact_json", False),
+            "context_dedup": optimization_config.get("enable_context_deduplication", False),
+            "token_tracking": optimization_config.get("enable_token_tracking", False),
+            "budget_warnings": optimization_config.get("enable_token_budget_warnings", False),
+            "result_summarization": optimization_config.get("enable_result_summarization", False),
+            "error_truncation": optimization_config.get("enable_error_truncation", False),
+            "shadow_mode": optimization_config.get("shadow_mode", False),
+            "canary_percentage": optimization_config.get("canary_percentage", 0),
+        }
+
+    @staticmethod
+    def should_use_optimization(task: Task, optimization_config: dict, logger=None) -> bool:
+        """Determine if task should use optimizations based on canary percentage.
+
+        Uses deterministic hash-based selection for consistent behavior.
+        """
+        if hasattr(task, 'optimization_override') and task.optimization_override is not None:
+            reason = getattr(task, 'optimization_override_reason', 'no reason given')
+            if logger:
+                logger.info(
+                    f"Task {task.id} optimization override: {task.optimization_override} ({reason})"
+                )
+            return task.optimization_override
+
+        canary_pct = optimization_config.get("canary_percentage", 0)
+
+        if canary_pct == 0:
+            return False
+        elif canary_pct >= 100:
+            return True
+        else:
+            task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
+            return (task_hash % 100) < canary_pct

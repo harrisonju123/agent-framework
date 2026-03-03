@@ -75,6 +75,7 @@ NO_VERDICT_LONG = (
 def _make_agent(agent_id="qa"):
     """Build a minimal Agent with ReviewCycleManager for testing _can_salvage_verdict."""
     from agent_framework.core.review_cycle import ReviewCycleManager
+    from agent_framework.core.error_recovery import ErrorRecoveryManager
 
     config = AgentConfig(
         id=agent_id,
@@ -85,13 +86,25 @@ def _make_agent(agent_id="qa"):
     a = Agent.__new__(Agent)
     a.config = config
     a.logger = MagicMock()
-    a._review_cycle = ReviewCycleManager(
+    review_cycle = ReviewCycleManager(
         config=config,
         queue=MagicMock(),
         logger=a.logger,
         agent_definition=None,
         session_logger=MagicMock(),
         activity_manager=MagicMock(),
+    )
+    a._review_cycle = review_cycle
+    a._error_recovery = ErrorRecoveryManager(
+        config=config,
+        queue=MagicMock(),
+        llm=MagicMock(),
+        logger=a.logger,
+        session_logger=MagicMock(),
+        retry_handler=MagicMock(),
+        escalation_handler=MagicMock(),
+        workspace=MagicMock(),
+        review_cycle=review_cycle,
     )
     return a
 

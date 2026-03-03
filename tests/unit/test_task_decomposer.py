@@ -523,8 +523,8 @@ class TestBoundaryDependencyInference:
         for st in subtasks:
             assert st.depends_on == [], f"{st.title} should be independent (all tier 1)"
 
-    def test_three_tier_ordering(self):
-        """config + src + tests → config independent, src→config, tests→config+src."""
+    def test_three_tier_colocation(self):
+        """config + src + tests → tests co-locate with src, not separate boundary."""
         decomposer = TaskDecomposer()
         parent = _make_task(id="parent-3tier")
         plan = _make_plan(
@@ -548,17 +548,15 @@ class TestBoundaryDependencyInference:
 
         assert "config" in by_dir, "Should have config subtask"
         assert "src" in by_dir, "Should have src subtask"
-        assert "tests" in by_dir, "Should have tests subtask"
+        # Tests are co-located with src, not in a separate boundary
+        assert "tests" not in by_dir, (
+            "Tests should be co-located with src, not in a separate subtask"
+        )
 
-        # Config (tier 0) is independent
-        assert by_dir["config"].depends_on == []
-
-        # Src (tier 1) depends on config (tier 0)
-        assert by_dir["config"].id in by_dir["src"].depends_on
-
-        # Tests (tier 2) depends on both config and src
-        assert by_dir["config"].id in by_dir["tests"].depends_on
-        assert by_dir["src"].id in by_dir["tests"].depends_on
+        # Verify test files landed in the src subtask
+        src_files = by_dir["src"].plan.files_to_modify
+        assert "tests/test_feature.py" in src_files
+        assert "tests/test_utils.py" in src_files
 
     def test_classify_boundary_tier(self):
         """Unit test tier classification with various directory patterns."""

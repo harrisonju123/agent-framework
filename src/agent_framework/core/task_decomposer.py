@@ -93,10 +93,11 @@ class SubtaskBoundary:
     """A natural split point identified in a plan."""
 
     name: str  # e.g. "Database schema changes"
-    files: list[str]  # Files this subtask covers
+    files: list[str]  # Files this subtask covers (source + co-located tests)
     approach_steps: list[str]  # Relevant steps from parent plan
     depends_on_subtasks: list[int]  # Indices of subtasks this depends on (for ordering)
     estimated_lines: int
+    source_file_count: int = 0  # Non-test files; used for MAX_DELIVERABLES enforcement
 
 
 class TaskDecomposer:
@@ -108,6 +109,11 @@ class TaskDecomposer:
     MIN_SUBTASK_SIZE = 50  # Don't create subtasks smaller than this
     MAX_SUBTASKS = 5  # Cap on number of subtasks
     MAX_DEPTH = 1  # Subtasks cannot themselves decompose
+    MAX_DELIVERABLES_PER_SUBTASK = 4  # Source files per subtask; test files don't count
+
+    # Refactoring existing code requires reading, understanding context, editing,
+    # and fixing tests — substantially more work than greenfield creation.
+    MODIFICATION_EFFORT_MULTIPLIER: float = 2.0
 
     # Medium tasks with many discrete deliverables should decompose even below
     # the line threshold — the deliverable count signals complexity that a single
@@ -145,7 +151,8 @@ class TaskDecomposer:
         return False
 
     def decompose(
-        self, parent_task: Task, plan: PlanDocument, estimated_lines: int
+        self, parent_task: Task, plan: PlanDocument, estimated_lines: int,
+        workspace: str | Path | None = None,
     ) -> list[Task]:
         """
         Split parent task into independent subtasks.
@@ -154,6 +161,7 @@ class TaskDecomposer:
             parent_task: The task to decompose
             plan: The task's plan document
             estimated_lines: Estimated total lines of code
+            workspace: Working directory for checking file existence (effort multiplier)
 
         Returns:
             List of created subtask objects
@@ -166,7 +174,9 @@ class TaskDecomposer:
             return []
 
         # Identify natural split boundaries
-        boundaries = self._identify_split_boundaries(plan, estimated_lines)
+        boundaries = self._identify_split_boundaries(
+            plan, estimated_lines, workspace=workspace,
+        )
 
         # Cap at MAX_SUBTASKS
         if len(boundaries) > self.MAX_SUBTASKS:
@@ -190,19 +200,23 @@ class TaskDecomposer:
         return subtasks
 
     def _identify_split_boundaries(
-        self, plan: PlanDocument, estimated_lines: int
+        self, plan: PlanDocument, estimated_lines: int,
+        workspace: str | Path | None = None,
     ) -> list[SubtaskBoundary]:
         """
         Group files_to_modify into clusters that form natural subtasks.
 
-        Uses directory-prefix grouping as the primary heuristic:
-        - Group files by their top-level directory (e.g., all src/core/ together)
-        - If a group is still >300 lines, split further by subdirectories
-        - If we end up with < 2 groups, fall back to splitting approach steps
+        Strategy:
+        1. Separate source files from test files
+        2. Group source files by top-level directory
+        3. Co-locate each test file with the source subtask it corresponds to
+        4. Enforce MAX_DELIVERABLES_PER_SUBTASK (source files only; tests are free)
+        5. Apply effort multiplier for files that already exist on disk
 
         Args:
             plan: The task's plan document
             estimated_lines: Total estimated lines for the task
+            workspace: Working directory for checking file existence (effort multiplier)
 
         Returns:
             List of SubtaskBoundary objects representing natural splits
@@ -211,39 +225,45 @@ class TaskDecomposer:
         if not files:
             return []
 
-        # Estimate lines per file (rough heuristic: total / file count)
-        lines_per_file = estimated_lines // len(files) if files else 0
+        # Partition into source vs test files
+        source_files: list[str] = []
+        test_files: list[str] = []
+        for f in files:
+            if self._is_test_file(f):
+                test_files.append(f)
+            else:
+                source_files.append(f)
 
-        # Group files by top-level directory
+        # Estimate lines per source file (tests are "free" additions)
+        source_count = len(source_files) or 1
+        lines_per_file = estimated_lines // source_count
+
+        # Group source files by top-level directory
         dir_groups: dict[str, list[str]] = {}
-        for file in files:
-            # Extract top-level directory (e.g., "src/core/task.py" -> "src")
+        for file in source_files:
             parts = Path(file).parts
             top_dir = parts[0] if parts else "root"
             if top_dir not in dir_groups:
                 dir_groups[top_dir] = []
             dir_groups[top_dir].append(file)
 
-        # Create boundaries from directory groups
-        boundaries = []
+        # Build initial boundaries from directory groups
+        boundaries: list[SubtaskBoundary] = []
         for dir_name, group_files in dir_groups.items():
             group_estimated = len(group_files) * lines_per_file
 
-            # If group is still too large, try to split by subdirectory
             if group_estimated > 300 and len(group_files) > 2:
                 sub_boundaries = self._split_by_subdirectory(
                     group_files, lines_per_file, dir_name
                 )
-                # _split_by_subdirectory leaves approach_steps empty;
-                # backfill so each sub-boundary carries relevant context
                 for sb in sub_boundaries:
+                    sb.source_file_count = len(sb.files)
                     if not sb.approach_steps:
                         sb.approach_steps = self._extract_relevant_steps(
                             plan.approach, sb.files
                         )
                 boundaries.extend(sub_boundaries)
             else:
-                # Create single boundary for this directory group
                 boundary = SubtaskBoundary(
                     name=f"Changes in {dir_name}",
                     files=group_files,
@@ -252,8 +272,19 @@ class TaskDecomposer:
                     ),
                     depends_on_subtasks=[],
                     estimated_lines=group_estimated,
+                    source_file_count=len(group_files),
                 )
                 boundaries.append(boundary)
+
+        # Enforce MAX_DELIVERABLES_PER_SUBTASK on source files
+        boundaries = self._enforce_max_deliverables(boundaries, lines_per_file, plan)
+
+        # Co-locate test files with their corresponding source boundaries
+        self._colocate_test_files(boundaries, test_files)
+
+        # Apply effort multiplier for existing files (modifications are harder)
+        if workspace:
+            self._apply_effort_multiplier(boundaries, workspace)
 
         # If we still have < 2 boundaries, fall back to approach step splitting
         if len(boundaries) < 2:
@@ -293,6 +324,7 @@ class TaskDecomposer:
                 approach_steps=[],  # Will be filled by caller
                 depends_on_subtasks=[],
                 estimated_lines=len(group_files) * lines_per_file,
+                source_file_count=len(group_files),
             )
             boundaries.append(boundary)
 
@@ -331,6 +363,119 @@ class TaskDecomposer:
         ]
 
         return boundaries
+
+    @staticmethod
+    def _is_test_file(file_path: str) -> bool:
+        """Check if a file path is a test file by directory or naming convention."""
+        parts = Path(file_path).parts
+        name = Path(file_path).name
+        for part in parts:
+            if part.lower() in _TEST_DIRS:
+                return True
+        if name.startswith("test_") or name.endswith("_test.py"):
+            return True
+        return False
+
+    @staticmethod
+    def _test_matches_source(test_path: str, source_path: str) -> bool:
+        """Check if a test file corresponds to a source file.
+
+        Matches `tests/**/test_module_name.py` to `src/.../module_name.py`.
+        """
+        source_stem = Path(source_path).stem
+        test_name = Path(test_path).name
+        return test_name == f"test_{source_stem}.py"
+
+    def _enforce_max_deliverables(
+        self,
+        boundaries: list[SubtaskBoundary],
+        lines_per_file: int,
+        plan: PlanDocument,
+    ) -> list[SubtaskBoundary]:
+        """Split any boundary that exceeds MAX_DELIVERABLES_PER_SUBTASK source files.
+
+        Chunks oversized boundaries into groups of MAX_DELIVERABLES_PER_SUBTASK files.
+        """
+        result: list[SubtaskBoundary] = []
+        cap = self.MAX_DELIVERABLES_PER_SUBTASK
+
+        for boundary in boundaries:
+            if boundary.source_file_count <= cap:
+                result.append(boundary)
+                continue
+
+            # Chunk the boundary's source files into groups of `cap`
+            files = boundary.files
+            for chunk_start in range(0, len(files), cap):
+                chunk = files[chunk_start:chunk_start + cap]
+                chunk_num = chunk_start // cap + 1
+                sub = SubtaskBoundary(
+                    name=f"{boundary.name} (part {chunk_num})",
+                    files=chunk,
+                    approach_steps=self._extract_relevant_steps(
+                        plan.approach, chunk
+                    ),
+                    depends_on_subtasks=[],
+                    estimated_lines=len(chunk) * lines_per_file,
+                    source_file_count=len(chunk),
+                )
+                result.append(sub)
+
+        return result
+
+    def _colocate_test_files(
+        self,
+        boundaries: list[SubtaskBoundary],
+        test_files: list[str],
+    ) -> None:
+        """Pair each test file with the boundary containing its source counterpart.
+
+        Unmatched test files go into the last boundary as a catch-all.
+        Test files don't increase source_file_count (they're "free" additions).
+        """
+        remaining_tests: list[str] = []
+
+        for test_path in test_files:
+            matched = False
+            for boundary in boundaries:
+                for src in boundary.files:
+                    if self._test_matches_source(test_path, src):
+                        boundary.files.append(test_path)
+                        matched = True
+                        break
+                if matched:
+                    break
+            if not matched:
+                remaining_tests.append(test_path)
+
+        # Distribute unmatched tests to the last boundary
+        if remaining_tests and boundaries:
+            boundaries[-1].files.extend(remaining_tests)
+
+    def _apply_effort_multiplier(
+        self,
+        boundaries: list[SubtaskBoundary],
+        workspace: str | Path,
+    ) -> None:
+        """Inflate estimated_lines for boundaries whose files already exist on disk.
+
+        Modifying existing code is harder than creating new files: the engineer
+        must read, understand context, edit carefully, and fix broken tests.
+        """
+        workspace_path = Path(workspace)
+        for boundary in boundaries:
+            existing_count = sum(
+                1 for f in boundary.files
+                if (workspace_path / f).exists()
+            )
+            if existing_count == 0:
+                continue
+            total = len(boundary.files) or 1
+            existing_ratio = existing_count / total
+            # Scale multiplier proportionally: all-existing gets full multiplier,
+            # mixed gets a blend between 1.0 and MODIFICATION_EFFORT_MULTIPLIER.
+            blended = 1.0 + (self.MODIFICATION_EFFORT_MULTIPLIER - 1.0) * existing_ratio
+            boundary.estimated_lines = int(boundary.estimated_lines * blended)
 
     @staticmethod
     def _classify_boundary_tier(boundary: SubtaskBoundary) -> int:
@@ -375,25 +520,39 @@ class TaskDecomposer:
     def _infer_boundary_dependencies(
         self, boundaries: list[SubtaskBoundary]
     ) -> None:
-        """Set depends_on_subtasks based on execution-tier ordering.
+        """Set depends_on_subtasks conservatively to maximize parallelism.
 
-        Higher-tier boundaries depend on all lower-tier boundaries.
-        Same-tier boundaries are independent (parallelizable).
-        Mutates boundaries in place. Only overwrites when multiple tiers
-        exist — preserves manually-set deps (e.g. from approach-step fallback)
-        when all boundaries land on the same tier.
+        Only adds a dependency when boundary j creates a file that boundary i
+        imports (detected by filename reference in approach steps). Tier-based
+        ordering is intentionally NOT used — co-location already pairs source
+        with tests, so most boundaries can run in parallel.
+
+        Preserves manually-set deps (e.g. from approach-step fallback).
         """
         if len(boundaries) < 2:
             return
 
-        tiers = [self._classify_boundary_tier(b) for b in boundaries]
-
-        # All same tier → nothing to infer, preserve existing deps
-        if len(set(tiers)) < 2:
-            return
+        # Build a set of file stems per boundary for import-reference matching
+        boundary_stems: list[set[str]] = [
+            {Path(f).stem for f in b.files if not self._is_test_file(f)}
+            for b in boundaries
+        ]
 
         for i, boundary in enumerate(boundaries):
-            deps = [j for j, tier in enumerate(tiers) if tier < tiers[i]]
+            # Skip boundaries that already have manually-set deps
+            if boundary.depends_on_subtasks:
+                continue
+
+            deps: list[int] = []
+            # Check if any approach step references a file owned by another boundary
+            for j, other_stems in enumerate(boundary_stems):
+                if i == j:
+                    continue
+                for step in boundary.approach_steps:
+                    if any(stem in step for stem in other_stems if len(stem) > 3):
+                        deps.append(j)
+                        break
+
             boundary.depends_on_subtasks = deps
 
     def _extract_relevant_steps(

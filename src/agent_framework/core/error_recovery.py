@@ -1,6 +1,7 @@
 """Error recovery and replanning manager."""
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -14,8 +15,12 @@ if TYPE_CHECKING:
     from ..memory.memory_store import MemoryStore
     from ..utils.rich_logging import ContextLogger
     from .session_logger import SessionLogger
+    from .budget_manager import BudgetManager
+    from .activity import ActivityManager
+    from .review_cycle import ReviewCycleManager
 
 from .task import Task, TaskStatus
+from .activity import ActivityEvent
 from ..llm.base import LLMRequest
 from ..utils.subprocess_utils import run_git_command
 
@@ -37,6 +42,10 @@ class ErrorRecoveryManager:
         memory_store: Optional["MemoryStore"] = None,
         replan_config: Optional[dict] = None,
         self_eval_config: Optional[dict] = None,
+        budget_manager: Optional["BudgetManager"] = None,
+        activity_manager: Optional["ActivityManager"] = None,
+        review_cycle: Optional["ReviewCycleManager"] = None,
+        model_success_store=None,
     ):
         self.config = config
         self.queue = queue
@@ -48,6 +57,10 @@ class ErrorRecoveryManager:
         self.workspace = workspace
         self.jira_client = jira_client
         self.memory_store = memory_store
+        self._budget_manager = budget_manager
+        self._activity_manager = activity_manager
+        self._review_cycle = review_cycle
+        self._model_success_store = model_success_store
 
         # Self-evaluation configuration
         eval_cfg = self_eval_config or {}
@@ -868,3 +881,146 @@ Previous attempts failed. Use this revised approach:
                 )
 
         return prompt + replan_section
+
+    # -- Failure response handling (moved from agent.py) --
+
+    @staticmethod
+    def extract_partial_progress(content: str, max_bytes: int = 2048) -> str:
+        """Extract meaningful text blocks from a partial LLM response.
+
+        Filters out [Tool Call: ...] noise and keeps the last few
+        substantive text blocks so retries can pick up where we left off.
+        """
+        if not content:
+            return ""
+
+        # Split on tool-call markers and keep non-marker blocks
+        blocks = re.split(r'\[Tool Call:[^\]]*\]', content)
+        meaningful = [b.strip() for b in blocks if b.strip()]
+
+        # Keep last 5 meaningful blocks
+        meaningful = meaningful[-5:]
+        joined = "\n\n".join(meaningful)
+
+        # Enforce size cap
+        if len(joined.encode("utf-8", errors="replace")) > max_bytes:
+            joined = joined[-max_bytes:]
+
+        return joined
+
+    def finalize_failed_attempt(
+        self, task: Task, working_dir: Optional[Path], *,
+        content: Optional[str] = None,
+        error: Optional[str] = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: Optional[float] = None,
+    ) -> None:
+        """Consolidate all attempt preservation for retry awareness."""
+        if content:
+            summary = self.extract_partial_progress(content)
+            if summary:
+                task.context["_previous_attempt_summary"] = summary
+
+        try:
+            from .attempt_tracker import record_attempt
+            record = record_attempt(
+                workspace=self.workspace,
+                task=task,
+                agent_id=self.config.id,
+                working_dir=working_dir,
+                error=error or task.last_error,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+                logger=self.logger,
+            )
+            if record and record.branch:
+                task.context["_previous_attempt_branch"] = record.branch
+                task.context["_previous_attempt_commit_sha"] = record.commit_sha
+        except Exception as e:
+            self.logger.debug(f"Attempt recording failed (non-fatal): {e}")
+
+    def can_salvage_verdict(self, task: Task, response) -> bool:
+        """Check if a failed response contains a valid review verdict worth salvaging."""
+        if self.config.base_id not in ("qa", "architect"):
+            return False
+        if not self._review_cycle:
+            return False
+        content = getattr(response, "content", "") or ""
+        if len(content) < 200:
+            return False
+        outcome = self._review_cycle.parse_review_outcome(content)
+        return outcome.approved or outcome.needs_fix
+
+    async def handle_failed_response(
+        self, task: Task, response, *,
+        working_dir: Optional[Path] = None,
+        context_budget=None,
+    ) -> None:
+        """Handle failed LLM response: log, record attempt, emit events, trigger retry."""
+        task.last_error = response.error or "Unknown error"
+
+        this_cost = self._budget_manager.estimate_cost(response) if self._budget_manager else 0.0
+        prev = task.context.get("_cumulative_cost", 0.0)
+        task.context["_cumulative_cost"] = prev + this_cost
+
+        self.finalize_failed_attempt(
+            task, working_dir,
+            content=response.content,
+            error=response.error,
+            input_tokens=response.input_tokens,
+            output_tokens=response.output_tokens,
+            cost_usd=this_cost,
+        )
+
+        self.logger.error(
+            f"Task failed with detailed error:\n"
+            f"  Task ID: {task.id}\n"
+            f"  Error: {task.last_error}\n"
+            f"  Model: {response.model_used}\n"
+            f"  Latency: {response.latency_ms:.0f}ms\n"
+            f"  Finish reason: {response.finish_reason}"
+        )
+        self.logger.task_failed(task.last_error, task.retry_count)
+
+        self.session_logger.log(
+            "task_failed",
+            error=task.last_error,
+            retry=task.retry_count,
+            model=response.model_used,
+            finish_reason=response.finish_reason,
+            tokens_in=response.input_tokens,
+            tokens_out=response.output_tokens,
+            cost=this_cost,
+        )
+
+        if self._activity_manager:
+            self._activity_manager.append_event(ActivityEvent(
+                type="fail",
+                agent=self.config.id,
+                task_id=task.id,
+                title=task.title,
+                timestamp=datetime.now(timezone.utc),
+                retry_count=task.retry_count,
+                error_message=task.last_error,
+                root_task_id=task.root_id,
+                context_utilization_percent=context_budget.utilization_percent if context_budget else None,
+                context_budget_tokens=context_budget.total_budget if context_budget else None,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cost=this_cost,
+            ))
+
+        if self._model_success_store is not None and response.model_used:
+            repo_slug = task.context.get("github_repo", "")
+            task_type_str = task.type if isinstance(task.type, str) else task.type.value
+            self._model_success_store.record_outcome(
+                repo_slug=repo_slug,
+                model_tier=response.model_used,
+                task_type=task_type_str,
+                success=False,
+                cost=this_cost,
+            )
+
+        await self.handle_failure(task)

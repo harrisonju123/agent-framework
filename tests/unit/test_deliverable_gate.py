@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_framework.core.agent import Agent, _IMPLEMENTATION_STEP_IDS, _NON_CODE_STEP_IDS
+from agent_framework.core.agent import Agent
+from agent_framework.core.post_completion import PostCompletionManager, _IMPLEMENTATION_STEP_IDS, _NON_CODE_STEP_IDS
 from agent_framework.core.error_recovery import ErrorRecoveryManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
@@ -61,8 +62,9 @@ def _make_manager():
     )
 
 
-def _make_agent():
+def _make_agent(tmp_path=None):
     """Build a MagicMock with real Agent methods bound for isolated testing."""
+    workspace = tmp_path or Path("/tmp/agent-test")
     a = MagicMock()
     a._handle_successful_response = Agent._handle_successful_response.__get__(a)
     a._is_implementation_step = Agent._is_implementation_step.__get__(a)
@@ -80,6 +82,22 @@ def _make_agent():
     a.queue = MagicMock()
     # Async methods called in _handle_successful_response before our gate
     a._run_sandbox_tests = AsyncMock(return_value=None)
+    # PostCompletionManager is called at the end of _handle_successful_response
+    budget_mock = MagicMock()
+    budget_mock.estimate_cost.return_value = 0.0
+    a._post_completion = PostCompletionManager(
+        config=a.config, queue=a.queue, workspace=workspace,
+        logger=a.logger, session_logger=a._session_logger,
+        activity_manager=MagicMock(), review_cycle=MagicMock(),
+        workflow_router=MagicMock(), git_ops=MagicMock(),
+        budget=budget_mock, error_recovery=MagicMock(),
+        optimization_config={}, session_logging_enabled=False,
+        session_logs_dir=workspace / "logs" if isinstance(workspace, Path) else Path(workspace) / "logs",
+    )
+    a._analytics = MagicMock()
+    a._analytics.extract_and_store_memories = MagicMock()
+    a._analytics.analyze_tool_patterns = MagicMock(return_value=None)
+    a._context_window_manager = None
     return a
 
 
@@ -255,7 +273,7 @@ class TestDeliverableGateIntegration:
         agent.queue.mark_completed.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_gate_skips_when_working_dir_none(self, _mock_routing):
         """No working directory → gate cannot run, task completes normally."""
         agent = _make_agent()
@@ -271,7 +289,7 @@ class TestDeliverableGateIntegration:
         assert task_arg.status == TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_gate_skips_for_plan_step(self, _mock_routing):
         """Plan steps produce prose, not code — gate should not fire."""
         agent = _make_agent()
@@ -287,7 +305,7 @@ class TestDeliverableGateIntegration:
         agent._handle_failure.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_gate_passes_when_changes_exist(self, _mock_routing):
         """Implementation step with git changes → normal completion."""
         agent = _make_agent()
@@ -304,7 +322,7 @@ class TestDeliverableGateIntegration:
         assert task_arg.status == TaskStatus.COMPLETED
 
     @pytest.mark.asyncio
-    @patch("agent_framework.core.agent.read_routing_signal", return_value=None)
+    @patch("agent_framework.core.routing.read_routing_signal", return_value=None)
     async def test_gate_skips_for_code_review(self, _mock_routing):
         """Code review is prose-only — exempt from deliverable gate."""
         agent = _make_agent()

@@ -2649,5 +2649,167 @@ def _run_claude_cli(prompt: str, cwd: Path, framework_config, timeout: int = 360
         raise RuntimeError(f"Claude CLI execution exceeded timeout of {timeout} seconds")
 
 
+@cli.command("analyze-session")
+@click.argument("task_id")
+@click.pass_context
+def analyze_session(ctx, task_id):
+    """Analyze a single session log for read patterns, cost, and tool usage.
+
+    Parses logs/sessions/{task_id}.jsonl and prints a formatted report
+    highlighting duplicate file reads, tool call distribution, cost, and duration.
+
+    Examples:
+        agent analyze-session chain-abc123-implement-d1
+        agent -w /path/to/workspace analyze-session my-task-id
+    """
+    import json as _json
+
+    workspace = ctx.obj["workspace"]
+    session_path = workspace / "logs" / "sessions" / f"{task_id}.jsonl"
+
+    if not session_path.exists():
+        console.print(f"[red]No session log found at {session_path}[/]")
+        return
+
+    # Parse all events
+    events = []
+    for line in session_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(_json.loads(line))
+        except _json.JSONDecodeError:
+            continue
+
+    if not events:
+        console.print("[yellow]Session log is empty[/]")
+        return
+
+    # --- Collect stats ---
+    tool_counts: dict[str, int] = {}
+    file_reads: dict[str, int] = {}
+    total_cost = 0.0
+    tokens_in = 0
+    tokens_out = 0
+    duration_ms = 0
+    task_start_ts = None
+    task_complete_ts = None
+    model = ""
+
+    # Track sequences for chunked-read detection (same file within 5 calls)
+    recent_reads: list[tuple[int, str]] = []  # (sequence, file_path)
+
+    for evt in events:
+        event_name = evt.get("event", "")
+
+        if event_name == "tool_call":
+            tool = evt.get("tool", "unknown")
+            tool_counts[tool] = tool_counts.get(tool, 0) + 1
+
+            tool_input = evt.get("input", {})
+            seq = evt.get("sequence", 0)
+
+            if tool == "Read" and isinstance(tool_input, dict):
+                fp = tool_input.get("file_path", "")
+                if fp:
+                    file_reads[fp] = file_reads.get(fp, 0) + 1
+                    recent_reads.append((seq, fp))
+
+        elif event_name == "llm_complete":
+            total_cost += evt.get("cost", 0) or 0
+            tokens_in = max(tokens_in, evt.get("tokens_in", 0) or 0)
+            tokens_out += evt.get("tokens_out", 0) or 0
+            duration_ms += evt.get("duration_ms", 0) or 0
+            model = evt.get("model", model) or model
+
+        elif event_name == "task_start":
+            task_start_ts = evt.get("ts")
+
+        elif event_name == "task_complete":
+            task_complete_ts = evt.get("ts")
+
+    # Detect chunked reads: same file read again within 5 sequential tool calls
+    chunked_reads: dict[str, int] = {}
+    for i, (seq_i, fp_i) in enumerate(recent_reads):
+        for j in range(i + 1, len(recent_reads)):
+            seq_j, fp_j = recent_reads[j]
+            if fp_j == fp_i and seq_j - seq_i <= 5:
+                chunked_reads[fp_i] = chunked_reads.get(fp_i, 0) + 1
+                break
+
+    # --- Print report ---
+    console.print(f"\n[bold]Session Analysis: {task_id}[/]")
+    console.print(f"Model: [cyan]{model or 'unknown'}[/]")
+
+    # Duration
+    if task_start_ts and task_complete_ts:
+        from datetime import datetime as _dt
+        try:
+            start = _dt.fromisoformat(task_start_ts.replace("Z", "+00:00"))
+            end = _dt.fromisoformat(task_complete_ts.replace("Z", "+00:00"))
+            wall_seconds = (end - start).total_seconds()
+            console.print(f"Wall time: [cyan]{wall_seconds:.0f}s[/]")
+        except (ValueError, TypeError):
+            pass
+
+    console.print(f"LLM time: [cyan]{duration_ms / 1000:.1f}s[/]")
+    console.print(f"Cost: [cyan]${total_cost:.3f}[/]")
+    console.print(f"Tokens in: [cyan]{tokens_in:,}[/]  out: [cyan]{tokens_out:,}[/]")
+    console.print()
+
+    # Tool call distribution
+    if tool_counts:
+        table = Table(title="Tool Calls")
+        table.add_column("Tool", style="bold")
+        table.add_column("Count", justify="right")
+        for tool, count in sorted(tool_counts.items(), key=lambda x: -x[1]):
+            table.add_row(tool, str(count))
+        table.add_row("[bold]Total[/]", f"[bold]{sum(tool_counts.values())}[/]")
+        console.print(table)
+        console.print()
+
+    # File reads — highlight duplicates
+    if file_reads:
+        duplicates = {fp: c for fp, c in file_reads.items() if c > 1}
+        unique = len(file_reads)
+        total_reads = sum(file_reads.values())
+        dup_reads = sum(c - 1 for c in file_reads.values() if c > 1)
+
+        console.print(f"[bold]File Reads[/]: {total_reads} total, {unique} unique, [red]{dup_reads} duplicate[/]")
+
+        if duplicates:
+            dup_table = Table(title="Duplicate Reads (re-read files)")
+            dup_table.add_column("File", style="bold", max_width=80)
+            dup_table.add_column("Reads", justify="right")
+            for fp, count in sorted(duplicates.items(), key=lambda x: -x[1]):
+                style = "red bold" if count >= 3 else "yellow"
+                dup_table.add_row(fp, f"[{style}]{count}[/]")
+            console.print(dup_table)
+        console.print()
+
+    # Chunked reads
+    if chunked_reads:
+        console.print("[bold]Chunked Reads[/] (same file re-read within 5 tool calls):")
+        for fp, count in sorted(chunked_reads.items(), key=lambda x: -x[1]):
+            console.print(f"  [yellow]{fp}[/] — {count} chunked re-read(s)")
+        console.print()
+
+    # Re-read events from circuit breaker
+    reread_events = [e for e in events if e.get("event") == "reread_threshold_exceeded"]
+    escalation_events = [e for e in events if e.get("event") in ("exploration_escalation", "exploration_force_halt")]
+    if reread_events or escalation_events:
+        console.print("[bold red]Circuit Breaker Activity[/]")
+        if reread_events:
+            console.print(f"  Re-read threshold exceeded: [red]{len(reread_events)}[/] time(s)")
+            for e in reread_events:
+                console.print(f"    {e.get('file_path', '?')} — read {e.get('read_count', '?')} times")
+        if escalation_events:
+            for e in escalation_events:
+                level = e.get("level", "?")
+                console.print(f"  Escalation level {level}: {e.get('event')} at tool call {e.get('tool_calls', '?')}")
+        console.print()
+
+
 if __name__ == "__main__":
     cli()

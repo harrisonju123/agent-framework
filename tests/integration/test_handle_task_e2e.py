@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_framework.core.agent import Agent
+from agent_framework.core.post_completion import PostCompletionManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
 
@@ -117,6 +118,8 @@ def _build_mock_agent(tmp_path: Path) -> MagicMock:
     agent._workflow_router.queue = agent.queue
     agent._workflow_router.check_and_create_fan_in_task = MagicMock()
     agent._workflow_router.set_session_logger = MagicMock()
+    agent._workflow_router.enforce_chain = MagicMock(return_value=False)
+    agent._workflow_router.is_at_terminal_workflow_step = MagicMock(return_value=True)
 
     # Workflow executor
     agent._workflow_executor = MagicMock()
@@ -142,6 +145,7 @@ def _build_mock_agent(tmp_path: Path) -> MagicMock:
     # Error recovery
     agent._error_recovery = MagicMock()
     agent._error_recovery.handle_failure = AsyncMock()
+    agent._error_recovery.handle_failed_response = AsyncMock()
     agent._error_recovery.has_deliverables.return_value = True
 
     # Retry handler
@@ -163,6 +167,40 @@ def _build_mock_agent(tmp_path: Path) -> MagicMock:
     agent._optimization_config = MagicMock()
     agent._optimization_config.get.return_value = False
     agent._optimization_config.__getitem__ = MagicMock(return_value={})
+
+    # Analytics manager (provides callbacks for PostCompletionManager)
+    agent._analytics = MagicMock()
+    agent._analytics.extract_summary = AsyncMock(return_value="Summary")
+    agent._analytics.extract_and_store_memories = MagicMock()
+    agent._analytics.analyze_tool_patterns = MagicMock(return_value=0)
+
+    # LLM executor (delegation target for _execute_llm_with_interruption_watch)
+    agent._llm_executor = MagicMock()
+    agent._llm_executor.process_completion = MagicMock()
+    agent._llm_executor.log_routing_decision = MagicMock()
+
+    # PostCompletionManager — real instance with mock dependencies so
+    # _handle_successful_response / _run_post_completion_flow exercise
+    # the actual completion logic (mark_completed, workflow routing, etc.)
+    session_logs_dir = tmp_path / "logs" / "sessions"
+    post_completion = PostCompletionManager(
+        config=agent.config,
+        queue=agent.queue,
+        workspace=agent.workspace,
+        logger=agent.logger,
+        session_logger=session_logger,
+        activity_manager=agent.activity_manager,
+        review_cycle=agent._review_cycle,
+        workflow_router=agent._workflow_router,
+        git_ops=agent._git_ops,
+        budget=agent._budget,
+        error_recovery=agent._error_recovery,
+        optimization_config={},
+        session_logging_enabled=False,
+        session_logs_dir=session_logs_dir,
+        agent_definition=agent._agent_definition,
+    )
+    agent._post_completion = post_completion
 
     # Self-eval
     agent._self_eval_enabled = False
@@ -281,7 +319,7 @@ class TestSuccessfulTaskLifecycle:
 # ---------------------------------------------------------------------------
 
 class TestFailedResponseTriggersErrorRecovery:
-    """LLM returns failure -> _handle_failed_response -> _handle_failure called."""
+    """LLM returns failure -> _handle_failed_response -> error_recovery called."""
 
     @pytest.mark.asyncio
     async def test_failed_response_triggers_error_recovery(self, tmp_path):
@@ -297,17 +335,10 @@ class TestFailedResponseTriggersErrorRecovery:
 
         await agent._handle_task(task)
 
-        # _handle_failure should have been called (via _handle_failed_response)
-        agent._handle_failure.assert_awaited_once()
-
-        # Cost should be accumulated for failed attempts
-        agent._budget.estimate_cost.assert_called_with(failed_response)
-
-        # Error should be recorded on the task
-        assert task.last_error == "Context window exceeded"
-
-        # _finalize_failed_attempt captures partial work before retry
-        agent._finalize_failed_attempt.assert_called_once()
+        # _error_recovery.handle_failed_response should have been called
+        agent._error_recovery.handle_failed_response.assert_awaited_once()
+        call_kwargs = agent._error_recovery.handle_failed_response.call_args
+        assert call_kwargs[0][1] is failed_response  # response arg
 
         # Task should NOT be completed
         assert task.status != TaskStatus.COMPLETED
@@ -343,17 +374,12 @@ class TestWorkflowTaskWritesChainState:
 
         assert task.status == TaskStatus.COMPLETED
 
-        # _save_upstream_context is called for workflow/chain tasks
-        agent._save_upstream_context.assert_called_once_with(task, response)
+        # Workflow chain enforcement runs inside PostCompletionManager
+        # which delegates to workflow_router.enforce_chain
+        agent._workflow_router.enforce_chain.assert_called_once()
 
-        # _save_step_to_chain_state is called for workflow/chain tasks
-        agent._save_step_to_chain_state.assert_called_once()
-        call_kwargs = agent._save_step_to_chain_state.call_args
-        assert call_kwargs[0][0] is task
-        assert call_kwargs[0][1] is response
-
-        # Workflow chain enforcement should have been invoked
-        agent._enforce_workflow_chain.assert_called_once()
+        # Git operations: detect implementation branch is called
+        agent._git_ops.detect_implementation_branch.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +421,7 @@ class TestSubtaskSkipsWorkflowChain:
         agent._workflow_router.check_and_create_fan_in_task.assert_called_once_with(task)
 
         # Workflow chain enforcement should NOT have been called for a subtask
-        agent._enforce_workflow_chain.assert_not_called()
+        agent._workflow_router.enforce_chain.assert_not_called()
 
         # PR lifecycle should NOT run for subtasks
         agent._git_ops.push_and_create_pr_if_needed.assert_not_called()

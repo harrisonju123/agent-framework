@@ -160,6 +160,15 @@ class OptimizationConfig(BaseModel):
         "create_pr": 25,
     })
 
+    # Escalation multipliers for progressive exploration intervention.
+    # Level 1 fires at threshold * [0], level 2 at threshold * [1], etc.
+    exploration_escalation_multipliers: List[float] = Field(
+        default_factory=lambda: [1.0, 2.0, 3.0]
+    )
+
+    # Interrupt after N re-reads of the same file (context compression re-read detection)
+    reread_interrupt_threshold: int = 3
+
     # Per-task-tree USD budget ceilings by estimated effort (t-shirt size)
     enable_effort_budget_ceilings: bool = False
     effort_budget_ceilings: Dict[str, float] = Field(default_factory=lambda: {

@@ -1217,7 +1217,7 @@ class TestReadCacheInjection:
         )
 
     def test_inject_with_summaries(self, builder, cache_dir, task_with_root):
-        """Read cache with LLM summaries renders a markdown table."""
+        """Read cache with LLM summaries renders FILE: lines with role tags."""
         import json
         cache_data = {
             "root_task_id": "root123",
@@ -1234,6 +1234,12 @@ class TestReadCacheInjection:
                     "read_at": "2026-02-18T10:01:00Z",
                     "workflow_step": "plan",
                 },
+                "src/config.py": {
+                    "summary": "App configuration loader",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:02:00Z",
+                    "workflow_step": "plan",
+                },
             },
         }
         (cache_dir / "root123.json").write_text(json.dumps(cache_data))
@@ -1242,8 +1248,9 @@ class TestReadCacheInjection:
         assert "FILES ANALYZED BY PREVIOUS AGENTS" in result
         assert "src/server.py" in result
         assert "Express server" in result
-        assert "| Role |" in result
-        assert "| ref |" in result
+        assert "[ref]" in result
+        assert "FILE:" in result
+        assert "Use Grep to find specific sections instead of re-reading" in result
         assert "base prompt" in result
 
     def test_inject_paths_only(self, builder, cache_dir, task_with_root):
@@ -1262,6 +1269,12 @@ class TestReadCacheInjection:
                     "summary": "",
                     "read_by": "architect",
                     "read_at": "2026-02-18T10:01:00Z",
+                    "workflow_step": "plan",
+                },
+                "src/config.py": {
+                    "summary": "",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:02:00Z",
                     "workflow_step": "plan",
                 },
             },
@@ -1290,6 +1303,10 @@ class TestReadCacheInjection:
             "root_task_id": "root123",
             "entries": {
                 "src/server.py": {"summary": "", "read_by": "architect",
+                                   "read_at": "2026-02-18T10:00:00Z", "workflow_step": "plan"},
+                "src/models.py": {"summary": "", "read_by": "architect",
+                                   "read_at": "2026-02-18T10:00:00Z", "workflow_step": "plan"},
+                "src/config.py": {"summary": "", "read_by": "architect",
                                    "read_at": "2026-02-18T10:00:00Z", "workflow_step": "plan"},
             },
         }
@@ -1390,6 +1407,18 @@ class TestReadCacheSeedFromRepo:
                     "read_at": "2026-02-18T10:00:00Z",
                     "workflow_step": "plan",
                 },
+                "src/models.py": {
+                    "summary": "SQLAlchemy models",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:01:00Z",
+                    "workflow_step": "plan",
+                },
+                "src/config.py": {
+                    "summary": "App configuration",
+                    "read_by": "architect",
+                    "read_at": "2026-02-18T10:02:00Z",
+                    "workflow_step": "plan",
+                },
             },
         }
         (cache_dir / "_repo-justworkshr-myrepo.json").write_text(json.dumps(repo_data))
@@ -1410,7 +1439,7 @@ class TestReadCacheSeedFromRepo:
         """Existing task cache is used directly; repo cache not consulted."""
         import json
 
-        # Task-specific cache with different content
+        # Task-specific cache with enough entries to cross the threshold
         task_data = {
             "root_task_id": "planning-myrepo-20260219",
             "entries": {
@@ -1418,6 +1447,18 @@ class TestReadCacheSeedFromRepo:
                     "summary": "Task-specific file",
                     "read_by": "engineer",
                     "read_at": "2026-02-19T10:00:00Z",
+                    "workflow_step": "implement",
+                },
+                "src/task_helpers.py": {
+                    "summary": "Helper utilities",
+                    "read_by": "engineer",
+                    "read_at": "2026-02-19T10:01:00Z",
+                    "workflow_step": "implement",
+                },
+                "src/task_models.py": {
+                    "summary": "Data models",
+                    "read_by": "engineer",
+                    "read_at": "2026-02-19T10:02:00Z",
                     "workflow_step": "implement",
                 },
             },
@@ -2315,3 +2356,380 @@ class TestQAWarningsInjection:
         result = builder._inject_qa_warnings("Base", sample_task)
 
         assert result.count("Always check null") == 1
+
+
+class TestMinimalTaskJson:
+    """Tests for _minimal_task_json() compressed serialization."""
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    def test_includes_core_fields(self, builder, sample_task):
+        """Minimal JSON includes id, title, description."""
+        import json
+        result = json.loads(builder._minimal_task_json(sample_task))
+        assert result["id"] == sample_task.id
+        assert result["title"] == sample_task.title
+        assert "description" in result
+
+    def test_includes_deliverables_and_criteria(self, builder, sample_task):
+        """Deliverables and acceptance_criteria preserved when present."""
+        import json
+        result = json.loads(builder._minimal_task_json(sample_task))
+        assert result["deliverables"] == sample_task.deliverables
+        assert result["acceptance_criteria"] == sample_task.acceptance_criteria
+
+    def test_truncates_long_description(self, builder, sample_task):
+        """Description longer than 500 chars is truncated."""
+        import json
+        sample_task.description = "x" * 800
+        result = json.loads(builder._minimal_task_json(sample_task))
+        assert len(result["description"]) <= 504  # 500 + "..."
+
+    def test_excludes_metadata_fields(self, builder, sample_task):
+        """Fields like retry_count, created_at, blocks are excluded."""
+        import json
+        result = json.loads(builder._minimal_task_json(sample_task))
+        for field in ("retry_count", "created_at", "started_at", "blocks",
+                      "depends_on", "subtask_ids", "notes"):
+            assert field not in result
+
+    def test_context_only_workflow_keys(self, builder, sample_task):
+        """Context keeps only workflow-relevant keys."""
+        import json
+        sample_task.context["_internal_key"] = "hidden"
+        sample_task.context["random_stuff"] = "also hidden"
+        result = json.loads(builder._minimal_task_json(sample_task))
+        ctx = result.get("context", {})
+        assert "jira_key" in ctx
+        assert "github_repo" in ctx
+        assert "_internal_key" not in ctx
+        assert "random_stuff" not in ctx
+
+    def test_compact_json_no_whitespace(self, builder, sample_task):
+        """Output uses compact separators — no extra whitespace."""
+        result = builder._minimal_task_json(sample_task)
+        assert "  " not in result  # No indentation
+        assert ": " not in result  # Compact separator
+
+
+class TestShouldInject:
+    """Tests for phase-aware _should_inject() gating."""
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    def test_no_workflow_step_allows_all(self, builder, sample_task):
+        """Tasks without workflow_step get all injections."""
+        sample_task.context.pop("workflow_step", None)
+        for section in ("memories", "tool_tips", "codebase_index", "read_cache",
+                         "upstream_context", "human_guidance", "requirements"):
+            assert builder._should_inject(section, sample_task) is True
+
+    def test_implement_step_allowed_sections(self, builder, sample_task):
+        """Implement step allows read_cache, codebase_index, memories, etc."""
+        sample_task.context["workflow_step"] = "implement"
+        assert builder._should_inject("read_cache", sample_task) is True
+        assert builder._should_inject("codebase_index", sample_task) is True
+        assert builder._should_inject("memories", sample_task) is True
+        assert builder._should_inject("requirements", sample_task) is True
+
+    def test_implement_step_blocked_sections(self, builder, sample_task):
+        """Implement step blocks upstream_context and human_guidance."""
+        sample_task.context["workflow_step"] = "implement"
+        assert builder._should_inject("upstream_context", sample_task) is False
+        assert builder._should_inject("human_guidance", sample_task) is False
+
+    def test_create_pr_blocks_everything(self, builder, sample_task):
+        """create_pr step has an empty allowed set — blocks all optional sections."""
+        sample_task.context["workflow_step"] = "create_pr"
+        for section in ("memories", "tool_tips", "codebase_index", "read_cache",
+                         "upstream_context", "human_guidance", "requirements"):
+            assert builder._should_inject(section, sample_task) is False
+
+    def test_code_review_allows_read_cache_and_upstream(self, builder, sample_task):
+        """code_review step allows read_cache and upstream_context only."""
+        sample_task.context["workflow_step"] = "code_review"
+        assert builder._should_inject("read_cache", sample_task) is True
+        assert builder._should_inject("upstream_context", sample_task) is True
+        assert builder._should_inject("memories", sample_task) is False
+        assert builder._should_inject("tool_tips", sample_task) is False
+
+    def test_testing_task_skips_heavy_sections(self, builder, sample_task):
+        """Testing tasks skip memories, tool_tips, codebase_index even without workflow_step."""
+        sample_task.type = TaskType.TESTING
+        sample_task.context.pop("workflow_step", None)
+        assert builder._should_inject("memories", sample_task) is False
+        assert builder._should_inject("tool_tips", sample_task) is False
+        assert builder._should_inject("codebase_index", sample_task) is False
+        # Non-skipped sections still allowed
+        assert builder._should_inject("requirements", sample_task) is True
+
+    def test_unknown_step_allows_all(self, builder, sample_task):
+        """Unknown workflow step falls back to allowing everything."""
+        sample_task.context["workflow_step"] = "some_custom_step"
+        assert builder._should_inject("memories", sample_task) is True
+        assert builder._should_inject("codebase_index", sample_task) is True
+
+
+class TestReadCacheTrivialSkip:
+    """_inject_read_cache skips injection when fewer than 3 entries exist."""
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    def test_skip_trivial_cache(self, builder, tmp_path):
+        """Cache with fewer than 3 entries should not be injected."""
+        import json
+        cache_dir = tmp_path / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        cache_data = {
+            "root_task_id": "root-trivial",
+            "entries": {
+                "src/one.py": {"summary": "One file", "read_by": "architect"},
+                "src/two.py": {"summary": "Two files", "read_by": "architect"},
+            },
+        }
+        (cache_dir / "root-trivial.json").write_text(json.dumps(cache_data))
+
+        task = Task(
+            id="chain-root-trivial-step-d0",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="test",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Implement",
+            description="Implement",
+            context={"_root_task_id": "root-trivial"},
+        )
+        result = builder._inject_read_cache("base prompt", task)
+        assert result == "base prompt"
+
+
+class TestLegacyPromptMinimalJson:
+    """Legacy prompt uses minimal JSON for execution steps."""
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    def test_implement_step_uses_minimal_json(self, builder, sample_task):
+        """Implementation step should not include retry_count, blocks, etc."""
+        sample_task.context["workflow_step"] = "implement"
+        prompt = builder._build_prompt_legacy(sample_task)
+        # Minimal JSON omits these fields
+        assert "retry_count" not in prompt
+        assert "blocks" not in prompt
+        assert "subtask_ids" not in prompt
+
+    def test_plan_step_uses_full_json(self, builder, sample_task):
+        """Planning step still gets the full task JSON."""
+        sample_task.context["workflow_step"] = "plan"
+        prompt = builder._build_prompt_legacy(sample_task)
+        # Full JSON includes these metadata fields
+        assert "created_at" in prompt
+
+
+class TestToolTipsRereadWarning:
+    """_inject_tool_tips surfaces cross-step-reread warnings prominently."""
+
+    @pytest.fixture
+    def builder_with_store(self, agent_config, tmp_path):
+        from agent_framework.memory.tool_pattern_store import ToolPatternStore
+
+        store = ToolPatternStore(tmp_path, enabled=True)
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+            tool_pattern_store=store,
+        )
+        return PromptBuilder(ctx), store
+
+    def test_reread_warning_surfaced_prominently(self, builder_with_store):
+        """cross-step-reread pattern gets a WARNING prefix above other tips."""
+        from agent_framework.memory.tool_pattern_analyzer import ToolPatternRecommendation
+
+        builder, store = builder_with_store
+        store.store_patterns("company/api", [
+            ToolPatternRecommendation(pattern_id="cross-step-reread", tip="Re-read tip"),
+            ToolPatternRecommendation(pattern_id="sequential-reads", tip="Sequential tip"),
+        ])
+        task = Task(
+            id="test-123", type=TaskType.IMPLEMENTATION, status=TaskStatus.PENDING,
+            priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Test", description="Test",
+            context={"github_repo": "company/api"},
+        )
+        result = builder._inject_tool_tips("base prompt", task)
+        assert "WARNING:" in result
+        assert "re-reading" in result.lower()
+        assert "Sequential tip" in result
+
+    def test_no_warning_without_reread_pattern(self, builder_with_store):
+        """Without cross-step-reread, no WARNING prefix appears."""
+        from agent_framework.memory.tool_pattern_analyzer import ToolPatternRecommendation
+
+        builder, store = builder_with_store
+        store.store_patterns("company/api", [
+            ToolPatternRecommendation(pattern_id="sequential-reads", tip="Sequential tip"),
+        ])
+        task = Task(
+            id="test-123", type=TaskType.IMPLEMENTATION, status=TaskStatus.PENDING,
+            priority=1, created_by="test", assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="Test", description="Test",
+            context={"github_repo": "company/api"},
+        )
+        result = builder._inject_tool_tips("base prompt", task)
+        assert "WARNING:" not in result
+        assert "Sequential tip" in result
+
+
+class TestReadCacheEnrichSummary:
+    """_enrich_summary upgrades basic summaries with structural detail."""
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    def test_enriches_short_summary(self, builder, tmp_path):
+        """A short summary gets replaced by a richer one from file_summarizer."""
+        f = tmp_path / "example.py"
+        f.write_text(
+            "class Foo:\n"
+            "    def bar(self, x):\n        pass\n"
+        )
+        result = builder._enrich_summary(str(f), "3L")
+        assert "Classes: Foo" in result
+        assert "bar(x)" in result
+
+    def test_already_rich_summary_unchanged(self, builder):
+        """A summary that already has structural info is returned as-is."""
+        existing = "150L. Classes: Agent, Config. Methods: run(task), setup()"
+        result = builder._enrich_summary("/nonexistent.py", existing)
+        assert result == existing
+
+    def test_missing_file_falls_back(self, builder):
+        """If the file can't be read, falls back to existing summary."""
+        result = builder._enrich_summary("/no/such/file.py", "50L")
+        assert result == "50L"
+
+    def test_empty_existing_returns_no_summary(self, builder):
+        """Empty existing summary with unreadable file returns placeholder."""
+        result = builder._enrich_summary("/no/such/file.py", "")
+        assert result == "(no summary)"
+
+    def test_relative_path_resolved_against_workspace(self, builder, tmp_path):
+        """Repo-relative paths get resolved against workspace."""
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        f = src_dir / "utils.py"
+        f.write_text("MAX_SIZE = 100\ndef compute(data):\n    pass\n")
+        result = builder._enrich_summary("src/utils.py", "3L")
+        assert "Methods:" in result or "compute" in result
+
+
+class TestReadCacheGrepDirective:
+    """_inject_read_cache includes Grep directive in both formats."""
+
+    @pytest.fixture
+    def builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    def test_summary_format_has_grep_directive(self, builder, tmp_path):
+        """Cache with summaries includes the Grep instruction."""
+        import json
+        cache_dir = tmp_path / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        entries = {
+            f"src/file_{i}.py": {
+                "summary": f"Module {i}",
+                "read_by": "architect",
+                "workflow_step": "plan",
+            }
+            for i in range(4)
+        }
+        (cache_dir / "root1.json").write_text(json.dumps({
+            "root_task_id": "root1",
+            "entries": entries,
+        }))
+        task = Task(
+            id="chain-root1-step-d0", type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING, priority=1, created_by="test",
+            assigned_to="engineer", created_at=datetime.now(timezone.utc),
+            title="Test", description="Test",
+            context={"_root_task_id": "root1"},
+        )
+        result = builder._inject_read_cache("base prompt", task)
+        assert "Use Grep to find specific sections instead of re-reading" in result
+
+    def test_paths_only_format_has_grep_directive(self, builder, tmp_path):
+        """Cache without summaries also includes the Grep instruction."""
+        import json
+        cache_dir = tmp_path / ".agent-communication" / "read-cache"
+        cache_dir.mkdir(parents=True)
+        entries = {
+            f"src/file_{i}.py": {
+                "summary": "",
+                "read_by": "architect",
+                "workflow_step": "plan",
+            }
+            for i in range(4)
+        }
+        (cache_dir / "root1.json").write_text(json.dumps({
+            "root_task_id": "root1",
+            "entries": entries,
+        }))
+        task = Task(
+            id="chain-root1-step-d0", type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING, priority=1, created_by="test",
+            assigned_to="engineer", created_at=datetime.now(timezone.utc),
+            title="Test", description="Test",
+            context={"_root_task_id": "root1"},
+        )
+        result = builder._inject_read_cache("base prompt", task)
+        assert "Use Grep to find specific sections instead of re-reading" in result

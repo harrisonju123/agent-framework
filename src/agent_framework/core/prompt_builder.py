@@ -99,6 +99,20 @@ class PromptBuilder:
     # QA handles testing at qa_review; running tests at review/PR steps wastes budget.
     _TEST_SUPPRESSED_STEPS = frozenset({"code_review", "preview_review", "create_pr"})
 
+    # Which optional prompt sections to include per workflow phase.
+    # Unlisted phases get all sections (backward-compatible default).
+    _PHASE_INJECTIONS: dict[str, set[str]] = {
+        "plan": {"upstream_context", "human_guidance"},
+        "implement": {"read_cache", "codebase_index", "memories", "tool_tips", "requirements"},
+        "code_review": {"read_cache", "upstream_context"},
+        "qa_review": {"codebase_index", "upstream_context"},
+        "create_pr": set(),
+    }
+
+    # Testing tasks have a tight 20K budget; drop heavyweight sections
+    # instead of increasing the budget (cheaper, same quality)
+    _TESTING_SKIP_INJECTIONS = frozenset({"memories", "tool_tips", "codebase_index"})
+
     # Steps where the LLM must review only — no file writes or implementation.
     # Injects _build_review_only_guidance() (hard "REVIEWER" constraints + VERDICT format).
     _REVIEW_ONLY_STEPS = frozenset({"code_review"})
@@ -165,7 +179,8 @@ class PromptBuilder:
             prompt = self._build_prompt_legacy(task, prompt_override=prompt_text)
 
         # Inject requirements checklist so engineer knows exactly what to deliver
-        prompt = self._inject_requirements_checklist(prompt, task)
+        if self._should_inject("requirements", task):
+            prompt = self._inject_requirements_checklist(prompt, task)
 
         # Inject preview mode constraints when task is a preview
         if task.type == TaskType.PREVIEW:
@@ -178,23 +193,27 @@ class PromptBuilder:
                 prompt_preview = prompt_preview.replace(task.context['jira_key'], "JIRA-XXX")
             self.logger.debug(f"Built prompt preview (first 500 chars): {prompt_preview}...")
 
-        # Append test failure context if present
+        # Append test failure context if present (always — retries need it)
         prompt = self._append_test_failure_context(prompt, task)
 
         # Inject relevant memories from previous tasks
-        prompt = self._inject_memories(prompt, task)
+        if self._should_inject("memories", task):
+            prompt = self._inject_memories(prompt, task)
 
         # Inject recurring QA warnings for files in this task
         prompt = self._inject_qa_warnings(prompt, task)
 
         # Inject tool efficiency tips from session analysis
-        prompt = self._inject_tool_tips(prompt, task)
+        if self._should_inject("tool_tips", task):
+            prompt = self._inject_tool_tips(prompt, task)
 
         # Inject structural codebase overview and relevant symbols
-        prompt = self._inject_codebase_index(prompt, task)
+        if self._should_inject("codebase_index", task):
+            prompt = self._inject_codebase_index(prompt, task)
 
         # Inject read cache from previous chain steps
-        prompt = self._inject_read_cache(prompt, task)
+        if self._should_inject("read_cache", task):
+            prompt = self._inject_read_cache(prompt, task)
 
         # Inject self-eval critique if retrying after failed self-evaluation
         prompt = self._inject_self_eval_context(prompt, task)
@@ -206,7 +225,8 @@ class PromptBuilder:
         prompt = self._inject_retry_context(prompt, task)
 
         # Inject human guidance if provided via `agent guide` command
-        prompt = self._inject_human_guidance(prompt, task)
+        if self._should_inject("human_guidance", task):
+            prompt = self._inject_human_guidance(prompt, task)
 
         # Persist cascade observability after prompt is fully built
         task.context["_upstream_context_source"] = self._last_upstream_source
@@ -282,6 +302,68 @@ class PromptBuilder:
             task_hash = int(hashlib.md5(task.id.encode(), usedforsecurity=False).hexdigest()[:8], 16)
             return (task_hash % 100) < canary_pct
 
+    def _should_inject(self, section_name: str, task: Task) -> bool:
+        """Check whether a prompt section should be included for this task's phase.
+
+        Falls back to allowing everything when the workflow step is unknown,
+        so non-workflow tasks are unaffected.
+        """
+        step = task.context.get("workflow_step")
+        if step is None:
+            # Testing tasks still get their skip set even without a workflow step
+            if task.type == TaskType.TESTING and section_name in self._TESTING_SKIP_INJECTIONS:
+                return False
+            return True
+
+        allowed = self._PHASE_INJECTIONS.get(step)
+        if allowed is None:
+            # Unknown step — include everything (safe default)
+            return True
+
+        if section_name not in allowed:
+            return False
+
+        # Testing tasks drop extra sections on top of phase gating
+        if task.type == TaskType.TESTING and section_name in self._TESTING_SKIP_INJECTIONS:
+            return False
+
+        return True
+
+    def _minimal_task_json(self, task: Task) -> str:
+        """Serialize task with only fields needed for LLM execution.
+
+        More aggressive than _get_minimal_task_dict — designed for
+        implementation/testing steps where the plan carries the detail.
+        """
+        fields: dict[str, Any] = {
+            "id": task.id,
+            "title": task.title.strip() if task.title else "",
+        }
+
+        # Truncate long descriptions — the plan has the detail
+        if task.description:
+            desc = task.description.strip()
+            fields["description"] = desc[:500] + "..." if len(desc) > 500 else desc
+
+        if task.deliverables:
+            fields["deliverables"] = task.deliverables
+        if task.acceptance_criteria:
+            fields["acceptance_criteria"] = task.acceptance_criteria
+
+        # Only workflow-relevant context keys
+        _ALLOWED_CONTEXT_KEYS = {
+            "jira_key", "jira_project", "github_repo", "mode",
+            "workflow", "workflow_step", "repository_name",
+        }
+        relevant_ctx = {
+            k: v for k, v in task.context.items()
+            if k in _ALLOWED_CONTEXT_KEYS
+        }
+        if relevant_ctx:
+            fields["context"] = relevant_ctx
+
+        return json.dumps(fields, separators=(",", ":"))
+
     # Context keys filtered from legacy prompt serialization to save tokens.
     # Underscore-prefixed keys are always stripped (internal bookkeeping).
     # These named keys are injected as dedicated prompt sections elsewhere.
@@ -289,13 +371,18 @@ class PromptBuilder:
 
     def _build_prompt_legacy(self, task: Task, prompt_override: str = None) -> str:
         """Build prompt using legacy format (original implementation)."""
-        task_dict = task.model_dump()
-        if "context" in task_dict and isinstance(task_dict["context"], dict):
-            task_dict["context"] = {
-                k: v for k, v in task_dict["context"].items()
-                if not k.startswith("_") and k not in self._LEGACY_CONTEXT_EXCLUDE_KEYS
-            }
-        task_json = json.dumps(task_dict, indent=2, default=str)
+        # Use compressed task JSON for execution steps where the plan carries detail
+        step = task.context.get("workflow_step")
+        if step in ("implement", "qa_review", "create_pr"):
+            task_json = self._minimal_task_json(task)
+        else:
+            task_dict = task.model_dump()
+            if "context" in task_dict and isinstance(task_dict["context"], dict):
+                task_dict["context"] = {
+                    k: v for k, v in task_dict["context"].items()
+                    if not k.startswith("_") and k not in self._LEGACY_CONTEXT_EXCLUDE_KEYS
+                }
+            task_json = json.dumps(task_dict, indent=2, default=str)
         agent_prompt = prompt_override or self.ctx.config.prompt
 
         # Extract integration context
@@ -385,11 +472,14 @@ IMPORTANT:
         - Strategy 4: Compact JSON (no whitespace)
         - Strategy 5: Result summarization (include dep summaries)
         """
-        # Always use minimal fields in optimized prompts (Strategy 1)
-        task_dict = self._get_minimal_task_dict(task)
-
-        # Always use compact JSON in optimized prompts (Strategy 4)
-        task_json = json.dumps(task_dict, separators=(',', ':'))
+        # Use aggressively compressed JSON for execution steps;
+        # fall back to the existing minimal dict for planning/unknown steps
+        step = task.context.get("workflow_step")
+        if step in ("implement", "qa_review", "create_pr"):
+            task_json = self._minimal_task_json(task)
+        else:
+            task_dict = self._get_minimal_task_dict(task)
+            task_json = json.dumps(task_dict, separators=(',', ':'))
 
         # Extract integration context (only dynamic values, not boilerplate)
         jira_key = task.context.get("jira_key")
@@ -1209,7 +1299,11 @@ If a tool call fails:
         return prompt + "\n\n" + section
 
     def _inject_tool_tips(self, prompt: str, task: Task) -> str:
-        """Append tool efficiency tips from previous session analysis."""
+        """Append tool efficiency tips from previous session analysis.
+
+        When a cross-step-reread pattern is present, surfaces it prominently
+        so the LLM avoids redundant file reads from the start.
+        """
         if not self.ctx.tool_pattern_store:
             return prompt
 
@@ -1225,7 +1319,20 @@ If a tool call fails:
         if not patterns:
             return prompt
 
-        tips_lines = [f"- {p.tip}" for p in patterns]
+        # Surface re-read warnings prominently above general tips
+        reread_patterns = [p for p in patterns if p.pattern_id == "cross-step-reread"]
+        other_patterns = [p for p in patterns if p.pattern_id != "cross-step-reread"]
+
+        tips_lines = []
+        if reread_patterns:
+            tips_lines.append(
+                "WARNING: Previous tasks wasted tokens re-reading files. "
+                "Use Grep for targeted lookups instead of re-reading whole files."
+            )
+            tips_lines.append("")
+        for p in other_patterns:
+            tips_lines.append(f"- {p.tip}")
+
         tips_section = "## Tool Efficiency Tips\n\n" + "\n".join(tips_lines)
 
         self.logger.debug(f"Injected {len(patterns)} tool tips ({len(tips_section)} chars)")
@@ -1235,6 +1342,7 @@ If a tool call fails:
                 repo=repo_slug,
                 count=len(patterns),
                 chars=len(tips_section),
+                has_reread_warning=len(reread_patterns) > 0,
             )
         return prompt + "\n\n" + tips_section
 
@@ -1425,6 +1533,11 @@ If a tool call fails:
         if not entries:
             return prompt
 
+        # Skip injection for trivial caches — the overhead isn't worth it
+        # when only 1-2 files were read by a prior step
+        if len(entries) < 3:
+            return prompt
+
         # Migrate legacy absolute-path keys to repo-relative
         entries = self._migrate_legacy_cache_paths(entries)
 
@@ -1443,10 +1556,16 @@ If a tool call fails:
 
         if has_summaries:
             lines = ["## FILES ANALYZED BY PREVIOUS AGENTS\n"]
-            lines.append("| File | Summary | Role |")
-            lines.append("|------|---------|------|")
+            lines.append(
+                "These files were read by previous agents. "
+                "Use Grep to find specific sections instead of re-reading."
+            )
+            lines.append("")
             for file_path, entry in entries.items():
-                summary = entry.get("summary", "").replace("|", "/")
+                summary = entry.get("summary", "")
+                # Try to enrich with structural detail if the summary is short
+                rich_summary = self._enrich_summary(file_path, summary)
+                display_summary = rich_summary.replace("|", "/")
                 # Role priority: CHANGED (actually modified) > MODIFY (planned) > ref
                 if entry.get("modified_by"):
                     role = "CHANGED"
@@ -1454,10 +1573,8 @@ If a tool call fails:
                     role = "MODIFY"
                 else:
                     role = "ref"
-                # Truncate long summaries per-row
-                if len(summary) > 120:
-                    summary = summary[:117] + "..."
-                lines.append(f"| {self._display_path(file_path)} | {summary} | {role} |")
+                display_path = self._display_path(file_path)
+                lines.append(f"FILE: {display_path} [{role}] -- {display_summary}")
             lines.append("")
             lines.append(self._read_cache_step_directive(task) + "\n")
         else:
@@ -1468,6 +1585,9 @@ If a tool call fails:
                 paths_str += f", ... ({len(paths) - 30} more)"
             lines = [
                 "## FILES READ BY PREVIOUS AGENTS\n",
+                "These files were read by previous agents. "
+                "Use Grep to find specific sections instead of re-reading.",
+                "",
                 paths_str,
                 "",
                 self._read_cache_step_directive(task) + "\n",
@@ -1490,6 +1610,31 @@ If a tool call fails:
             )
 
         return prompt + "\n\n" + section
+
+    def _enrich_summary(self, file_path: str, existing_summary: str) -> str:
+        """Upgrade a basic summary with structural detail when possible.
+
+        Falls back to existing_summary if file is unreadable or already rich.
+        """
+        # Already rich enough — structural summaries contain class/method info
+        if len(existing_summary) > 80 and ("Classes:" in existing_summary or "Methods:" in existing_summary):
+            return existing_summary
+
+        try:
+            from ..utils.file_summarizer import summarize_file_rich
+
+            # Resolve repo-relative path against workspace for disk access
+            full_path = file_path
+            if not file_path.startswith("/"):
+                full_path = str(self.ctx.workspace / file_path)
+
+            rich = summarize_file_rich(full_path, max_length=300)
+            if rich and len(rich) > len(existing_summary):
+                return rich
+        except Exception:
+            pass
+
+        return existing_summary or "(no summary)"
 
     @staticmethod
     def _matches_modify_set(file_path: str, modify_set: set[str]) -> bool:

@@ -107,6 +107,10 @@ class ToolUsageMetrics(BaseModel):
     sessions_exceeding_threshold: int = 0   # count above threshold
     by_agent: Dict[str, float] = {}         # agent_id → avg tool calls
     by_step: Dict[str, int] = {}            # workflow_step → count of sessions exceeding
+    # Re-read circuit breaker signals
+    reread_interrupts: int = 0              # count of reread_threshold_exceeded events
+    exploration_escalations: Dict[int, int] = {}  # level → count (2=escalation, 3=force_halt)
+    avg_duplicate_read_rate: float = 0.0    # duplicate_reads / total_reads across sessions
 
 
 class LanguageMismatchMetrics(BaseModel):
@@ -582,6 +586,12 @@ class AgenticMetrics:
         sessions_exceeding = 0
         step_exceeding: Dict[str, int] = defaultdict(int)
         alert_threshold = 50  # default; overwritten from first exploration_alert event
+        # Re-read circuit breaker counters
+        reread_interrupts = 0
+        escalation_counts: Dict[int, int] = defaultdict(int)
+        # For avg duplicate read rate across read_dedup_stats events
+        total_session_reads = 0
+        total_session_dupes = 0
 
         for task_id, events in events_by_task.items():
             for e in events:
@@ -596,7 +606,24 @@ class AgenticMetrics:
                     break
 
             for e in events:
-                if e.get("event") != "tool_usage_stats":
+                evt = e.get("event")
+
+                if evt == "reread_threshold_exceeded":
+                    reread_interrupts += 1
+                elif evt == "exploration_escalation":
+                    level = e.get("level", 2)
+                    escalation_counts[level] += 1
+                elif evt == "exploration_force_halt":
+                    level = e.get("level", 3)
+                    escalation_counts[level] += 1
+                elif evt == "read_dedup_stats":
+                    tr = e.get("total_reads", 0)
+                    dr = e.get("duplicate_reads", 0)
+                    if isinstance(tr, int) and isinstance(dr, int):
+                        total_session_reads += tr
+                        total_session_dupes += dr
+
+                if evt != "tool_usage_stats":
                     continue
 
                 total = e.get("total_calls", 0)
@@ -614,7 +641,7 @@ class AgenticMetrics:
                     total_distribution[tool] += count
 
                 dupes = e.get("duplicate_reads", {})
-                if dupes:
+                if isinstance(dupes, dict) and dupes:
                     tasks_with_dupes += 1
                     total_dupe_count += len(dupes)
 
@@ -630,6 +657,11 @@ class AgenticMetrics:
                 break
 
         n = len(task_call_counts)
+        avg_dup_read_rate = (
+            round(total_session_dupes / total_session_reads, 3)
+            if total_session_reads > 0 else 0.0
+        )
+
         if n == 0:
             return ToolUsageMetrics(
                 total_tasks_analyzed=0,
@@ -641,6 +673,9 @@ class AgenticMetrics:
                 avg_read_before_write_ratio=0.0,
                 avg_edit_density=0.0,
                 top_tasks_by_calls={},
+                reread_interrupts=reread_interrupts,
+                exploration_escalations=dict(escalation_counts),
+                avg_duplicate_read_rate=avg_dup_read_rate,
             )
 
         all_counts = list(task_call_counts.values())
@@ -670,6 +705,9 @@ class AgenticMetrics:
             sessions_exceeding_threshold=sessions_exceeding,
             by_agent=by_agent,
             by_step=dict(step_exceeding),
+            reread_interrupts=reread_interrupts,
+            exploration_escalations=dict(escalation_counts),
+            avg_duplicate_read_rate=avg_dup_read_rate,
         )
 
     def _aggregate_context_budget(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> ContextBudgetMetrics:

@@ -879,12 +879,19 @@ class TestInjectReadCacheRoleColumn:
             "entries": entries,
         }))
 
+    # Padding entries to cross the >= 3 threshold for read cache injection
+    _PAD_ENTRIES = {
+        "src/pad_a.py": {"summary": "Padding A", "read_by": "architect", "workflow_step": "plan"},
+        "src/pad_b.py": {"summary": "Padding B", "read_by": "architect", "workflow_step": "plan"},
+    }
+
     def test_role_column_modify(self, builder, workspace):
         """File in plan.files_to_modify gets MODIFY role."""
         from agent_framework.core.task import PlanDocument
 
         self._write_cache(workspace, {
             "src/target.py": {"summary": "Target file", "read_by": "architect", "workflow_step": "plan"},
+            **self._PAD_ENTRIES,
         })
         task = Task(
             id="chain-root1-impl-d0", type=TaskType.IMPLEMENTATION,
@@ -900,7 +907,7 @@ class TestInjectReadCacheRoleColumn:
 
         result = builder._inject_read_cache("base prompt", task)
 
-        assert "| MODIFY |" in result
+        assert "[MODIFY]" in result
 
     def test_role_column_ref(self, builder, workspace):
         """File NOT in plan.files_to_modify gets ref role."""
@@ -908,6 +915,7 @@ class TestInjectReadCacheRoleColumn:
 
         self._write_cache(workspace, {
             "src/helper.py": {"summary": "Helper file", "read_by": "architect", "workflow_step": "plan"},
+            **self._PAD_ENTRIES,
         })
         task = Task(
             id="chain-root1-impl-d0", type=TaskType.IMPLEMENTATION,
@@ -923,9 +931,9 @@ class TestInjectReadCacheRoleColumn:
 
         result = builder._inject_read_cache("base prompt", task)
 
-        assert "| ref |" in result
+        assert "[ref]" in result
         # Table should not have a MODIFY role cell
-        assert "| MODIFY |" not in result
+        assert "[MODIFY]" not in result
 
     def test_role_changed_for_modified_entry(self, builder, workspace):
         """Entry with modified_by gets CHANGED role."""
@@ -938,6 +946,7 @@ class TestInjectReadCacheRoleColumn:
                 "modified_by": "engineer",
                 "modified_at": "2026-02-20T12:00:00Z",
             },
+            **self._PAD_ENTRIES,
         })
         task = Task(
             id="chain-root1-review-d0", type=TaskType.IMPLEMENTATION,
@@ -949,7 +958,7 @@ class TestInjectReadCacheRoleColumn:
 
         result = builder._inject_read_cache("base prompt", task)
 
-        assert "| CHANGED |" in result
+        assert "[CHANGED]" in result
 
     def test_role_priority_changed_over_modify(self, builder, workspace):
         """Entry with both modified_by and in files_to_modify gets CHANGED (not MODIFY)."""
@@ -964,6 +973,7 @@ class TestInjectReadCacheRoleColumn:
                 "modified_by": "engineer",
                 "modified_at": "2026-02-20T12:00:00Z",
             },
+            **self._PAD_ENTRIES,
         })
         task = Task(
             id="chain-root1-impl-d0", type=TaskType.IMPLEMENTATION,
@@ -980,8 +990,8 @@ class TestInjectReadCacheRoleColumn:
         result = builder._inject_read_cache("base prompt", task)
 
         # CHANGED takes priority over MODIFY
-        assert "| CHANGED |" in result
-        assert "| MODIFY |" not in result
+        assert "[CHANGED]" in result
+        assert "[MODIFY]" not in result
 
 
 class TestInjectReadCacheStepDirective:
@@ -1014,6 +1024,8 @@ class TestInjectReadCacheStepDirective:
             "root_task_id": "root1",
             "entries": {
                 "src/file.py": {"summary": "A file", "read_by": "architect", "workflow_step": "plan"},
+                "src/pad_a.py": {"summary": "Pad A", "read_by": "architect", "workflow_step": "plan"},
+                "src/pad_b.py": {"summary": "Pad B", "read_by": "architect", "workflow_step": "plan"},
             },
         }))
 

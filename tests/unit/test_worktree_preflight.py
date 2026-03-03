@@ -4,7 +4,7 @@ import asyncio
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -143,27 +143,23 @@ class TestLLMCancelledOnWorktreeVanish:
 
     @pytest.mark.asyncio
     async def test_llm_cancelled_on_runtime_vanish(self, agent, task, tmp_worktree):
-        agent._execute_llm_with_interruption_watch = (
-            Agent._execute_llm_with_interruption_watch.__get__(agent)
-        )
-        agent._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(agent)
-        agent._auto_commit_wip = AsyncMock()
-        agent._update_phase = MagicMock()
+        """LLMExecutionManager drives the interruption race; when the worktree
+        vanishes the watcher fires, LLM is cancelled, and worktree_vanished is emitted."""
+        from agent_framework.core.llm_executor import LLMExecutionManager
+
         agent._session_logger = MagicMock()
         agent._session_logger.log = MagicMock()
         agent._session_logger.log_tool_call = MagicMock()
+        agent._session_logger.log_tool_result = MagicMock()
         agent._context_window_manager = None
         agent._current_specialization = None
         agent._current_file_count = 0
-        agent._mcp_enabled = False
-        agent._max_consecutive_tool_calls = 999
-        agent._max_consecutive_diagnostic_calls = 999
-        agent._exploration_alert_threshold = 999
-        agent._exploration_alert_thresholds = {}
         agent.config.id = "test-agent"
+        agent.config.base_id = "engineer"
         agent.workspace = Path("/tmp/test-workspace")
+        agent._optimization_config = {}
 
-        # Make LLM hang
+        # Make LLM hang forever
         llm = MagicMock()
 
         async def _complete(*args, **kwargs):
@@ -174,14 +170,46 @@ class TestLLMCancelledOnWorktreeVanish:
         llm.get_partial_output = MagicMock(return_value="")
         agent.llm = llm
 
+        # Build a real LLMExecutionManager so its execute() drives the
+        # interruption race between watcher and LLM.
+        agent._git_ops = MagicMock()
+        agent._git_ops.active_worktree = tmp_worktree
+        executor = LLMExecutionManager(
+            config=agent.config,
+            llm=llm,
+            git_ops=agent._git_ops,
+            logger=agent.logger,
+            session_logger=agent._session_logger,
+            activity_manager=agent.activity_manager,
+        )
+        agent._llm_executor = executor
+
+        # Bind the real delegation wrapper
+        agent._execute_llm_with_interruption_watch = (
+            Agent._execute_llm_with_interruption_watch.__get__(agent)
+        )
+        agent._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(agent)
+        from agent_framework.core.error_recovery import ErrorRecoveryManager
+        er = ErrorRecoveryManager(
+            config=agent.config, queue=MagicMock(), llm=MagicMock(),
+            logger=agent.logger, session_logger=agent._session_logger,
+            retry_handler=MagicMock(), escalation_handler=MagicMock(),
+            workspace=agent.workspace if hasattr(agent.workspace, '__fspath__') else Path("/tmp"),
+        )
+        agent._error_recovery = er
+        agent._update_phase = MagicMock()
+        agent._is_implementation_step = MagicMock(return_value=True)
+        agent._max_consecutive_tool_calls = 999
+        agent._max_consecutive_diagnostic_calls = 999
+        agent._exploration_alert_threshold = 999
+        agent._exploration_alert_thresholds = {}
+
         # Wire up watcher to use the real method
         agent._watch_for_interruption = (
             Agent._watch_for_interruption.__get__(agent)
         )
         agent._check_pause_signal = MagicMock(return_value=False)
         agent._write_heartbeat = MagicMock()
-        agent._git_ops = MagicMock()
-        agent._git_ops.active_worktree = tmp_worktree
 
         # Delete worktree after a short delay to trigger watcher
         async def delete_soon():
@@ -198,7 +226,7 @@ class TestLLMCancelledOnWorktreeVanish:
         )
 
         assert result is None
-        agent.llm.cancel.assert_called()
+        llm.cancel.assert_called()
 
         # Verify worktree_vanished event was emitted
         event_calls = agent.activity_manager.append_event.call_args_list

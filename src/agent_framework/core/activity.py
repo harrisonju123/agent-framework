@@ -98,7 +98,7 @@ class ActivityEvent(BaseModel):
         "start", "retry", "complete", "fail", "interrupted", "phase",
         "test_complete", "test_fail", "context_budget_critical", "token_budget_exceeded",
         "circuit_breaker", "exploration_alert", "queued", "worktree_vanished",
-        "workflow_summary",
+        "workflow_summary", "model_routing_decision",
     ]
     agent: str
     task_id: str

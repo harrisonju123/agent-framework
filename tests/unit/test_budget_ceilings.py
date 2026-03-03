@@ -1,6 +1,7 @@
 """Tests for per-task budget ceiling feature."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import MagicMock
 
@@ -8,6 +9,7 @@ import pytest
 
 from agent_framework.core.budget_manager import BudgetManager
 from agent_framework.core.config import OptimizationConfig
+from agent_framework.core.post_completion import PostCompletionManager
 from agent_framework.core.task import Task, TaskStatus, TaskType, PlanDocument
 from agent_framework.workflow.executor import WorkflowExecutor
 
@@ -71,6 +73,41 @@ def _make_plan(file_count, step_count=0):
     plan.files_to_modify = [f"file_{i}.py" for i in range(file_count)]
     plan.approach = [f"step_{i}" for i in range(step_count)]
     return plan
+
+
+def _wire_post_completion(agent, *, workspace=None, optimization_config=None):
+    """Attach a real PostCompletionManager + analytics mocks so Agent delegation works.
+
+    Agent._run_post_completion_flow and Agent._resolve_budget_ceiling both
+    delegate to self._post_completion, and the callbacks reference self._analytics
+    and self._context_window_manager.
+    """
+    ws = workspace or Path("/tmp/test-workspace")
+    opt_cfg = optimization_config
+    if opt_cfg is None:
+        opt_cfg = dict(agent._optimization_config) if hasattr(agent._optimization_config, "items") else {}
+
+    agent._analytics = MagicMock()
+    agent._analytics.extract_and_store_memories = MagicMock()
+    agent._analytics.analyze_tool_patterns = MagicMock(return_value=None)
+    agent._context_window_manager = None
+
+    agent._post_completion = PostCompletionManager(
+        config=agent.config,
+        queue=MagicMock(),
+        workspace=ws,
+        logger=agent.logger,
+        session_logger=MagicMock(),
+        activity_manager=MagicMock(),
+        review_cycle=getattr(agent, "_review_cycle", MagicMock()),
+        workflow_router=getattr(agent, "_workflow_router", MagicMock()),
+        git_ops=getattr(agent, "_git_ops", MagicMock()),
+        budget=agent._budget,
+        error_recovery=MagicMock(),
+        optimization_config=opt_cfg,
+        session_logging_enabled=False,
+        session_logs_dir=ws / "logs",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,17 +276,12 @@ class TestCostAccumulation:
         agent._workflow_router = MagicMock()
         agent._review_cycle = MagicMock()
         agent._git_ops = MagicMock()
-        agent._memory_retriever = MagicMock()
-        agent._tool_pattern_analyzer = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
         agent.logger = MagicMock()
 
+        _wire_post_completion(agent)
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
 
         task = _make_task(context={"workflow": "default", "_cumulative_cost": 1.0})
         response = MagicMock()
@@ -272,17 +304,12 @@ class TestCostAccumulation:
         agent._workflow_router = MagicMock()
         agent._review_cycle = MagicMock()
         agent._git_ops = MagicMock()
-        agent._memory_retriever = MagicMock()
-        agent._tool_pattern_analyzer = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "architect"
         agent.logger = MagicMock()
 
+        _wire_post_completion(agent)
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
 
         task = _make_task(context={"workflow": "default"})
         response = MagicMock()
@@ -303,17 +330,12 @@ class TestCostAccumulation:
         agent._workflow_router = MagicMock()
         agent._review_cycle = MagicMock()
         agent._git_ops = MagicMock()
-        agent._memory_retriever = MagicMock()
-        agent._tool_pattern_analyzer = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
         agent.logger = MagicMock()
 
+        _wire_post_completion(agent)
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
 
         task = _make_task(context={"workflow": "default"})
 
@@ -342,17 +364,12 @@ class TestCeilingStamping:
         agent._workflow_router = MagicMock()
         agent._review_cycle = MagicMock()
         agent._git_ops = MagicMock()
-        agent._memory_retriever = MagicMock()
-        agent._tool_pattern_analyzer = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "architect"
         agent.logger = MagicMock()
 
+        _wire_post_completion(agent)
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
 
         task = _make_task(estimated_effort="S", context={"workflow": "default"})
         response = MagicMock()
@@ -374,17 +391,12 @@ class TestCeilingStamping:
         agent._workflow_router = MagicMock()
         agent._review_cycle = MagicMock()
         agent._git_ops = MagicMock()
-        agent._memory_retriever = MagicMock()
-        agent._tool_pattern_analyzer = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
         agent.logger = MagicMock()
 
+        _wire_post_completion(agent)
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
 
         task = _make_task(context={
             "workflow": "default",
@@ -409,17 +421,12 @@ class TestCeilingStamping:
         agent._workflow_router = MagicMock()
         agent._review_cycle = MagicMock()
         agent._git_ops = MagicMock()
-        agent._memory_retriever = MagicMock()
-        agent._tool_pattern_analyzer = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "engineer"
         agent.logger = MagicMock()
 
+        _wire_post_completion(agent)
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
 
         task = _make_task(context={"workflow": "default"})
         response = MagicMock()
@@ -442,17 +449,12 @@ class TestCeilingStamping:
         agent._workflow_router = MagicMock()
         agent._review_cycle = MagicMock()
         agent._git_ops = MagicMock()
-        agent._memory_retriever = MagicMock()
-        agent._tool_pattern_analyzer = MagicMock()
         agent.config = MagicMock()
         agent.config.base_id = "architect"
         agent.logger = MagicMock()
 
+        _wire_post_completion(agent)
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
-        agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
-        agent._extract_and_store_memories = MagicMock()
-        agent._analyze_tool_patterns = MagicMock()
-        agent._log_task_completion_metrics = MagicMock()
 
         task = _make_task(context={"workflow": "default"})  # no estimated_effort
         response = MagicMock()
@@ -690,6 +692,11 @@ class TestResolveBudgetCeilingWithAbsolute:
             "enable_effort_budget_ceilings": enable_ceilings,
             "absolute_budget_ceiling_usd": absolute,
         })
+        agent.config = MagicMock()
+        agent.config.base_id = "engineer"
+        agent.logger = MagicMock()
+
+        _wire_post_completion(agent)
         agent._resolve_budget_ceiling = Agent._resolve_budget_ceiling.__get__(agent)
         return agent
 

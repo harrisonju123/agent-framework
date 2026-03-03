@@ -515,17 +515,58 @@ class TestSubtaskWorkflowChainGuard:
 
     @pytest.fixture
     def mock_agent(self, tmp_workspace):
-        """Create a minimally-mocked Agent for testing _run_post_completion_flow."""
+        """Create a minimally-mocked Agent for testing _run_post_completion_flow.
+
+        _run_post_completion_flow now delegates to PostCompletionManager, so we
+        construct a real PostCompletionManager with mock dependencies and wire
+        it into the agent via _post_completion.
+        """
         from agent_framework.core.agent import Agent
+        from agent_framework.core.post_completion import PostCompletionManager
 
         agent = MagicMock()
         agent.logger = Mock()
         agent.workspace = tmp_workspace
+        agent._context_window_manager = None
+        agent._analytics = MagicMock()
+
         # Mock the review cycle manager
         agent._review_cycle = MagicMock()
-        # enforce_chain returns bool — False means no downstream routing occurred
+        agent._workflow_router = MagicMock()
+        # enforce_chain returns bool -- False means no downstream routing occurred
+        agent._workflow_router.enforce_chain.return_value = False
+        agent._workflow_router.is_at_terminal_workflow_step.return_value = False
         agent._enforce_workflow_chain = MagicMock(return_value=False)
-        # Bind the real method under test to the mock
+        agent._git_ops = MagicMock()
+
+        # Build real PostCompletionManager with the same mock objects
+        config = MagicMock()
+        config.id = "engineer-1"
+        config.base_id = "engineer"
+        agent.config = config
+
+        session_logs_dir = tmp_workspace / "logs" / "sessions"
+        session_logs_dir.mkdir(parents=True, exist_ok=True)
+
+        post_completion = PostCompletionManager(
+            config=config,
+            queue=agent.queue,
+            workspace=tmp_workspace,
+            logger=agent.logger,
+            session_logger=MagicMock(),
+            activity_manager=MagicMock(),
+            review_cycle=agent._review_cycle,
+            workflow_router=agent._workflow_router,
+            git_ops=agent._git_ops,
+            budget=MagicMock(),
+            error_recovery=MagicMock(),
+            optimization_config={},
+            session_logging_enabled=False,
+            session_logs_dir=session_logs_dir,
+        )
+        agent._post_completion = post_completion
+
+        # Bind the real delegation method
         agent._run_post_completion_flow = Agent._run_post_completion_flow.__get__(agent)
         return agent
 
@@ -566,13 +607,12 @@ class TestSubtaskWorkflowChainGuard:
         # Workflow chain methods should NOT be called for subtasks
         mock_agent._review_cycle.queue_code_review_if_needed.assert_not_called()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_not_called()
-        mock_agent._enforce_workflow_chain.assert_not_called()
+        mock_agent._workflow_router.enforce_chain.assert_not_called()
         mock_agent._git_ops.push_and_create_pr_if_needed.assert_not_called()
 
-        # Per-subtask learning/metrics should still run
-        mock_agent._extract_and_store_memories.assert_called_once()
-        mock_agent._analyze_tool_patterns.assert_called_once()
-        mock_agent._log_task_completion_metrics.assert_called_once()
+        # Per-subtask learning/metrics callbacks should still fire
+        mock_agent._analytics.extract_and_store_memories.assert_called_once()
+        mock_agent._analytics.analyze_tool_patterns.assert_called_once()
 
     def test_regular_task_still_chains(self, mock_agent, mock_response):
         """Non-subtask (parent_task_id=None) must still get full workflow chain."""
@@ -583,14 +623,16 @@ class TestSubtaskWorkflowChainGuard:
         )
 
         mock_agent._workflow_router.check_and_create_fan_in_task.assert_called_once_with(task)
+        # No workflow in context -> legacy review routing fires
         mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
-        mock_agent._enforce_workflow_chain.assert_called_once()
+        # enforce_chain is on workflow_router now
+        mock_agent._workflow_router.enforce_chain.assert_called_once()
         mock_agent._git_ops.push_and_create_pr_if_needed.assert_called_once()
 
     def test_fan_in_task_flows_through_chain(self, mock_agent, mock_response):
         """Fan-in task (parent_task_id=None, context.fan_in=True) flows through
-        the full workflow chain — it's the aggregated result that should create PRs."""
+        the full workflow chain -- it's the aggregated result that should create PRs."""
         fan_in = self._make_task(
             "fan-in-parent-1",
             parent_task_id=None,
@@ -602,9 +644,10 @@ class TestSubtaskWorkflowChainGuard:
         )
 
         mock_agent._workflow_router.check_and_create_fan_in_task.assert_called_once()
+        # No workflow in context -> legacy review routing fires
         mock_agent._review_cycle.queue_code_review_if_needed.assert_called_once()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_called_once()
-        mock_agent._enforce_workflow_chain.assert_called_once()
+        mock_agent._workflow_router.enforce_chain.assert_called_once()
         mock_agent._git_ops.push_and_create_pr_if_needed.assert_called_once()
 
     def test_workflow_task_skips_legacy_routing(self, mock_agent, mock_response):
@@ -621,6 +664,536 @@ class TestSubtaskWorkflowChainGuard:
         # Legacy review routing should NOT be called for workflow-managed tasks
         mock_agent._review_cycle.queue_code_review_if_needed.assert_not_called()
         mock_agent._review_cycle.queue_review_fix_if_needed.assert_not_called()
-        # DAG chain routing should still be called
-        mock_agent._enforce_workflow_chain.assert_called_once()
+        # DAG chain routing should still be called (on workflow_router)
+        mock_agent._workflow_router.enforce_chain.assert_called_once()
         mock_agent._git_ops.push_and_create_pr_if_needed.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests for right-sized, parallel-capable subtask decomposition
+# ---------------------------------------------------------------------------
+
+
+class TestMaxDeliverablesPerSubtask:
+    """Enforce MAX_DELIVERABLES_PER_SUBTASK so no boundary gets overloaded."""
+
+    def test_boundary_with_7_source_files_splits_into_chunks(self):
+        """A directory with 7 source files should become 2 boundaries (4+3)."""
+        decomposer = TaskDecomposer()
+        files = [f"src/core/module_{i}.py" for i in range(7)]
+        # Also include a second dir so we get >=2 boundaries total
+        files += [f"lib/util_{i}.py" for i in range(3)]
+
+        plan = PlanDocument(
+            objectives=["Big refactor"],
+            approach=[f"Modify module_{i}.py" for i in range(7)] + ["Update utils"],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-max-deliverables",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Max deliverables test",
+            description="Test max deliverables enforcement",
+            plan=plan,
+        )
+
+        estimated = len(files) * 50
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # No subtask should have more than 4 source files
+        for st in subtasks:
+            source_count = sum(
+                1 for f in st.plan.files_to_modify
+                if not TaskDecomposer._is_test_file(f)
+            )
+            assert source_count <= TaskDecomposer.MAX_DELIVERABLES_PER_SUBTASK, (
+                f"Subtask {st.id} has {source_count} source files, "
+                f"max is {TaskDecomposer.MAX_DELIVERABLES_PER_SUBTASK}"
+            )
+
+    def test_boundary_within_limit_stays_intact(self):
+        """A boundary with <=4 source files should not be split further."""
+        decomposer = TaskDecomposer()
+        # 3 files in each of 2 directories — both within limit
+        files = [f"src/a/mod_{i}.py" for i in range(3)]
+        files += [f"src/b/mod_{i}.py" for i in range(3)]
+
+        plan = PlanDocument(
+            objectives=["Small refactor"],
+            approach=["Step 1", "Step 2"],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-within-limit",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Within limit test",
+            description="Test that small boundaries are not split",
+            plan=plan,
+        )
+
+        estimated = len(files) * 80
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # We should get exactly 2 subtasks (one per subdir under src/)
+        assert len(subtasks) == 2
+        for st in subtasks:
+            assert len(st.plan.files_to_modify) == 3
+
+
+class TestSourceTestColocation:
+    """Tests for co-locating test files with their source counterparts."""
+
+    def test_test_file_colocated_with_matching_source(self):
+        """test_bar.py should land in the same subtask as bar.py."""
+        decomposer = TaskDecomposer()
+        files = [
+            "src/core/bar.py",
+            "src/core/baz.py",
+            "src/utils/helper.py",
+            "src/utils/config.py",
+            "tests/unit/test_bar.py",
+            "tests/unit/test_helper.py",
+        ]
+
+        plan = PlanDocument(
+            objectives=["Implement feature"],
+            approach=["Modify bar.py", "Modify helper.py"],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-colocation",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Colocation test",
+            description="Test source-test co-location",
+            plan=plan,
+        )
+
+        estimated = 600
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # Find which subtask contains bar.py
+        for st in subtasks:
+            if "src/core/bar.py" in st.plan.files_to_modify:
+                assert "tests/unit/test_bar.py" in st.plan.files_to_modify, (
+                    "test_bar.py should be co-located with bar.py"
+                )
+            if "src/utils/helper.py" in st.plan.files_to_modify:
+                assert "tests/unit/test_helper.py" in st.plan.files_to_modify, (
+                    "test_helper.py should be co-located with helper.py"
+                )
+
+    def test_test_files_dont_inflate_source_count(self):
+        """Test files should not count toward MAX_DELIVERABLES_PER_SUBTASK."""
+        decomposer = TaskDecomposer()
+        # 4 source files + 4 matching test files = 8 total, but only 4 source
+        files = [f"src/core/mod_{i}.py" for i in range(4)]
+        files += [f"tests/unit/test_mod_{i}.py" for i in range(4)]
+        # Need a second group to get >=2 boundaries
+        files += [f"lib/util_{i}.py" for i in range(2)]
+
+        plan = PlanDocument(
+            objectives=["Refactor"],
+            approach=[f"Update mod_{i}.py" for i in range(4)] + ["Update utils"],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-no-inflate",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="No inflate test",
+            description="Test that tests dont count as source deliverables",
+            plan=plan,
+        )
+
+        estimated = len(files) * 50
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # The core subtask should have 4 source + 4 test = 8 files total,
+        # but that should be ONE subtask (not split further) because
+        # source_file_count == 4 <= MAX_DELIVERABLES_PER_SUBTASK
+        core_subtasks = [
+            st for st in subtasks
+            if any("src/core" in f for f in st.plan.files_to_modify)
+        ]
+        assert len(core_subtasks) == 1, (
+            f"Expected 1 core subtask, got {len(core_subtasks)} — "
+            "test files should not trigger further splitting"
+        )
+
+    def test_unmatched_test_goes_to_last_boundary(self):
+        """Test files with no matching source should land in the last subtask."""
+        decomposer = TaskDecomposer()
+        files = [
+            "src/core/alpha.py",
+            "src/utils/beta.py",
+            "tests/integration/test_end_to_end.py",  # No matching source file
+        ]
+
+        plan = PlanDocument(
+            objectives=["Implement"],
+            approach=["Modify alpha.py", "Modify beta.py", "Add e2e test"],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-unmatched",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Unmatched test",
+            description="Test unmatched test file placement",
+            plan=plan,
+        )
+
+        estimated = 400
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # The unmatched test should end up in the last subtask
+        all_files_in_subtasks = []
+        for st in subtasks:
+            all_files_in_subtasks.extend(st.plan.files_to_modify)
+
+        assert "tests/integration/test_end_to_end.py" in all_files_in_subtasks, (
+            "Unmatched test file should still be included in some subtask"
+        )
+
+
+class TestEffortMultiplier:
+    """Tests for modification effort multiplier on existing files."""
+
+    def test_existing_files_inflate_estimate(self, tmp_path):
+        """Files that exist on disk get their estimates inflated."""
+        decomposer = TaskDecomposer()
+        workspace = tmp_path / "repo"
+        workspace.mkdir()
+
+        # Create 2 files on disk (they "exist")
+        (workspace / "src").mkdir(parents=True)
+        (workspace / "src" / "existing_a.py").write_text("# existing")
+        (workspace / "src" / "existing_b.py").write_text("# existing")
+        (workspace / "lib").mkdir(parents=True)
+        (workspace / "lib" / "new_a.py").parent.mkdir(parents=True, exist_ok=True)
+
+        files = [
+            "src/existing_a.py",
+            "src/existing_b.py",
+            "lib/new_a.py",
+            "lib/new_b.py",
+        ]
+
+        plan = PlanDocument(
+            objectives=["Mix of new and existing"],
+            approach=["Modify existing_a.py", "Create new_a.py"],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-effort",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Effort test",
+            description="Test effort multiplier",
+            plan=plan,
+        )
+
+        estimated = 400
+        subtasks = decomposer.decompose(task, plan, estimated, workspace=workspace)
+
+        # Find subtask covering existing files
+        src_subtask = None
+        lib_subtask = None
+        for st in subtasks:
+            if any("existing_a" in f for f in st.plan.files_to_modify):
+                src_subtask = st
+            if any("new_a" in f for f in st.plan.files_to_modify):
+                lib_subtask = st
+
+        assert src_subtask is not None, "Should have subtask for src/"
+        assert lib_subtask is not None, "Should have subtask for lib/"
+
+        # The src subtask (all existing) should have higher estimated_lines
+        src_estimate = int(next(
+            n.replace("Estimated lines: ", "")
+            for n in src_subtask.notes
+            if "Estimated lines:" in n
+        ))
+        lib_estimate = int(next(
+            n.replace("Estimated lines: ", "")
+            for n in lib_subtask.notes
+            if "Estimated lines:" in n
+        ))
+
+        assert src_estimate > lib_estimate, (
+            f"Existing-file subtask ({src_estimate}) should have higher estimate "
+            f"than new-file subtask ({lib_estimate})"
+        )
+
+    def test_no_workspace_skips_multiplier(self):
+        """Without workspace, effort multiplier is not applied."""
+        decomposer = TaskDecomposer()
+        files = [
+            "src/a/mod_1.py",
+            "src/a/mod_2.py",
+            "src/b/mod_3.py",
+            "src/b/mod_4.py",
+        ]
+
+        plan = PlanDocument(
+            objectives=["Feature"],
+            approach=["Step 1", "Step 2"],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-no-ws",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="No workspace test",
+            description="Test decompose without workspace",
+            plan=plan,
+        )
+
+        estimated = 400
+        # Should not raise — workspace=None is the default
+        subtasks = decomposer.decompose(task, plan, estimated)
+        assert len(subtasks) >= 2
+
+
+class TestParallelCapableSplits:
+    """Tests for conservative dependency inference that maximizes parallelism."""
+
+    def test_independent_directories_have_no_deps(self):
+        """Subtasks modifying different files with unrelated steps should be parallel."""
+        decomposer = TaskDecomposer()
+        files = [
+            "src/auth/login.py",
+            "src/auth/session.py",
+            "src/billing/invoice.py",
+            "src/billing/payment.py",
+        ]
+
+        plan = PlanDocument(
+            objectives=["Update auth and billing"],
+            approach=[
+                "Modify login.py for SSO support",
+                "Update session.py to handle tokens",
+                "Add invoice.py PDF export",
+                "Update payment.py with Stripe v3",
+            ],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-parallel",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Parallel splits test",
+            description="Test that independent subtasks are parallel",
+            plan=plan,
+        )
+
+        estimated = 600
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # With independent directories and no cross-references in approach steps,
+        # subtasks should have NO dependencies on each other
+        for st in subtasks:
+            assert st.depends_on == [], (
+                f"Subtask {st.id} has dependencies {st.depends_on} "
+                "but should be independent"
+            )
+
+    def test_cross_referenced_steps_create_dependency(self):
+        """When approach steps reference files from another boundary, add a dep."""
+        decomposer = TaskDecomposer()
+        files = [
+            "src/core/base_model.py",
+            "src/core/validators.py",
+            "src/api/endpoints.py",
+            "src/api/serializers.py",
+        ]
+
+        plan = PlanDocument(
+            objectives=["Extend API with validation"],
+            approach=[
+                "Add BaseModel fields for validation in base_model.py",
+                "Implement validators.py validation rules",
+                "Use base_model.py in endpoints.py to enforce validation",
+                "Update serializers.py to use validators.py output",
+            ],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-cross-ref",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Cross-ref deps test",
+            description="Test dependency inference from approach step cross-refs",
+            plan=plan,
+        )
+
+        estimated = 600
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # The api subtask references "base_model" and "validators" from core,
+        # so it should depend on the core subtask
+        api_subtask = None
+        for st in subtasks:
+            if any("src/api" in f for f in st.plan.files_to_modify):
+                api_subtask = st
+                break
+
+        assert api_subtask is not None, "Should have an API subtask"
+        assert len(api_subtask.depends_on) > 0, (
+            "API subtask should depend on core subtask because its approach "
+            "steps reference base_model.py and validators.py"
+        )
+
+    def test_same_dir_source_and_tests_are_parallel(self):
+        """With co-location, src+tests in same subtask should not create deps."""
+        decomposer = TaskDecomposer()
+        files = [
+            "src/auth/login.py",
+            "src/auth/session.py",
+            "tests/unit/test_login.py",
+            "src/billing/invoice.py",
+            "src/billing/payment.py",
+            "tests/unit/test_invoice.py",
+        ]
+
+        plan = PlanDocument(
+            objectives=["Update auth and billing with tests"],
+            approach=[
+                "Modify login.py",
+                "Update session.py",
+                "Add invoice.py changes",
+                "Update payment.py",
+            ],
+            risks=[],
+            success_criteria=["Tests pass"],
+            files_to_modify=files,
+        )
+
+        task = Task(
+            id="test-colocated-parallel",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(UTC),
+            title="Colocated parallel test",
+            description="Test that co-located source+tests are parallel",
+            plan=plan,
+        )
+
+        estimated = 600
+        subtasks = decomposer.decompose(task, plan, estimated)
+
+        # Both subtasks should be parallel (no deps) since they
+        # don't reference each other's files in approach steps
+        for st in subtasks:
+            assert st.depends_on == [], (
+                f"Subtask {st.id} has dependencies {st.depends_on} "
+                "but co-located subtasks should be parallel"
+            )
+
+
+class TestIsTestFile:
+    """Unit tests for _is_test_file classification."""
+
+    def test_test_directory_detected(self):
+        assert TaskDecomposer._is_test_file("tests/unit/test_foo.py") is True
+        assert TaskDecomposer._is_test_file("test/integration/helper.py") is True
+        assert TaskDecomposer._is_test_file("spec/models/user_spec.rb") is True
+
+    def test_test_prefix_detected(self):
+        assert TaskDecomposer._is_test_file("src/test_utils.py") is True
+
+    def test_test_suffix_detected(self):
+        assert TaskDecomposer._is_test_file("src/utils_test.py") is True
+
+    def test_source_files_not_classified_as_test(self):
+        assert TaskDecomposer._is_test_file("src/core/agent.py") is False
+        assert TaskDecomposer._is_test_file("lib/helpers/utils.py") is False
+        assert TaskDecomposer._is_test_file("config/settings.py") is False
+
+
+class TestTestMatchesSource:
+    """Unit tests for _test_matches_source pairing logic."""
+
+    def test_matching_pair(self):
+        assert TaskDecomposer._test_matches_source(
+            "tests/unit/test_agent.py", "src/core/agent.py"
+        ) is True
+
+    def test_non_matching_pair(self):
+        assert TaskDecomposer._test_matches_source(
+            "tests/unit/test_agent.py", "src/core/task.py"
+        ) is False
+
+    def test_deep_nesting(self):
+        assert TaskDecomposer._test_matches_source(
+            "tests/integration/api/test_router.py", "src/api/router.py"
+        ) is True

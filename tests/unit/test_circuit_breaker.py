@@ -1,14 +1,54 @@
-"""Tests for the stuck-agent circuit breaker in _execute_llm_with_interruption_watch."""
+"""Tests for the stuck-agent circuit breaker in LLMExecutionManager.execute().
+
+The circuit breaker logic lives in CheckpointManager (triggered via
+LLMExecutionManager.execute), which is called through the
+Agent._execute_llm_with_interruption_watch shim. Tests construct a real
+LLMExecutionManager so the circuit breaker fires authentically.
+"""
 
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_framework.core.agent import Agent
+from agent_framework.core.agent import Agent, AgentConfig
+from agent_framework.core.llm_executor import LLMExecutionManager
 from agent_framework.core.task import Task, TaskStatus, TaskType
+
+
+def _make_agent_config(agent_id="test-agent"):
+    """Create a real AgentConfig for LLMExecutionManager."""
+    return AgentConfig(
+        id=agent_id,
+        name="Test Agent",
+        queue="test",
+        prompt="test prompt",
+    )
+
+
+def _make_executor(session_logger, activity_manager, agent_id="test-agent"):
+    """Build a real LLMExecutionManager with mock I/O deps.
+
+    Shares session_logger and activity_manager so test assertions work
+    against the same objects the agent mock exposes.
+    """
+    config = _make_agent_config(agent_id)
+    llm = MagicMock()  # placeholder; _setup_and_get_callback replaces it
+    git_ops = MagicMock()
+    git_ops.active_worktree = None
+    git_ops.worktree_env_vars = None
+    git_ops.safety_commit.return_value = False
+    logger = MagicMock()
+    return LLMExecutionManager(
+        config=config,
+        llm=llm,
+        git_ops=git_ops,
+        logger=logger,
+        session_logger=session_logger,
+        activity_manager=activity_manager,
+    )
 
 
 @pytest.fixture
@@ -29,17 +69,23 @@ def task():
 
 @pytest.fixture
 def agent():
-    """Minimal mock agent with the real _execute_llm_with_interruption_watch bound."""
+    """Minimal mock agent with the real _execute_llm_with_interruption_watch bound.
+
+    Provides a real LLMExecutionManager on _llm_executor so the circuit
+    breaker logic inside execute() runs for real.
+    """
+    from agent_framework.core.error_recovery import ErrorRecoveryManager
+
     a = MagicMock()
     a._execute_llm_with_interruption_watch = (
         Agent._execute_llm_with_interruption_watch.__get__(a)
     )
     a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
-    a._auto_commit_wip = AsyncMock()
     a._update_phase = MagicMock()
     a._session_logger = MagicMock()
     a._session_logger.log = MagicMock()
     a._session_logger.log_tool_call = MagicMock()
+    a._session_logger.log_tool_result = MagicMock()
     a._context_window_manager = None
     a._current_specialization = None
     a._current_file_count = 0
@@ -48,12 +94,28 @@ def agent():
     a._max_consecutive_diagnostic_calls = 5  # Diagnostic breaker threshold
     a._exploration_alert_threshold = 999  # Don't trigger in circuit breaker tests
     a._exploration_alert_thresholds = {}
+    a._optimization_config = {}
+    a._is_implementation_step = MagicMock(return_value=False)
     a.config = MagicMock()
     a.config.id = "test-agent"
+    a.config.base_id = "test-agent"
     a.workspace = Path("/tmp/test-workspace")
     a.logger = MagicMock()
     a.queue = MagicMock()
     a.activity_manager = MagicMock()
+
+    er = ErrorRecoveryManager(
+        config=a.config, queue=MagicMock(), llm=MagicMock(),
+        logger=a.logger, session_logger=a._session_logger,
+        retry_handler=MagicMock(), escalation_handler=MagicMock(),
+        workspace=a.workspace,
+    )
+    a._error_recovery = er
+
+    # Real executor so circuit breaker logic runs
+    executor = _make_executor(a._session_logger, a.activity_manager)
+    a._llm_executor = executor
+
     return a
 
 
@@ -67,7 +129,7 @@ def _make_slow_llm(on_tool_activity_ref):
 
     async def _complete(*args, **kwargs):
         on_tool_activity_ref.append(kwargs.get("on_tool_activity"))
-        # Hang until cancelled — circuit breaker or test timeout will end this
+        # Hang until cancelled -- circuit breaker or test timeout will end this
         await asyncio.sleep(999)
 
     llm.complete = _complete
@@ -77,9 +139,14 @@ def _make_slow_llm(on_tool_activity_ref):
 
 
 async def _setup_and_get_callback(agent, task):
-    """Start the LLM execution and return (result_task, on_tool_activity callback)."""
+    """Start the LLM execution and return (result_task, on_tool_activity callback).
+
+    Installs a slow mock LLM on the real LLMExecutionManager so that the
+    on_tool_activity callback created inside execute() is captured.
+    """
     cb_ref = []
-    agent.llm = _make_slow_llm(cb_ref)
+    slow_llm = _make_slow_llm(cb_ref)
+    agent._llm_executor.llm = slow_llm
 
     async def _never_interrupt():
         await asyncio.sleep(999)
@@ -106,10 +173,10 @@ class TestCircuitBreakerFires:
 
     @pytest.mark.asyncio
     async def test_fires_after_threshold_low_diversity(self, agent, task):
-        """Repeated commands at threshold → low diversity → trip."""
+        """Repeated commands at threshold -> low diversity -> trip."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # Same command repeated 5 times → diversity = 1/5 = 0.2
+        # Same command repeated 5 times -> diversity = 1/5 = 0.2
         for _ in range(5):
             on_tool("Bash", "git status")
 
@@ -119,11 +186,11 @@ class TestCircuitBreakerFires:
         assert result.success is False
         assert result.finish_reason == "circuit_breaker"
         assert "consecutive Bash calls" in result.error
-        agent.llm.cancel.assert_called()
+        agent._llm_executor.llm.cancel.assert_called()
 
     @pytest.mark.asyncio
     async def test_non_bash_resets_counter(self, agent, task):
-        """Interleaving a non-Bash tool resets the counter — no trip."""
+        """Interleaving a non-Bash tool resets the counter -- no trip."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
         # Fire 4 Bash calls (threshold=5), then a Read, then 4 more Bash
@@ -133,7 +200,7 @@ class TestCircuitBreakerFires:
         for i in range(4):
             on_tool("Bash", "git status")
 
-        # Give a moment for the event loop — circuit breaker should NOT have tripped
+        # Give a moment for the event loop -- circuit breaker should NOT have tripped
         await asyncio.sleep(0.05)
         assert not result_task.done(), "Circuit breaker should not have tripped"
 
@@ -145,10 +212,10 @@ class TestCircuitBreakerFires:
 
     @pytest.mark.asyncio
     async def test_diverse_commands_pass_at_threshold(self, agent, task):
-        """All-unique commands at threshold → high diversity → no trip."""
+        """All-unique commands at threshold -> high diversity -> no trip."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 5 unique commands at threshold=5 → diversity = 5/5 = 1.0 > 0.5
+        # 5 unique commands at threshold=5 -> diversity = 5/5 = 1.0 > 0.5
         for i in range(5):
             on_tool("Bash", f"unique-command-{i}")
 
@@ -166,7 +233,7 @@ class TestCircuitBreakerFires:
         """Fully diverse commands never trip, even far beyond threshold."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 50 unique commands at threshold=5 — high diversity should never trip
+        # 50 unique commands at threshold=5 -- high diversity should never trip
         for i in range(50):
             on_tool("Bash", f"unique-command-{i}")
 
@@ -181,18 +248,18 @@ class TestCircuitBreakerFires:
 
     @pytest.mark.asyncio
     async def test_diversity_at_boundary_trips(self, agent, task):
-        """Exactly 0.5 diversity (<=) → trips at soft threshold."""
+        """Exactly 0.5 diversity (<=) -> trips at soft threshold."""
         # threshold=5, need exactly 0.5 diversity at count=6
-        # 3 unique out of 6 = 0.5 — but we need to reach threshold first.
+        # 3 unique out of 6 = 0.5 -- but we need to reach threshold first.
         # At count=5: need 2-3 unique. Use 2 unique commands repeated.
-        # Actually at count=5: 2 unique → 0.4, 3 unique → 0.6
+        # Actually at count=5: 2 unique -> 0.4, 3 unique -> 0.6
         # We need exactly 0.5 at count >= 5. So at count=6: 3 unique = 0.5
         # But the check happens at each Bash call >= threshold.
-        # At count=5 with pattern [A, A, B, B, C]: 3/5 = 0.6 → no trip
-        # At count=6 with pattern [A, A, B, B, C, C]: 3/6 = 0.5 → trips
+        # At count=5 with pattern [A, A, B, B, C]: 3/5 = 0.6 -> no trip
+        # At count=6 with pattern [A, A, B, B, C, C]: 3/6 = 0.5 -> trips
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 3 commands each repeated twice → diversity = 3/6 = 0.5
+        # 3 commands each repeated twice -> diversity = 3/6 = 0.5
         for cmd in ["cmd-a", "cmd-a", "cmd-b", "cmd-b", "cmd-c", "cmd-c"]:
             on_tool("Bash", cmd)
 
@@ -213,7 +280,7 @@ class TestCircuitBreakerFires:
         # Reset with a non-Bash tool
         on_tool("Read", "file.py")
 
-        # Now 5 unique commands — should NOT trip (diversity = 1.0 > 0.5)
+        # Now 5 unique commands -- should NOT trip (diversity = 1.0 > 0.5)
         for i in range(5):
             on_tool("Bash", f"fresh-unique-{i}")
 
@@ -241,9 +308,13 @@ class TestCircuitBreakerEvents:
 
         await asyncio.wait_for(result_task, timeout=5.0)
 
-        agent.activity_manager.append_event.assert_called_once()
-        event = agent.activity_manager.append_event.call_args[0][0]
-        assert event.type == "circuit_breaker"
+        agent.activity_manager.append_event.assert_called()
+        events = [
+            c[0][0] for c in agent.activity_manager.append_event.call_args_list
+            if c[0][0].type == "circuit_breaker"
+        ]
+        assert len(events) == 1
+        event = events[0]
         assert event.agent == "test-agent"
         assert event.task_id == "test-cb-1"
         assert "5 consecutive Bash calls" in event.title
@@ -280,7 +351,7 @@ class TestCircuitBreakerWipCommit:
 
     @pytest.mark.asyncio
     async def test_auto_commit_called_on_trip(self, agent, task):
-        """_auto_commit_wip is called before LLM cancellation."""
+        """auto_commit_wip is called before LLM cancellation."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
         for _ in range(5):
@@ -288,19 +359,18 @@ class TestCircuitBreakerWipCommit:
 
         await asyncio.wait_for(result_task, timeout=5.0)
 
-        agent._auto_commit_wip.assert_awaited_once()
-        call_args = agent._auto_commit_wip.call_args
-        assert call_args[0][0] == task
-        assert call_args[0][2] == 5  # bash_count
+        # The executor calls its own auto_commit_wip -> git_ops.safety_commit
+        agent._llm_executor.git_ops.safety_commit.assert_called_once()
+        msg = agent._llm_executor.git_ops.safety_commit.call_args[0][1]
+        assert "5 consecutive Bash calls" in msg
 
     @pytest.mark.asyncio
     async def test_auto_commit_delegates_to_safety_commit(self):
-        """_auto_commit_wip delegates to GitOperationsManager.safety_commit."""
-        a = MagicMock()
-        a._auto_commit_wip = Agent._auto_commit_wip.__get__(a)
-        a._git_ops = MagicMock()
-        a._git_ops.safety_commit.return_value = True
-        a._session_logger = MagicMock()
+        """LLMExecutionManager.auto_commit_wip delegates to GitOperationsManager.safety_commit."""
+        session_logger = MagicMock()
+        activity_manager = MagicMock()
+        executor = _make_executor(session_logger, activity_manager)
+        executor.git_ops.safety_commit.return_value = True
 
         t = Task(
             id="wip-1", type=TaskType.IMPLEMENTATION, status=TaskStatus.IN_PROGRESS,
@@ -309,20 +379,19 @@ class TestCircuitBreakerWipCommit:
             context={},
         )
 
-        await a._auto_commit_wip(t, Path("/tmp/work"), 15)
+        await executor.auto_commit_wip(t, Path("/tmp/work"), 15)
 
-        a._git_ops.safety_commit.assert_called_once()
-        assert "circuit breaker" in a._git_ops.safety_commit.call_args[0][1]
-        a._session_logger.log.assert_called_once()
+        executor.git_ops.safety_commit.assert_called_once()
+        assert "circuit breaker" in executor.git_ops.safety_commit.call_args[0][1]
+        session_logger.log.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_auto_commit_no_session_log_when_clean(self):
-        """_auto_commit_wip skips session log when safety_commit returns False."""
-        a = MagicMock()
-        a._auto_commit_wip = Agent._auto_commit_wip.__get__(a)
-        a._git_ops = MagicMock()
-        a._git_ops.safety_commit.return_value = False
-        a._session_logger = MagicMock()
+        """auto_commit_wip skips session log when safety_commit returns False."""
+        session_logger = MagicMock()
+        activity_manager = MagicMock()
+        executor = _make_executor(session_logger, activity_manager)
+        executor.git_ops.safety_commit.return_value = False
 
         t = Task(
             id="wip-2", type=TaskType.IMPLEMENTATION, status=TaskStatus.IN_PROGRESS,
@@ -331,19 +400,18 @@ class TestCircuitBreakerWipCommit:
             context={},
         )
 
-        await a._auto_commit_wip(t, Path("/tmp/work"), 15)
+        await executor.auto_commit_wip(t, Path("/tmp/work"), 15)
 
-        a._git_ops.safety_commit.assert_called_once()
-        a._session_logger.log.assert_not_called()
+        executor.git_ops.safety_commit.assert_called_once()
+        session_logger.log.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_auto_commit_passes_bash_count(self):
-        """_auto_commit_wip includes the bash count in the commit message."""
-        a = MagicMock()
-        a._auto_commit_wip = Agent._auto_commit_wip.__get__(a)
-        a._git_ops = MagicMock()
-        a._git_ops.safety_commit.return_value = False
-        a._session_logger = MagicMock()
+        """auto_commit_wip includes the bash count in the commit message."""
+        session_logger = MagicMock()
+        activity_manager = MagicMock()
+        executor = _make_executor(session_logger, activity_manager)
+        executor.git_ops.safety_commit.return_value = False
 
         t = Task(
             id="wip-3", type=TaskType.IMPLEMENTATION, status=TaskStatus.IN_PROGRESS,
@@ -352,9 +420,9 @@ class TestCircuitBreakerWipCommit:
             context={},
         )
 
-        await a._auto_commit_wip(t, Path("/tmp/work"), 42)
+        await executor.auto_commit_wip(t, Path("/tmp/work"), 42)
 
-        msg = a._git_ops.safety_commit.call_args[0][1]
+        msg = executor.git_ops.safety_commit.call_args[0][1]
         assert "42 consecutive Bash calls" in msg
 
 
@@ -382,7 +450,7 @@ class TestCircuitBreakerPartialOutput:
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
         # Override get_partial_output to return meaningful content
-        agent.llm.get_partial_output.return_value = (
+        agent._llm_executor.llm.get_partial_output.return_value = (
             "I analyzed the auth module and found:\n"
             "[Tool Call: Read src/auth.py]\n"
             "The existing implementation uses session-based auth.\n"
@@ -407,7 +475,7 @@ class TestCircuitBreakerPartialOutput:
         """Empty partial output does not populate _previous_attempt_summary."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        agent.llm.get_partial_output.return_value = ""
+        agent._llm_executor.llm.get_partial_output.return_value = ""
 
         for _ in range(5):
             on_tool("Bash", "git status")
@@ -421,7 +489,7 @@ class TestCircuitBreakerPartialOutput:
         """get_partial_output raising does not prevent circuit breaker response."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        agent.llm.get_partial_output.side_effect = RuntimeError("buffer gone")
+        agent._llm_executor.llm.get_partial_output.side_effect = RuntimeError("buffer gone")
 
         for _ in range(5):
             on_tool("Bash", "git status")
@@ -438,10 +506,10 @@ class TestCircuitBreakerProductiveCommands:
 
     @pytest.mark.asyncio
     async def test_productive_commands_bypass_at_threshold(self, agent, task):
-        """All-productive commands at base threshold → deferred (effective=15)."""
+        """All-productive commands at base threshold -> deferred (effective=15)."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 5× pytest at threshold=5 → productive_ratio=1.0 → effective=15
+        # 5x pytest at threshold=5 -> productive_ratio=1.0 -> effective=15
         for _ in range(5):
             on_tool("Bash", "pytest tests/ -v")
 
@@ -456,10 +524,10 @@ class TestCircuitBreakerProductiveCommands:
 
     @pytest.mark.asyncio
     async def test_productive_commands_trip_at_hard_ceiling(self, agent, task):
-        """All-productive commands at 3× threshold → trip (hard ceiling)."""
+        """All-productive commands at 3x threshold -> trip (hard ceiling)."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 15× pytest at threshold=5 → effective=15 → trip
+        # 15x pytest at threshold=5 -> effective=15 -> trip
         for _ in range(15):
             on_tool("Bash", "pytest tests/ -v")
 
@@ -473,7 +541,7 @@ class TestCircuitBreakerProductiveCommands:
         """Non-productive repeated commands trip at base threshold."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 5× ls at threshold=5 → productive_ratio=0.0 → trip immediately
+        # 5x ls at threshold=5 -> productive_ratio=0.0 -> trip immediately
         for _ in range(5):
             on_tool("Bash", "ls -la")
 
@@ -484,10 +552,10 @@ class TestCircuitBreakerProductiveCommands:
 
     @pytest.mark.asyncio
     async def test_mixed_commands_below_productive_threshold(self, agent, task):
-        """60% productive (below 70% threshold) → trips at base threshold."""
+        """60% productive (below 70% threshold) -> trips at base threshold."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 3 productive + 2 non-productive = 60% productive < 70% → trips normally
+        # 3 productive + 2 non-productive = 60% productive < 70% -> trips normally
         on_tool("Bash", "pytest tests/")
         on_tool("Bash", "pytest tests/")
         on_tool("Bash", "pytest tests/")
@@ -501,10 +569,10 @@ class TestCircuitBreakerProductiveCommands:
 
     @pytest.mark.asyncio
     async def test_mixed_commands_above_productive_threshold(self, agent, task):
-        """80% productive (above 70% threshold) → deferred."""
+        """80% productive (above 70% threshold) -> deferred."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
-        # 4 productive + 1 non-productive = 80% productive > 70% → deferred
+        # 4 productive + 1 non-productive = 80% productive > 70% -> deferred
         on_tool("Bash", "pytest tests/")
         on_tool("Bash", "pytest tests/")
         on_tool("Bash", "pytest tests/")
@@ -530,9 +598,10 @@ class TestCircuitBreakerProductiveCommands:
 
         await asyncio.sleep(0.05)
 
-        # Check that the info log with productive_ratio was emitted
+        # The executor's logger (not agent.logger) emits the deferral message
+        executor_logger = agent._llm_executor.logger
         info_calls = [
-            str(c) for c in agent.logger.info.call_args_list
+            str(c) for c in executor_logger.info.call_args_list
             if "productive_ratio" in str(c)
         ]
         assert len(info_calls) >= 1, "Should log productive_ratio on deferral"
@@ -554,8 +623,12 @@ class TestCircuitBreakerProductiveCommands:
 
         await asyncio.wait_for(result_task, timeout=5.0)
 
-        event = agent.activity_manager.append_event.call_args[0][0]
-        assert "productive_ratio=" in event.title
+        cb_events = [
+            c[0][0] for c in agent.activity_manager.append_event.call_args_list
+            if c[0][0].type == "circuit_breaker"
+        ]
+        assert len(cb_events) == 1
+        assert "productive_ratio=" in cb_events[0].title
 
     @pytest.mark.asyncio
     async def test_productive_ratio_in_session_log(self, agent, task):
@@ -594,7 +667,7 @@ class TestDiagnosticCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_path_prefixed_commands_trip(self, agent, task):
-        """/bin/echo x5 trips — path prefix is stripped before matching."""
+        """/bin/echo x5 trips -- path prefix is stripped before matching."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
         for _ in range(5):
@@ -626,7 +699,7 @@ class TestDiagnosticCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_counter_resets_on_non_bash(self, agent, task):
-        """Diagnostic counter resets on non-Bash tool: pwd x4 → Read → pwd x4 → no trip."""
+        """Diagnostic counter resets on non-Bash tool: pwd x4 -> Read -> pwd x4 -> no trip."""
         result_task, on_tool = await _setup_and_get_callback(agent, task)
 
         for _ in range(4):
@@ -646,7 +719,7 @@ class TestDiagnosticCircuitBreaker:
 
     @pytest.mark.asyncio
     async def test_counter_resets_on_non_diagnostic_bash(self, agent, task):
-        """Diagnostic counter resets on non-diagnostic Bash: pwd x4 → git status → pwd x4."""
+        """Diagnostic counter resets on non-diagnostic Bash: pwd x4 -> git status -> pwd x4."""
         # Raise volume threshold so only the diagnostic breaker is under test
         agent._max_consecutive_tool_calls = 50
         result_task, on_tool = await _setup_and_get_callback(agent, task)
@@ -699,9 +772,12 @@ class TestDiagnosticCircuitBreaker:
 
         await asyncio.wait_for(result_task, timeout=5.0)
 
-        agent.activity_manager.append_event.assert_called_once()
-        event = agent.activity_manager.append_event.call_args[0][0]
-        assert "Diagnostic" in event.title
+        cb_events = [
+            c[0][0] for c in agent.activity_manager.append_event.call_args_list
+            if c[0][0].type == "circuit_breaker"
+        ]
+        assert len(cb_events) == 1
+        assert "Diagnostic" in cb_events[0].title
 
     def test_config_default(self):
         """SafeguardsConfig has max_consecutive_diagnostic_calls=5 by default."""
@@ -715,16 +791,18 @@ def _make_exploration_agent(threshold: int = 10, thresholds: dict | None = None)
 
     Circuit breaker thresholds are set high so only the exploration alert is under test.
     """
+    from agent_framework.core.error_recovery import ErrorRecoveryManager
+
     a = MagicMock()
     a._execute_llm_with_interruption_watch = (
         Agent._execute_llm_with_interruption_watch.__get__(a)
     )
     a._finalize_failed_attempt = Agent._finalize_failed_attempt.__get__(a)
-    a._auto_commit_wip = AsyncMock()
     a._update_phase = MagicMock()
     a._session_logger = MagicMock()
     a._session_logger.log = MagicMock()
     a._session_logger.log_tool_call = MagicMock()
+    a._session_logger.log_tool_result = MagicMock()
     a._context_window_manager = None
     a._current_specialization = None
     a._current_file_count = 0
@@ -733,6 +811,8 @@ def _make_exploration_agent(threshold: int = 10, thresholds: dict | None = None)
     a._max_consecutive_diagnostic_calls = 999
     a._exploration_alert_threshold = threshold
     a._exploration_alert_thresholds = thresholds or {}
+    a._optimization_config = {}
+    a._is_implementation_step = MagicMock(return_value=False)
     a.config = MagicMock()
     a.config.id = "test-agent"
     a.config.base_id = "engineer"
@@ -740,6 +820,25 @@ def _make_exploration_agent(threshold: int = 10, thresholds: dict | None = None)
     a.logger = MagicMock()
     a.queue = MagicMock()
     a.activity_manager = MagicMock()
+
+    er = ErrorRecoveryManager(
+        config=a.config, queue=MagicMock(), llm=MagicMock(),
+        logger=a.logger, session_logger=a._session_logger,
+        retry_handler=MagicMock(), escalation_handler=MagicMock(),
+        workspace=a.workspace,
+    )
+    a._error_recovery = er
+
+    # Real executor so circuit breaker / exploration alert logic runs
+    executor = _make_executor(a._session_logger, a.activity_manager, agent_id="test-agent")
+    # Use a MagicMock config with base_id="engineer" instead of mutating
+    # the AgentConfig class (which would contaminate other tests)
+    mock_config = MagicMock()
+    mock_config.id = "test-agent"
+    mock_config.base_id = "engineer"
+    executor.config = mock_config
+    a._llm_executor = executor
+
     return a
 
 
@@ -748,7 +847,7 @@ class TestExplorationAlert:
 
     @pytest.mark.asyncio
     async def test_alert_fires_at_threshold(self, task):
-        """10 diverse tool calls → session log event + activity event."""
+        """10 diverse tool calls -> session log event + activity event."""
         a = _make_exploration_agent(threshold=10)
         result_task, on_tool = await _setup_and_get_callback(a, task)
 
@@ -783,7 +882,7 @@ class TestExplorationAlert:
 
     @pytest.mark.asyncio
     async def test_alert_fires_once(self, task):
-        """20 calls past threshold=10 → only 1 alert."""
+        """20 calls past threshold=10 -> only 1 alert."""
         a = _make_exploration_agent(threshold=10)
         result_task, on_tool = await _setup_and_get_callback(a, task)
 
@@ -806,7 +905,7 @@ class TestExplorationAlert:
 
     @pytest.mark.asyncio
     async def test_no_alert_below_threshold(self, task):
-        """49 calls with threshold=50 → no alert."""
+        """49 calls with threshold=50 -> no alert."""
         a = _make_exploration_agent(threshold=50)
         result_task, on_tool = await _setup_and_get_callback(a, task)
 
@@ -829,7 +928,7 @@ class TestExplorationAlert:
 
     @pytest.mark.asyncio
     async def test_agent_continues_after_alert(self, task):
-        """LLM task is NOT cancelled after alert — agent keeps working."""
+        """LLM task is NOT cancelled after alert -- agent keeps working."""
         a = _make_exploration_agent(threshold=10)
         result_task, on_tool = await _setup_and_get_callback(a, task)
 
@@ -860,7 +959,7 @@ class TestExplorationAlert:
 
     @pytest.mark.asyncio
     async def test_plan_step_uses_plan_threshold(self):
-        """Plan step with threshold=80: 60 calls → no alert; 85 calls → alert."""
+        """Plan step with threshold=80: 60 calls -> no alert; 85 calls -> alert."""
         thresholds = {"plan": 80, "implement": 50}
         task = Task(
             id="test-plan-1",
@@ -877,7 +976,7 @@ class TestExplorationAlert:
         a = _make_exploration_agent(threshold=50, thresholds=thresholds)
         result_task, on_tool = await _setup_and_get_callback(a, task)
 
-        # 60 calls — below plan threshold of 80
+        # 60 calls -- below plan threshold of 80
         for i in range(60):
             on_tool("Read", f"file_{i}.py")
         await asyncio.sleep(0.05)
@@ -888,7 +987,7 @@ class TestExplorationAlert:
         ]
         assert len(alert_logs) == 0, "60 calls should not trigger plan threshold of 80"
 
-        # 25 more calls → 85 total, exceeds plan threshold
+        # 25 more calls -> 85 total, exceeds plan threshold
         for i in range(25):
             on_tool("Read", f"extra_{i}.py")
         await asyncio.sleep(0.05)

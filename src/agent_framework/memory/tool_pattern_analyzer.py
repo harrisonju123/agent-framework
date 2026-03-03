@@ -44,6 +44,11 @@ _TIPS = {
         "different offset/limit values wastes tokens — the whole file fits in "
         "context after one read."
     ),
+    "cross-step-reread": (
+        "Previous tasks wasted tokens re-reading files that earlier agents "
+        "already analyzed. Check the FILES ANALYZED BY PREVIOUS AGENTS section "
+        "and use Grep for targeted lookups instead of re-reading whole files."
+    ),
 }
 
 # Bash commands that indicate file-op anti-pattern
@@ -433,6 +438,26 @@ class ToolPatternAnalyzer:
                     pattern_id="chunked-reread",
                     tip=_TIPS["chunked-reread"],
                 )
+        return None
+
+    @staticmethod
+    def compute_reread_recommendation(
+        wasteful_rereads: int, total_cached: int,
+    ) -> Optional[ToolPatternRecommendation]:
+        """Generate a cross-step-reread pattern when wasteful re-read rate is high.
+
+        Called by post-task analytics with data from read_cache_bypass events.
+        Threshold: >30% wasteful rate with at least 3 wasteful re-reads.
+        """
+        if total_cached == 0 or wasteful_rereads < 3:
+            return None
+        wasteful_rate = wasteful_rereads / total_cached
+        if wasteful_rate > 0.3:
+            return ToolPatternRecommendation(
+                pattern_id="cross-step-reread",
+                tip=_TIPS["cross-step-reread"],
+                hit_count=wasteful_rereads,
+            )
         return None
 
     def _detect_read_without_limit(

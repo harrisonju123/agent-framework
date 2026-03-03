@@ -108,6 +108,26 @@ class SessionLogger:
             return
         self.log("prompt_content", prompt=prompt, **extra)
 
+    def log_read_dedup_stats(self, read_stats: dict[str, int], total_reads: int) -> None:
+        """Log aggregate read dedup statistics for this session.
+
+        Called at session end to capture file re-read waste for post-hoc analysis.
+        """
+        if not read_stats:
+            return
+        duplicate_reads = sum(v - 1 for v in read_stats.values() if v > 1)
+        unique_files = total_reads - duplicate_reads
+        worst_file, worst_count = max(read_stats.items(), key=lambda x: x[1])
+        self.log(
+            "read_dedup_stats",
+            total_reads=total_reads,
+            unique_files=unique_files,
+            duplicate_reads=duplicate_reads,
+            worst_file=worst_file,
+            worst_count=worst_count,
+            files_reread={k: v for k, v in read_stats.items() if v > 1},
+        )
+
     @property
     def enabled(self) -> bool:
         return self._enabled

@@ -236,6 +236,59 @@ class TestChunkedReread:
         assert len(chunked) == 1
 
 
+class TestCrossStepReread:
+    """Tests for compute_reread_recommendation — cross-step re-read detection."""
+
+    def test_high_wasteful_rate_triggers(self):
+        rec = ToolPatternAnalyzer.compute_reread_recommendation(
+            wasteful_rereads=5, total_cached=10,
+        )
+        assert rec is not None
+        assert rec.pattern_id == "cross-step-reread"
+        assert rec.hit_count == 5
+
+    def test_low_wasteful_rate_below_threshold(self):
+        """30% threshold: 2 out of 10 = 20% -> no recommendation."""
+        rec = ToolPatternAnalyzer.compute_reread_recommendation(
+            wasteful_rereads=2, total_cached=10,
+        )
+        assert rec is None
+
+    def test_few_wasteful_rereads_below_minimum(self):
+        """Even with high rate, need at least 3 wasteful re-reads."""
+        rec = ToolPatternAnalyzer.compute_reread_recommendation(
+            wasteful_rereads=2, total_cached=3,
+        )
+        assert rec is None
+
+    def test_zero_cached_files(self):
+        rec = ToolPatternAnalyzer.compute_reread_recommendation(
+            wasteful_rereads=0, total_cached=0,
+        )
+        assert rec is None
+
+    def test_exactly_at_threshold(self):
+        """3 out of 10 = 30% is not > 30%, so no recommendation."""
+        rec = ToolPatternAnalyzer.compute_reread_recommendation(
+            wasteful_rereads=3, total_cached=10,
+        )
+        assert rec is None
+
+    def test_just_above_threshold(self):
+        """4 out of 10 = 40% > 30% and >= 3 wasteful."""
+        rec = ToolPatternAnalyzer.compute_reread_recommendation(
+            wasteful_rereads=4, total_cached=10,
+        )
+        assert rec is not None
+        assert rec.pattern_id == "cross-step-reread"
+
+    def test_tip_text_mentions_grep(self):
+        rec = ToolPatternAnalyzer.compute_reread_recommendation(
+            wasteful_rereads=5, total_cached=10,
+        )
+        assert "Grep" in rec.tip
+
+
 class TestEdgeCases:
     def test_empty_session(self, tmp_path):
         path = tmp_path / "empty.jsonl"

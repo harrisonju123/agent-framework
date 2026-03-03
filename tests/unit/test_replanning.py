@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_framework.core.agent import Agent
 from agent_framework.core.task import Task, TaskStatus, TaskType
 from agent_framework.llm.base import LLMResponse
 
@@ -38,7 +37,7 @@ class _AgentMock:
         self._session_logger = error_recovery.session_logger
         self.logger = error_recovery.logger
         self._request_replan = error_recovery.request_replan
-        self._inject_replan_context = Agent._inject_replan_context.__get__(self)
+        self._inject_replan_context = error_recovery.inject_replan_context
         self._build_replan_memory_context = lambda task: error_recovery._build_replan_memory_context(task)
         self._replan_model = "haiku"
 
