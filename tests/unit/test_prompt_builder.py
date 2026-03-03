@@ -1668,8 +1668,8 @@ class TestChainStateIntegration:
 
         assert context == ""
 
-    def test_rejection_feedback_still_takes_priority(self, agent_config, tmp_path):
-        """Human rejection feedback should override even chain state."""
+    def test_rejection_feedback_merged_with_chain_state(self, agent_config, tmp_path):
+        """Both rejection feedback and chain state appear when both exist."""
         from agent_framework.core.chain_state import ChainState, StepRecord, save_chain_state
 
         state = ChainState(
@@ -1698,8 +1698,191 @@ class TestChainStateIntegration:
         builder = PromptBuilder(ctx)
         context = builder._load_upstream_context(task)
 
+        # Both sections present
         assert "CHECKPOINT REJECTED" in context
         assert "redo the auth approach" in context
+        assert "CHAIN STATE" in context
+
+        # Rejection feedback appears before chain state
+        reject_pos = context.index("CHECKPOINT REJECTED")
+        chain_pos = context.index("CHAIN STATE")
+        assert reject_pos < chain_pos
+
+
+class TestUpstreamContextMerging:
+    """rejection_feedback and chain_state are merged, not either/or.
+
+    Fix tasks from review bounces need the rejection text (what to fix) AND
+    the chain state (plan, files, broader context). Without merging, engineers
+    on fix cycles lose all context about what they're supposed to build.
+    """
+
+    def _make_chain_task(self, tmp_path, **extra_context):
+        ctx = {
+            "_root_task_id": "root-1",
+            "workflow": "default",
+            "workflow_step": "implement",
+            "chain_step": True,
+            "github_repo": "company/api",
+            "user_goal": "Add JWT authentication",
+            **extra_context,
+        }
+        return Task(
+            id="chain-root-1-implement-d2",
+            type=TaskType.IMPLEMENTATION,
+            status=TaskStatus.PENDING,
+            priority=1,
+            created_by="architect",
+            assigned_to="engineer",
+            created_at=datetime.now(timezone.utc),
+            title="[chain] Implement auth",
+            description="Implement the auth feature",
+            context=ctx,
+        )
+
+    def _save_plan_state(self, tmp_path):
+        from agent_framework.core.chain_state import ChainState, StepRecord, save_chain_state
+
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Add JWT authentication",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan",
+                    agent_id="architect",
+                    task_id="chain-root-1-plan-d1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="Planned auth feature",
+                    verdict="approved",
+                    plan={
+                        "objectives": ["Add JWT auth"],
+                        "approach": ["Create auth service"],
+                        "files_to_modify": ["src/auth.py"],
+                        "risks": [],
+                        "success_criteria": ["Tests pass"],
+                    },
+                ),
+            ],
+        )
+        save_chain_state(tmp_path, state)
+
+    def _make_builder(self, agent_config, tmp_path):
+        ctx = PromptContext(
+            config=agent_config,
+            workspace=tmp_path,
+            mcp_enabled=False,
+            optimization_config={},
+        )
+        return PromptBuilder(ctx)
+
+    def test_both_merged_when_both_exist(self, agent_config, tmp_path):
+        """Both rejection feedback AND chain state appear in the output."""
+        self._save_plan_state(tmp_path)
+        task = self._make_chain_task(
+            tmp_path, rejection_feedback="Auth approach is wrong, use OAuth2 instead"
+        )
+        builder = self._make_builder(agent_config, tmp_path)
+
+        result = builder._load_upstream_context(task)
+
+        assert "CHECKPOINT REJECTED" in result
+        assert "OAuth2 instead" in result
+        assert "CHAIN STATE" in result
+        assert "Add JWT auth" in result
+
+    def test_merged_source_label(self, agent_config, tmp_path):
+        """Source tracking reflects the merged state."""
+        self._save_plan_state(tmp_path)
+        task = self._make_chain_task(
+            tmp_path, rejection_feedback="Fix the thing"
+        )
+        builder = self._make_builder(agent_config, tmp_path)
+        builder._load_upstream_context(task)
+
+        assert builder._last_upstream_source == "rejection_feedback+chain_state"
+        assert builder._last_upstream_chars > 0
+
+    def test_rejection_only_when_no_chain_state(self, agent_config, tmp_path):
+        """Without chain state, only rejection feedback appears."""
+        task = self._make_chain_task(
+            tmp_path, rejection_feedback="Redo this"
+        )
+        builder = self._make_builder(agent_config, tmp_path)
+
+        result = builder._load_upstream_context(task)
+
+        assert "CHECKPOINT REJECTED" in result
+        assert "CHAIN STATE" not in result
+        assert builder._last_upstream_source == "rejection_feedback"
+
+    def test_chain_state_only_when_no_rejection(self, agent_config, tmp_path):
+        """Without rejection feedback, only chain state appears."""
+        self._save_plan_state(tmp_path)
+        task = self._make_chain_task(tmp_path)
+        builder = self._make_builder(agent_config, tmp_path)
+
+        result = builder._load_upstream_context(task)
+
+        assert "CHAIN STATE" in result
+        assert "CHECKPOINT REJECTED" not in result
+        assert builder._last_upstream_source == "chain_state"
+
+    def test_fallback_to_lower_sources_when_neither_top_source(self, prompt_builder, sample_task):
+        """Without rejection or chain state, falls through to structured_findings."""
+        sample_task.context["structured_findings"] = {
+            "findings": [
+                {"file": "a.py", "severity": "MAJOR", "description": "bug found"}
+            ]
+        }
+
+        result = prompt_builder._load_upstream_context(sample_task)
+
+        assert "QA FINDINGS" in result
+        assert "bug found" in result
+        assert prompt_builder._last_upstream_source == "structured_findings"
+
+    def test_rejection_plus_chain_state_blocks_lower_fallbacks(self, agent_config, tmp_path):
+        """When merged context exists, lower-priority sources are not used."""
+        self._save_plan_state(tmp_path)
+        task = self._make_chain_task(
+            tmp_path,
+            rejection_feedback="Fix the auth flow",
+            upstream_summary="This should NOT appear",
+        )
+        builder = self._make_builder(agent_config, tmp_path)
+
+        result = builder._load_upstream_context(task)
+
+        assert "CHECKPOINT REJECTED" in result
+        assert "CHAIN STATE" in result
+        assert "This should NOT appear" not in result
+
+    def test_rejection_ordering_before_chain_state(self, agent_config, tmp_path):
+        """Rejection feedback is the most immediately actionable — comes first."""
+        self._save_plan_state(tmp_path)
+        task = self._make_chain_task(
+            tmp_path, rejection_feedback="Fix edge cases"
+        )
+        builder = self._make_builder(agent_config, tmp_path)
+
+        result = builder._load_upstream_context(task)
+
+        reject_pos = result.index("CHECKPOINT REJECTED")
+        chain_pos = result.index("CHAIN STATE")
+        assert reject_pos < chain_pos
+
+    def test_skip_reasons_combined_across_tiers(self, agent_config, tmp_path):
+        """Skip reasons from top tier + fallback tier are all captured."""
+        # No chain state file, no rejection — both top sources skip.
+        # upstream_summary will be the winner from fallback tier.
+        task = self._make_chain_task(tmp_path)
+        task.context["upstream_summary"] = "Fallback text"
+        builder = self._make_builder(agent_config, tmp_path)
+
+        builder._load_upstream_context(task)
+
+        assert builder._last_upstream_source == "upstream_summary"
 
 
 class TestAttemptHistoryInRetryContext:

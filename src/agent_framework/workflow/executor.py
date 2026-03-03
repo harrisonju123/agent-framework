@@ -272,8 +272,9 @@ class WorkflowExecutor:
         if chain_depth >= MAX_CHAIN_DEPTH:
             self.logger.warning(
                 f"Chain depth {chain_depth} reached max ({MAX_CHAIN_DEPTH}) "
-                f"for task {task.id} — halting workflow to prevent runaway loop"
+                f"for task {task.id} — halting workflow, attempting PR creation"
             )
+            task.context["_ceiling_halted"] = "chain_depth"
             return
 
         # Absolute ceiling that survives escalation/re-planning resets
@@ -281,8 +282,9 @@ class WorkflowExecutor:
         if global_cycles >= MAX_GLOBAL_CYCLES:
             self.logger.warning(
                 f"Global cycle count {global_cycles} reached max ({MAX_GLOBAL_CYCLES}) "
-                f"for task {task.id} — halting workflow to prevent runaway loop"
+                f"for task {task.id} — halting workflow, attempting PR creation"
             )
+            task.context["_ceiling_halted"] = "global_cycles"
             return
 
         # Per-task budget ceiling: terminate chain cleanly (branch is in git, work not lost)
@@ -291,9 +293,10 @@ class WorkflowExecutor:
             self.logger.warning(
                 f"Cumulative cost ${task.context.get('_cumulative_cost', 0):.2f} "
                 f"exceeds ceiling ${task.context.get('_budget_ceiling', 0):.2f} "
-                f"for task {task.id} — halting workflow (budget exceeded)"
+                f"for task {task.id} — halting workflow, attempting PR creation"
             )
             task.context["budget_halted"] = True
+            task.context["_ceiling_halted"] = "budget"
             return
 
         # Cap review→engineer fix cycles to prevent infinite bounce loops.

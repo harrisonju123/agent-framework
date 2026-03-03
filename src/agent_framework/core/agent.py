@@ -68,7 +68,7 @@ class AgentConfig:
     name: str
     queue: str
     prompt: str
-    poll_interval: int = 30
+    poll_interval: int = 5
     max_retries: int = 5
     timeout: int = 1800
     # Sandbox configuration
@@ -642,11 +642,31 @@ class Agent:
                     except Exception:
                         pass
             else:
-                self.logger.debug(
-                    f"No tasks available for {self.config.id}, "
-                    f"sleeping for {self.config.poll_interval}s"
-                )
-                await asyncio.sleep(self.config.poll_interval)
+                await self._wait_for_queue_activity()
+
+    async def _wait_for_queue_activity(self) -> None:
+        """Sleep up to poll_interval seconds, but wake early if a new task is pushed.
+
+        Watches the queue's .notify file mtime — FileQueue.push() touches it
+        on every enqueue, so we detect new tasks within ~0.25s instead of
+        waiting the full poll interval.
+        """
+        notify_path = self.queue.get_notify_path(self.config.queue)
+        try:
+            baseline = notify_path.stat().st_mtime
+        except OSError:
+            baseline = 0.0
+
+        tick = 0.25
+        remaining = self.config.poll_interval
+        while remaining > 0 and self._running:
+            await asyncio.sleep(min(tick, remaining))
+            remaining -= tick
+            try:
+                if notify_path.stat().st_mtime != baseline:
+                    return  # new task pushed — wake up immediately
+            except OSError:
+                pass
 
     async def stop(self) -> None:
         """Stop the polling loop gracefully."""

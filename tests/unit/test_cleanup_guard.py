@@ -207,6 +207,7 @@ class TestPollingLoopGuard:
 
         agent.queue.claim = MagicMock(side_effect=claim_side_effect)
         agent._handle_task = AsyncMock(side_effect=handle_task_side_effect)
+        agent._wait_for_queue_activity = Agent._wait_for_queue_activity.__get__(agent)
         agent.run = Agent.run.__get__(agent)
 
         return agent, task, lock

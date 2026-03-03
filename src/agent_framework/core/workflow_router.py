@@ -321,15 +321,23 @@ class WorkflowRouter:
                     routing_signal
                     and routing_signal.target_agent == WORKFLOW_COMPLETE
                 )
-                if self.is_at_terminal_workflow_step(task) or workflow_complete_signal:
-                    self.queue_pr_creation_if_needed(task, workflow_def)
-                else:
+                ceiling_halt = task.context.get("_ceiling_halted")
+                if ceiling_halt:
+                    self.logger.warning(
+                        f"Workflow halted by {ceiling_halt} ceiling at "
+                        f"step {task.context.get('workflow_step', 'unknown')} "
+                        f"for task {task.id} — attempting safety-net PR creation"
+                    )
+                elif not self.is_at_terminal_workflow_step(task) and not workflow_complete_signal:
                     self.logger.warning(
                         f"Workflow halted for task {task.id}: no edge matched at "
                         f"step {task.context.get('workflow_step', 'unknown')} "
                         f"(verdict={task.context.get('verdict')!r}). "
-                        f"Not at terminal step, skipping PR creation."
+                        f"Attempting safety-net PR creation."
                     )
+                # Always attempt PR creation — stranding committed work
+                # with no PR is worse than creating one from a mid-chain step
+                self.queue_pr_creation_if_needed(task, workflow_def)
 
             # Log routing decision
             if routing_signal:

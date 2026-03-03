@@ -68,10 +68,10 @@ class LLMConfig(BaseModel):
 
 class TaskConfig(BaseModel):
     """Task processing configuration."""
-    poll_interval: int = 30
+    poll_interval: int = 5
     timeout: int = 1800
     max_retries: int = 5
-    backoff_initial: int = 30
+    backoff_initial: int = 10
     backoff_max: int = 240
     backoff_multiplier: int = 2
 

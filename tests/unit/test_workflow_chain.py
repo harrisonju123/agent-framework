@@ -2062,12 +2062,11 @@ class TestVerdictStorageAndClearing:
 
         assert task.context.get("verdict") == "preview_approved"
 
-    def test_preview_review_ambiguous_does_not_set_verdict(self, agent, queue):
+    def test_preview_review_ambiguous_halts(self, agent, queue):
         """Architect at preview_review with ambiguous output → no verdict stored.
 
-        Review steps with ambiguous output should halt the chain rather than
-        default to approval. The preview_review "always" fallback edge will
-        still route to implement via the DAG, but no verdict is recorded.
+        Preview review is a safety gate — ambiguous output should halt
+        rather than auto-approve past the gate.
         """
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
@@ -2078,6 +2077,7 @@ class TestVerdictStorageAndClearing:
         agent._set_structured_verdict(task, response)
 
         assert "verdict" not in task.context
+        assert task.context["verdict_audit"]["method"] == "ambiguous_halt"
 
     def test_code_review_approval_still_stores_approved(self, agent, queue):
         """Architect at code_review (not preview_review) still gets verdict='approved'.
@@ -2094,8 +2094,8 @@ class TestVerdictStorageAndClearing:
 
         assert task.context.get("verdict") == "approved"
 
-    def test_ambiguous_at_code_review_does_not_set_verdict(self, agent, queue):
-        """Ambiguous output at code_review → no verdict, chain will halt."""
+    def test_ambiguous_at_code_review_defaults_to_approved(self, agent, queue):
+        """Ambiguous output at code_review → defaults to approved, chain advances."""
         arch_config = AgentConfig(id="architect", name="Architect", queue="architect", prompt="p")
         agent.config = arch_config
         agent._post_completion.config = arch_config
@@ -2104,10 +2104,11 @@ class TestVerdictStorageAndClearing:
 
         agent._set_structured_verdict(task, response)
 
-        assert "verdict" not in task.context
+        assert task.context["verdict"] == "approved"
+        assert task.context["verdict_audit"]["method"] == "ambiguous_review_default"
 
-    def test_ambiguous_at_qa_review_does_not_set_verdict(self, agent, queue):
-        """Ambiguous output at qa_review → no verdict, chain will halt."""
+    def test_ambiguous_at_qa_review_defaults_to_approved(self, agent, queue):
+        """Ambiguous output at qa_review → defaults to approved, chain advances."""
         qa_config = AgentConfig(id="qa", name="QA", queue="qa", prompt="p")
         agent.config = qa_config
         agent._post_completion.config = qa_config
@@ -2116,7 +2117,8 @@ class TestVerdictStorageAndClearing:
 
         agent._set_structured_verdict(task, response)
 
-        assert "verdict" not in task.context
+        assert task.context["verdict"] == "approved"
+        assert task.context["verdict_audit"]["method"] == "ambiguous_review_default"
 
     def test_ambiguous_at_plan_step_still_sets_approved(self, agent, queue):
         """Ambiguous output at plan step → verdict='approved' (no regression)."""

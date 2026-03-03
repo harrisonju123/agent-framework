@@ -742,8 +742,8 @@ class TestReviewFixGuard:
 class TestEnforceChainNonTerminalGuard:
     """Verify that `not routed` at a non-terminal step halts rather than creating a PR."""
 
-    def test_does_not_queue_pr_when_stuck_mid_chain(self, router, queue):
-        """code_review with no verdict → no condition matches → PR NOT queued."""
+    def test_queues_safety_net_pr_when_stuck_mid_chain(self, router, queue):
+        """code_review with no edge match → safety-net PR queued."""
         router.config.base_id = "architect"
         task = _make_task(
             workflow="review",
@@ -759,17 +759,17 @@ class TestEnforceChainNonTerminalGuard:
 
         router.enforce_chain(task, response)
 
-        # No PR task should be queued — code_review has outgoing edges
+        # Safety-net: PR should be queued even at non-terminal step
         pr_pushes = [
             call for call in queue.push.call_args_list
             if call[0][0].type == TaskType.PR_REQUEST
         ]
-        assert len(pr_pushes) == 0, "PR was queued despite being stuck at non-terminal step"
+        assert len(pr_pushes) == 1, "Safety-net PR not queued when stuck mid-chain"
 
         # Warning should be logged
         warning_calls = [
             call for call in router.logger.warning.call_args_list
-            if "Workflow halted" in str(call)
+            if "Workflow halted" in str(call) or "safety-net" in str(call)
         ]
         assert len(warning_calls) == 1
 
@@ -791,8 +791,8 @@ class TestEnforceChainNonTerminalGuard:
             "Workflow halted" in str(call) for call in router.logger.warning.call_args_list
         ), "Unexpected halt warning at terminal step"
 
-    def test_halts_qa_review_with_no_verdict(self, router, queue):
-        """qa_review with no verdict → chain halts, PR NOT queued."""
+    def test_queues_safety_net_pr_at_qa_review_with_no_verdict(self, router, queue):
+        """qa_review with no verdict → safety-net PR queued."""
         router.config.base_id = "qa"
         task = _make_task(
             workflow="review",
@@ -812,10 +812,10 @@ class TestEnforceChainNonTerminalGuard:
             call for call in queue.push.call_args_list
             if call[0][0].type == TaskType.PR_REQUEST
         ]
-        assert len(pr_pushes) == 0, "PR was queued despite being stuck at qa_review"
+        assert len(pr_pushes) == 1, "Safety-net PR not queued when stuck at qa_review"
 
         warning_calls = [
             call for call in router.logger.warning.call_args_list
-            if "Workflow halted" in str(call)
+            if "Workflow halted" in str(call) or "safety-net" in str(call)
         ]
         assert len(warning_calls) == 1

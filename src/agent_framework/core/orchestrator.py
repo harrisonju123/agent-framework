@@ -171,10 +171,9 @@ class Orchestrator:
                     agent_id = f"{agent_def.id}-{replica_num}"
 
                 self.spawn_agent(agent_id, env_vars=env_vars)
-                time.sleep(0.5)  # 0.5s delay between spawns
 
-        # Verify agents started
-        time.sleep(2)
+        # Brief pause for process init before checking for early exits
+        time.sleep(0.5)
         for agent_id, proc in self.processes.items():
             if proc.poll() is not None:
                 logger.error(f"Agent {agent_id} failed to start (exit code: {proc.poll()})")
@@ -717,6 +716,5 @@ class Orchestrator:
                     replica_num = current_replicas + i + 1
                     agent_id = f"{agent_def.id}-{replica_num}"
                     self.spawn_agent(agent_id)
-                    time.sleep(0.5)
 
         self.health_degraded = False

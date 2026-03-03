@@ -503,7 +503,13 @@ def _is_fix_cycle(state: ChainState, consumer_step: str) -> bool:
 
 
 def _render_for_implement(state: ChainState) -> str:
-    """Render context for the engineer's implementation step."""
+    """Render context for the engineer's implementation step.
+
+    Surfaces the full picture — not just what to build (plan), but what
+    success looks like (criteria) and why it's being built (user goal).
+    Without these, the engineer optimizes for the approach without knowing
+    the acceptance bar or original scope.
+    """
     plan_step = _find_step(state, Steps.PLAN)
     if not plan_step:
         return ""
@@ -512,6 +518,9 @@ def _render_for_implement(state: ChainState) -> str:
         # render it rather than falling through to noisy upstream_summary
         if plan_step.summary:
             lines = ["\n## CHAIN STATE — IMPLEMENTATION CONTEXT\n"]
+            # Include user goal even in fallback — gives the engineer scope
+            if state.user_goal:
+                lines.append(f"### TASK GOAL\n{state.user_goal[:1000]}\n")
             lines.append("### PLAN (from upstream agent)")
             lines.append(plan_step.summary)
             lines.append("")
@@ -519,6 +528,11 @@ def _render_for_implement(state: ChainState) -> str:
         return ""
 
     lines = ["\n## CHAIN STATE — IMPLEMENTATION CONTEXT\n"]
+
+    # User goal first — anchors the engineer on what the task is actually about
+    if state.user_goal:
+        lines.append(f"### TASK GOAL\n{state.user_goal[:1000]}\n")
+
     plan = plan_step.plan
     lines.append("### PLAN")
     if plan.get("objectives"):
@@ -535,6 +549,12 @@ def _render_for_implement(state: ChainState) -> str:
         lines.append("\n**Risks:**")
         for risk in plan["risks"]:
             lines.append(f"- {risk}")
+
+    # Acceptance criteria — tells the engineer what "done" looks like
+    if plan.get("success_criteria"):
+        lines.append("\n### ACCEPTANCE CRITERIA")
+        for criterion in plan["success_criteria"]:
+            lines.append(f"- {criterion}")
 
     # Surface design rationale so the engineer understands constraints
     if plan_step.design_rationale:

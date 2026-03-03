@@ -830,27 +830,67 @@ If a tool call fails:
     def _load_upstream_context(self, task: Task) -> str:
         """Load upstream agent's findings from chain state, inline context, or disk.
 
-        Uses a 5-level priority cascade with full observability — the selected
-        source and skip reasons are persisted in task.context for diagnostics.
+        rejection_feedback and chain_state are MERGED when both exist — fix tasks
+        from review bounces need the rejection text AND the broader plan/files
+        context from chain state. Without merging, engineers on fix cycles lose
+        all context about what they're supposed to build.
+
+        The remaining sources (structured_findings, upstream_summary, disk_file)
+        are true fallbacks used only when neither top source produced content.
         """
-        levels = [
-            CascadeLevel("rejection_feedback", self._resolve_rejection_feedback),
-            CascadeLevel("chain_state", self._resolve_chain_state),
+        skip_reasons: list[str] = []
+
+        # --- Top tier: rejection_feedback + chain_state are peers, not fallbacks ---
+        rejection, rej_reason = self._resolve_rejection_feedback(task=task)
+        if rej_reason:
+            skip_reasons.append(f"rejection_feedback: {rej_reason}")
+
+        chain, chain_reason = self._resolve_chain_state(task=task)
+        if chain_reason:
+            skip_reasons.append(f"chain_state: {chain_reason}")
+
+        if rejection and chain:
+            merged = rejection + chain
+            source = "rejection_feedback+chain_state"
+        elif rejection:
+            merged = rejection
+            source = "rejection_feedback"
+        elif chain:
+            merged = chain
+            source = "chain_state"
+        else:
+            merged = None
+            source = None
+
+        if merged is not None:
+            self._last_upstream_source = source
+            self._last_upstream_chars = len(merged)
+
+            if skip_reasons:
+                self.logger.info(
+                    "Upstream context cascade: selected %r (%d chars), skipped: %s",
+                    source, len(merged), "; ".join(skip_reasons),
+                )
+            return merged
+
+        # --- Fallback tier: true cascade for lower-priority sources ---
+        fallback_levels = [
             CascadeLevel("structured_findings", self._resolve_structured_findings),
             CascadeLevel("upstream_summary", self._resolve_upstream_summary),
             CascadeLevel("disk_file", self._resolve_disk_file),
         ]
-        result = resolve_cascade(levels, default="", task=task)
+        result = resolve_cascade(fallback_levels, default="", task=task)
 
-        # Store on self; build() writes to task.context to avoid mutating
-        # the task before the prompt is serialized (shadow mode compares prompts)
+        # Combine skip reasons from top tier with fallback cascade
+        all_skip_reasons = skip_reasons + result.skip_reasons
+
         self._last_upstream_source = result.source
         self._last_upstream_chars = len(result.value)
 
-        if result.skip_reasons:
+        if all_skip_reasons:
             self.logger.info(
                 "Upstream context cascade: selected %r (%d chars), skipped: %s",
-                result.source, len(result.value), "; ".join(result.skip_reasons),
+                result.source, len(result.value), "; ".join(all_skip_reasons),
             )
 
         return result.value

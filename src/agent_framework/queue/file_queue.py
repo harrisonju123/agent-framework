@@ -68,6 +68,22 @@ class FileQueue:
         self.heartbeat_dir.mkdir(parents=True, exist_ok=True)
         self.malformed_dir.mkdir(parents=True, exist_ok=True)
 
+    def get_notify_path(self, queue_id: str) -> Path:
+        """Path to the notification file for a queue. Agents poll its mtime."""
+        return self.queue_dir / queue_id / ".notify"
+
+    def _touch_notify(self, queue_id: str) -> None:
+        """Touch the notify file so waiting agents detect the new task."""
+        try:
+            notify = self.get_notify_path(queue_id)
+            notify.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.utime(notify)
+            except FileNotFoundError:
+                notify.write_bytes(b"")
+        except OSError:
+            pass
+
     def push(self, task: Task, queue_id: str) -> bool:
         """
         Add a task to a queue. Returns True if pushed, False if rejected.
@@ -97,6 +113,9 @@ class FileQueue:
 
         # Atomic write
         atomic_write_model(task_file, task)
+
+        # Signal waiting agents that a new task is available
+        self._touch_notify(queue_id)
         return True
 
     def pop(self, queue_id: str) -> Optional[Task]:

@@ -34,6 +34,9 @@ DEFAULT_MAX_AGE_HOURS = 24
 # Active worktrees older than this are considered stale (crashed agent) and eligible for eviction
 STALE_ACTIVE_THRESHOLD_SECONDS = 2 * 3600
 
+# Skip redundant fetches if one succeeded recently
+FETCH_TTL_SECONDS = 300
+
 # Minimum age before any cleanup path can delete a worktree — belt-and-suspenders
 # guard against race conditions where a worktree is incorrectly marked inactive
 MIN_WORKTREE_AGE_SECONDS = 3600
@@ -107,6 +110,7 @@ class WorktreeManager:
         self._registry: Dict[str, WorktreeInfo] = {}
         self._registry_dirty = False
         self._last_registry_save: float = 0.0
+        self._last_fetch: Dict[str, float] = {}  # repo_path -> monotonic timestamp
 
         # Ensure worktree root exists
         self.config.root.mkdir(parents=True, exist_ok=True)
@@ -391,8 +395,8 @@ class WorktreeManager:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Fetch latest from origin
-            self._run_git(["fetch", "origin"], cwd=base_repo, timeout=60)
+            # Fetch latest from origin (skips if recent fetch is cached)
+            self._fetch_if_stale(base_repo)
 
             # Check if branch exists remotely
             branch_exists = self._branch_exists(base_repo, branch_name)
@@ -609,10 +613,7 @@ class WorktreeManager:
         Returns True on success, False on failure.
         Fetch is best-effort (non-fatal on failure).
         """
-        try:
-            self._run_git(["fetch", "origin"], cwd=base_repo, timeout=60)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
+        self._fetch_if_stale(base_repo)
 
         try:
             if self._branch_exists(base_repo, branch_name):
@@ -1031,6 +1032,29 @@ class WorktreeManager:
             return None
         except Exception:
             return None
+
+    def _fetch_if_stale(self, base_repo: Path, *, timeout: int = 60) -> bool:
+        """Fetch origin only if the last successful fetch was more than FETCH_TTL_SECONDS ago.
+
+        Returns True if a fetch was executed (or skipped because cache is fresh),
+        False on fetch failure.
+        """
+        repo_key = str(base_repo)
+        now = time.monotonic()
+        last = self._last_fetch.get(repo_key)
+        if last is not None and now - last < FETCH_TTL_SECONDS:
+            logger.debug(
+                f"Skipping fetch for {base_repo.name} — "
+                f"last fetch {now - last:.0f}s ago (TTL {FETCH_TTL_SECONDS}s)"
+            )
+            return True
+        try:
+            self._run_git(["fetch", "origin"], cwd=base_repo, timeout=timeout)
+            self._last_fetch[repo_key] = time.monotonic()
+            return True
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            logger.warning(f"git fetch failed for {base_repo.name}: {exc}")
+            return False
 
     def _run_git(
         self,

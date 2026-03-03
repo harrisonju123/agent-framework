@@ -96,17 +96,17 @@ class TestVerdictAuditEmission:
         assert audit["method"] == "review_outcome"
         assert audit["value"] == "needs_fix"
 
-    def test_ambiguous_at_review_step_emits_halt(self):
+    def test_ambiguous_at_review_step_defaults_to_approved(self):
         agent = _make_agent()
         task = _make_task(workflow_step="qa_review")
         response = _make_response("I reviewed the code and it looks okay.")
 
         agent._set_structured_verdict(task, response)
 
-        # Ambiguous at review step: no verdict set
-        assert "verdict" not in task.context or task.context.get("verdict") is None
+        # Ambiguous at review step defaults to approved to keep chain moving
+        assert task.context["verdict"] == "approved"
         audit = task.context["verdict_audit"]
-        assert audit["method"] == "ambiguous_halt"
+        assert audit["method"] == "ambiguous_review_default"
 
     def test_ambiguous_at_non_review_step_emits_default(self):
         agent = _make_agent(base_id="architect", agent_id="architect")

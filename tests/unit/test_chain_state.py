@@ -752,6 +752,156 @@ class TestImplementSummaryFallback:
         assert len(result) <= CHAIN_STATE_MAX_PROMPT_CHARS + 50
 
 
+class TestImplementContextEnrichment:
+    """_render_for_implement includes user goal, acceptance criteria, and requirements."""
+
+    def test_includes_user_goal(self, chain_state_with_steps):
+        """Engineer sees the original task description to understand full scope."""
+        chain_state_with_steps.steps = chain_state_with_steps.steps[:1]
+        result = render_for_step(chain_state_with_steps, "implement")
+        assert "TASK GOAL" in result
+        assert "Add JWT-based authentication to the API" in result
+
+    def test_includes_acceptance_criteria_from_plan(self, chain_state_with_steps):
+        """success_criteria from plan are rendered as acceptance criteria."""
+        chain_state_with_steps.steps = chain_state_with_steps.steps[:1]
+        result = render_for_step(chain_state_with_steps, "implement")
+        assert "ACCEPTANCE CRITERIA" in result
+        assert "All endpoints protected" in result
+        assert "Tests pass" in result
+
+    def test_acceptance_criteria_absent_when_plan_has_none(self):
+        """No ACCEPTANCE CRITERIA section when plan doesn't have success_criteria."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Add auth",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="planned",
+                    plan={
+                        "objectives": ["Add auth"],
+                        "approach": ["Create service"],
+                        "files_to_modify": ["src/auth.py"],
+                    },
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert "ACCEPTANCE CRITERIA" not in result
+        # Plan content still renders
+        assert "Add auth" in result
+
+    def test_user_goal_absent_when_empty(self):
+        """No TASK GOAL section when user_goal is empty."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="planned",
+                    plan={
+                        "objectives": ["Add auth"],
+                        "approach": ["Create service"],
+                    },
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert "TASK GOAL" not in result
+
+    def test_user_goal_truncated_when_long(self):
+        """Long user goals are capped to prevent prompt bloat."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="x" * 2000,
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="planned",
+                    plan={
+                        "objectives": ["Add auth"],
+                        "approach": ["Create service"],
+                    },
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert "TASK GOAL" in result
+        # user_goal is capped at 1000 chars
+        assert "x" * 1001 not in result
+
+    def test_section_ordering(self, chain_state_with_steps):
+        """TASK GOAL appears before PLAN, and ACCEPTANCE CRITERIA after PLAN."""
+        chain_state_with_steps.steps = chain_state_with_steps.steps[:1]
+        result = render_for_step(chain_state_with_steps, "implement")
+        goal_pos = result.index("TASK GOAL")
+        plan_pos = result.index("### PLAN")
+        criteria_pos = result.index("ACCEPTANCE CRITERIA")
+        assert goal_pos < plan_pos < criteria_pos
+
+    def test_summary_fallback_includes_user_goal(self):
+        """Even when plan extraction failed, user goal is shown."""
+        state = ChainState(
+            root_task_id="root-1",
+            user_goal="Build a REST API for user management",
+            workflow="default",
+            steps=[
+                StepRecord(
+                    step_id="plan", agent_id="architect", task_id="t1",
+                    completed_at="2026-02-19T10:00:00+00:00",
+                    summary="Plan: implement user CRUD endpoints",
+                    plan=None,
+                ),
+            ],
+        )
+        result = render_for_step(state, "implement")
+        assert "TASK GOAL" in result
+        assert "Build a REST API for user management" in result
+        assert "PLAN (from upstream agent)" in result
+
+    def test_existing_plan_fields_still_render(self, chain_state_with_steps):
+        """Enrichment doesn't break existing plan rendering (objectives, approach, risks)."""
+        chain_state_with_steps.steps = chain_state_with_steps.steps[:1]
+        result = render_for_step(chain_state_with_steps, "implement")
+        # Original fields
+        assert "Add user authentication" in result
+        assert "Implement JWT tokens" in result
+        assert "Create auth service" in result
+        assert "Add middleware" in result
+        assert "Token expiry edge cases" in result
+        assert "src/auth.py" in result
+        # New fields
+        assert "TASK GOAL" in result
+        assert "ACCEPTANCE CRITERIA" in result
+
+    def test_does_not_affect_fix_cycle_rendering(self, chain_state_with_steps):
+        """Fix cycle uses its own renderer, unaffected by implementation enrichment."""
+        chain_state_with_steps.steps[2].verdict = "needs_fix"
+        chain_state_with_steps.steps[2].findings = [
+            {"file": "src/auth.py", "severity": "HIGH", "description": "Missing validation"},
+        ]
+        result = render_for_step(chain_state_with_steps, "implement")
+        assert "FIX CYCLE" in result
+        # Should NOT have TASK GOAL (that's implementation context, not fix context)
+        assert "TASK GOAL" not in result
+
+    def test_does_not_affect_code_review_rendering(self, chain_state_with_steps):
+        """Code review renderer is unchanged."""
+        result = render_for_step(chain_state_with_steps, "code_review")
+        assert "CODE REVIEW CONTEXT" in result
+        # code_review should NOT have ACCEPTANCE CRITERIA or TASK GOAL
+        assert "TASK GOAL" not in result
+        assert "ACCEPTANCE CRITERIA" not in result
+
+
 class TestStepRecordTiming:
     def test_started_at_and_duration_defaults(self):
         record = StepRecord(

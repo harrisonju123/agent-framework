@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 from .task import PlanDocument, Task
 from .activity import ActivityEvent, AgentActivity, AgentStatus, CurrentTask
 from ..utils.type_helpers import get_type_str
-from ..workflow.executor import PREVIEW_REVIEW_STEPS
+from ..workflow.constants import WorkflowStepConstants as Steps
 
 # Matches synthetic [Tool Call: Read], [Tool Call: Bash] etc. markers injected
 # by the Claude CLI backend into response.content for logging visibility.
@@ -110,7 +110,7 @@ class PostCompletionManager:
         preview_review uses "preview_approved" so the preview_approved DAG edge
         fires instead of the generic "approved" edge.
         """
-        if task.context.get("workflow_step") in PREVIEW_REVIEW_STEPS:
+        if task.context.get("workflow_step") in Steps.PREVIEW_REVIEW_STEPS:
             return "preview_approved"
         return "approved"
 
@@ -136,16 +136,26 @@ class PostCompletionManager:
             task.context["verdict"] = "needs_fix"
             audit.method = "review_outcome"
         else:
-            _REVIEW_STEP_IDS = PREVIEW_REVIEW_STEPS | {"code_review", "qa_review"}
-            if workflow_step in _REVIEW_STEP_IDS:
+            if workflow_step in Steps.PREVIEW_REVIEW_STEPS:
+                # Preview review is a pre-implementation safety gate — ambiguous
+                # output should halt, not auto-approve past the gate
                 self.logger.warning(
                     f"Ambiguous review outcome at step {workflow_step!r} for "
-                    f"task {task.id} — not setting verdict (chain will halt)"
+                    f"task {task.id} — not setting verdict (preview gate halts)"
                 )
                 audit.method = "ambiguous_halt"
             else:
+                # Default to approved so the chain keeps moving — downstream
+                # reviewers will catch real issues
                 task.context["verdict"] = self.approval_verdict(task)
-                audit.method = "ambiguous_default"
+                if workflow_step in Steps.REVIEW_STEPS:
+                    self.logger.warning(
+                        f"Ambiguous review outcome at step {workflow_step!r} for "
+                        f"task {task.id} — defaulting to approved to keep chain moving"
+                    )
+                    audit.method = "ambiguous_review_default"
+                else:
+                    audit.method = "ambiguous_default"
 
         # no_changes marker overrides any previous verdict at plan step
         if (self.config.base_id == "architect"
