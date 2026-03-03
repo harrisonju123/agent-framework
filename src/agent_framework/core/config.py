@@ -274,6 +274,22 @@ class OptimizationConfig(BaseModel):
         return self
 
 
+class ParallelSubtasksConfig(BaseModel):
+    """Configuration for parallel subtask execution within decomposed tasks."""
+    enabled: bool = False
+    max_workers: int = 3
+    merge_strategy: Literal["sequential-merge", "octopus"] = "sequential-merge"
+    # Timeout for individual subtask subprocess (seconds)
+    subprocess_timeout: int = 3600
+
+    @field_validator('max_workers')
+    @classmethod
+    def validate_max_workers(cls, v: int) -> int:
+        if v < 1 or v > 10:
+            raise ValueError(f"max_workers must be 1-10, got {v}")
+        return v
+
+
 class WorktreeConfig(BaseModel):
     """Git worktree configuration for isolated agent workspaces."""
     enabled: bool = False
@@ -574,6 +590,7 @@ class FrameworkConfig(BaseSettings):
     multi_repo: MultiRepoConfig = Field(default_factory=MultiRepoConfig)
     repositories: List[RepositoryConfig] = Field(default_factory=list)
     pr_lifecycle: PRLifecycleConfig = Field(default_factory=PRLifecycleConfig)
+    parallel_subtasks: ParallelSubtasksConfig = Field(default_factory=ParallelSubtasksConfig)
     indexing: CodeIndexingConfig = Field(default_factory=CodeIndexingConfig)
 
     class Config:

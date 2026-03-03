@@ -584,6 +584,73 @@ class TestEventEmission:
         assert call_kwargs["completed_subtask_count"] == 2
 
 
+# -- Parallel mode fan-in guard --
+
+class TestParallelModeFanInGuard:
+    def test_parallel_mode_skips_fan_in_check(self, router, queue):
+        """Subtask with _parallel_execution flag skips per-subtask fan-in."""
+        subtask = _make_task(task_id="sub-1", _parallel_execution=True)
+        subtask.parent_task_id = "parent-123"
+
+        router.check_and_create_fan_in_task(subtask)
+
+        # Fan-in should NOT be created — ParallelExecutionManager handles it
+        queue.find_task.assert_not_called()
+        queue.create_fan_in_task.assert_not_called()
+
+    def test_non_parallel_subtask_still_checks_fan_in(self, router, queue):
+        """Subtask without _parallel_execution flag follows normal fan-in path."""
+        parent = _make_task(task_id="parent-123")
+        parent.subtask_ids = ["sub-1"]
+
+        subtask = _make_task(task_id="sub-1")
+        subtask.parent_task_id = "parent-123"
+
+        queue.find_task.return_value = parent
+        queue.check_subtasks_complete.return_value = True
+        fan_in = _make_task(task_id="fan-in-parent-123")
+        queue.create_fan_in_task.return_value = fan_in
+        queue.get_completed.return_value = subtask
+
+        router.check_and_create_fan_in_task(subtask)
+
+        queue.create_fan_in_task.assert_called_once()
+
+
+class TestDecomposeParallelFlag:
+    def test_decompose_with_parallel_enabled(self, router, queue):
+        """Subtasks are marked with _parallel_execution when parallel_enabled=True."""
+        task = _make_task(task_id="parent-par")
+        task.plan = MagicMock()
+        task.plan.files_to_modify = ["a.py", "b.py"]
+        task.plan.approach = ["step1"]
+
+        sub1 = _make_task(task_id="parent-par-sub-0")
+        sub2 = _make_task(task_id="parent-par-sub-1")
+
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_dec:
+            mock_dec.return_value.decompose.return_value = [sub1, sub2]
+            router.decompose_and_queue_subtasks(task, parallel_enabled=True)
+
+        assert sub1.context.get("_parallel_execution") is True
+        assert sub2.context.get("_parallel_execution") is True
+
+    def test_decompose_without_parallel_flag(self, router, queue):
+        """Subtasks are NOT marked when parallel_enabled=False (default)."""
+        task = _make_task(task_id="parent-ser")
+        task.plan = MagicMock()
+        task.plan.files_to_modify = ["a.py"]
+        task.plan.approach = ["step1"]
+
+        sub1 = _make_task(task_id="parent-ser-sub-0")
+
+        with patch("agent_framework.core.workflow_router.TaskDecomposer") as mock_dec:
+            mock_dec.return_value.decompose.return_value = [sub1]
+            router.decompose_and_queue_subtasks(task, parallel_enabled=False)
+
+        assert "_parallel_execution" not in sub1.context
+
+
 # -- REVIEW/FIX guard for chain tasks --
 
 class TestReviewFixGuard:

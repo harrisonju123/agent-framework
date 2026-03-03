@@ -2649,6 +2649,34 @@ def _run_claude_cli(prompt: str, cwd: Path, framework_config, timeout: int = 360
         raise RuntimeError(f"Claude CLI execution exceeded timeout of {timeout} seconds")
 
 
+@cli.command("run-task")
+@click.argument("task_id")
+@click.option("--agent", "-a", default="engineer", help="Agent ID to run as")
+@click.pass_context
+def run_task(ctx, task_id, agent):
+    """Execute a single task by ID and exit (no polling).
+
+    Used internally by ParallelExecutionManager to run subtasks in
+    separate processes. Can also be used for manual single-task execution.
+
+    TASK_ID is the ID of the task to execute.
+    """
+    workspace = ctx.obj["workspace"]
+
+    from ..run_agent import setup_logging, _build_agent
+
+    setup_logging(agent, workspace)
+
+    try:
+        agent_instance = _build_agent(agent, workspace)
+    except Exception as e:
+        console.print(f"[red]Failed to build agent: {e}[/]")
+        raise SystemExit(1)
+
+    success = asyncio.run(agent_instance.run_single_task(task_id))
+    raise SystemExit(0 if success else 1)
+
+
 @cli.command("analyze-session")
 @click.argument("task_id")
 @click.pass_context

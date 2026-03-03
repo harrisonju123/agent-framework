@@ -66,8 +66,21 @@ class WorkflowRouter:
 
         When a subtask completes, checks if all siblings are also complete.
         If so, creates a fan-in task that aggregates results and continues workflow.
+
+        When parallel execution is active (parent has '_parallel_execution' in
+        context), fan-in is triggered by ParallelExecutionManager after merge,
+        not by individual subtask completions. This guard prevents premature
+        fan-in creation while parallel workers are still running.
         """
         if not task.parent_task_id:
+            return
+
+        # When parallel mode is active, ParallelExecutionManager controls fan-in
+        if task.context.get("_parallel_execution"):
+            self.logger.debug(
+                f"Subtask {task.id} in parallel mode — "
+                f"skipping per-subtask fan-in check"
+            )
             return
 
         # This is a subtask - check if all siblings are done
@@ -137,22 +150,32 @@ class WorkflowRouter:
 
         return result
 
-    def decompose_and_queue_subtasks(self, task: Task) -> None:
+    def decompose_and_queue_subtasks(self, task: Task, parallel_enabled: bool = False) -> None:
         """Decompose task into subtasks and queue them to engineer.
 
         Replaces normal workflow routing - subtasks will each flow through
         the workflow individually, and fan-in will aggregate them at completion.
+
+        Args:
+            task: Parent task to decompose.
+            parallel_enabled: When True, mark subtasks for parallel execution
+                so per-subtask fan-in checks are skipped.
         """
         decomposer = TaskDecomposer()
         estimated_lines = estimate_plan_lines(task.plan)
 
         self.logger.info(
-            f"Decomposing task {task.id} into parallel subtasks "
+            f"Decomposing task {task.id} into {'parallel' if parallel_enabled else 'serial'} subtasks "
             f"(estimated {estimated_lines} lines from "
             f"{len(task.plan.files_to_modify)} files + {len(task.plan.approach)} steps)"
         )
 
         subtasks = decomposer.decompose(task, task.plan, estimated_lines)
+
+        # Mark subtasks for parallel execution so fan-in guard skips them
+        if parallel_enabled:
+            for subtask in subtasks:
+                subtask.context["_parallel_execution"] = True
 
         # Queue each subtask to engineer (skip duplicates)
         queued_count = 0

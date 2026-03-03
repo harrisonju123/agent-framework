@@ -674,6 +674,43 @@ class Agent:
         # Write final heartbeat
         self._write_heartbeat()
 
+    async def run_single_task(self, task_id: str) -> bool:
+        """Execute a single task by ID and exit — no polling loop.
+
+        Entry point for parallel subtask workers. Claims the specific task,
+        runs _handle_task(), and returns success/failure.
+
+        Args:
+            task_id: ID of the task to execute.
+
+        Returns:
+            True if task completed successfully, False otherwise.
+        """
+        self._running = True
+        self.logger.info(f"run_single_task: claiming {task_id}")
+
+        # Find and claim the task directly
+        task = self.queue.find_task(task_id)
+        if not task:
+            self.logger.error(f"run_single_task: task {task_id} not found")
+            return False
+
+        lock = self.queue.acquire_lock(task.id, self.config.id)
+        if not lock:
+            self.logger.error(f"run_single_task: could not acquire lock for {task_id}")
+            return False
+
+        try:
+            await self._handle_task(task, lock=lock)
+            return task.status == TaskStatus.COMPLETED
+        except Exception as e:
+            self.logger.error(f"run_single_task: unhandled exception for {task_id}: {e}", exc_info=True)
+            try:
+                self.queue.release_lock(lock)
+            except Exception:
+                pass
+            return False
+
     def _validate_task_or_reject(self, task: Task) -> bool:
         """Validate task and reject if invalid. Returns True if task should proceed."""
         if not self.config.validate_tasks:
