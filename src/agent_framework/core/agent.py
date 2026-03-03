@@ -1112,6 +1112,7 @@ class Agent:
             current_file_count=self._current_file_count,
             optimization_config=dict(self._optimization_config),
             finalize_failed_attempt_cb=self._finalize_failed_attempt,
+            read_cache_cb=self._read_cache.populate_read_cache,
         )
         # LLMExecutionManager._handle_interruption sets task state but
         # needs queue.update — handle it here for the interruption case

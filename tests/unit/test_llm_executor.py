@@ -330,3 +330,167 @@ class TestHandleCircuitBreakerReread:
 
         cb_calls = [c for c in log_calls if c[0][0] == "circuit_breaker"]
         assert cb_calls[0][1]["trigger"] == "volume"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for threshold wiring and circuit breaker callback tests
+# ---------------------------------------------------------------------------
+
+async def _run_with_captured_reread_threshold(*, task_ctx=None, execute_kwargs=None):
+    """Execute LLM and return the reread_threshold passed to CheckpointManager."""
+    from agent_framework.core.checkpoint_manager import CheckpointManager
+
+    mgr = _make_manager()
+    captured = []
+    original_init = CheckpointManager.__init__
+
+    def _capture_init(self_cm, **kwargs):
+        captured.append(kwargs.get("reread_threshold"))
+        original_init(self_cm, **kwargs)
+
+    async def _fast_complete(request, *, task_id=None, **kwargs):
+        return LLMResponse(
+            content="done", model_used="sonnet", input_tokens=10,
+            output_tokens=5, finish_reason="end_turn", latency_ms=10,
+            success=True,
+        )
+
+    mgr.llm.complete = _fast_complete
+    mgr.llm.cancel = MagicMock()
+
+    task = _make_task(**(task_ctx or {}))
+
+    async def _never_interrupt():
+        await asyncio.sleep(999)
+
+    try:
+        CheckpointManager.__init__ = _capture_init
+        await mgr.execute(
+            task, "prompt", Path("/tmp/work"), None,
+            watch_for_interruption_coro=_never_interrupt,
+            **(execute_kwargs or {}),
+        )
+    finally:
+        CheckpointManager.__init__ = original_init
+
+    return captured[0]
+
+
+def _make_checkpoint_mock(*, reread=False, volume=False):
+    """Build a mock CheckpointManager for circuit breaker tests."""
+    cm = MagicMock()
+    cm.consecutive_bash = 15 if volume else 0
+    cm.consecutive_diagnostic = 0
+    cm.diagnostic_tripped = False
+    cm._reread_interrupted = reread
+    cm.bash_commands = ["ls"] * 15 if volume else []
+    cm._max_consecutive = 15
+    cm._max_diagnostic = 10
+    if reread:
+        cm.get_worst_reread.return_value = ("core/agent.py", 4)
+        cm.get_read_stats.return_value = {"core/agent.py": 4}
+    return cm
+
+
+# ---------------------------------------------------------------------------
+# Re-read threshold wiring: config → CheckpointManager
+# ---------------------------------------------------------------------------
+
+class TestRereadThresholdWiring:
+    """Verify reread_interrupt_threshold flows from optimization_config to CheckpointManager."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_ctx,execute_kwargs,expected", [
+        pytest.param(
+            {}, {"optimization_config": {"reread_interrupt_threshold": 12}}, 12,
+            id="explicit_config",
+        ),
+        pytest.param(
+            {}, {"is_implementation_step": True}, 8,
+            id="impl_step_default",
+        ),
+        pytest.param(
+            {"workflow_step": "code_review"}, {"is_implementation_step": False}, 3,
+            id="review_step_default",
+        ),
+        pytest.param(
+            {"workflow_step": "implement"}, {"is_implementation_step": False}, 8,
+            id="implement_workflow_step",
+        ),
+        pytest.param(
+            {}, {"is_implementation_step": True, "optimization_config": {"reread_interrupt_threshold": 5}}, 5,
+            id="explicit_overrides_step_default",
+        ),
+    ])
+    async def test_reread_threshold(self, task_ctx, execute_kwargs, expected):
+        result = await _run_with_captured_reread_threshold(
+            task_ctx=task_ctx, execute_kwargs=execute_kwargs,
+        )
+        assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# read_cache_cb invoked on circuit breaker
+# ---------------------------------------------------------------------------
+
+class TestReadCacheCbOnCircuitBreaker:
+    """Verify read_cache_cb is called when the circuit breaker trips."""
+
+    @pytest.mark.asyncio
+    async def test_read_cache_cb_called_on_circuit_breaker(self):
+        mgr = _make_manager()
+        mgr.git_ops.safety_commit.return_value = False
+        mgr.llm.cancel = MagicMock()
+        mgr.llm.get_partial_output = MagicMock(return_value="")
+        task = _make_task()
+        wd = MagicMock(exists=MagicMock(return_value=True), __str__=lambda self: "/tmp/work")
+        cache_cb = MagicMock()
+
+        llm_task = asyncio.create_task(asyncio.sleep(999))
+        watcher_task = asyncio.create_task(asyncio.sleep(999))
+
+        await mgr._handle_circuit_breaker(
+            task, wd, _make_checkpoint_mock(reread=True), llm_task, watcher_task,
+            read_cache_cb=cache_cb,
+        )
+        cache_cb.assert_called_once_with(task, wd)
+
+    @pytest.mark.asyncio
+    async def test_read_cache_cb_exception_is_non_fatal(self):
+        """If read_cache_cb raises, the circuit breaker should still complete."""
+        mgr = _make_manager()
+        mgr.git_ops.safety_commit.return_value = False
+        mgr.llm.cancel = MagicMock()
+        mgr.llm.get_partial_output = MagicMock(return_value="")
+        task = _make_task()
+        wd = MagicMock(exists=MagicMock(return_value=True), __str__=lambda self: "/tmp/work")
+        cache_cb = MagicMock(side_effect=RuntimeError("cache write failed"))
+
+        llm_task = asyncio.create_task(asyncio.sleep(999))
+        watcher_task = asyncio.create_task(asyncio.sleep(999))
+
+        result = await mgr._handle_circuit_breaker(
+            task, wd, _make_checkpoint_mock(volume=True), llm_task, watcher_task,
+            read_cache_cb=cache_cb,
+        )
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"
+
+    @pytest.mark.asyncio
+    async def test_no_read_cache_cb_is_fine(self):
+        """When read_cache_cb is None, circuit breaker should work as before."""
+        mgr = _make_manager()
+        mgr.git_ops.safety_commit.return_value = False
+        mgr.llm.cancel = MagicMock()
+        mgr.llm.get_partial_output = MagicMock(return_value="")
+        task = _make_task()
+        wd = MagicMock(exists=MagicMock(return_value=True), __str__=lambda self: "/tmp/work")
+
+        llm_task = asyncio.create_task(asyncio.sleep(999))
+        watcher_task = asyncio.create_task(asyncio.sleep(999))
+
+        result = await mgr._handle_circuit_breaker(
+            task, wd, _make_checkpoint_mock(volume=True), llm_task, watcher_task,
+        )
+        assert result.success is False
+        assert result.finish_reason == "circuit_breaker"

@@ -23,6 +23,7 @@ from .task import Task, TaskType
 from .activity import ActivityEvent, TaskPhase
 from ..llm.base import LLMRequest, LLMResponse
 from ..utils.type_helpers import get_type_str
+from ..workflow.constants import WorkflowStepConstants as Steps
 
 # Circuit breaker: commands that indicate productive work
 _PRODUCTIVE_PREFIXES = frozenset({
@@ -89,6 +90,7 @@ class LLMExecutionManager:
         current_file_count: int = 0,
         optimization_config: Optional[dict] = None,
         finalize_failed_attempt_cb=None,
+        read_cache_cb=None,
     ) -> Optional[LLMResponse]:
         """Execute LLM with interruption watching, return response or None if interrupted."""
 
@@ -100,6 +102,13 @@ class LLMExecutionManager:
             (exploration_alert_thresholds or {}).get(_workflow_step, exploration_alert_threshold)
             if _workflow_step else exploration_alert_threshold
         )
+        # Step-aware re-read threshold: implementation steps legitimately
+        # re-read files during read→edit→verify cycles across many files
+        _default_reread = 8 if (is_implementation_step or _workflow_step in Steps.IMPLEMENTATION_STEPS) else 3
+        _reread_threshold = (optimization_config or {}).get(
+            "reread_interrupt_threshold", _default_reread,
+        )
+
         _checkpoint_mgr = CheckpointManager(
             task=task,
             working_dir=working_dir,
@@ -116,6 +125,7 @@ class LLMExecutionManager:
             circuit_breaker_event=_circuit_breaker_event,
             agent_id=self.config.id,
             agent_base_id=self.config.base_id,
+            reread_threshold=_reread_threshold,
         )
 
         def _on_tool_activity(tool_name: str, tool_input_summary: Optional[str]):
@@ -209,6 +219,7 @@ class LLMExecutionManager:
                 task, working_dir, _checkpoint_mgr,
                 llm_task, watcher_task,
                 finalize_failed_attempt_cb=finalize_failed_attempt_cb,
+                read_cache_cb=read_cache_cb,
             )
 
         if watcher_task in done:
@@ -216,6 +227,7 @@ class LLMExecutionManager:
                 task, working_dir, _checkpoint_mgr,
                 llm_task, circuit_breaker_task,
                 finalize_failed_attempt_cb=finalize_failed_attempt_cb,
+                read_cache_cb=read_cache_cb,
             )
 
         # LLM finished first — cancel watcher and circuit breaker
@@ -234,6 +246,7 @@ class LLMExecutionManager:
         self, task, working_dir, checkpoint_mgr,
         llm_task, watcher_task, *,
         finalize_failed_attempt_cb=None,
+        read_cache_cb=None,
     ) -> LLMResponse:
         """Handle circuit breaker trip — kill subprocess and return synthetic failure."""
         count = checkpoint_mgr.consecutive_bash
@@ -321,6 +334,13 @@ class LLMExecutionManager:
         if finalize_failed_attempt_cb:
             finalize_failed_attempt_cb(task, working_dir, content=partial, error=error_msg)
 
+        # Persist reads from this failed session so retries start with context
+        if read_cache_cb:
+            try:
+                read_cache_cb(task, working_dir)
+            except Exception:
+                self.logger.debug("read_cache_cb failed on circuit breaker path", exc_info=True)
+
         llm_task.cancel()
         watcher_task.cancel()
         for t in [llm_task, watcher_task]:
@@ -366,6 +386,7 @@ class LLMExecutionManager:
         self, task, working_dir, checkpoint_mgr,
         llm_task, circuit_breaker_task, *,
         finalize_failed_attempt_cb=None,
+        read_cache_cb=None,
     ) -> None:
         """Handle pause/stop signal or worktree vanishing during LLM execution."""
         wt = self.git_ops.active_worktree
@@ -393,6 +414,13 @@ class LLMExecutionManager:
         partial = self.llm.get_partial_output()
         if finalize_failed_attempt_cb:
             finalize_failed_attempt_cb(task, working_dir, content=partial, error=error_msg)
+
+        # Persist reads so the retry starts with context (skip if worktree gone)
+        if read_cache_cb and not worktree_gone:
+            try:
+                read_cache_cb(task, working_dir)
+            except Exception:
+                self.logger.debug("read_cache_cb failed on interruption path", exc_info=True)
 
         if worktree_gone:
             self.session_logger.log(
