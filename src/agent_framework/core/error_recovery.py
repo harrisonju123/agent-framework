@@ -23,6 +23,7 @@ from .task import Task, TaskStatus
 from .activity import ActivityEvent
 from ..llm.base import LLMRequest
 from ..utils.subprocess_utils import run_git_command
+from ..workflow.constants import WorkflowStepConstants as Steps
 
 
 class ErrorRecoveryManager:
