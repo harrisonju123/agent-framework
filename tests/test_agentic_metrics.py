@@ -266,7 +266,7 @@ class TestMemoryUsefulness:
         report = AgenticMetrics(workspace).generate_report(hours=24)
         assert report.memory.completion_rate_with_recall == 1.0
         assert report.memory.completion_rate_without_recall == 0.5
-        assert report.memory.recall_usefulness_delta == 0.5
+        assert report.memory.recall_completion_rate_differential == 0.5
 
     def test_zero_delta_both_complete(self, workspace):
         _write_session(workspace, "t1", [
@@ -277,13 +277,13 @@ class TestMemoryUsefulness:
             {"ts": _now_iso(), "event": "task_complete", "task_id": "t2"},
         ])
         report = AgenticMetrics(workspace).generate_report(hours=24)
-        assert report.memory.recall_usefulness_delta == 0.0
+        assert report.memory.recall_completion_rate_differential == 0.0
 
     def test_no_data_returns_zeros(self, workspace):
         report = AgenticMetrics(workspace).generate_report(hours=24)
         assert report.memory.completion_rate_with_recall == 0.0
         assert report.memory.completion_rate_without_recall == 0.0
-        assert report.memory.recall_usefulness_delta == 0.0
+        assert report.memory.recall_completion_rate_differential == 0.0
 
 
 class TestTrends:
@@ -363,7 +363,7 @@ class TestCodebaseIndexMetrics:
         report = AgenticMetrics(workspace).generate_report(hours=24)
         assert report.codebase_index.injection_rate == 0.5
 
-    def test_positive_usefulness_delta(self, workspace):
+    def test_positive_completion_rate_differential(self, workspace):
         """Tasks with index injection complete more often → positive delta."""
         # 2 tasks with index: both complete
         _write_session(workspace, "t1", [
@@ -385,7 +385,7 @@ class TestCodebaseIndexMetrics:
         ci = report.codebase_index
         assert ci.completion_rate_with_index == 1.0
         assert ci.completion_rate_without_index == 0.5
-        assert ci.index_usefulness_delta == 0.5
+        assert ci.index_completion_rate_differential == 0.5
 
     def test_trend_includes_index_rate(self, workspace):
         now = datetime.now(timezone.utc)

@@ -304,7 +304,7 @@ class MemoryMetricsResponse(BaseModel):
     recall_rate: float
     completion_rate_with_recall: float = 0.0
     completion_rate_without_recall: float = 0.0
-    recall_usefulness_delta: float = 0.0
+    recall_completion_rate_differential: float = 0.0
 
 
 class CodebaseIndexMetricsResponse(BaseModel):
@@ -314,7 +314,7 @@ class CodebaseIndexMetricsResponse(BaseModel):
     injection_rate: float
     completion_rate_with_index: float = 0.0
     completion_rate_without_index: float = 0.0
-    index_usefulness_delta: float = 0.0
+    index_completion_rate_differential: float = 0.0
 
 
 class SelfEvalMetricsResponse(BaseModel):

@@ -37,10 +37,11 @@ class MemoryMetrics(BaseModel):
     avg_chars_injected: float
     # Fraction of tasks that had at least one memory injection
     recall_rate: float
-    # Usefulness proxy: completion rate comparison for tasks with/without recall
+    # Correlational (not causal): tasks with recall may complete more often
+    # due to confounding factors (e.g., simpler tasks, more context)
     completion_rate_with_recall: float = 0.0
     completion_rate_without_recall: float = 0.0
-    recall_usefulness_delta: float = 0.0
+    recall_completion_rate_differential: float = 0.0
 
 
 class CodebaseIndexMetrics(BaseModel):
@@ -49,9 +50,11 @@ class CodebaseIndexMetrics(BaseModel):
     tasks_with_injection: int
     avg_chars_injected: float
     injection_rate: float  # tasks_with_injection / total_observed_tasks
+    # Correlational (not causal): tasks with index may complete more often
+    # due to confounding factors (e.g., better-indexed repos are simpler)
     completion_rate_with_index: float = 0.0
     completion_rate_without_index: float = 0.0
-    index_usefulness_delta: float = 0.0
+    index_completion_rate_differential: float = 0.0
 
 
 class SelfEvalMetrics(BaseModel):
@@ -303,7 +306,7 @@ class AgenticMetrics:
             recall_rate=round(tasks_with_recall / total_tasks, 3) if total_tasks > 0 else 0.0,
             completion_rate_with_recall=rate_with,
             completion_rate_without_recall=rate_without,
-            recall_usefulness_delta=round(rate_with - rate_without, 3),
+            recall_completion_rate_differential=round(rate_with - rate_without, 3),
         )
 
     def _aggregate_codebase_index(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> CodebaseIndexMetrics:
@@ -340,7 +343,7 @@ class AgenticMetrics:
             injection_rate=round(tasks_with_injection / total_tasks, 3) if total_tasks > 0 else 0.0,
             completion_rate_with_index=rate_with,
             completion_rate_without_index=rate_without,
-            index_usefulness_delta=round(rate_with - rate_without, 3),
+            index_completion_rate_differential=round(rate_with - rate_without, 3),
         )
 
     def _aggregate_self_eval(self, events_by_task: Dict[str, List[Dict[str, Any]]]) -> SelfEvalMetrics:

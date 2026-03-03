@@ -773,6 +773,7 @@ class Agent:
             timestamp=datetime.now(timezone.utc),
             retry_count=self_eval_count if event_type == "retry" else None,
             root_task_id=task.root_id,
+            task_type=get_type_str(task.type),
         ))
 
         # Deterministic JIRA transition on task start

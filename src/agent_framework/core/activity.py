@@ -129,6 +129,8 @@ class ActivityEvent(BaseModel):
     # Correlation fields for handoff latency measurement
     root_task_id: Optional[str] = None
     source_task_id: Optional[str] = None
+    # Explicit task type from Task.type (avoids fragile title-based inference)
+    task_type: Optional[str] = None
 
 
 class ActivityManager:

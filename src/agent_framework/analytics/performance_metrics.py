@@ -32,6 +32,7 @@ class TaskMetrics(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cost: float = 0.0
+    task_type: Optional[str] = None
 
 
 class AgentPerformance(BaseModel):
@@ -217,6 +218,7 @@ class PerformanceMetrics:
                     title=event.get('title', ''),
                     status='in_progress',
                     started_at=datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')),
+                    task_type=event.get('task_type'),
                 )
 
             elif event_type == 'complete' and task_id in tasks:
@@ -282,12 +284,16 @@ class PerformanceMetrics:
         return sorted(performance, key=lambda x: x.total_tasks, reverse=True)
 
     def _calculate_task_type_metrics(self, task_metrics: Dict[str, TaskMetrics]) -> List[TaskTypeMetrics]:
-        """Calculate metrics aggregated by task type (inferred from title)."""
-        # Simple heuristic: group by first word in title or JIRA prefix
+        """Calculate metrics aggregated by task type.
+
+        Prefers the explicit task_type from activity events (populated from
+        Task.type since 2026-03). Falls back to title-based inference for
+        older events that don't carry task_type.
+        """
         type_tasks: Dict[str, List[TaskMetrics]] = defaultdict(list)
 
         for task in task_metrics.values():
-            task_type = self._infer_task_type(task.title)
+            task_type = task.task_type if task.task_type is not None else self._infer_task_type(task.title)
             type_tasks[task_type].append(task)
 
         metrics = []

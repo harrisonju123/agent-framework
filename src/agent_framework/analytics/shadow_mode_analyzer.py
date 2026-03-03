@@ -1,6 +1,13 @@
 """
 Shadow mode optimization analysis.
 
+.. deprecated::
+    Shadow mode is disabled by default and has never been activated in
+    production. The write path (optimization.jsonl) is gated behind
+    ``shadow_mode`` config, so the analyzer always reads empty data.
+    Consider removing this module once a replacement observability
+    strategy is in place.
+
 Analyzes shadow mode data to evaluate optimization effectiveness:
 - Token savings vs. success rate impact
 - Identifies safe-to-enable optimizations
@@ -9,6 +16,7 @@ Analyzes shadow mode data to evaluate optimization effectiveness:
 
 import json
 import logging
+import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -76,6 +84,13 @@ class ShadowModeAnalyzer:
         optimization_data = self._read_optimization_data(cutoff_time)
 
         if not optimization_data:
+            if not self.metrics_file.exists():
+                warnings.warn(
+                    "ShadowModeAnalyzer: shadow mode is not active in production — "
+                    "optimization.jsonl is missing. This analyzer will return empty data.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
             return self._empty_report(hours)
 
         # Read success/failure data from activity stream

@@ -96,9 +96,9 @@ watch(() => props.report, renderCharts)
               <div class="text-center">
                 <p
                   class="text-lg font-semibold"
-                  :class="report.memory.recall_usefulness_delta >= 0 ? 'text-green-600' : 'text-red-600'"
+                  :class="report.memory.recall_completion_rate_differential >= 0 ? 'text-green-600' : 'text-red-600'"
                 >
-                  {{ report.memory.recall_usefulness_delta >= 0 ? '+' : '' }}{{ pct(report.memory.recall_usefulness_delta) }}
+                  {{ report.memory.recall_completion_rate_differential >= 0 ? '+' : '' }}{{ pct(report.memory.recall_completion_rate_differential) }}
                 </p>
                 <p class="text-xs text-slate-400">Delta</p>
               </div>

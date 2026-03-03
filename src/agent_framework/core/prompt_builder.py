@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..workflow.constants import WorkflowStepConstants as Steps
+from ..workflow.step_utils import is_at_terminal_workflow_step as _is_at_terminal_step
 
 if TYPE_CHECKING:
     from .config import AgentConfig, AgentDefinition, WorkflowDefinition
@@ -593,28 +594,9 @@ IMPORTANT:
         Returns True for standalone tasks (no workflow) to preserve backward
         compatibility — standalone agents should always be allowed to create PRs.
         """
-        workflow_name = task.context.get("workflow")
-        if not workflow_name or not self.ctx.workflows_config or workflow_name not in self.ctx.workflows_config:
-            return True
-
-        workflow_def = self.ctx.workflows_config[workflow_name]
-        try:
-            dag = workflow_def.to_dag(workflow_name)
-        except Exception:
-            return True
-
-        # Prefer explicit workflow_step from chain context
-        step_id = task.context.get("workflow_step")
-        if step_id and step_id in dag.steps:
-            return dag.is_terminal_step(step_id)
-
-        # Fallback: find the step for this agent's base_id
-        for step in dag.steps.values():
-            if step.agent == self.ctx.config.base_id:
-                return dag.is_terminal_step(step.id)
-
-        # If we can't determine the step, assume terminal (safer default)
-        return True
+        return _is_at_terminal_step(
+            task, self.ctx.workflows_config or {}, self.ctx.config.base_id,
+        )
 
     def _get_minimal_task_dict(self, task: Task) -> Dict[str, Any]:
         """Extract only prompt-relevant task fields.

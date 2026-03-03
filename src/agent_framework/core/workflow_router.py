@@ -13,6 +13,7 @@ from .task import Task, TaskStatus, TaskType
 from .task_decomposer import TaskDecomposer, estimate_plan_lines
 from .routing import validate_routing_signal, log_routing_decision, WORKFLOW_COMPLETE
 from ..utils.type_helpers import get_type_str, strip_chain_prefixes
+from ..workflow.step_utils import is_at_terminal_workflow_step as _is_at_terminal_step
 
 
 class WorkflowRouter:
@@ -355,27 +356,7 @@ class WorkflowRouter:
         Returns True for standalone tasks (no workflow) to preserve backward
         compatibility — standalone agents should always be allowed to create PRs.
         """
-        workflow_name = task.context.get("workflow")
-        if not workflow_name or workflow_name not in self._workflows_config:
-            return True
-
-        workflow_def = self._workflows_config[workflow_name]
-        try:
-            dag = workflow_def.to_dag(workflow_name)
-        except Exception:
-            return True
-
-        # Prefer explicit workflow_step from chain context
-        step_id = task.context.get("workflow_step")
-        if step_id and step_id in dag.steps:
-            return dag.is_terminal_step(step_id)
-
-        # Fallback: find the step for this agent's base_id
-        for step in dag.steps.values():
-            if step.agent == self.config.base_id:
-                return dag.is_terminal_step(step.id)
-
-        return True
+        return _is_at_terminal_step(task, self._workflows_config, self.config.base_id)
 
     def build_workflow_context(self, task: Task) -> Dict[str, Any]:
         """Build context dict for workflow condition evaluation."""

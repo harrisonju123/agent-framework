@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 from .task import Task
 from .task_manifest import load_manifest, get_or_create_manifest
 from ..utils.type_helpers import strip_chain_prefixes
+from ..workflow.step_utils import is_at_terminal_workflow_step as _is_at_terminal_step
 
 # Branch naming prefixes used by the agent framework. Referenced by
 # cleanup_merged_branches() and the cleanup-branches CLI command.
@@ -1156,32 +1157,8 @@ class GitOperationsManager:
 
         Returns True for standalone tasks (no workflow) to preserve backward
         compatibility — standalone agents should always be allowed to create PRs.
-
-        NOTE: Duplicated from WorkflowRouter.is_at_terminal_workflow_step() because
-        GitOperationsManager can't import WorkflowRouter (circular dependency).
-        Keep both copies in sync when modifying.
         """
-        workflow_name = task.context.get("workflow")
-        if not workflow_name or workflow_name not in self._workflows_config:
-            return True
-
-        workflow_def = self._workflows_config[workflow_name]
-        try:
-            dag = workflow_def.to_dag(workflow_name)
-        except Exception:
-            return True
-
-        # Prefer explicit workflow_step from chain context
-        step_id = task.context.get("workflow_step")
-        if step_id and step_id in dag.steps:
-            return dag.is_terminal_step(step_id)
-
-        # Fallback: find the step for this agent's base_id
-        for step in dag.steps.values():
-            if step.agent == self.config.base_id:
-                return dag.is_terminal_step(step.id)
-
-        return True
+        return _is_at_terminal_step(task, self._workflows_config, self.config.base_id)
 
     def _sync_jira_status(self, task: Task, target_status: str, comment: Optional[str] = None) -> None:
         """Transition a JIRA ticket to target_status if all preconditions are met.

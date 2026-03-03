@@ -168,7 +168,7 @@ export interface MemoryMetrics {
   recall_rate: number
   completion_rate_with_recall: number
   completion_rate_without_recall: number
-  recall_usefulness_delta: number
+  recall_completion_rate_differential: number
 }
 
 export interface SelfEvalMetrics {
